@@ -30,7 +30,7 @@ pub(crate) async fn store(
 ) -> Option<Arc<dyn CheckpointStore>> {
     query
         .as_any()
-        .downcast_ref::<crate::computation::runtime::QueryInstance>()
+        .downcast_ref::<crate::computation::runtime::NativeQuery>()
         .expect("computation query")
         .checkpoint_store()
         .expect("native checkpoint resource")

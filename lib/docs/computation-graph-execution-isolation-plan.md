@@ -33,7 +33,15 @@ complete native connector migration or closure of every referenced CW package.
 | H1/H2 | Normal Unix host/supervisor, accepted-definition readiness, parent/child/grandchild lifecycle, child-only plugin loading, control, cuts and namespace ownership. macOS/Linux each passed 7 units and 10 local process cases. Both passed 51 query/merger cases, including actual child deaths and real RocksDB reopen. | Windows, hard kernel resource containment, all providers/reset boundaries and production-duration qualification. |
 | N1 | Complete prepared macOS Host profile passed 7 units and 11 process cases. Actual mutual-TLS Linux-VM traffic exercised receipt loss/delay, version/authentication failure, exact output, RocksDB/encrypted-redb reopen and independent remote-child ownership using the same normal runtime source. | VM networking is not physical production cross-machine qualification. No remote provisioning, distributed lease or unfenced replacement guarantee. |
 | Performance | Fresh final-source 8-query CPU-heavy reference, three repetitions: two workers 1.926x and four workers 3.478x median throughput; measured full-process CPU use was 1.971/3.711 cores. Twelve processes verified 480,000 measured results, including current-thread correctness. Earlier 108 lighter and 24 persistent-aggregate processes passed independent oracles. | Local reference acceptance is not production SLO, allocation-traffic, full connector or sustained soak qualification. |
-| Q1/demo gates | Matching native plugins rebuilt; Server passed 448 unit/selected integration cases. Strict storage-fixture lint, 14 Python checks and runner self-check passed. Rebuilt GPU functional/native-input/recovery/browser and Move-a-Wall live/SSE/browser/awaited shutdown passed. Guides, inventory and artifact provenance reconciled. | GPU full `--acceptance` still rejects its existing unsupported PostgreSQL policy-context/transaction-completion contract; that broader contract is outside this selected work and its guard remains intact. Full replacement qualification in the wider ledger remains open. |
+| Q1/demo gates | Matching native plugins rebuilt; Server passed 448 unit/selected integration cases. Strict storage-fixture lint, 14 Python checks and runner self-check passed. Rebuilt GPU functional/native-input/recovery/browser and Move-a-Wall live/SSE/browser/awaited shutdown passed. Guides, inventory and artifact provenance reconciled. | At this checkpoint, GPU full `--acceptance` still rejected its unsupported policy-context marker. See the later update below. Full replacement qualification in the wider ledger remains open. |
+
+**Later update (16 October 2026):** GPU Lab now reports its implemented native
+policy-context transaction contract and runs native-input checks in full
+acceptance. Atomic configuration and stale-policy completion regressions protect
+that claim. The separate durable network stop investigation also resolved its
+force/graceful test mismatch and repaired pause bookkeeping after a timeout.
+These targeted changes do not close the broader deadline, graph-size,
+stock-Server packaging or production-qualification items in the work inventory.
 
 The real-process cases required corrections to fixture plugin provenance,
 readiness interpretation and cancellation cleanup. A prior compiling host

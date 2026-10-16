@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "source_fingerprint": "fnv1a64:f22c3405422fcf00",
+  "source_fingerprint": "fnv1a64:47124c2877f3bbea",
   "source_files": [
     "components/computation-contracts/src/a2_bridge.rs",
     "components/computation-contracts/src/admission_messages.rs",
@@ -207,11 +207,10 @@
     "lib/src/computation/runtime/inspection.rs",
     "lib/src/computation/runtime/mod.rs",
     "lib/src/computation/runtime/native_query.rs",
-    "lib/src/computation/runtime/query.rs",
+    "lib/src/computation/runtime/query_assembly.rs",
     "lib/src/computation/runtime/reaction.rs",
     "lib/src/computation/runtime/snapshot.rs",
     "lib/src/computation/runtime/source.rs",
-    "lib/src/computation/scoped_graph.rs",
     "lib/src/computation/v1/binary_codec.rs",
     "lib/src/computation/v1/bounded_pipe.rs",
     "lib/src/computation/v1/broadcast_pipe.rs",
@@ -5536,21 +5535,21 @@
       "name": "drasi_computation_contracts::query_identity::IdentityRecord",
       "kind": "struct",
       "file": "components/computation-contracts/src/query_identity.rs",
-      "line": 57,
+      "line": 59,
       "condition": "",
       "fields": [
         {
           "name": "version",
           "declaration": "u32",
           "variant": "",
-          "line": 60,
+          "line": 62,
           "condition": ""
         },
         {
           "name": "identity",
           "declaration": "QueryRecoveryIdentity",
           "variant": "",
-          "line": 61,
+          "line": 63,
           "condition": ""
         }
       ]
@@ -5559,28 +5558,28 @@
       "name": "drasi_computation_contracts::query_identity::QueryIdentityError",
       "kind": "enum",
       "file": "components/computation-contracts/src/query_identity.rs",
-      "line": 43,
+      "line": 45,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "String",
           "variant": "Invalid",
-          "line": 48,
+          "line": 50,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "u32",
           "variant": "UnsupportedVersion",
-          "line": 50,
+          "line": 52,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "ContractError",
           "variant": "Contract",
-          "line": 54,
+          "line": 56,
           "condition": ""
         }
       ]
@@ -5596,35 +5595,35 @@
           "name": "construction_scope",
           "declaration": "String",
           "variant": "",
-          "line": 29,
+          "line": 31,
           "condition": ""
         },
         {
           "name": "graph_id",
           "declaration": "String",
           "variant": "",
-          "line": 30,
+          "line": 32,
           "condition": ""
         },
         {
           "name": "query_id",
           "declaration": "ComponentId",
           "variant": "",
-          "line": 31,
+          "line": 33,
           "condition": ""
         },
         {
           "name": "configuration_hash",
           "declaration": "u64",
           "variant": "",
-          "line": 32,
+          "line": 34,
           "condition": ""
         },
         {
           "name": "incarnation",
           "declaration": "Option < uuid :: Uuid >",
           "variant": "",
-          "line": 33,
+          "line": 35,
           "condition": ""
         }
       ]
@@ -13891,7 +13890,7 @@
       "name": "drasi_lib::computation::runtime::BootstrapRegistration",
       "kind": "type alias",
       "file": "lib/src/computation/runtime/mod.rs",
-      "line": 52,
+      "line": 54,
       "condition": "",
       "fields": []
     },
@@ -13899,7 +13898,7 @@
       "name": "drasi_lib::computation::runtime::ReactionRegistration",
       "kind": "type alias",
       "file": "lib/src/computation/runtime/mod.rs",
-      "line": 51,
+      "line": 53,
       "condition": "",
       "fields": []
     },
@@ -13907,70 +13906,70 @@
       "name": "drasi_lib::computation::runtime::Record",
       "kind": "struct",
       "file": "lib/src/computation/runtime/mod.rs",
-      "line": 168,
+      "line": 161,
       "condition": "",
       "fields": [
         {
           "name": "token",
           "declaration": "u64",
           "variant": "",
-          "line": 170,
+          "line": 163,
           "condition": ""
         },
         {
           "name": "node",
           "declaration": "ComponentId",
           "variant": "",
-          "line": 171,
+          "line": 164,
           "condition": ""
         },
         {
           "name": "resource",
           "declaration": "ResourceId",
           "variant": "",
-          "line": 172,
+          "line": 165,
           "condition": ""
         },
         {
           "name": "value",
           "declaration": "Value",
           "variant": "",
-          "line": 173,
+          "line": 166,
           "condition": ""
         },
         {
           "name": "owner",
           "declaration": "Arc < RuntimeInstance >",
           "variant": "",
-          "line": 174,
+          "line": 167,
           "condition": ""
         },
         {
           "name": "metadata",
           "declaration": "HashMap < String , String >",
           "variant": "",
-          "line": 175,
+          "line": 168,
           "condition": ""
         },
         {
           "name": "bootstrap_recipe",
           "declaration": "Option < crate :: config :: BootstrapSnapshot >",
           "variant": "",
-          "line": 176,
+          "line": 169,
           "condition": ""
         },
         {
           "name": "initial_status",
           "declaration": "ComponentStatus",
           "variant": "",
-          "line": 177,
+          "line": 170,
           "condition": ""
         },
         {
           "name": "activation_requested",
           "declaration": "bool",
           "variant": "",
-          "line": 178,
+          "line": 171,
           "condition": ""
         }
       ]
@@ -13979,63 +13978,63 @@
       "name": "drasi_lib::computation::runtime::RecordData",
       "kind": "struct",
       "file": "lib/src/computation/runtime/mod.rs",
-      "line": 181,
+      "line": 174,
       "condition": "",
       "fields": [
         {
           "name": "token",
           "declaration": "u64",
           "variant": "",
-          "line": 183,
+          "line": 176,
           "condition": ""
         },
         {
           "name": "node",
           "declaration": "ComponentId",
           "variant": "",
-          "line": 184,
+          "line": 177,
           "condition": ""
         },
         {
           "name": "resource",
           "declaration": "ResourceId",
           "variant": "",
-          "line": 185,
+          "line": 178,
           "condition": ""
         },
         {
           "name": "value",
           "declaration": "Value",
           "variant": "",
-          "line": 186,
+          "line": 179,
           "condition": ""
         },
         {
           "name": "metadata",
           "declaration": "HashMap < String , String >",
           "variant": "",
-          "line": 187,
+          "line": 180,
           "condition": ""
         },
         {
           "name": "bootstrap_recipe",
           "declaration": "Option < crate :: config :: BootstrapSnapshot >",
           "variant": "",
-          "line": 188,
+          "line": 181,
           "condition": ""
         },
         {
           "name": "initial_status",
           "declaration": "ComponentStatus",
           "variant": "",
-          "line": 189,
+          "line": 182,
           "condition": ""
         },
         {
           "name": "activation_requested",
           "declaration": "bool",
           "variant": "",
-          "line": 190,
+          "line": 183,
           "condition": ""
         }
       ]
@@ -14044,98 +14043,105 @@
       "name": "drasi_lib::computation::runtime::Runtime",
       "kind": "struct",
       "file": "lib/src/computation/runtime/mod.rs",
-      "line": 291,
+      "line": 284,
       "condition": "",
       "fields": [
         {
           "name": "config",
           "declaration": "Arc < RuntimeConfig >",
           "variant": "",
-          "line": 292,
+          "line": 285,
           "condition": ""
         },
         {
           "name": "services",
           "declaration": "LegacyPluginServices",
           "variant": "",
-          "line": 293,
+          "line": 286,
           "condition": ""
         },
         {
           "name": "middleware",
           "declaration": "Arc < drasi_core :: middleware :: MiddlewareTypeRegistry >",
           "variant": "",
-          "line": 294,
+          "line": 287,
           "condition": ""
         },
         {
           "name": "events",
           "declaration": "Arc < events :: Events >",
           "variant": "",
-          "line": 295,
+          "line": 288,
           "condition": ""
         },
         {
           "name": "parent",
           "declaration": "OnceLock < ComputationHandle >",
           "variant": "",
-          "line": 296,
+          "line": 289,
+          "condition": ""
+        },
+        {
+          "name": "instance_owner",
+          "declaration": "OnceLock < Weak < super :: instance :: InstanceGraph > >",
+          "variant": "",
+          "line": 290,
           "condition": ""
         },
         {
           "name": "cleanup_candidates",
           "declaration": "RwLock < BTreeMap < u64 , Record > >",
           "variant": "",
-          "line": 299,
+          "line": 293,
           "condition": ""
         },
         {
           "name": "mutations",
           "declaration": "Mutex < () >",
           "variant": "",
-          "line": 300,
+          "line": 294,
           "condition": ""
         },
         {
           "name": "next_instance",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 301,
+          "line": 295,
           "condition": ""
         },
         {
           "name": "changed",
           "declaration": "watch :: Sender < u64 >",
           "variant": "",
-          "line": 302,
+          "line": 296,
           "condition": ""
         },
         {
           "name": "catalog",
           "declaration": "QueryResultsCatalog",
           "variant": "",
-          "line": 303,
+          "line": 297,
           "condition": ""
         },
         {
           "name": "factory",
           "declaration": "Arc < RuntimeFactory >",
           "variant": "",
-          "line": 304,
+          "line": 298,
           "condition": ""
         },
         {
           "name": "logs",
           "declaration": "Arc < crate :: observability :: ComponentLogRegistry >",
           "variant": "",
-          "line": 305,
+          "line": 299,
           "condition": ""
         },
         {
           "name": "lifecycle_metrics",
           "declaration": "Arc < LifecycleMetrics >",
           "variant": "",
-          "line": 306,
+          "line": 300,
           "condition": ""
         }
       ]
@@ -14144,7 +14150,7 @@
       "name": "drasi_lib::computation::runtime::SourceRegistration",
       "kind": "type alias",
       "file": "lib/src/computation/runtime/mod.rs",
-      "line": 50,
+      "line": 52,
       "condition": "",
       "fields": []
     },
@@ -14152,28 +14158,21 @@
       "name": "drasi_lib::computation::runtime::Value",
       "kind": "enum",
       "file": "lib/src/computation/runtime/mod.rs",
-      "line": 122,
+      "line": 124,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "Arc < SourceInstance >",
           "variant": "Source",
-          "line": 124,
-          "condition": ""
-        },
-        {
-          "name": "0",
-          "declaration": "Arc < QueryInstance >",
-          "variant": "Query",
-          "line": 125,
+          "line": 126,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "Arc < ReactionInstance >",
           "variant": "Reaction",
-          "line": 126,
+          "line": 127,
           "condition": ""
         }
       ]
@@ -14205,13 +14204,6 @@
           "declaration": "LegacyPluginServices",
           "variant": "",
           "line": 200,
-          "condition": ""
-        },
-        {
-          "name": "indexes",
-          "declaration": "Arc < crate :: indexes :: IndexFactory >",
-          "variant": "",
-          "line": 201,
           "condition": ""
         }
       ]
@@ -14352,28 +14344,35 @@
       "name": "drasi_lib::computation::runtime::native_query::NativeQuery",
       "kind": "struct",
       "file": "lib/src/computation/runtime/native_query.rs",
-      "line": 640,
+      "line": 728,
       "condition": "",
       "fields": [
         {
           "name": "config",
           "declaration": "QueryConfig",
           "variant": "",
-          "line": 641,
+          "line": 729,
           "condition": ""
         },
         {
           "name": "handle",
           "declaration": "ComponentHandle",
           "variant": "",
-          "line": 642,
+          "line": 730,
           "condition": ""
         },
         {
           "name": "control",
           "declaration": "GraphControl",
           "variant": "",
-          "line": 643,
+          "line": 731,
+          "condition": ""
+        },
+        {
+          "name": "owner",
+          "declaration": "std :: sync :: Weak < Runtime >",
+          "variant": "",
+          "line": 732,
           "condition": ""
         }
       ]
@@ -14382,35 +14381,35 @@
       "name": "drasi_lib::computation::runtime::native_query::NativeQueryUpdate",
       "kind": "struct",
       "file": "lib/src/computation/runtime/native_query.rs",
-      "line": 169,
+      "line": 246,
       "condition": "",
       "fields": [
         {
           "name": "members",
           "declaration": "BTreeMap < ComponentId , ComponentGeneration >",
           "variant": "",
-          "line": 170,
+          "line": 247,
           "condition": ""
         },
         {
           "name": "changes",
           "declaration": "Vec < DesiredMutation >",
           "variant": "",
-          "line": 171,
+          "line": 248,
           "condition": ""
         },
         {
           "name": "bindings",
           "declaration": "TopologyBindings",
           "variant": "",
-          "line": 172,
+          "line": 249,
           "condition": ""
         },
         {
           "name": "running",
           "declaration": "bool",
           "variant": "",
-          "line": 173,
+          "line": 250,
           "condition": ""
         }
       ]
@@ -14419,327 +14418,28 @@
       "name": "drasi_lib::computation::runtime::native_query::NativeReceiver",
       "kind": "struct",
       "file": "lib/src/computation/runtime/native_query.rs",
-      "line": 714,
+      "line": 817,
       "condition": "",
       "fields": [
         {
           "name": "receiver",
           "declaration": "super :: CatalogSubscription",
           "variant": "",
-          "line": 715,
+          "line": 818,
           "condition": ""
         },
         {
           "name": "handle",
           "declaration": "ComponentHandle",
           "variant": "",
-          "line": 716,
+          "line": 819,
           "condition": ""
         },
         {
           "name": "control",
           "declaration": "GraphControl",
           "variant": "",
-          "line": 717,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::runtime::query::LegacyReceiver",
-      "kind": "struct",
-      "file": "lib/src/computation/runtime/query.rs",
-      "line": 759,
-      "condition": "",
-      "fields": [
-        {
-          "name": "0",
-          "declaration": "CatalogSubscription",
-          "variant": "",
-          "line": 759,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::runtime::query::ParentBinding",
-      "kind": "struct",
-      "file": "lib/src/computation/runtime/query.rs",
-      "line": 85,
-      "condition": "",
-      "fields": [
-        {
-          "name": "control",
-          "declaration": "GraphControl",
-          "variant": "",
-          "line": 86,
-          "condition": ""
-        },
-        {
-          "name": "node",
-          "declaration": "ComponentId",
-          "variant": "",
-          "line": 87,
-          "condition": ""
-        },
-        {
-          "name": "token",
-          "declaration": "u64",
-          "variant": "",
-          "line": 88,
-          "condition": ""
-        },
-        {
-          "name": "initial_status",
-          "declaration": "ComponentStatus",
-          "variant": "",
-          "line": 89,
-          "condition": ""
-        },
-        {
-          "name": "_status_observer",
-          "declaration": "Arc < dyn PublicationObserver >",
-          "variant": "",
-          "line": 90,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::runtime::query::QueryExecution",
-      "kind": "struct",
-      "file": "lib/src/computation/runtime/query.rs",
-      "line": 126,
-      "condition": "",
-      "fields": [
-        {
-          "name": "catalog",
-          "declaration": "QueryResultsCatalog",
-          "variant": "",
-          "line": 127,
-          "condition": ""
-        },
-        {
-          "name": "output_generation",
-          "declaration": "OnceLock < QueryOutputGenerationReader >",
-          "variant": "",
-          "line": 128,
-          "condition": ""
-        },
-        {
-          "name": "source_bindings",
-          "declaration": "Vec < Arc < SourceInstance > >",
-          "variant": "",
-          "line": 129,
-          "condition": ""
-        },
-        {
-          "name": "subscriptions",
-          "declaration": "Vec < Arc < LegacySourceSubscription > >",
-          "variant": "",
-          "line": 130,
-          "condition": ""
-        },
-        {
-          "name": "inspector",
-          "declaration": "ComputationInspector",
-          "variant": "",
-          "line": 131,
-          "condition": ""
-        },
-        {
-          "name": "life",
-          "declaration": "Mutex < QueryLife >",
-          "variant": "",
-          "line": 132,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::runtime::query::QueryInstance",
-      "kind": "struct",
-      "file": "lib/src/computation/runtime/query.rs",
-      "line": 135,
-      "condition": "",
-      "fields": [
-        {
-          "name": "config",
-          "declaration": "QueryConfig",
-          "variant": "",
-          "line": 136,
-          "condition": ""
-        },
-        {
-          "name": "metrics",
-          "declaration": "Arc < QueryOutputMetrics >",
-          "variant": "",
-          "line": 137,
-          "condition": ""
-        },
-        {
-          "name": "volatile",
-          "declaration": "bool",
-          "variant": "",
-          "line": 138,
-          "condition": ""
-        },
-        {
-          "name": "execution",
-          "declaration": "OnceLock < QueryExecution >",
-          "variant": "",
-          "line": 139,
-          "condition": ""
-        },
-        {
-          "name": "initializing",
-          "declaration": "Mutex < () >",
-          "variant": "",
-          "line": 140,
-          "condition": ""
-        },
-        {
-          "name": "parent",
-          "declaration": "OnceLock < ParentBinding >",
-          "variant": "",
-          "line": 141,
-          "condition": ""
-        },
-        {
-          "name": "global_catalog",
-          "declaration": "QueryResultsCatalog",
-          "variant": "",
-          "line": 142,
-          "condition": ""
-        },
-        {
-          "name": "started",
-          "declaration": "AtomicBool",
-          "variant": "",
-          "line": 143,
-          "condition": ""
-        },
-        {
-          "name": "requested",
-          "declaration": "AtomicBool",
-          "variant": "",
-          "line": 144,
-          "condition": ""
-        },
-        {
-          "name": "closed",
-          "declaration": "AtomicBool",
-          "variant": "",
-          "line": 145,
-          "condition": ""
-        },
-        {
-          "name": "changed",
-          "declaration": "watch :: Sender < u64 >",
-          "variant": "",
-          "line": 146,
-          "condition": ""
-        },
-        {
-          "name": "owner",
-          "declaration": "Weak < super :: Runtime >",
-          "variant": "",
-          "line": 147,
-          "condition": ""
-        },
-        {
-          "name": "status",
-          "declaration": "watch :: Sender < ComponentStatus >",
-          "variant": "",
-          "line": 148,
-          "condition": ""
-        },
-        {
-          "name": "cleanup",
-          "declaration": "drasi_core :: computation :: ComputationIoScope",
-          "variant": "",
-          "line": 149,
-          "condition": ""
-        },
-        {
-          "name": "deleted",
-          "declaration": "Arc < AtomicBool >",
-          "variant": "",
-          "line": 150,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::runtime::query::QueryLife",
-      "kind": "struct",
-      "file": "lib/src/computation/runtime/query.rs",
-      "line": 35,
-      "condition": "",
-      "fields": [
-        {
-          "name": "scope",
-          "declaration": "ScopedGraph",
-          "variant": "",
-          "line": 36,
-          "condition": ""
-        },
-        {
-          "name": "creation_attempted",
-          "declaration": "bool",
-          "variant": "",
-          "line": 37,
-          "condition": ""
-        },
-        {
-          "name": "activation",
-          "declaration": "Option < BoxFuture < 'static , GraphResult < StartReport > > >",
-          "variant": "",
-          "line": 38,
-          "condition": ""
-        },
-        {
-          "name": "link",
-          "declaration": "Option < CatalogLink >",
-          "variant": "",
-          "line": 39,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::runtime::query::QueryStatusObserver",
-      "kind": "struct",
-      "file": "lib/src/computation/runtime/query.rs",
-      "line": 93,
-      "condition": "",
-      "fields": [
-        {
-          "name": "node",
-          "declaration": "ComponentId",
-          "variant": "",
-          "line": 94,
-          "condition": ""
-        },
-        {
-          "name": "token",
-          "declaration": "u64",
-          "variant": "",
-          "line": 95,
-          "condition": ""
-        },
-        {
-          "name": "initial_status",
-          "declaration": "ComponentStatus",
-          "variant": "",
-          "line": 96,
-          "condition": ""
-        },
-        {
-          "name": "status",
-          "declaration": "watch :: Sender < ComponentStatus >",
-          "variant": "",
-          "line": 97,
+          "line": 820,
           "condition": ""
         }
       ]
@@ -14958,71 +14658,6 @@
           "declaration": "watch :: Sender < u64 >",
           "variant": "",
           "line": 43,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "kind": "struct",
-      "file": "lib/src/computation/scoped_graph.rs",
-      "line": 30,
-      "condition": "",
-      "fields": [
-        {
-          "name": "graph",
-          "declaration": "Arc < GraphSlot >",
-          "variant": "",
-          "line": 34,
-          "condition": ""
-        },
-        {
-          "name": "run",
-          "declaration": "Option < JoinHandle < anyhow :: Result < () > > >",
-          "variant": "",
-          "line": 35,
-          "condition": ""
-        },
-        {
-          "name": "cancel",
-          "declaration": "watch :: Sender < bool >",
-          "variant": "",
-          "line": 36,
-          "condition": ""
-        },
-        {
-          "name": "control",
-          "declaration": "watch :: Receiver < Option < GraphControl > >",
-          "variant": "",
-          "line": 37,
-          "condition": ""
-        },
-        {
-          "name": "inspector",
-          "declaration": "ComputationInspector",
-          "variant": "",
-          "line": 38,
-          "condition": ""
-        },
-        {
-          "name": "paused",
-          "declaration": "BTreeMap < ComponentId , ComponentGeneration >",
-          "variant": "",
-          "line": 39,
-          "condition": ""
-        },
-        {
-          "name": "terminal",
-          "declaration": "Option < String >",
-          "variant": "",
-          "line": 40,
-          "condition": ""
-        },
-        {
-          "name": "disposed",
-          "declaration": "bool",
-          "variant": "",
-          "line": 41,
           "condition": ""
         }
       ]
@@ -18772,6 +18407,13 @@
           "variant": "",
           "line": 359,
           "condition": ""
+        },
+        {
+          "name": "lifecycle_members",
+          "declaration": "Option < Arc < BTreeMap < ComponentId , ComponentGeneration > > >",
+          "variant": "",
+          "line": 360,
+          "condition": ""
         }
       ]
     },
@@ -20689,98 +20331,98 @@
       "name": "drasi_lib::computation::v1::graph::controller::reconcile::PreparationSnapshot",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph/reconcile.rs",
-      "line": 1254,
+      "line": 1256,
       "condition": "",
       "fields": [
         {
           "name": "snapshot",
           "declaration": "GraphSnapshot",
           "variant": "",
-          "line": 1255,
+          "line": 1257,
           "condition": ""
         },
         {
           "name": "observed",
           "declaration": "Arc < ObservedGraph >",
           "variant": "",
-          "line": 1256,
+          "line": 1258,
           "condition": ""
         },
         {
           "name": "components",
           "declaration": "Vec < Arc < InstanceSlot > >",
           "variant": "",
-          "line": 1257,
+          "line": 1259,
           "condition": ""
         },
         {
           "name": "ids",
           "declaration": "BTreeMap < ComponentId , usize >",
           "variant": "",
-          "line": 1258,
+          "line": 1260,
           "condition": ""
         },
         {
           "name": "edges",
           "declaration": "BTreeMap < usize , EdgeSnapshot >",
           "variant": "",
-          "line": 1259,
+          "line": 1261,
           "condition": ""
         },
         {
           "name": "providers",
           "declaration": "BTreeMap < usize , Arc < dyn PipeProvider > >",
           "variant": "",
-          "line": 1260,
+          "line": 1262,
           "condition": ""
         },
         {
           "name": "factories",
           "declaration": "BTreeMap < ImplementationIdentity , Arc < dyn ComponentFactory > >",
           "variant": "",
-          "line": 1261,
+          "line": 1263,
           "condition": ""
         },
         {
           "name": "resource_handles",
           "declaration": "BTreeMap < ResourceId , ResourceHandle >",
           "variant": "",
-          "line": 1262,
+          "line": 1264,
           "condition": ""
         },
         {
           "name": "execution_scope",
           "declaration": "Arc < str >",
           "variant": "",
-          "line": 1263,
+          "line": 1265,
           "condition": ""
         },
         {
           "name": "next_generation",
           "declaration": "u64",
           "variant": "",
-          "line": 1264,
+          "line": 1266,
           "condition": ""
         },
         {
           "name": "next_edge",
           "declaration": "usize",
           "variant": "",
-          "line": 1265,
+          "line": 1267,
           "condition": ""
         },
         {
           "name": "next_binding_generation",
           "declaration": "u64",
           "variant": "",
-          "line": 1266,
+          "line": 1268,
           "condition": ""
         },
         {
           "name": "next_resource_generation",
           "declaration": "u64",
           "variant": "",
-          "line": 1267,
+          "line": 1269,
           "condition": ""
         }
       ]
@@ -20789,63 +20431,63 @@
       "name": "drasi_lib::computation::v1::graph::controller::reconcile::Prepared",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph/reconcile.rs",
-      "line": 1243,
+      "line": 1245,
       "condition": "",
       "fields": [
         {
           "name": "nodes",
           "declaration": "Vec < NodeSnapshot >",
           "variant": "",
-          "line": 1244,
+          "line": 1246,
           "condition": ""
         },
         {
           "name": "edges",
           "declaration": "Vec < EdgeSnapshot >",
           "variant": "",
-          "line": 1245,
+          "line": 1247,
           "condition": ""
         },
         {
           "name": "order",
           "declaration": "Vec < usize >",
           "variant": "",
-          "line": 1246,
+          "line": 1248,
           "condition": ""
         },
         {
           "name": "components",
           "declaration": "BTreeMap < ComponentId , Component >",
           "variant": "",
-          "line": 1247,
+          "line": 1249,
           "condition": ""
         },
         {
           "name": "pipes",
           "declaration": "BTreeMap < EdgeDefinition , Box < dyn PipeProvider > >",
           "variant": "",
-          "line": 1248,
+          "line": 1250,
           "condition": ""
         },
         {
           "name": "resources",
           "declaration": "BTreeMap < ResourceId , ResourceHandle >",
           "variant": "",
-          "line": 1249,
+          "line": 1251,
           "condition": ""
         },
         {
           "name": "resource_constructors",
           "declaration": "BTreeMap < ResourceId , Arc < dyn ResourceConstructor > >",
           "variant": "",
-          "line": 1250,
+          "line": 1252,
           "condition": ""
         },
         {
           "name": "factories",
           "declaration": "BTreeMap < ImplementationIdentity , Arc < dyn ComponentFactory > >",
           "variant": "",
-          "line": 1251,
+          "line": 1253,
           "condition": ""
         }
       ]
@@ -27938,7 +27580,7 @@
       "name": "drasi_lib::computation::v1::query::ComputationQueryLanguage",
       "kind": "enum",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 84,
+      "line": 87,
       "condition": "",
       "fields": []
     },
@@ -27946,49 +27588,49 @@
       "name": "drasi_lib::computation::v1::query::ContinuousQueryDefinition",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 91,
+      "line": 94,
       "condition": "",
       "fields": [
         {
           "name": "graph_id",
           "declaration": "String",
           "variant": "",
-          "line": 94,
+          "line": 97,
           "condition": ""
         },
         {
           "name": "id",
           "declaration": "ComponentId",
           "variant": "",
-          "line": 95,
+          "line": 98,
           "condition": ""
         },
         {
           "name": "query",
           "declaration": "String",
           "variant": "",
-          "line": 96,
+          "line": 99,
           "condition": ""
         },
         {
           "name": "language",
           "declaration": "ComputationQueryLanguage",
           "variant": "",
-          "line": 97,
+          "line": 100,
           "condition": ""
         },
         {
           "name": "output_stream",
           "declaration": "StreamId",
           "variant": "",
-          "line": 98,
+          "line": 101,
           "condition": ""
         },
         {
           "name": "outbox_capacity",
           "declaration": "NonZeroUsize",
           "variant": "",
-          "line": 99,
+          "line": 102,
           "condition": ""
         }
       ]
@@ -27997,14 +27639,14 @@
       "name": "drasi_lib::computation::v1::query::ContinuousQueryFactory",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 1903,
+      "line": 1952,
       "condition": "",
       "fields": [
         {
           "name": "descriptor",
           "declaration": "FactoryDescriptor",
           "variant": "",
-          "line": 1904,
+          "line": 1953,
           "condition": ""
         }
       ]
@@ -28013,273 +27655,294 @@
       "name": "drasi_lib::computation::v1::query::ContinuousQueryTransformer",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 327,
+      "line": 330,
       "condition": "",
       "fields": [
         {
           "name": "definition",
           "declaration": "ContinuousQueryDefinition",
           "variant": "",
-          "line": 328,
+          "line": 331,
           "condition": ""
         },
         {
           "name": "descriptor",
           "declaration": "ComponentDescriptor",
           "variant": "",
-          "line": 329,
+          "line": 332,
           "condition": ""
         },
         {
           "name": "provider",
           "declaration": "Arc < dyn ComputationIndexProvider >",
           "variant": "",
-          "line": 330,
+          "line": 333,
           "condition": ""
         },
         {
           "name": "query",
           "declaration": "Option < ComputationQuery >",
           "variant": "",
-          "line": 331,
+          "line": 334,
           "condition": ""
         },
         {
           "name": "recovery_contract",
           "declaration": "super :: ComponentRecovery",
           "variant": "",
-          "line": 332,
+          "line": 335,
           "condition": ""
         },
         {
           "name": "results",
           "declaration": "QueryResults",
           "variant": "",
-          "line": 333,
+          "line": 336,
           "condition": ""
         },
         {
           "name": "codec",
           "declaration": "EnvelopeCodec",
           "variant": "",
-          "line": 334,
+          "line": 337,
           "condition": ""
         },
         {
           "name": "failure",
           "declaration": "Arc < AtomicBool >",
           "variant": "",
-          "line": 335,
+          "line": 338,
           "condition": ""
         },
         {
           "name": "options",
           "declaration": "QueryOptions",
           "variant": "",
-          "line": 336,
+          "line": 339,
           "condition": ""
         },
         {
           "name": "bootstrap",
           "declaration": "Option < Arc < dyn ComputationBootstrapProvider > >",
           "variant": "",
-          "line": 337,
+          "line": 340,
           "condition": ""
         },
         {
           "name": "bootstrap_complete",
           "declaration": "AtomicBool",
           "variant": "",
-          "line": 338,
+          "line": 341,
           "condition": ""
         },
         {
           "name": "watermarks",
           "declaration": "Mutex < HashMap < String , u64 > >",
           "variant": "",
-          "line": 339,
+          "line": 342,
           "condition": ""
         },
         {
           "name": "source_progress",
           "declaration": "Option < Arc < QuerySourceProgress > >",
           "variant": "",
-          "line": 340,
+          "line": 343,
           "condition": ""
         },
         {
           "name": "execution",
           "declaration": "QueryExecutionSettings",
           "variant": "",
-          "line": 341,
+          "line": 344,
           "condition": ""
         },
         {
           "name": "middleware",
           "declaration": "Option < Arc < drasi_core :: middleware :: MiddlewareTypeRegistry > >",
           "variant": "",
-          "line": 342,
+          "line": 345,
           "condition": ""
         },
         {
           "name": "registration",
           "declaration": "Option < super :: query_catalog :: QueryRegistration >",
           "variant": "",
-          "line": 343,
+          "line": 346,
           "condition": ""
         },
         {
           "name": "catalog",
           "declaration": "Option < super :: QueryResultsCatalog >",
           "variant": "",
-          "line": 344,
+          "line": 347,
           "condition": ""
         },
         {
           "name": "api_configuration",
           "declaration": "Option < crate :: config :: QueryConfig >",
           "variant": "",
-          "line": 345,
+          "line": 348,
           "condition": ""
         },
         {
           "name": "api_view",
           "declaration": "std :: sync :: OnceLock < Arc < super :: QueryApi > >",
           "variant": "",
-          "line": 346,
+          "line": 349,
           "condition": ""
         },
         {
           "name": "metrics",
           "declaration": "Option < Arc < crate :: metrics :: QueryOutputMetrics > >",
           "variant": "",
-          "line": 347,
+          "line": 350,
           "condition": ""
         },
         {
           "name": "reset_configuration",
           "declaration": "bool",
           "variant": "",
-          "line": 348,
+          "line": 351,
           "condition": ""
         },
         {
           "name": "runtime_compatibility",
           "declaration": "bool",
           "variant": "",
-          "line": 349,
+          "line": 352,
           "condition": ""
         },
         {
           "name": "output_persistent",
           "declaration": "bool",
           "variant": "",
-          "line": 350,
+          "line": 353,
           "condition": ""
         },
         {
           "name": "legacy_hash",
           "declaration": "Option < u64 >",
           "variant": "",
-          "line": 351,
+          "line": 354,
           "condition": ""
         },
         {
           "name": "checkpoint_view",
           "declaration": "Arc < RwLock < Option < Arc < dyn drasi_core :: interface :: CheckpointStore > > > >",
           "variant": "",
-          "line": 352,
+          "line": 355,
           "condition": ""
         },
         {
           "name": "output_persistence_view",
           "declaration": "Arc < RwLock < Option < bool > > >",
           "variant": "",
-          "line": 353,
+          "line": 356,
           "condition": ""
         },
         {
           "name": "publication_identity",
           "declaration": "Arc < RwLock < Option < uuid :: Uuid > > >",
           "variant": "",
-          "line": 354,
+          "line": 357,
           "condition": ""
         },
         {
           "name": "recovery_scope",
           "declaration": "Arc < str >",
           "variant": "",
-          "line": 355,
+          "line": 358,
+          "condition": ""
+        },
+        {
+          "name": "recovery_graph_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 359,
+          "condition": ""
+        },
+        {
+          "name": "default_dispatch_capacity",
+          "declaration": "usize",
+          "variant": "",
+          "line": 360,
+          "condition": ""
+        },
+        {
+          "name": "declaration",
+          "declaration": "Option < Arc < super :: query_configuration :: OrdinaryQueryDeclaration > >",
+          "variant": "",
+          "line": 361,
           "condition": ""
         },
         {
           "name": "scheduling",
           "declaration": "Option < Arc < super :: QuerySchedulingResource > >",
           "variant": "",
-          "line": 356,
+          "line": 362,
           "condition": ""
         },
         {
           "name": "draining_futures",
           "declaration": "bool",
           "variant": "",
-          "line": 357,
+          "line": 363,
           "condition": ""
         },
         {
           "name": "delivery_tracking",
           "declaration": "bool",
           "variant": "",
-          "line": 358,
+          "line": 364,
           "condition": ""
         },
         {
           "name": "pending_output",
           "declaration": "VecDeque < super :: ChangeEnvelope >",
           "variant": "",
-          "line": 359,
+          "line": 365,
           "condition": ""
         },
         {
           "name": "replay_pending",
           "declaration": "Arc < AtomicBool >",
           "variant": "",
-          "line": 360,
+          "line": 366,
           "condition": ""
         },
         {
           "name": "delivery_changed",
           "declaration": "Arc < tokio :: sync :: Notify >",
           "variant": "",
-          "line": 361,
+          "line": 367,
           "condition": ""
         },
         {
           "name": "delivery_sequence",
           "declaration": "Arc < AtomicU64 >",
           "variant": "",
-          "line": 362,
+          "line": 368,
           "condition": ""
         },
         {
           "name": "delivered_output",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 363,
+          "line": 369,
           "condition": ""
         },
         {
           "name": "output_binding_state",
           "declaration": "Option < Arc < super :: output_bindings :: OutputBindingState > >",
           "variant": "",
-          "line": 364,
+          "line": 370,
           "condition": ""
         },
         {
           "name": "output_bindings",
           "declaration": "super :: OutputBindings",
           "variant": "",
-          "line": 365,
+          "line": 371,
           "condition": ""
         }
       ]
@@ -28288,21 +27951,21 @@
       "name": "drasi_lib::computation::v1::query::FutureWakeup",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 186,
+      "line": 189,
       "condition": "",
       "fields": [
         {
           "name": "queue",
           "declaration": "Arc < dyn FutureQueue >",
           "variant": "",
-          "line": 187,
+          "line": 190,
           "condition": ""
         },
         {
           "name": "keep_alive",
           "declaration": "bool",
           "variant": "",
-          "line": 188,
+          "line": 191,
           "condition": ""
         }
       ]
@@ -28311,28 +27974,28 @@
       "name": "drasi_lib::computation::v1::query::InputProgress",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 243,
+      "line": 246,
       "condition": "",
       "fields": [
         {
           "name": "graph",
           "declaration": "super :: producer_progress :: GraphInputProgress",
           "variant": "",
-          "line": 244,
+          "line": 247,
           "condition": ""
         },
         {
           "name": "source_id",
           "declaration": "String",
           "variant": "",
-          "line": 245,
+          "line": 248,
           "condition": ""
         },
         {
           "name": "profiling",
           "declaration": "Option < ProfilingMetadata >",
           "variant": "",
-          "line": 246,
+          "line": 249,
           "condition": ""
         }
       ]
@@ -28341,28 +28004,28 @@
       "name": "drasi_lib::computation::v1::query::ProcessingGuard",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 212,
+      "line": 215,
       "condition": "",
       "fields": [
         {
           "name": "failure",
           "declaration": "Arc < AtomicBool >",
           "variant": "",
-          "line": 213,
+          "line": 216,
           "condition": ""
         },
         {
           "name": "complete",
           "declaration": "bool",
           "variant": "",
-          "line": 214,
+          "line": 217,
           "condition": ""
         },
         {
           "name": "progress",
           "declaration": "Option < Arc < QuerySourceProgress > >",
           "variant": "",
-          "line": 215,
+          "line": 218,
           "condition": ""
         }
       ]
@@ -28371,14 +28034,14 @@
       "name": "drasi_lib::computation::v1::query::QueryIndexProviderResource",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 1901,
+      "line": 1950,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "Arc < dyn ComputationIndexProvider >",
           "variant": "",
-          "line": 1901,
+          "line": 1950,
           "condition": ""
         }
       ]
@@ -28387,21 +28050,21 @@
       "name": "drasi_lib::computation::v1::query::TransactionTimer",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 228,
+      "line": 231,
       "condition": "",
       "fields": [
         {
           "name": "metrics",
           "declaration": "Option < Arc < crate :: metrics :: QueryOutputMetrics > >",
           "variant": "",
-          "line": 229,
+          "line": 232,
           "condition": ""
         },
         {
           "name": "started",
           "declaration": "std :: time :: Instant",
           "variant": "",
-          "line": 230,
+          "line": 233,
           "condition": ""
         }
       ]
@@ -28617,35 +28280,35 @@
       "name": "drasi_lib::computation::v1::query_catalog::CatalogInner",
       "kind": "struct",
       "file": "lib/src/computation/v1/query_catalog.rs",
-      "line": 135,
+      "line": 150,
       "condition": "",
       "fields": [
         {
           "name": "graph",
           "declaration": "Arc < str >",
           "variant": "",
-          "line": 136,
+          "line": 151,
           "condition": ""
         },
         {
           "name": "state",
           "declaration": "Mutex < CatalogState >",
           "variant": "",
-          "line": 137,
+          "line": 152,
           "condition": ""
         },
         {
           "name": "changed",
           "declaration": "watch :: Sender < u64 >",
           "variant": "",
-          "line": 138,
+          "line": 153,
           "condition": ""
         },
         {
           "name": "events",
           "declaration": "tokio :: sync :: broadcast :: Sender < ChangeEnvelope >",
           "variant": "",
-          "line": 139,
+          "line": 154,
           "condition": ""
         }
       ]
@@ -28654,14 +28317,14 @@
       "name": "drasi_lib::computation::v1::query_catalog::CatalogLink",
       "kind": "struct",
       "file": "lib/src/computation/v1/query_catalog.rs",
-      "line": 152,
+      "line": 167,
       "condition": "",
       "fields": [
         {
           "name": "_registration",
           "declaration": "QueryRegistration",
           "variant": "",
-          "line": 153,
+          "line": 168,
           "condition": ""
         }
       ]
@@ -28890,28 +28553,28 @@
       "name": "drasi_lib::computation::v1::query_catalog::QueryRegistration",
       "kind": "struct",
       "file": "lib/src/computation/v1/query_catalog.rs",
-      "line": 147,
+      "line": 162,
       "condition": "",
       "fields": [
         {
           "name": "catalog",
           "declaration": "Weak < CatalogInner >",
           "variant": "",
-          "line": 148,
+          "line": 163,
           "condition": ""
         },
         {
           "name": "id",
           "declaration": "ComponentId",
           "variant": "",
-          "line": 149,
+          "line": 164,
           "condition": ""
         },
         {
           "name": "generation",
           "declaration": "u64",
           "variant": "",
-          "line": 150,
+          "line": 165,
           "condition": ""
         }
       ]
@@ -28920,14 +28583,14 @@
       "name": "drasi_lib::computation::v1::query_catalog::QueryResultsCatalog",
       "kind": "struct",
       "file": "lib/src/computation/v1/query_catalog.rs",
-      "line": 142,
+      "line": 157,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "Arc < CatalogInner >",
           "variant": "",
-          "line": 145,
+          "line": 160,
           "condition": ""
         }
       ]
@@ -28936,21 +28599,21 @@
       "name": "drasi_lib::computation::v1::query_catalog::QueryResultsOutlet",
       "kind": "struct",
       "file": "lib/src/computation/v1/query_catalog.rs",
-      "line": 509,
+      "line": 525,
       "condition": "",
       "fields": [
         {
           "name": "descriptor",
           "declaration": "ComponentDescriptor",
           "variant": "",
-          "line": 510,
+          "line": 526,
           "condition": ""
         },
         {
           "name": "catalog",
           "declaration": "QueryResultsCatalog",
           "variant": "",
-          "line": 511,
+          "line": 527,
           "condition": ""
         }
       ]
@@ -28959,14 +28622,14 @@
       "name": "drasi_lib::computation::v1::query_catalog::QueryResultsOutletFactory",
       "kind": "struct",
       "file": "lib/src/computation/v1/query_catalog.rs",
-      "line": 556,
+      "line": 572,
       "condition": "",
       "fields": [
         {
           "name": "descriptor",
           "declaration": "FactoryDescriptor",
           "variant": "",
-          "line": 557,
+          "line": 573,
           "condition": ""
         }
       ]
@@ -29057,6 +28720,50 @@
           "declaration": "tokio :: sync :: broadcast :: Receiver < ChangeEnvelope >",
           "variant": "Broadcast",
           "line": 79,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::computation::v1::query_configuration::OrdinaryQueryDeclaration",
+      "kind": "struct",
+      "file": "lib/src/computation/v1/query_configuration.rs",
+      "line": 41,
+      "condition": "",
+      "fields": [
+        {
+          "name": "id",
+          "declaration": "super :: ComponentId",
+          "variant": "",
+          "line": 43,
+          "condition": ""
+        },
+        {
+          "name": "failure",
+          "declaration": "Option < Arc < super :: GraphError > >",
+          "variant": "",
+          "line": 44,
+          "condition": ""
+        },
+        {
+          "name": "backend",
+          "declaration": "Option < Arc < dyn drasi_core :: interface :: IndexBackendPlugin > >",
+          "variant": "",
+          "line": 45,
+          "condition": ""
+        },
+        {
+          "name": "default_dispatch_capacity",
+          "declaration": "usize",
+          "variant": "",
+          "line": 46,
+          "condition": ""
+        },
+        {
+          "name": "sources",
+          "declaration": "Vec < Arc < super :: SourcePluginHost > >",
+          "variant": "",
+          "line": 47,
           "condition": ""
         }
       ]
@@ -40042,7 +39749,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 61,
+      "line": 63,
       "condition": ""
     },
     {
@@ -40052,7 +39759,7 @@
       "variant": "Contract",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 54,
+      "line": 56,
       "condition": ""
     },
     {
@@ -40062,7 +39769,7 @@
       "variant": "Invalid",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 48,
+      "line": 50,
       "condition": ""
     },
     {
@@ -40072,7 +39779,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 31,
+      "line": 33,
       "condition": ""
     },
     {
@@ -40082,7 +39789,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 29,
+      "line": 31,
       "condition": ""
     },
     {
@@ -40092,7 +39799,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 30,
+      "line": 32,
       "condition": ""
     },
     {
@@ -40102,7 +39809,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 33,
+      "line": 35,
       "condition": ""
     },
     {
@@ -45562,7 +45269,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 171,
+      "line": 164,
       "condition": ""
     },
     {
@@ -45572,7 +45279,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 172,
+      "line": 165,
       "condition": ""
     },
     {
@@ -45582,7 +45289,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 177,
+      "line": 170,
       "condition": ""
     },
     {
@@ -45592,7 +45299,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 173,
+      "line": 166,
       "condition": ""
     },
     {
@@ -45602,7 +45309,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 174,
+      "line": 167,
       "condition": ""
     },
     {
@@ -45612,7 +45319,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 176,
+      "line": 169,
       "condition": ""
     },
     {
@@ -45622,7 +45329,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 175,
+      "line": 168,
       "condition": ""
     },
     {
@@ -45632,7 +45339,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 175,
+      "line": 168,
       "condition": ""
     },
     {
@@ -45642,7 +45349,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 184,
+      "line": 177,
       "condition": ""
     },
     {
@@ -45652,7 +45359,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 185,
+      "line": 178,
       "condition": ""
     },
     {
@@ -45662,7 +45369,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 189,
+      "line": 182,
       "condition": ""
     },
     {
@@ -45672,7 +45379,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 186,
+      "line": 179,
       "condition": ""
     },
     {
@@ -45682,7 +45389,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 188,
+      "line": 181,
       "condition": ""
     },
     {
@@ -45692,7 +45399,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 187,
+      "line": 180,
       "condition": ""
     },
     {
@@ -45702,7 +45409,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 187,
+      "line": 180,
       "condition": ""
     },
     {
@@ -45712,7 +45419,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 294,
+      "line": 287,
       "condition": ""
     },
     {
@@ -45722,7 +45429,17 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "OnceLock",
-      "line": 296,
+      "line": 289,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::runtime::Runtime",
+      "to": "drasi_lib::computation::instance::InstanceGraph",
+      "field": "instance_owner",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "OnceLock / weak live target",
+      "line": 290,
       "condition": ""
     },
     {
@@ -45732,7 +45449,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "RwLock / BTreeMap entries",
-      "line": 299,
+      "line": 293,
       "condition": ""
     },
     {
@@ -45742,7 +45459,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 304,
+      "line": 298,
       "condition": ""
     },
     {
@@ -45752,7 +45469,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 295,
+      "line": 288,
       "condition": ""
     },
     {
@@ -45762,7 +45479,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 293,
+      "line": 286,
       "condition": ""
     },
     {
@@ -45772,7 +45489,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 303,
+      "line": 297,
       "condition": ""
     },
     {
@@ -45782,7 +45499,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 292,
+      "line": 285,
       "condition": ""
     },
     {
@@ -45792,7 +45509,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 306,
+      "line": 300,
       "condition": ""
     },
     {
@@ -45802,7 +45519,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 305,
+      "line": 299,
       "condition": ""
     },
     {
@@ -45812,17 +45529,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 301,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::Value",
-      "to": "drasi_lib::computation::runtime::query::QueryInstance",
-      "field": "0",
-      "variant": "Query",
-      "cardinality": "0..1",
-      "relationship": "shared strong",
-      "line": 125,
+      "line": 295,
       "condition": ""
     },
     {
@@ -45832,7 +45539,7 @@
       "variant": "Reaction",
       "cardinality": "0..1",
       "relationship": "shared strong",
-      "line": 126,
+      "line": 127,
       "condition": ""
     },
     {
@@ -45842,7 +45549,7 @@
       "variant": "Source",
       "cardinality": "0..1",
       "relationship": "shared strong",
-      "line": 124,
+      "line": 126,
       "condition": ""
     },
     {
@@ -45863,16 +45570,6 @@
       "cardinality": "1",
       "relationship": "stored value",
       "line": 200,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::component::RuntimeFactory",
-      "to": "drasi_lib::indexes::factory::IndexFactory",
-      "field": "indexes",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "shared strong",
-      "line": 201,
       "condition": ""
     },
     {
@@ -46017,12 +45714,22 @@
     },
     {
       "from": "drasi_lib::computation::runtime::native_query::NativeQuery",
+      "to": "drasi_lib::computation::runtime::Runtime",
+      "field": "owner",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "weak live target",
+      "line": 732,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::runtime::native_query::NativeQuery",
       "to": "drasi_lib::computation::v1::graph::GraphControl",
       "field": "control",
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 643,
+      "line": 731,
       "condition": ""
     },
     {
@@ -46032,7 +45739,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 642,
+      "line": 730,
       "condition": ""
     },
     {
@@ -46042,7 +45749,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 641,
+      "line": 729,
       "condition": ""
     },
     {
@@ -46052,7 +45759,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 170,
+      "line": 247,
       "condition": ""
     },
     {
@@ -46062,7 +45769,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 171,
+      "line": 248,
       "condition": ""
     },
     {
@@ -46072,7 +45779,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 172,
+      "line": 249,
       "condition": ""
     },
     {
@@ -46082,7 +45789,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 170,
+      "line": 247,
       "condition": ""
     },
     {
@@ -46092,7 +45799,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 717,
+      "line": 820,
       "condition": ""
     },
     {
@@ -46102,7 +45809,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 716,
+      "line": 819,
       "condition": ""
     },
     {
@@ -46112,297 +45819,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 715,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::LegacyReceiver",
-      "to": "drasi_lib::computation::v1::query_catalog::CatalogSubscription",
-      "field": "0",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 759,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::ParentBinding",
-      "to": "drasi_computation_contracts::data::ComponentId",
-      "field": "node",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 87,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::ParentBinding",
-      "to": "drasi_lib::channels::events::ComponentStatus",
-      "field": "initial_status",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 89,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::ParentBinding",
-      "to": "drasi_lib::computation::v1::graph::GraphControl",
-      "field": "control",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 86,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::ParentBinding",
-      "to": "drasi_lib::computation::v1::inspection::PublicationObserver",
-      "field": "_status_observer",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "shared strong / trait object; concrete implementation erased",
-      "line": 90,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryExecution",
-      "to": "drasi_lib::computation::runtime::query::QueryLife",
-      "field": "life",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "Mutex",
-      "line": 132,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryExecution",
-      "to": "drasi_lib::computation::runtime::source::SourceInstance",
-      "field": "source_bindings",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "Vec entries / shared strong",
-      "line": 129,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryExecution",
-      "to": "drasi_lib::computation::v1::inspection::ComputationInspector",
-      "field": "inspector",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 131,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryExecution",
-      "to": "drasi_lib::computation::v1::plugin_source::LegacySourceSubscription",
-      "field": "subscriptions",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "Vec entries / shared strong",
-      "line": 130,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryExecution",
-      "to": "drasi_lib::computation::v1::query_catalog::QueryOutputGenerationReader",
-      "field": "output_generation",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "OnceLock",
-      "line": 128,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryExecution",
-      "to": "drasi_lib::computation::v1::query_catalog::QueryResultsCatalog",
-      "field": "catalog",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 127,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_core::computation::io_scope::BlockingScope",
-      "field": "cleanup",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 149,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_lib::channels::events::ComponentStatus",
-      "field": "status",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "watch latest value",
-      "line": 148,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_lib::computation::runtime::Runtime",
-      "field": "owner",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "weak live target",
-      "line": 147,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_lib::computation::runtime::query::ParentBinding",
-      "field": "parent",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "OnceLock",
-      "line": 141,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_lib::computation::runtime::query::QueryExecution",
-      "field": "execution",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "OnceLock",
-      "line": 139,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_lib::computation::v1::query_catalog::QueryResultsCatalog",
-      "field": "global_catalog",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 142,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_lib::config::schema::QueryConfig",
-      "field": "config",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 136,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "drasi_lib::metrics::query_metrics::QueryOutputMetrics",
-      "field": "metrics",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "shared strong",
-      "line": 137,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "std::sync::atomic::AtomicBool",
-      "field": "closed",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 145,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "std::sync::atomic::AtomicBool",
-      "field": "deleted",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "shared strong",
-      "line": 150,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "std::sync::atomic::AtomicBool",
-      "field": "requested",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 144,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryInstance",
-      "to": "std::sync::atomic::AtomicBool",
-      "field": "started",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 143,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryLife",
-      "to": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "field": "scope",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 36,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryLife",
-      "to": "drasi_lib::computation::v1::query_catalog::CatalogLink",
-      "field": "link",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option",
-      "line": 39,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryLife",
-      "to": "futures::future::BoxFuture",
-      "field": "activation",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option / task/future/callback handle; captures and output not inferred",
-      "line": 38,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryStatusObserver",
-      "to": "drasi_computation_contracts::data::ComponentId",
-      "field": "node",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 94,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryStatusObserver",
-      "to": "drasi_lib::channels::events::ComponentStatus",
-      "field": "initial_status",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 96,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::query::QueryStatusObserver",
-      "to": "drasi_lib::channels::events::ComponentStatus",
-      "field": "status",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "watch latest value",
-      "line": 97,
+      "line": 818,
       "condition": ""
     },
     {
@@ -46623,76 +46040,6 @@
       "cardinality": "1",
       "relationship": "shared strong / trait object; concrete implementation erased",
       "line": 37,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "to": "drasi_computation_contracts::data::ComponentId",
-      "field": "paused",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "BTreeMap entries",
-      "line": 39,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "to": "drasi_lib::computation::instance::GraphSlot",
-      "field": "graph",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "shared strong",
-      "line": 34,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "to": "drasi_lib::computation::v1::graph::GraphControl",
-      "field": "control",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "watch latest value / Option",
-      "line": 37,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "to": "drasi_lib::computation::v1::inspection::ComputationInspector",
-      "field": "inspector",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 38,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "to": "drasi_lib::computation::v1::lifecycle::ComponentGeneration",
-      "field": "paused",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "BTreeMap entries",
-      "line": 39,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "to": "std::string::String",
-      "field": "terminal",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option",
-      "line": 40,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::scoped_graph::ScopedGraph",
-      "to": "tokio::task::JoinHandle",
-      "field": "run",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option / task/future/callback handle; captures and output not inferred",
-      "line": 35,
       "condition": ""
     },
     {
@@ -50157,6 +49504,16 @@
     },
     {
       "from": "drasi_lib::computation::v1::graph::addition::ComponentHandle",
+      "to": "drasi_computation_contracts::data::ComponentId",
+      "field": "lifecycle_members",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "Option / shared strong / BTreeMap entries",
+      "line": 360,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::graph::addition::ComponentHandle",
       "to": "drasi_lib::computation::v1::graph::GraphControl",
       "field": "control",
       "variant": "",
@@ -50173,6 +49530,16 @@
       "cardinality": "1",
       "relationship": "stored value",
       "line": 359,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::graph::addition::ComponentHandle",
+      "to": "drasi_lib::computation::v1::lifecycle::ComponentGeneration",
+      "field": "lifecycle_members",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "Option / shared strong / BTreeMap entries",
+      "line": 360,
       "condition": ""
     },
     {
@@ -52542,7 +51909,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1258,
+      "line": 1260,
       "condition": ""
     },
     {
@@ -52552,7 +51919,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1262,
+      "line": 1264,
       "condition": ""
     },
     {
@@ -52562,7 +51929,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1261,
+      "line": 1263,
       "condition": ""
     },
     {
@@ -52572,7 +51939,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / shared strong / trait object; concrete implementation erased",
-      "line": 1260,
+      "line": 1262,
       "condition": ""
     },
     {
@@ -52582,7 +51949,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1259,
+      "line": 1261,
       "condition": ""
     },
     {
@@ -52592,7 +51959,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1255,
+      "line": 1257,
       "condition": ""
     },
     {
@@ -52602,7 +51969,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries / shared strong",
-      "line": 1257,
+      "line": 1259,
       "condition": ""
     },
     {
@@ -52612,7 +51979,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / shared strong / trait object; concrete implementation erased",
-      "line": 1261,
+      "line": 1263,
       "condition": ""
     },
     {
@@ -52622,7 +51989,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1262,
+      "line": 1264,
       "condition": ""
     },
     {
@@ -52632,7 +51999,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1256,
+      "line": 1258,
       "condition": ""
     },
     {
@@ -52642,7 +52009,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1247,
+      "line": 1249,
       "condition": ""
     },
     {
@@ -52652,7 +52019,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1250,
+      "line": 1252,
       "condition": ""
     },
     {
@@ -52662,7 +52029,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1249,
+      "line": 1251,
       "condition": ""
     },
     {
@@ -52672,7 +52039,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1251,
+      "line": 1253,
       "condition": ""
     },
     {
@@ -52682,7 +52049,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / owned box / trait object; concrete implementation erased",
-      "line": 1248,
+      "line": 1250,
       "condition": ""
     },
     {
@@ -52692,7 +52059,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1247,
+      "line": 1249,
       "condition": ""
     },
     {
@@ -52702,7 +52069,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1248,
+      "line": 1250,
       "condition": ""
     },
     {
@@ -52712,7 +52079,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 1245,
+      "line": 1247,
       "condition": ""
     },
     {
@@ -52722,7 +52089,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 1244,
+      "line": 1246,
       "condition": ""
     },
     {
@@ -52732,7 +52099,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / shared strong / trait object; concrete implementation erased",
-      "line": 1251,
+      "line": 1253,
       "condition": ""
     },
     {
@@ -52742,7 +52109,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / shared strong / trait object; concrete implementation erased",
-      "line": 1250,
+      "line": 1252,
       "condition": ""
     },
     {
@@ -52752,7 +52119,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1249,
+      "line": 1251,
       "condition": ""
     },
     {
@@ -59002,7 +58369,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 95,
+      "line": 98,
       "condition": ""
     },
     {
@@ -59012,7 +58379,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 98,
+      "line": 101,
       "condition": ""
     },
     {
@@ -59022,7 +58389,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 97,
+      "line": 100,
       "condition": ""
     },
     {
@@ -59032,7 +58399,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 99,
+      "line": 102,
       "condition": ""
     },
     {
@@ -59042,7 +58409,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 94,
+      "line": 97,
       "condition": ""
     },
     {
@@ -59052,7 +58419,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 96,
+      "line": 99,
       "condition": ""
     },
     {
@@ -59062,7 +58429,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1904,
+      "line": 1953,
       "condition": ""
     },
     {
@@ -59072,7 +58439,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 334,
+      "line": 337,
       "condition": ""
     },
     {
@@ -59082,7 +58449,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "VecDeque entries",
-      "line": 359,
+      "line": 365,
       "condition": ""
     },
     {
@@ -59092,7 +58459,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 329,
+      "line": 332,
       "condition": ""
     },
     {
@@ -59102,7 +58469,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong / trait object; concrete implementation erased",
-      "line": 330,
+      "line": 333,
       "condition": ""
     },
     {
@@ -59112,7 +58479,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 331,
+      "line": 334,
       "condition": ""
     },
     {
@@ -59122,7 +58489,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "shared strong / RwLock / Option / shared strong / trait object; concrete implementation erased",
-      "line": 352,
+      "line": 355,
       "condition": ""
     },
     {
@@ -59132,7 +58499,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 342,
+      "line": 345,
       "condition": ""
     },
     {
@@ -59142,7 +58509,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 333,
+      "line": 336,
       "condition": ""
     },
     {
@@ -59152,7 +58519,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 364,
+      "line": 370,
       "condition": ""
     },
     {
@@ -59162,7 +58529,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 365,
+      "line": 371,
       "condition": ""
     },
     {
@@ -59172,7 +58539,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 328,
+      "line": 331,
       "condition": ""
     },
     {
@@ -59182,7 +58549,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "OnceLock / shared strong",
-      "line": 346,
+      "line": 349,
       "condition": ""
     },
     {
@@ -59192,7 +58559,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong / trait object; concrete implementation erased",
-      "line": 337,
+      "line": 340,
       "condition": ""
     },
     {
@@ -59202,7 +58569,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 336,
+      "line": 339,
       "condition": ""
     },
     {
@@ -59212,7 +58579,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 343,
+      "line": 346,
       "condition": ""
     },
     {
@@ -59222,7 +58589,17 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 344,
+      "line": 347,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::query::ContinuousQueryTransformer",
+      "to": "drasi_lib::computation::v1::query_configuration::OrdinaryQueryDeclaration",
+      "field": "declaration",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option / shared strong",
+      "line": 361,
       "condition": ""
     },
     {
@@ -59232,7 +58609,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 341,
+      "line": 344,
       "condition": ""
     },
     {
@@ -59242,7 +58619,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 356,
+      "line": 362,
       "condition": ""
     },
     {
@@ -59252,7 +58629,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 332,
+      "line": 335,
       "condition": ""
     },
     {
@@ -59262,7 +58639,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 340,
+      "line": 343,
       "condition": ""
     },
     {
@@ -59272,7 +58649,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 345,
+      "line": 348,
       "condition": ""
     },
     {
@@ -59282,7 +58659,17 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 347,
+      "line": 350,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::query::ContinuousQueryTransformer",
+      "to": "std::string::String",
+      "field": "recovery_graph_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 359,
       "condition": ""
     },
     {
@@ -59292,7 +58679,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Mutex / HashMap entries",
-      "line": 339,
+      "line": 342,
       "condition": ""
     },
     {
@@ -59302,7 +58689,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 338,
+      "line": 341,
       "condition": ""
     },
     {
@@ -59312,7 +58699,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 335,
+      "line": 338,
       "condition": ""
     },
     {
@@ -59322,7 +58709,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 360,
+      "line": 366,
       "condition": ""
     },
     {
@@ -59332,7 +58719,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 363,
+      "line": 369,
       "condition": ""
     },
     {
@@ -59342,7 +58729,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 362,
+      "line": 368,
       "condition": ""
     },
     {
@@ -59352,7 +58739,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 361,
+      "line": 367,
       "condition": ""
     },
     {
@@ -59362,7 +58749,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "shared strong / RwLock / Option",
-      "line": 354,
+      "line": 357,
       "condition": ""
     },
     {
@@ -59372,7 +58759,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong / trait object; concrete implementation erased",
-      "line": 187,
+      "line": 190,
       "condition": ""
     },
     {
@@ -59382,7 +58769,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 246,
+      "line": 249,
       "condition": ""
     },
     {
@@ -59392,7 +58779,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 244,
+      "line": 247,
       "condition": ""
     },
     {
@@ -59402,7 +58789,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 245,
+      "line": 248,
       "condition": ""
     },
     {
@@ -59412,7 +58799,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 215,
+      "line": 218,
       "condition": ""
     },
     {
@@ -59422,7 +58809,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 213,
+      "line": 216,
       "condition": ""
     },
     {
@@ -59432,7 +58819,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong / trait object; concrete implementation erased",
-      "line": 1901,
+      "line": 1950,
       "condition": ""
     },
     {
@@ -59442,7 +58829,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 229,
+      "line": 232,
       "condition": ""
     },
     {
@@ -59452,7 +58839,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 230,
+      "line": 233,
       "condition": ""
     },
     {
@@ -59602,7 +58989,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "channel payload access (not exclusive ownership)",
-      "line": 139,
+      "line": 154,
       "condition": ""
     },
     {
@@ -59612,7 +58999,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "Mutex",
-      "line": 137,
+      "line": 152,
       "condition": ""
     },
     {
@@ -59622,7 +59009,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 153,
+      "line": 168,
       "condition": ""
     },
     {
@@ -59852,7 +59239,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 149,
+      "line": 164,
       "condition": ""
     },
     {
@@ -59862,7 +59249,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "weak live target",
-      "line": 148,
+      "line": 163,
       "condition": ""
     },
     {
@@ -59872,7 +59259,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 145,
+      "line": 160,
       "condition": ""
     },
     {
@@ -59882,7 +59269,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 510,
+      "line": 526,
       "condition": ""
     },
     {
@@ -59892,7 +59279,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 511,
+      "line": 527,
       "condition": ""
     },
     {
@@ -59902,7 +59289,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 557,
+      "line": 573,
       "condition": ""
     },
     {
@@ -59963,6 +59350,46 @@
       "cardinality": "0..*",
       "relationship": "channel payload access (not exclusive ownership)",
       "line": 78,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::query_configuration::OrdinaryQueryDeclaration",
+      "to": "drasi_computation_contracts::data::ComponentId",
+      "field": "id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 43,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::query_configuration::OrdinaryQueryDeclaration",
+      "to": "drasi_core::interface::index_backend::IndexBackendPlugin",
+      "field": "backend",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option / shared strong / trait object; concrete implementation erased",
+      "line": 45,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::query_configuration::OrdinaryQueryDeclaration",
+      "to": "drasi_lib::computation::v1::graph::GraphError",
+      "field": "failure",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option / shared strong",
+      "line": 44,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::query_configuration::OrdinaryQueryDeclaration",
+      "to": "drasi_lib::computation::v1::plugin_source::SourcePluginHost",
+      "field": "sources",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "Vec entries / shared strong",
+      "line": 47,
       "condition": ""
     },
     {
@@ -67713,7 +67140,7 @@
     },
     {
       "name": "drasi_lib::computation",
-      "code_lines": 7,
+      "code_lines": 6,
       "types": 0,
       "files": [
         "lib/src/computation/mod.rs"
@@ -67737,7 +67164,7 @@
     },
     {
       "name": "drasi_lib::computation::instance_ops",
-      "code_lines": 395,
+      "code_lines": 402,
       "types": 1,
       "files": [
         "lib/src/computation/instance_ops.rs"
@@ -67761,7 +67188,7 @@
     },
     {
       "name": "drasi_lib::computation::runtime",
-      "code_lines": 1913,
+      "code_lines": 1853,
       "types": 7,
       "files": [
         "lib/src/computation/runtime/mod.rs"
@@ -67769,7 +67196,7 @@
     },
     {
       "name": "drasi_lib::computation::runtime::component",
-      "code_lines": 345,
+      "code_lines": 318,
       "types": 4,
       "files": [
         "lib/src/computation/runtime/component.rs"
@@ -67785,7 +67212,7 @@
     },
     {
       "name": "drasi_lib::computation::runtime::inspection",
-      "code_lines": 747,
+      "code_lines": 696,
       "types": 0,
       "files": [
         "lib/src/computation/runtime/inspection.rs"
@@ -67793,23 +67220,23 @@
     },
     {
       "name": "drasi_lib::computation::runtime::native_query",
-      "code_lines": 864,
+      "code_lines": 963,
       "types": 3,
       "files": [
         "lib/src/computation/runtime/native_query.rs"
       ]
     },
     {
-      "name": "drasi_lib::computation::runtime::query",
-      "code_lines": 872,
-      "types": 6,
+      "name": "drasi_lib::computation::runtime::query_assembly",
+      "code_lines": 618,
+      "types": 0,
       "files": [
-        "lib/src/computation/runtime/query.rs"
+        "lib/src/computation/runtime/query_assembly.rs"
       ]
     },
     {
       "name": "drasi_lib::computation::runtime::reaction",
-      "code_lines": 255,
+      "code_lines": 257,
       "types": 1,
       "files": [
         "lib/src/computation/runtime/reaction.rs"
@@ -67817,7 +67244,7 @@
     },
     {
       "name": "drasi_lib::computation::runtime::snapshot",
-      "code_lines": 214,
+      "code_lines": 217,
       "types": 1,
       "files": [
         "lib/src/computation/runtime/snapshot.rs"
@@ -67829,14 +67256,6 @@
       "types": 2,
       "files": [
         "lib/src/computation/runtime/source.rs"
-      ]
-    },
-    {
-      "name": "drasi_lib::computation::scoped_graph",
-      "code_lines": 260,
-      "types": 1,
-      "files": [
-        "lib/src/computation/scoped_graph.rs"
       ]
     },
     {
@@ -67969,7 +67388,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::graph::addition",
-      "code_lines": 893,
+      "code_lines": 927,
       "types": 4,
       "files": [
         "lib/src/computation/v1/graph/addition.rs"
@@ -67985,7 +67404,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::graph::controller",
-      "code_lines": 5330,
+      "code_lines": 5336,
       "types": 23,
       "files": [
         "lib/src/computation/v1/graph/controller.rs"
@@ -67993,7 +67412,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::graph::controller::reconcile",
-      "code_lines": 3532,
+      "code_lines": 3534,
       "types": 5,
       "files": [
         "lib/src/computation/v1/graph/reconcile.rs"
@@ -68049,7 +67468,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::graph::specification",
-      "code_lines": 613,
+      "code_lines": 620,
       "types": 25,
       "files": [
         "lib/src/computation/v1/graph/specification.rs"
@@ -68185,7 +67604,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::pipeline",
-      "code_lines": 915,
+      "code_lines": 918,
       "types": 2,
       "files": [
         "lib/src/computation/v1/pipeline.rs"
@@ -68289,7 +67708,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::query",
-      "code_lines": 2288,
+      "code_lines": 2397,
       "types": 9,
       "files": [
         "lib/src/computation/v1/query.rs"
@@ -68305,7 +67724,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::query::recovery",
-      "code_lines": 555,
+      "code_lines": 594,
       "types": 1,
       "files": [
         "lib/src/computation/v1/query_recovery.rs"
@@ -68329,7 +67748,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::query_catalog",
-      "code_lines": 784,
+      "code_lines": 799,
       "types": 14,
       "files": [
         "lib/src/computation/v1/query_catalog.rs"
@@ -68345,8 +67764,8 @@
     },
     {
       "name": "drasi_lib::computation::v1::query_configuration",
-      "code_lines": 115,
-      "types": 2,
+      "code_lines": 122,
+      "types": 3,
       "files": [
         "lib/src/computation/v1/query_configuration.rs"
       ]
@@ -68601,7 +68020,7 @@
     },
     {
       "name": "drasi_lib::lib_core_ops::graph_ops",
-      "code_lines": 46,
+      "code_lines": 53,
       "types": 0,
       "files": [
         "lib/src/lib_core_ops/graph_ops.rs"

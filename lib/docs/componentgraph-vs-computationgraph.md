@@ -3,14 +3,18 @@
 
 # ComponentGraph and ComputationGraph: what changed, what was fixed, and what is unfinished
 
-**Development snapshot: 13 October 2026.**
+**Original comparison snapshot: 13 October 2026.
+Query-host consolidation update: 16 October 2026.**
 
-This compares the older ComponentGraph-based runtime at Core
+The original review compared the older ComponentGraph-based runtime at Core
 [`261b8d40`](https://github.com/drasi-project/drasi-core/commit/261b8d40d35ce203a7f4aaae0028956d76a8def4)
-with the current ComputationGraph code at Core
+with the ComputationGraph snapshot at Core
 [`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8)
 and Server
 [`f15706d`](https://github.com/drasi-project/drasi-server/commit/f15706d0d65c5c829c0a653c0d977f4cad617d6a).
+The dated query-host update below describes the subsequent Core working-tree
+changes; those changes are not contained in the original comparison commits.
+It is a targeted update, not a new review of every capability or remaining item.
 The current `ComponentGraphView` (`ComponentGraph` remains an alias) is a
 read-only view, not the old execution system being compared. Here **native**
 means a component using the newer processing/plugin interface, not merely
@@ -47,6 +51,39 @@ There are three different achievements:
 The old runtime already had continuous queries, transactions and recovery.
 ComputationGraph did not invent those. Some work preserved existing behavior;
 some generalized it; some corrected bugs.
+
+## Ordinary queries now run directly in the instance graph
+
+**16 October 2026 update.** Earlier ComputationGraph builds put an ordinary
+DrasiLib query inside a `QueryInstance` host with its own small private graph.
+The actual query processor inside that graph was already
+`ContinuousQueryTransformer`. The host and private graph have now been removed:
+ordinary and explicitly assembled native queries use that same processor in the
+instance's main graph. The shared `drasi-core` query engine was not replaced.
+
+Each query's input readers, timer helper and result outlet are also main-graph
+components. Starting or stopping an ordinary query operates on its own helpers
+without stopping a shared source or an unrelated query. A cleanup gap found
+during this consolidation is fixed: individual and bulk stop APIs still finish
+the helpers when the evaluator itself has already stopped. This was a
+ComputationGraph consolidation defect, not another old ComponentGraph defect.
+
+Server's existing `queries` configuration and query-creation APIs did not need
+a schema change. Failed query definitions still retain their original settings
+and errors for inspection and retry. Saved-state and producer identities retain
+the original `lib-query/<hex query ID>` scope, so moving execution into the main
+graph does not reset checkpoints, result rows or unconfirmed output.
+
+The standard query factory now constructs `ContinuousQueryTransformer`
+directly with output-delivery tracking. `TransactionTransformer` keeps its
+compatible query constructors, which wrap the same processor; they are not a
+second query engine. Queries are still built in. Making the processor an
+[optional dynamically loaded query plugin][optional-query-plugin] remains a
+separate, unfinished step.
+
+See the [ordinary-query assembly][query-assembly], [query factory][query-code],
+[saved-state relocation regressions][query-hosting-tests] and
+[whole-query stop regressions][query-lifecycle-tests].
 
 ## What the old runtime already did
 
@@ -514,6 +551,36 @@ receipts, cancelled cleanup, failed replacement, native-library failures and
 actual process death with storage reopen. Protected test names and their
 specific checks are listed in the [test inventory][contracts].
 
+The 16 October host-consolidation qualification passed 1,157 library tests in
+each middleware-enabled and no-default-features profile, 46 selected public
+query/recovery integration tests, 21 Host lifecycle/pipeline/wire tests, and
+46 Server native integration tests. Existing ignored cases were retained.
+The public integration run includes all four ordinary stop APIs on both Tokio
+runtime flavors and exact output from an unaffected sibling query. Core and
+Server lint, formatting, generated architecture and protected-test inventory
+checks also passed. This was not a rerun of the entire connector test matrix.
+The durable network source-stop issue was not fixed by that host-consolidation
+checkpoint. A separate 16 October follow-up corrected the test's use of graceful
+stop where it required forced interruption, and fixed a real retry defect:
+after a graceful deadline, the next stop must reissue the withdrawn pause.
+Separate HTTP/gRPC tests preserve exact commit/reopen/delivery outcomes for
+graceful completion, forced interruption and timeout/retry. This is a
+ComputationGraph lifecycle correction, not another old ComponentGraph defect.
+
+The same follow-up removes GPU Lab's pre-native unsupported capability marker.
+Its native PostgreSQL transaction source, single atomic configuration query,
+matching policy fingerprints and stale-worker rejection implement the
+policy-context consistency contract. Full acceptance now checks real native
+input/recovery before writer/restart/scenario behavior and the capability
+declaration. Two consecutive complete acceptance runs passed on matching
+current-source images through Podman. Restart verification now checks readiness
+on the exact captured rows, rather than checking one observation and comparing
+a later, potentially unconverged snapshot. All saved-plan, configuration,
+identity and command-receipt assertions remain. This is not a claim of one atomic
+transaction across plan commits, simulated GPU execution and browser updates.
+
+The following throughput figures belong to the original reference measurement,
+not a new before/after benchmark of the host-consolidation change.
 The local independent-execution reference used eight CPU-heavy native queries,
 5,000 inputs and three repetitions. It checked 480,000 results, including
 single-thread correctness. Median two/four-worker throughput was 1.926/3.478
@@ -538,8 +605,8 @@ plugin versions/lifetimes and complete Server workflows.
 
 An earlier 28-profile compatibility run and the later selected execution tests
 are different checkpoints. Neither should be described as a freshly repeated
-full current-binary connector matrix. Nor do passing selected GPU/browser/restart
-checks close the GPU lab's still-rejected full transaction-completion acceptance.
+full current-binary connector matrix. Selected GPU/browser/restart checks alone
+also do not replace the full native-input and policy-context acceptance gate.
 
 ### Known unfinished implementation
 
@@ -609,6 +676,10 @@ policies must be selected explicitly rather than inferred from successful startu
 [old-query-stop]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/base.rs#L215-L244
 [old-instance-stop]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/lib_core.rs#L537-L630
 [query-code]: ../src/computation/v1/query.rs
+[query-assembly]: ../src/computation/runtime/query_assembly.rs
+[query-hosting-tests]: ../src/computation/v1/query_hosting_tests.rs
+[query-lifecycle-tests]: ../../lib-integration-tests/tests/runtime_flavor_tests.rs
+[optional-query-plugin]: computation-graph-remaining-work.md#cw-43-optional-native-query-plugin
 [ordered-queue]: ../src/channels/priority_queue.rs
 [ranked-input]: ../src/computation/v1/ranked_pipe.rs
 [ordering-tests]: ../../lib-integration-tests/tests/computation_reliability_ordering.rs

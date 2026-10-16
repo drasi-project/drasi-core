@@ -635,9 +635,10 @@ or an ingestion API that returns the pipe's actual durable acceptance.
 
 ## Query and timer handoff
 
-Query factories now construct `TransactionTransformer` query bodies using the
-shared core evaluator. Persistent output records are retained until forwarding
-is confirmed, then remain available within the query's ordinary replay window.
+Query factories construct `ContinuousQueryTransformer` components using the
+shared core evaluator and transaction owner. Persistent output records are
+retained until forwarding is confirmed, then remain available within the query's
+ordinary replay window.
 The query retains its result snapshot and logical result sequence; a replay gets
 a fresh transport sequence without applying query state changes again.
 

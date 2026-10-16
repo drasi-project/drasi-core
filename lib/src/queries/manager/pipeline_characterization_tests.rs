@@ -1717,7 +1717,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .iter()
             .filter(|event| matches!(event, TraceEvent::SessionCommit))
             .count()
-            < 2
+            < 3
         {
             tokio::task::yield_now().await;
         }
@@ -1750,13 +1750,20 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         vec![
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
+                source_id: transport_key.clone(),
+                sequence: 3,
+                source_position: None,
+            },
+            TraceEvent::SessionCommit,
+            TraceEvent::SessionBegin,
+            TraceEvent::CheckpointStaged {
                 source_id: progress_key("", Some(SOURCE_ID)),
                 sequence: 2,
                 source_position: Some(Bytes::from_static(b"position-3")),
             },
             TraceEvent::CheckpointStaged {
                 source_id: transport_key,
-                sequence: 2,
+                sequence: 4,
                 source_position: None,
             },
             TraceEvent::OutboxAppendAttempt {
@@ -1785,7 +1792,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             },
             TraceEvent::SessionCommit,
         ],
-        "unchanged committed input is deduplicated before a session, and new output commits before dispatch"
+        "replayed input advances only transport progress; new logical input and output commit before dispatch"
     );
     assert_eq!(
         backend

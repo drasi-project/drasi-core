@@ -1901,6 +1901,10 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("unresolved target") || w.contains("ambiguous")));
+        assert!(!report.types.iter().any(|node| {
+            node.name == "drasi_lib::computation::runtime::query::QueryInstance"
+                || node.name == "drasi_lib::computation::scoped_graph::ScopedGraph"
+        }));
         let output = render(&report, MARKER).unwrap();
         assert_eq!(
             output["runtime-dependencies.csv"].lines().count(),

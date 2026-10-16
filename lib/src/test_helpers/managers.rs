@@ -192,7 +192,7 @@ pub(crate) fn assert_query_implementation(_core: &DrasiLib, query: &dyn crate::q
     assert!(
         query
             .as_any()
-            .is::<crate::computation::runtime::QueryInstance>(),
+            .is::<crate::computation::runtime::NativeQuery>(),
         "queries must execute through the computation runtime"
     );
 }

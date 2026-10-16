@@ -28,11 +28,10 @@ common place to enforce execution, connection and ownership rules that would
 otherwise have to be coordinated separately by each component category.
 Durability builds on those rules, but remains explicitly configured.
 
-Three different meanings of "graph" matter here. The **ComputationGraph** is the
-runtime topology. An ordinary query owns a nested **QueryGraph**, which is
-another runtime topology. Neither is the **data graph** of nodes and
-relationships evaluated by Cypher/GQL. Changing runtime wiring does not require
-reimplementing graph matching.
+Two different meanings of "graph" matter here. The **ComputationGraph** is the
+runtime topology, including ordinary queries and their helpers. It is not the
+**data graph** of nodes and relationships evaluated by Cypher/GQL. Changing
+runtime wiring does not require reimplementing graph matching.
 
 ## Reading map
 
@@ -97,30 +96,31 @@ respective modules; they are not two names for the same kind of snapshot.
 
 ## Ownership and the two assembly paths
 
-### One instance owner, query-local execution
+### One instance owner, directly hosted queries
 
 Each DrasiLib instance has one root ComputationGraph. Ordinary component
 registrations and native component batches share that instance namespace.
 Adding a batch does not create a competing runtime.
 
-Ordinary Source, Query and Reaction objects appear as graph-owned service
-adapters at the root. Their semantic kinds remain Source, Query and Reaction;
+Ordinary Source and Reaction objects appear as graph-owned service
+adapters at the root. Their semantic kinds remain Source and Reaction;
 "service" describes their execution interface, not how users should see them.
-An ordinary query service owns a QueryGraph containing subscription readers,
-the evaluator node, scheduled-work input and result delivery.
+Ordinary query APIs assemble a `ContinuousQueryTransformer` and its subscription,
+timer and output helpers directly in the same graph. The query uses the existing
+Core evaluator. There is no separate `QueryInstance` execution host or private
+query graph.
 
 ```mermaid
 flowchart TB
     D[DrasiLib] -->|owns| R[Root ComputationGraph]
     R -->|owns| S[Ordinary source adapter]
-    R -->|owns| Q[Ordinary query adapter]
+    R -->|owns| Q[ContinuousQueryTransformer]
     R -->|owns| A[Ordinary reaction adapter]
     R -->|owns| N[Explicit native components]
-    Q -->|owns via ScopedGraph| G[QueryGraph and its driver task]
-    G --> SR[Source subscription readers]
-    G --> EV[Query evaluation component]
-    G --> TM[Scheduled-work source]
-    G --> OUT[Query-results outlet]
+    Q -->|uses| EV[Existing drasi-core query engine]
+    R --> SR[Source subscription readers]
+    R --> TM[Scheduled-work source]
+    R --> OUT[Query-results outlet]
     SR -. borrows source host .-> S
     A -. subscribes through catalog .-> OUT
 ```
@@ -133,10 +133,21 @@ their own cleanup obligations.
 Read [`instance.rs`](../src/computation/instance.rs) for the root driver and
 graph leases; [`runtime/component.rs`](../src/computation/runtime/component.rs)
 for ordinary component realization; and
-[`runtime/query.rs`](../src/computation/runtime/query.rs), especially
-`QueryInstance::construct`, for the nested graph assembly.
-[`scoped_graph.rs`](../src/computation/scoped_graph.rs) explains how that
-query's driver remains owned when a caller stops waiting for an operation.
+[`runtime/query_assembly.rs`](../src/computation/runtime/query_assembly.rs) for
+ordinary query declarations and assembly. Generation-fenced lifecycle groups
+start/stop the query and its exclusive helpers; the existing root task registry
+retains all processing and cleanup when a caller stops waiting.
+Stop decisions must inspect every group member: a stopped evaluator can still
+have active subscription or output helpers. Ordinary stop APIs must finish those
+helpers before reporting completion, without stopping a shared source.
+
+Failed definitions remain inspectable and retryable. The declaration resource
+contains configuration-related metadata and any typed preparation error; it does
+not run the query. Ordinary queries retain their previous `lib-query/<hex ID>`
+storage and producer identity even though they now execute in the instance
+graph. This preserves checkpoints, retained results and unconfirmed output
+without a data reset. Catalog transport counters survive replacement so a new
+component generation cannot reuse an already-published stream position.
 
 ### Ordinary APIs are assembly and compatibility, not a fallback engine
 
@@ -163,8 +174,9 @@ evaluator.
 
 Native components implement the graph contracts directly. Their data paths
 can connect source to transformer to sink without an ordinary Query object.
-A native query uses the same evaluation machinery but need not create the
-ordinary query-service wrapper or its nested task.
+Ordinary and explicitly assembled queries use the same native query component.
+Explicit assembly can omit ordinary configuration metadata and API adapters;
+neither path creates a private query graph or an additional execution host.
 
 Factories describe reconstructible components and resolve declared resources;
 supplied objects provide already-constructed instances. Both enter the same
@@ -229,7 +241,7 @@ subscribers of the same QoS channel, not arbitrary graph-wide atomic delivery.
 
 ## Scheduling, readiness and lifecycle
 
-### Owned native tasks and independently driven query scopes
+### Owned native tasks and independent query work
 
 Native processing, lifecycle/control and supported resource operations run in
 graph-owned Tokio tasks. The controller observes completions rather than polling
@@ -237,8 +249,9 @@ their business futures inline. Graph-owned task/result registries outlive
 cancelled waiters and the controller future until cleanup joins the actual work.
 Mutable operations on an instance remain serialized.
 
-Ordinary QueryGraphs have separate owned driver tasks. On a multithreaded Tokio
-runtime, independent native nodes and query scopes can use different workers.
+Ordinary queries use these same per-component tasks, not private graph drivers.
+On a multithreaded Tokio runtime, independent query and other native component
+operations can use different workers.
 Current-thread operation remains supported but is not CPU parallelism. A
 transaction container's inner steps remain within its one transaction/runner.
 Measured capacity still depends on contention, work size and transport.
@@ -536,9 +549,10 @@ Server/factory recipe for this component.
 
 `ContinuousQueryTransformer` handles graph input/output, query configuration,
 progress, recovery and result publication. The standard `ContinuousQueryFactory`
-constructs it inside a `TransactionTransformer` query body, which enables the
-appropriate delivery tracking. Direct construction and factory construction
-must not be assumed to have identical output-handoff configuration.
+constructs that component directly with output-delivery tracking enabled.
+`TransactionTransformer` retains compatible query constructors for direct
+assembly. Direct construction and factory construction must not be assumed
+to have identical output-handoff configuration.
 
 The bridge to the engine is
 [`core/src/computation/query_adapter.rs`](../../core/src/computation/query_adapter.rs).
@@ -907,8 +921,8 @@ before spawn, and handles are removed after observed completion. An abort
 request is not a completed join. Some I/O/draining workers must not be aborted
 on timeout at all.
 
-The same principle appears in graph instance leases, `ScopedGraph`, storage
-I/O scopes and controller cleanup. A failed cleanup leaves an owned,
+The same principle appears in graph instance leases, node-task registries,
+storage I/O scopes and controller cleanup. A failed cleanup leaves an owned,
 retryable obligation, not permission to open a replacement against the same
 resources. `GraphRun` drop can mark cleanup required; only awaited async
 cleanup can finish it. DrasiLib stop permits supported restart, whereas
@@ -1150,8 +1164,9 @@ for specific failures. Cleanup can fail in several owners: inspect the retained
 aggregate or lifecycle report, not only its primary source chain. Otherwise a
 second resource still requiring cleanup can disappear from the diagnosis.
 
-Inspection of the root and several live QueryGraphs is not one global
-transactional snapshot. A resource link shows a binding/ownership relationship,
+An instance inventory comes from one coherent root publication. Separate DrasiLib
+instances or child processes still do not form one global transactional snapshot.
+A resource link shows a binding/ownership relationship,
 not proof that every event used that resource. Private plugin resources are
 visible only when reported. Topology-as-data excludes configuration values,
 secrets and failure text; privileged configuration exports have different

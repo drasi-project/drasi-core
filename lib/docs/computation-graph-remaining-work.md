@@ -379,10 +379,10 @@ subscription-setup investigation PX-04 is not a new native repair task.
 
 <a id="cw-05-durable-network-source-stop"></a>
 
-#### Reproduced investigation: stopping a durable network source during commit
+#### Resolved: stopping a durable network source during commit
 
-**Priority: P1. Status: reproduced failing test; root cause and stop-contract
-interpretation unresolved. Recorded: 14 October 2026.**
+**Priority: P1. Status: stop-contract tests corrected and timeout/retry bug fixed.
+Original failure recorded: 14 October 2026. Resolution: 16 October 2026.**
 
 **Scenario:** the [native durable-admission test][native-admission-tests] gates a
 real RocksDB commit immediately before or after persistence. It exercises
@@ -391,51 +391,44 @@ call remains suspended. The admission request has a 100 ms timeout and reports
 `AcceptanceUnknown`: the client must resolve or retry the same producer session
 and sequence, not assume the event was rejected.
 
-**Observed failure:** from the test's ordering, the first failing stop case is
-HTTP after persistence, before the asynchronous commit call returns. Ordinary
-`stop_components` does not produce the test's expected completed-stop report;
-it returns `ReconciliationTimeout` at the graph's default five-second cleanup
-deadline:
+**Original failure:** the first failing case held an HTTP admission's commit
+after persistence and expected ordinary `stop_components` to interrupt it.
+Ordinary stop instead waited for the submitted write, then returned
+`ReconciliationTimeout` at the graph's five-second cleanup deadline:
 
 ```text
 reconciliation did not reach its processing or cleanup boundary before the deadline
 ```
 
-That failure occurs before this case's reconstruction and duplicate-acceptance
-assertions, and before the later gRPC cases. It demonstrates a stop/recovery
-qualification gap, not observed event loss or duplication, and does not
-establish that both protocols have the same failure.
+That initial timeout was consistent with graceful stop, not evidence of lost or
+duplicated data. The test now uses explicit force for deliberate interruption,
+over all registered users of the shared journal. Separate cases require
+graceful stop to wait for commit completion without fencing healthy storage.
 
-**Baseline evidence:** the same isolated test fails with the unchanged
-pre-split network plugin library and the same host/runtime. This is not a
-regression attributable to the component-crate reorganization; reproduction
-against current upstream `main` has not been established.
+**Actual runtime defect:** after a graceful deadline withdrew its pause request,
+the controller still recorded the worker as already pausing. A later stop could
+therefore time out again even after the write completed. A retried drain now
+reissues that pause and supersedes the earlier pending-resume marker, preserving
+the distinction between an unfinished request and an acknowledged boundary.
 
-**Reproduce:** from `drasi-core`, build the actual dynamic plugins before running
-the focused test; Rust path dependencies alone do not rebuild them.
+**Coverage:** HTTP and gRPC run on both sides of the real commit boundary.
+Timeout-only and forced cases preserve exact producer identity, persisted
+acceptance and one downstream delivery after reopening. Graceful cases preserve
+the completed commit; deadline/retry cases run on current-thread and multi-thread
+runtimes. The tests neither discard recovery assertions nor increase the
+deadline to hide the failure.
+
+**Run:** build the actual dynamic plugins before running the focused cases;
+Rust path dependencies alone do not rebuild them.
 
 ```sh
 make build-native-network-plugins
 cargo test -p drasi-host-sdk --test native_network_loopback \
-  durable_tests::network_timeouts_and_source_stop_resolve_real_commits_without_duplicate_acceptance \
-  -- --exact --nocapture --test-threads=1
+  durable_tests::network -- --nocapture --test-threads=1
 ```
 
-**Remaining investigation and closure criteria:** trace ownership of the
-in-flight admission through quiescence, cancellation, fencing and cleanup.
-Determine whether ordinary stop is correctly waiting for accepted work and
-the test instead requires explicit force or release of its commit gate, or
-whether runtime lifecycle handling violates the intended contract. Do not
-assume the broader [CW-06](#cw-06) deadline work is the proven cause.
-
-Resolve the stop expectation explicitly and qualify all eight combinations
-across both protocols, both commit boundaries and both interruption modes.
-After supported stop/cleanup and reconstruction, retrying the same session
-and sequence must leave exactly one accepted event and one downstream
-delivery. A completed-stop report must not hide retained work or lost
-ownership. Do not close this investigation by ignoring the test or merely
-raising its timeout; any changed expectation must follow the documented
-stop contract and retain exact recovery checks.
+This resolves the named test mismatch and retry defect, not every item in
+CW-05 or the broader per-owner/whole-shutdown deadline work in [CW-06](#cw-06).
 
 <a id="cw-06"></a>
 <a id="cw-06-give-lifecycle-phases-independent-enforceable-deadlines"></a>
@@ -451,8 +444,9 @@ wait does not lose the tracked cleanup task.
 **Testing:** recorded tests check slow independent cleanup, retained work after
 cancelled waits, and graceful-stop timeout/retry. They do not establish the
 complete deadline policy promised by E2. The separately recorded
-[durable network source-stop failure](#cw-05-durable-network-source-stop)
-remains an unresolved investigation, not proof of a particular deadline defect.
+[durable network source-stop case](#cw-05-durable-network-source-stop)
+now distinguishes graceful drain from force and protects retry after a withdrawn
+pause. That repair does not provide the complete deadline policy.
 
 **Remaining work:** provide separate time limits for each startup/cleanup step,
 each component or resource owner, and the whole shutdown. A component's startup
@@ -1590,6 +1584,13 @@ its plugin is selected/loaded, not rely on an unconditional built-in factory.
 Graphs without queries must work with the plugin absent; a graph requiring it
 must report a clear missing-plugin/factory error when it is unavailable.
 
+**Host-consolidation preparation:** ordinary queries now use
+`ContinuousQueryTransformer` directly in the instance graph rather than an
+extra query host and private graph. Existing query configuration and recovery
+identities remain supported. This removes an execution-layer dependency; it
+does **not** make the query component an optional dynamically loaded plugin or
+complete the SDK/ABI work below.
+
 Define and implement the required SDK/resource and ABI contracts for the
 query's actual index, bootstrap, scheduling, source-progress and result-catalogue
 dependencies. Preserve graph-owned lifecycle, transaction/recovery guarantees,
@@ -1721,9 +1722,15 @@ developer/maintainer documentation exist. The OTel tutorial correlates applicati
 telemetry; it does not implement Drasi-wide monitoring.
 
 **Testing:** selected Move-a-Wall and GPU functional/restart/browser checks were
-recorded. The GPU lab's full acceptance mode still rejects its unsupported
-policy-context/transaction-completion requirement. Those selected passes are
-not full GPU acceptance or proof of a stock-Server equivalent.
+recorded. The 16 October GPU update reports the implemented native
+policy-context transaction contract instead of its obsolete unsupported marker.
+Full acceptance now includes real native transaction input/recovery checks,
+writer faults, restart, commands and scenarios; two consecutive complete runs
+passed on matching current-source images through Podman. The restart check
+validates its captured rows at fresh confirmation without dropping persistence
+or receipt checks. Atomic configuration and delayed policy-result regressions
+protect the contract; none of this is proof of a stock-Server GPU equivalent or
+atomic downstream effects.
 
 **Remaining work:** finish required native templates and stock-Server packaging,
 readiness/reset behavior and exact result/effect checks. Preserve existing

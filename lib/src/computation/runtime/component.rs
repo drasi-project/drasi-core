@@ -198,13 +198,9 @@ impl ComputationService for Service {
 pub(super) struct RuntimeFactory {
     descriptor: FactoryDescriptor,
     services: LegacyPluginServices,
-    indexes: Arc<crate::indexes::IndexFactory>,
 }
 impl RuntimeFactory {
-    pub(super) fn new(
-        services: LegacyPluginServices,
-        indexes: Arc<crate::indexes::IndexFactory>,
-    ) -> Self {
+    pub(super) fn new(services: LegacyPluginServices) -> Self {
         Self {
             descriptor: FactoryDescriptor {
                 implementation: ImplementationIdentity::try_new("drasi/lib-runtime-component", "1")
@@ -233,19 +229,9 @@ impl RuntimeFactory {
                 )]
                 .into_iter()
                 .chain(LegacyPluginServices::requirements())
-                .chain([(
-                    Arc::from("indexes"),
-                    ResourceRequirement {
-                        minimum: 0,
-                        ..ResourceRequirement::exactly_one::<
-                            Arc<dyn drasi_core::interface::IndexBackendPlugin>,
-                        >(ResourceRole::IndexBackend)
-                    },
-                )])
                 .collect(),
             },
             services,
-            indexes,
         }
     }
 }
@@ -301,19 +287,6 @@ impl ComponentFactory for RuntimeFactory {
                         }
                     }
                 }
-                let selected = match &record.value {
-                    super::Value::Query(query) => self
-                        .indexes
-                        .configured_provider(query.config.storage_backend.as_ref()),
-                    _ => None,
-                };
-                crate::computation::v1::plugin_services::validate_service(
-                    spec,
-                    resources,
-                    "indexes",
-                    selected.as_ref().map(|(_, provider)| provider),
-                    |provider: &Arc<dyn drasi_core::interface::IndexBackendPlugin>| provider,
-                )?;
                 if spec.descriptor.id().as_str() != value.component.id() {
                     anyhow::bail!("runtime node ID does not match its component ID");
                 }

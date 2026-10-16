@@ -168,11 +168,13 @@ impl RuntimeComponent for ReactionInstance {
             .ok_or_else(|| anyhow::anyhow!("native runtime was dropped"))?;
         let mut inputs = self.inputs.lock().await;
         inputs.clear();
+        for id in &self.query_ids {
+            owner.link_query_output(id).await?;
+        }
         host.validate_startup_configuration().await?;
         let mut subscriptions = Vec::new();
         let mut heads = BTreeMap::new();
         for id in &self.query_ids {
-            owner.link_query_output(id).await?;
             host.wait_query_ready(id).await?;
             let subscription = owner.query_subscription(id).await?;
             heads.insert(id.clone(), subscription.head()?);

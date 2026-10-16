@@ -26,6 +26,5 @@ pub(crate) mod instance;
 mod instance_ops;
 mod internal;
 pub(crate) mod runtime;
-pub(crate) mod scoped_graph;
 
 pub mod v1;

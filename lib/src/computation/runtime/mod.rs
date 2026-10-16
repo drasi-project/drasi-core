@@ -14,9 +14,11 @@
 
 mod component;
 mod events;
+#[cfg(test)]
+mod group_lifecycle_tests;
 mod inspection;
-mod native_query;
-mod query;
+pub(crate) mod native_query;
+mod query_assembly;
 mod reaction;
 mod snapshot;
 mod source;
@@ -35,14 +37,14 @@ use crate::{
     ComponentStatus, DrasiLib, Reaction, Source,
 };
 use component::{RuntimeComponent, RuntimeFactory, RuntimeInstance};
-pub(crate) use query::QueryInstance;
+pub(crate) use native_query::NativeQuery;
 use reaction::ReactionInstance;
 use source::SourceInstance;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, OnceLock,
+        Arc, OnceLock, Weak,
     },
 };
 use tokio::sync::{watch, Mutex, RwLock};
@@ -122,21 +124,18 @@ pub(crate) async fn build(
 #[derive(Clone)]
 enum Value {
     Source(Arc<SourceInstance>),
-    Query(Arc<QueryInstance>),
     Reaction(Arc<ReactionInstance>),
 }
 impl Value {
     fn instance(&self) -> Arc<dyn RuntimeComponent> {
         match self {
             Self::Source(value) => value.clone(),
-            Self::Query(value) => value.clone(),
             Self::Reaction(value) => value.clone(),
         }
     }
     fn auto_start(&self) -> bool {
         match self {
             Self::Source(value) => value.source.auto_start(),
-            Self::Query(value) => value.config.auto_start,
             Self::Reaction(value) => value.reaction.auto_start(),
         }
     }
@@ -144,12 +143,6 @@ impl Value {
     fn subscription_inputs(&self) -> anyhow::Result<Vec<ComponentId>> {
         let inputs = match self {
             Self::Source(_) => Vec::new(),
-            Self::Query(query) => query
-                .config
-                .sources
-                .iter()
-                .map(|source| source.source_id.clone())
-                .collect(),
             Self::Reaction(reaction) => reaction.query_ids.clone(),
         };
         let own_id = self.instance().id().to_owned();
@@ -294,6 +287,7 @@ pub(crate) struct Runtime {
     middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
     events: Arc<events::Events>,
     parent: OnceLock<ComputationHandle>,
+    instance_owner: OnceLock<Weak<super::instance::InstanceGraph>>,
     // Retain interrupted/unsubmitted additions until awaited cleanup. This is
     // never consulted for membership, status, or installed resource lookup.
     cleanup_candidates: RwLock<BTreeMap<u64, Record>>,
@@ -320,16 +314,14 @@ impl Runtime {
             wal,
             secrets: config.secret_store_provider.clone(),
         };
-        let factory = Arc::new(RuntimeFactory::new(
-            services.clone(),
-            config.index_factory.clone(),
-        ));
+        let factory = Arc::new(RuntimeFactory::new(services.clone()));
         Arc::new(Self {
             config,
             services,
             middleware,
             events: events::Events::new(),
             parent: OnceLock::new(),
+            instance_owner: OnceLock::new(),
             cleanup_candidates: RwLock::new(BTreeMap::new()),
             mutations: Mutex::new(()),
             next_instance: AtomicU64::new(1),
@@ -347,7 +339,7 @@ impl Runtime {
 
     pub(crate) async fn initialize(
         self: &Arc<Self>,
-        graph_owner: &super::instance::InstanceGraph,
+        graph_owner: &Arc<super::instance::InstanceGraph>,
     ) -> anyhow::Result<()> {
         let mut builder = self
             .services
@@ -375,6 +367,9 @@ impl Runtime {
         self.parent
             .set(handle.clone())
             .map_err(|_| anyhow::anyhow!("native runtime already initialized"))?;
+        self.instance_owner
+            .set(Arc::downgrade(graph_owner))
+            .map_err(|_| anyhow::anyhow!("instance ownership was already attached"))?;
         handle.start().await?;
         Ok(())
     }
@@ -474,6 +469,19 @@ impl Runtime {
                 );
             }
         }
+        resources.extend(
+            publication
+                .desired
+                .select(GraphSelection::Exact(
+                    ordinary
+                        .iter()
+                        .map(|id| ComponentId::try_new(*id))
+                        .collect::<std::result::Result<Vec<_>, _>>()?,
+                ))?
+                .resources
+                .into_iter()
+                .map(|resource| resource.id),
+        );
         Ok(resources)
     }
     pub(crate) fn inspector(&self) -> anyhow::Result<ComputationInspector> {
@@ -541,27 +549,6 @@ impl Runtime {
         Ok(())
     }
 
-    async fn query_sources(
-        &self,
-        config: &QueryConfig,
-    ) -> anyhow::Result<Vec<Arc<SourceInstance>>> {
-        let records = self.current_records().await?;
-        let mut dependencies = Vec::new();
-        for setting in &config.sources {
-            let record = records
-                .get(&setting.source_id)
-                .ok_or_else(|| anyhow::anyhow!("Source '{}' not found", setting.source_id))?;
-            let Value::Source(source) = &record.value else {
-                anyhow::bail!("Component '{}' is not a Source", setting.source_id);
-            };
-            dependencies.push((source.clone(), self.handle_for(record)?));
-        }
-        for (_, handle) in &dependencies {
-            handle.wait_created().await?;
-        }
-        Ok(dependencies.into_iter().map(|(source, _)| source).collect())
-    }
-
     async fn reaction_queries(&self, ids: &[String]) -> anyhow::Result<()> {
         let control = self.control()?;
         let publication = control.registry_snapshot();
@@ -584,14 +571,6 @@ impl Runtime {
 
     async fn query_subscription(&self, id: &str) -> anyhow::Result<CatalogSubscription> {
         let publication = self.control()?.registry_snapshot();
-        if let Some(Value::Query(query)) = self
-            .records_at(&publication)
-            .await?
-            .get(id)
-            .map(|record| &record.value)
-        {
-            return query.subscribe_results();
-        }
         self.query_observation_at(&publication, id)?;
         let api = publication
             .query_api(&ComponentId::try_new(id)?)
@@ -601,9 +580,6 @@ impl Runtime {
 
     async fn link_query_output(&self, id: &str) -> anyhow::Result<()> {
         let publication = self.control()?.registry_snapshot();
-        if self.records_at(&publication).await?.contains_key(id) {
-            return Ok(());
-        }
         self.query_observation_at(&publication, id)?;
         let api = publication
             .query_api(&ComponentId::try_new(id)?)
@@ -672,19 +648,10 @@ impl Runtime {
             &self.config.id,
         ));
         let control = self.parent()?.control();
-        if let Value::Query(query) = &value {
-            query.bind_parent(
-                control.clone(),
-                node.clone(),
-                number,
-                ComponentStatus::Added,
-            )?;
-        }
         let factory = self.factory.clone();
         let mut descriptor = ComponentDescriptor::try_new(node.clone(), vec![])?
             .with_semantic_kind(match &value {
                 Value::Source(_) => ComponentSemanticKind::Source,
-                Value::Query(_) => ComponentSemanticKind::Query,
                 Value::Reaction(_) => ComponentSemanticKind::Reaction,
             });
         let mut validation_error = None;
@@ -706,11 +673,10 @@ impl Runtime {
                 }
             }
         }
-        let mut dependencies: BTreeMap<_, _> = [(Arc::from("instance"), vec![resource.clone()])]
+        let dependencies: BTreeMap<_, _> = [(Arc::from("instance"), vec![resource.clone()])]
             .into_iter()
             .chain(self.services.dependencies())
             .collect();
-        self.bind_index_dependency(&value, &mut dependencies)?;
         let spec = ComponentSpecification {
             descriptor,
             role: ComponentRole::Service,
@@ -827,24 +793,6 @@ impl Runtime {
         }
     }
 
-    fn bind_index_dependency(
-        &self,
-        value: &Value,
-        dependencies: &mut BTreeMap<Arc<str>, Vec<ResourceId>>,
-    ) -> anyhow::Result<()> {
-        dependencies.remove("indexes");
-        if let Value::Query(query) = value {
-            if let Some((name, _)) = self
-                .config
-                .index_factory
-                .configured_provider(query.config.storage_backend.as_ref())
-            {
-                dependencies.insert(Arc::from("indexes"), vec![index_resource_id(&name)?]);
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) async fn add_source(
         self: &Arc<Self>,
         source: Box<dyn Source>,
@@ -907,20 +855,53 @@ impl Runtime {
         start: bool,
     ) -> anyhow::Result<ComponentHandle> {
         self.control()?.require_configuration_write()?;
-        let mutation = self.mutations.lock().await;
-        let id = config.id.clone();
-        ComponentId::try_new(id)?;
-        let query = QueryInstance::new(config.clone(), self);
-        let handle = self
-            .register(
-                Value::Query(query.clone()),
-                serde_json::to_value(&config)?,
-                HashMap::new(),
-                None,
-                start,
-            )
-            .await?;
-        drop(mutation);
+        let _mutation = self.mutations.lock().await;
+        let id = ComponentId::try_new(config.id.as_str())?;
+        if config.id == self.config.id
+            || self
+                .control()?
+                .desired_snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.descriptor.id() == &id)
+        {
+            let implementation = ContinuousQueryFactory::default()
+                .descriptor()
+                .implementation
+                .clone();
+            let factory = FactoryRegistry::standard()
+                .get(&implementation)
+                .expect("standard query factory")
+                .clone();
+            let specification = factory.specification_from_config(
+                id.clone(),
+                serde_json::json!({
+                    "query": config.query,
+                    "query_config": config,
+                }),
+            )?;
+            let mut bindings = TopologyBindings::default();
+            bindings.factories.register(factory)?;
+            return self
+                .control()?
+                .add_component(ComponentAddition {
+                    definition: DesiredComponent {
+                        descriptor: specification.descriptor.clone(),
+                        role: ComponentRole::Query,
+                        completion: None,
+                        streams: BTreeMap::new(),
+                        lifecycle: LifecyclePolicy { auto_start: false },
+                        input_merge: InputMergePolicy::default(),
+                        construction: ComponentConstruction::Factory(specification),
+                    },
+                    resources: Vec::new(),
+                    bindings,
+                })
+                .await
+                .map_err(Into::into);
+        }
+        let batch = self.ordinary_query_batch(&config, None).await?;
+        let handle = self.install_ordinary_query(batch, id, start).await?;
         self.notify();
         Ok(handle)
     }
@@ -1107,6 +1088,11 @@ impl Runtime {
             };
             let observed = self.component_observation_at(&publication, id, kind)?;
             if kind == "query" {
+                let query = ComponentId::try_new(id)?;
+                if self.ordinary_queries_at(&publication)?.contains_key(&query) {
+                    let handle = control.component_handle(&query)?;
+                    return self.start_query_handle(&handle).await;
+                }
                 return native_query::start_query(&control, &ComponentId::try_new(id)?, None).await;
             }
             anyhow::ensure!(
@@ -1127,7 +1113,7 @@ impl Runtime {
             );
             return handle.start().await.map_err(Into::into);
         }
-        let mut record = self.record(id, kind).await?;
+        let record = self.record(id, kind).await?;
         if expected.is_some_and(|token| token != record.token) {
             return Err(GraphError::StaleGeneration.into());
         }
@@ -1145,39 +1131,7 @@ impl Runtime {
                 observed.lifecycle
             );
         }
-        let mut resume = Vec::new();
-        if let Value::Query(query) = &record.value {
-            let sources = {
-                let records = self.current_records().await?;
-                query
-                    .config
-                    .sources
-                    .iter()
-                    .map(|source| {
-                        match records.get(&source.source_id).map(|record| &record.value) {
-                            Some(Value::Source(source)) => Ok(source.clone()),
-                            _ => Err(anyhow::anyhow!("Source '{}' not found", source.source_id)),
-                        }
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()
-            };
-            if let Ok(sources) = sources {
-                if query.has_stale_sources(&sources) {
-                    let configuration = query.config.clone();
-                    let replacement = QueryInstance::new(configuration.clone(), self);
-                    resume = self.pause_consumers(&[id.to_owned()]).await?;
-                    record = self
-                        .replace_record(
-                            record,
-                            Value::Query(replacement),
-                            serde_json::to_value(configuration)?,
-                        )
-                        .await?;
-                }
-            }
-        }
-        self.start_record(&record).await?;
-        self.resume_records(resume).await
+        self.start_record(&record).await
     }
     async fn stop_record(&self, record: &Record) -> anyhow::Result<()> {
         let result = self.handle_for(record)?.stop().await;
@@ -1351,14 +1305,6 @@ impl Runtime {
             token,
             &self.config.id,
         ));
-        if let Value::Query(query) = &value {
-            query.bind_parent(
-                control.clone(),
-                old.node.clone(),
-                token,
-                ComponentStatus::Stopped,
-            )?;
-        }
         let mut desired = control
             .desired_snapshot()
             .select(GraphSelection::Exact(vec![old.node.clone()]))?
@@ -1378,7 +1324,6 @@ impl Runtime {
             Arc::from("record_token"),
             ConfigurationValue::Literal(token.into()),
         );
-        self.bind_index_dependency(&value, &mut spec.dependencies)?;
         let new = Record {
             token,
             node: old.node.clone(),
@@ -1452,18 +1397,13 @@ impl Runtime {
             .flat_map(|id| desired.data_dependents(id))
             .collect();
         let mut paused = Vec::new();
-        for kind in ["reaction", "query"] {
-            for record in records.values() {
-                let affected = record.value.instance().kind() == kind
-                    && if kind == "query" {
-                        queries.contains(&record.node)
-                    } else {
-                        dependents.contains(&record.node)
-                    };
-                if affected && self.needs_resume(record)? {
-                    self.stop_record(record).await?;
-                    paused.push(record.clone());
-                }
+        for record in records.values() {
+            if matches!(record.value, Value::Reaction(_))
+                && dependents.contains(&record.node)
+                && self.needs_resume(record)?
+            {
+                self.stop_record(record).await?;
+                paused.push(record.clone());
             }
         }
         Ok(paused)
@@ -1556,19 +1496,6 @@ impl Runtime {
                 serde_json::json!({"auto_start":source.source.auto_start()}),
             )
             .await?;
-        for id in affected
-            .into_iter()
-            .filter(|id| records.contains_key(id.as_str()))
-        {
-            let record = self.record(&id, "query").await?;
-            let Value::Query(query) = &record.value else {
-                unreachable!()
-            };
-            let config = query.config.clone();
-            let query = QueryInstance::new(config.clone(), self);
-            self.replace_record(record, Value::Query(query), serde_json::to_value(config)?)
-                .await?;
-        }
         let mut native_plan: Option<native_query::NativeQueryUpdate> = None;
         for (id, config, _) in &native {
             let plan = self.native_query_update_plan(id, config.clone()).await?;
@@ -1604,21 +1531,7 @@ impl Runtime {
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         self.control()?.require_configuration_write()?;
-        if !self.current_records().await?.contains_key(id) {
-            return self.update_native_query(id, config).await;
-        }
-        let old = self.record(id, "query").await?;
-        if config.id != id {
-            anyhow::bail!(
-                "New query ID '{}' does not match existing query ID '{id}'",
-                config.id
-            );
-        }
-        let query = QueryInstance::new(config.clone(), self);
-        let resume = self.pause_consumers(&[id.to_owned()]).await?;
-        self.replace_record(old, Value::Query(query), serde_json::to_value(config)?)
-            .await?;
-        self.resume_records(resume).await
+        self.update_native_query(id, config).await
     }
     pub(crate) async fn update_reaction(
         self: &Arc<Self>,
@@ -1655,6 +1568,16 @@ impl Runtime {
     }
     pub(crate) async fn start_kind(self: &Arc<Self>, kind: &str) -> anyhow::Result<()> {
         let publication = self.control()?.registry_snapshot();
+        if kind == "query" {
+            for id in self.ordinary_queries_at(&publication)?.keys() {
+                let observed = &publication.observed.components[id];
+                if publication.desired.lifecycle_policies[id].auto_start && !is_active(observed) {
+                    if let Err(error) = self.start_component(id.as_str(), "query").await {
+                        log::warn!("Query startup failed: {error:#}");
+                    }
+                }
+            }
+        }
         let records: Vec<_> = self
             .records_at(&publication)
             .await?
@@ -1698,12 +1621,15 @@ impl Runtime {
         &self,
         publication: &GraphRegistrySnapshot,
     ) -> anyhow::Result<Vec<ComponentId>> {
-        let ordinary: BTreeSet<_> = self
+        let mut ordinary: BTreeSet<_> = self
             .records_at(publication)
             .await?
             .into_values()
             .map(|record| record.node)
             .collect();
+        for id in self.ordinary_queries_at(publication)?.keys() {
+            ordinary.extend(native_query::query_members(publication, id).into_keys());
+        }
         Ok(publication
             .desired
             .nodes
@@ -1837,6 +1763,16 @@ impl Runtime {
         // afresh so the sweep sees the configuration as it is when it starts
         // that kind.
         for kind in ["reaction", "query", "source"] {
+            if kind == "query" {
+                let current = control.registry_snapshot();
+                for id in self.ordinary_queries_at(&current)?.keys() {
+                    if native_query::query_needs_stop(&current, id) {
+                        if let Err(error) = native_query::stop_query(&control, id, None).await {
+                            failures.push(error);
+                        }
+                    }
+                }
+            }
             match self.current_records().await {
                 Ok(records) => failures.extend(
                     self.stop_records(
@@ -1858,13 +1794,24 @@ impl Runtime {
     }
     pub(crate) async fn stop_kind(&self, kind: &str) -> anyhow::Result<()> {
         let records = self.current_records().await?;
-        let failures = self
+        let mut failures = self
             .stop_records(
                 records
                     .values()
                     .filter(|record| record.value.instance().kind() == kind),
             )
             .await;
+        if kind == "query" {
+            let control = self.control()?;
+            let publication = control.registry_snapshot();
+            for id in self.ordinary_queries_at(&publication)?.keys() {
+                if native_query::query_needs_stop(&publication, id) {
+                    if let Err(error) = native_query::stop_query(&control, id, None).await {
+                        failures.push(error);
+                    }
+                }
+            }
+        }
         if !failures.is_empty() {
             return Err(crate::error::OperationFailures::new(
                 format!("stopping {kind} components failed"),
@@ -1924,34 +1871,27 @@ impl Runtime {
             _ => unreachable!(),
         }
     }
-    pub(crate) async fn query(&self, id: &str) -> anyhow::Result<Arc<QueryInstance>> {
-        match self.record(id, "query").await?.value {
-            Value::Query(query) => Ok(query),
-            _ => unreachable!(),
-        }
-    }
-    pub(crate) async fn query_instance(
-        self: &Arc<Self>,
-        id: &str,
-    ) -> anyhow::Result<Arc<dyn QueryTrait>> {
+    pub(crate) async fn query(self: &Arc<Self>, id: &str) -> anyhow::Result<Arc<NativeQuery>> {
         let control = self.control()?;
         let publication = control.registry_snapshot();
-        if let Some(record) = self.records_at(&publication).await?.get(id) {
-            if let Value::Query(query) = &record.value {
-                return Ok(query.clone());
-            }
-        }
         let config = self.native_query_configuration_at(&publication, id)?;
         let handle = control.component_handle(&ComponentId::try_new(id)?)?;
         anyhow::ensure!(
             publication.observed.components[handle.id()].generation == handle.generation(),
             GraphError::StaleGeneration
         );
-        Ok(Arc::new(native_query::NativeQuery {
+        Ok(Arc::new(NativeQuery {
             config,
             handle,
             control,
+            owner: Arc::downgrade(self),
         }))
+    }
+    pub(crate) async fn query_instance(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> anyhow::Result<Arc<dyn QueryTrait>> {
+        Ok(self.query(id).await?)
     }
     pub(crate) async fn reaction_metrics(
         &self,

@@ -127,10 +127,17 @@ impl DrasiLib {
     pub async fn can_remove_component(&self, id: &str) -> Result<()> {
         let id = crate::computation::v1::ComponentId::try_new(id)
             .map_err(|error| crate::DrasiError::validation(error.to_string()).with_cause(error))?;
-        let dependents = self
-            .computation_control()?
-            .desired_snapshot()
-            .data_dependents(&id);
+        let control = self.computation_control()?;
+        let publication = control.registry_snapshot();
+        let mut dependents = publication.desired.data_dependents(&id);
+        if self
+            .computation_runtime
+            .ordinary_queries_at(&publication)?
+            .contains_key(&id)
+        {
+            let owned = crate::computation::runtime::native_query::query_members(&publication, &id);
+            dependents.retain(|dependent| !owned.contains_key(dependent));
+        }
         if !dependents.is_empty() {
             return Err(crate::error::DrasiError::validation(format!(
                 "Cannot remove '{}': depended on by: {}",

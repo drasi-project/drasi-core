@@ -581,14 +581,13 @@ input itself is the higher-risk work already tracked in CG-02.
 **Priority: P2 investigation. Complexity: High for a redesign.
 Disruption risk: High for a redesign; Low for measurement.**
 
-**What differs today:** Ordinary queries own independently scheduled nested query
-graphs. Several directly assembled native queries in one graph share that
-graph's controller task. They do not automatically get the same arrangement for
-using several CPU workers.
+**Historical rationale, now superseded:** Ordinary queries formerly owned
+independently scheduled nested query graphs. Native component operations now
+use graph-owned tasks, and ordinary queries use those same tasks directly in
+the instance graph. They do not require a separate query graph driver.
 
-**Why it matters:** CPU-heavy native workloads may scale differently from ordinary
-queries. That is a design boundary to measure, not evidence that native queries
-produce incorrect results or that every native workload is slower.
+**What remains:** Compare realistic query counts, work sizes and graph-publication
+costs. Removing the extra hosting layer is not itself a measured scaling claim.
 
 **What completion means:** First benchmark comparable query counts and workloads.
 Then either document the supported scheduling choice or design a controlled way
@@ -1280,7 +1279,7 @@ release-blocking claim or starting a large redesign.
 [management]: managed-configuration.md
 [design-limits]: computation-graph-design.md#current-limits
 [reconcile]: ../src/computation/v1/graph/reconcile.rs
-[query-runtime]: ../src/computation/runtime/query.rs
+[query-runtime]: ../src/computation/runtime/query_assembly.rs
 [controller]: ../src/computation/v1/graph/controller.rs
 [native-sdk]: ../../components/computation-plugin-sdk/README.md#remaining-native-limitations
 [network]: ../../components/computation-plugins/NETWORK.md

@@ -707,5 +707,12 @@ pub(super) fn validate_specification(
     }
     factory
         .validate_scope(graph_id, spec, declarations, resources)
-        .map_err(|error| super::topology(format!("invalid component definition: {error:#}")))
+        .map_err(|error| {
+            if let Some(GraphError::Reported { cause }) = error.downcast_ref::<GraphError>() {
+                return GraphError::Reported {
+                    cause: cause.clone(),
+                };
+            }
+            super::topology(format!("invalid component definition: {error:#}"))
+        })
 }

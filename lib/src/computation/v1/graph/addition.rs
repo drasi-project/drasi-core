@@ -357,9 +357,21 @@ pub struct ComponentHandle {
     control: GraphControl,
     id: ComponentId,
     generation: ComponentGeneration,
+    lifecycle_members: Option<Arc<BTreeMap<ComponentId, ComponentGeneration>>>,
 }
 
 impl ComponentHandle {
+    pub(crate) fn with_lifecycle_members(
+        mut self,
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+    ) -> GraphResult<Self> {
+        if members.get(&self.id) != Some(&self.generation) {
+            return Err(GraphError::StaleGeneration);
+        }
+        self.lifecycle_members = Some(Arc::new(members));
+        Ok(self)
+    }
+
     pub fn id(&self) -> &ComponentId {
         &self.id
     }
@@ -483,6 +495,11 @@ impl ComponentHandle {
 
     pub(crate) async fn start_requested(&self) -> GraphResult<super::super::StartReport> {
         self.wait_created().await?;
+        if let Some(members) = &self.lifecycle_members {
+            let report = self.control.start_members(members.as_ref().clone()).await?;
+            self.observed()?;
+            return Ok(report);
+        }
         let (reply, result) = oneshot::channel();
         self.control
             .commands
@@ -531,6 +548,19 @@ impl ComponentHandle {
     }
 
     pub async fn stop(&self) -> GraphResult<()> {
+        if let Some(members) = &self.lifecycle_members {
+            self.observed()?;
+            let report = self.control.stop_members(members.as_ref().clone()).await?;
+            if report.summary != super::super::OperationSummary::Completed {
+                return Err(GraphError::Component {
+                    component: self.id.clone(),
+                    operation: "stop component group",
+                    source: super::super::LifecycleReportError::Stop(report).into(),
+                });
+            }
+            self.observed()?;
+            return Ok(());
+        }
         let (reply, result) = oneshot::channel();
         self.control
             .commands
@@ -674,6 +704,7 @@ impl GraphControl {
             control: self.clone(),
             id,
             generation,
+            lifecycle_members: None,
         })
     }
 
@@ -688,6 +719,7 @@ impl GraphControl {
             control: self.clone(),
             id: id.clone(),
             generation,
+            lifecycle_members: None,
         })
     }
 
@@ -965,6 +997,9 @@ pub(super) fn insert(
 }
 
 pub(super) fn validation_failure(id: &ComponentId, error: GraphError) -> GraphError {
+    if matches!(error.underlying(), GraphError::Creation { component, .. } if component == id) {
+        return error;
+    }
     GraphError::Validation {
         component: id.clone(),
         source: anyhow::Error::new(error),

@@ -207,7 +207,7 @@ async fn clean_restart_preserves_query_generation_and_strict_reaction_checkpoint
     .expect("clean restart must preserve state and keep Strict reaction recovery available");
 }
 
-async fn query_graph_ownership() {
+async fn query_component_ownership() {
     let (source, source_calls) = ControlledSource::new("source");
     source_calls.auto_start.store(true, Ordering::Release);
     let (mut left_reaction, left_calls, mut left_output) =
@@ -251,6 +251,17 @@ async fn query_graph_ownership() {
     let right = core.computation_component("right").unwrap();
     let right_graph = core.inspect_query_computation("right").await.unwrap();
     let before = right_graph.snapshot();
+    let right_members = crate::computation::runtime::native_query::query_members(
+        &root.registry_snapshot(),
+        right.id(),
+    );
+    let right_resources = before
+        .desired
+        .select(GraphSelection::Exact(
+            right_members.keys().cloned().collect(),
+        ))
+        .unwrap()
+        .resources;
     let inventory = core.inspect_computation_inventory().await.unwrap();
     assert_eq!(
         inventory
@@ -260,25 +271,20 @@ async fn query_graph_ownership() {
             .count(),
         1
     );
-    assert_eq!(inventory.scopes.len(), 3);
+    assert_eq!(inventory.scopes.len(), 1);
     for id in ["left", "right"] {
         let node = ComponentId::try_new(id).unwrap();
-        let scope =
-            &inventory.scopes[&ComputationScope::root(root_id.clone()).nested(node.clone())];
-        let owner = scope.owner.as_ref().unwrap();
-        assert_eq!(
-            owner.component,
-            ComputationScope::root(root_id.clone()).entity(GraphEntityId::Component(node.clone()))
-        );
-        assert_eq!(
-            owner.generation,
-            core.computation_component(id).unwrap().generation()
-        );
+        let scope = &inventory.scopes[&ComputationScope::root(root_id.clone())];
+        assert!(scope.owner.is_none());
         assert!(scope
             .topology
             .nodes
-            .contains_key(&GraphEntityId::Component(node)));
-        assert_ne!(scope.topology.graph_id, root_id);
+            .contains_key(&GraphEntityId::Component(node.clone())));
+        assert_eq!(scope.topology.graph_id, root_id);
+        assert_eq!(
+            root.desired_snapshot().specifications[&node].role,
+            ComponentRole::Query
+        );
     }
 
     insert_person(&core, "source", "one", "Alice").await;
@@ -295,11 +301,13 @@ async fn query_graph_ownership() {
     assert!(left.observed().is_err());
     assert_eq!(left_calls.stops.load(Ordering::Acquire), 1);
     let inventory = core.inspect_computation_inventory().await.unwrap();
-    assert_eq!(inventory.scopes.len(), 2);
-    assert!(inventory
-        .scopes
-        .keys()
-        .all(|scope| { scope.owners != vec![ComponentId::try_new("left").unwrap()] }));
+    assert_eq!(inventory.scopes.len(), 1);
+    assert!(!inventory.scopes[&ComputationScope::root(root_id.clone())]
+        .topology
+        .nodes
+        .contains_key(&GraphEntityId::Component(
+            ComponentId::try_new("left").unwrap()
+        )));
     assert_eq!(
         right.generation(),
         core.computation_component("right").unwrap().generation()
@@ -318,13 +326,16 @@ async fn query_graph_ownership() {
     );
     let after = right_graph.snapshot();
     assert_eq!(after.desired.id, before.desired.id);
-    assert_eq!(after.desired.revision, before.desired.revision);
+    assert!(after.desired.revision > before.desired.revision);
     assert_eq!(after.observed.run_epoch, before.observed.run_epoch);
-    for (id, node) in &before.observed.components {
-        assert_eq!(after.observed.components[id].generation, node.generation);
+    for (id, generation) in &right_members {
+        assert_eq!(after.observed.components[id].generation, *generation);
     }
-    for (id, resource) in &before.observed.resources {
-        assert_eq!(after.observed.resources[id].generation, resource.generation);
+    for resource in &right_resources {
+        assert_eq!(
+            after.observed.resources[&resource.id].generation,
+            before.observed.resources[&resource.id].generation
+        );
     }
 
     core.add_query(query("left")).await.unwrap();
@@ -354,7 +365,7 @@ async fn query_graph_ownership() {
         );
     }
     let inventory = core.inspect_computation_inventory().await.unwrap();
-    assert_eq!(inventory.scopes.len(), 3);
+    assert_eq!(inventory.scopes.len(), 1);
     assert_eq!(
         inventory
             .scopes
@@ -363,10 +374,10 @@ async fn query_graph_ownership() {
             .count(),
         1
     );
-    let left_scope = &inventory.scopes
-        [&ComputationScope::root(root_id.clone()).nested(ComponentId::try_new("left").unwrap())];
+    let left_scope = &inventory.scopes[&ComputationScope::root(root_id.clone())];
+    assert!(left_scope.owner.is_none());
     assert_eq!(
-        left_scope.owner.as_ref().unwrap().generation,
+        root.observed().components[replacement.id()].generation,
         replacement.generation()
     );
     assert_eq!(
@@ -384,21 +395,104 @@ async fn query_graph_ownership() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn query_graph_ownership_and_sibling_progress_on_current_thread() {
-    tokio::time::timeout(Duration::from_secs(15), query_graph_ownership())
+async fn query_component_ownership_and_sibling_progress_on_current_thread() {
+    tokio::time::timeout(Duration::from_secs(15), query_component_ownership())
         .await
-        .expect("QueryGraph lifecycle must not stall unrelated query execution");
+        .expect("query lifecycle must not stall unrelated query execution");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_graph_ownership_and_sibling_progress_on_multiple_threads() {
-    tokio::time::timeout(Duration::from_secs(15), query_graph_ownership())
+async fn query_component_ownership_and_sibling_progress_on_multiple_threads() {
+    tokio::time::timeout(Duration::from_secs(15), query_component_ownership())
         .await
-        .expect("QueryGraph lifecycle must not stall unrelated query execution");
+        .expect("query lifecycle must not stall unrelated query execution");
+}
+
+async fn many_queries_share_one_graph() {
+    for count in [1, 8, 32] {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (source, control) = ControlledSource::new("shared-input");
+            control.auto_start.store(true, Ordering::Release);
+            let mut builder = builder().with_source(source);
+            for index in 0..count {
+                let mut query = config(&format!("query-{index}"), Some("shared-input"));
+                query.auto_start = true;
+                builder = builder.with_query(query);
+            }
+            let core = builder.build().await.unwrap();
+            let started = std::time::Instant::now();
+            core.start().await.unwrap();
+            let mut receivers = Vec::new();
+            for index in 0..count {
+                let id = format!("query-{index}");
+                core.computation_component(&id)
+                    .unwrap()
+                    .wait_started()
+                    .await
+                    .unwrap();
+                let query = core.query_manager().get_query_instance(&id).await.unwrap();
+                receivers.push((
+                    id,
+                    query
+                        .subscribe("fanout-check".into())
+                        .await
+                        .unwrap()
+                        .receiver,
+                ));
+            }
+            let startup = started.elapsed();
+            let processing = std::time::Instant::now();
+            for sequence in 1..=32 {
+                insert_person(
+                    &core,
+                    "shared-input",
+                    &format!("person-{sequence}"),
+                    &format!("name-{sequence}"),
+                )
+                .await;
+            }
+            for (id, mut receiver) in receivers {
+                for sequence in 1..=32 {
+                    let result = receiver.recv().await.unwrap();
+                    assert_eq!(result.query_id, id);
+                    assert_eq!(result.sequence, sequence);
+                    assert!(matches!(&result.results[..],
+                        [crate::channels::ResultDiff::Add { data, .. }]
+                        if data == &serde_json::json!({ "name": format!("name-{sequence}") })));
+                }
+            }
+            let processing = processing.elapsed();
+            let inventory = core.inspect_computation_inventory().await.unwrap();
+            assert_eq!(inventory.scopes.len(), 1);
+            assert_eq!(core.list_queries().await.unwrap().len(), count);
+            tracing::info!(
+                queries = count,
+                events_per_query = 32,
+                ?startup,
+                ?processing,
+                "main-graph query fanout qualification"
+            );
+            core.shutdown().await.unwrap();
+            assert_eq!(control.starts.load(Ordering::Acquire), 1);
+            assert_eq!(control.stops.load(Ordering::Acquire), 1);
+        })
+        .await
+        .expect("main-graph query fanout exceeded its responsiveness budget");
+    }
 }
 
 #[tokio::test]
-async fn direct_and_factory_additions_preserve_one_root_and_existing_query_graphs() {
+async fn many_queries_share_one_graph_current_thread() {
+    many_queries_share_one_graph().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_queries_share_one_graph_multi_thread() {
+    many_queries_share_one_graph().await;
+}
+
+#[tokio::test]
+async fn direct_and_factory_additions_preserve_one_root_and_existing_query_components() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let core = builder()
             .with_query(config("query", None))
@@ -481,12 +575,12 @@ async fn direct_and_factory_additions_preserve_one_root_and_existing_query_graph
         );
         let after = query_graph.snapshot();
         assert_eq!(after.desired.id, before.desired.id);
-        assert_eq!(after.desired.revision, before.desired.revision);
+        assert!(after.desired.revision > before.desired.revision);
         for (id, node) in &before.observed.components {
             assert_eq!(after.observed.components[id].generation, node.generation);
         }
         let inventory = core.inspect_computation_inventory().await.unwrap();
-        assert_eq!(inventory.scopes.len(), 2);
+        assert_eq!(inventory.scopes.len(), 1);
         assert_eq!(
             inventory
                 .scopes

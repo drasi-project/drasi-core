@@ -4,7 +4,13 @@
 
 This is the specification for building, installing, and presenting a simulated GPU management demo. Give an implementer this file **and the [presenter runbook](gpu-cluster-demo-runbook.md)**.
 
-**Current status:** the design and scripts are documented; the demo application, migrations, configuration, and launcher are not implemented in this workspace. Commands beginning with `./demo` below define the installation interface the implementer must deliver. They are not existing Drasi commands. Do not describe the installation as verified until those commands and the acceptance checks work on a clean machine.
+**Historical design specification:** this file records the original design and
+installation interface. The implemented demo now lives in the sibling
+`drasi-server/examples/gpu-cluster-lab/embedded` directory; use its
+[current operating guide](../../drasi-server/examples/gpu-cluster-lab/embedded/README.md)
+for actual commands, supported native transactional policy context, and
+acceptance boundaries. The original setup assumptions below are not the current
+deployment instructions or evidence of a missing implementation.
 
 | Reader | Read first |
 |---|---|

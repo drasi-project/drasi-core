@@ -2366,6 +2366,8 @@ impl Operations {
             .filter(|active| active.operation == Operation::Process)
         {
             self.quiescing.insert(index);
+            // A new drain supersedes the previous drain's withdrawn pause request.
+            self.resume_after_quiesce.remove(&index);
             active.quiesce.send_replace(true);
             update(graph, |state| {
                 state
@@ -2466,7 +2468,9 @@ impl Operations {
                         group.pending.remove(&index);
                         continue;
                     }
-                    if self.quiescing.contains(&index) {
+                    if self.quiescing.contains(&index)
+                        && !self.resume_after_quiesce.contains(&index)
+                    {
                         continue;
                     }
                     let incoming: Vec<_> = graph
@@ -3015,12 +3019,15 @@ impl Operations {
             generation = generation.0);
         update(graph, |state| {
             let observed = state.components.get_mut(&slot.id).expect("component");
+            let cleanup_only = operation == Operation::Stop
+                && deprovision
+                && observed.lifecycle == ComponentLifecycle::Stopped;
             observed.operation = epoch;
             observed.revision = state.revision;
             observed.transition_time = Utc::now();
             if matches!(operation, Operation::Create | Operation::Reconfigure) {
                 observed.realization = RealizationState::Creating;
-            } else if operation != Operation::Process {
+            } else if operation != Operation::Process && !cleanup_only {
                 observed.lifecycle = if operation == Operation::Start {
                     ComponentLifecycle::Starting
                 } else {

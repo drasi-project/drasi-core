@@ -299,9 +299,10 @@ configuration and built-in shared query/QoS recovery, including actual
 process-exit reconstruction. The performance correction and measurements are
 below. Move-a-Wall was rebuilt and passed its real Server/SSE/browser checks;
 GPU Cluster Lab was rebuilt and passed isolated functional/restart/writer
-recovery checks without touching its older live deployment. GPU's explicitly
-unsupported whole-transaction policy-context guarantee remains deferred; its
-full acceptance assertion was not weakened. These are exercised configurations,
+recovery checks without touching its older live deployment. At that checkpoint,
+GPU's policy-context capability marker remained unsupported and the full
+acceptance assertion was not weakened. The 16 October native-path update and
+acceptance coverage are recorded in the current work inventory. These are exercised configurations,
 not a claim that every plugin, provider or deployment is qualified.
 
 ### Earlier disabled-recovery measurement (2026-10-07)

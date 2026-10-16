@@ -285,6 +285,14 @@ A cancelled stop retains the join handle for subsequent cleanup. Buffered events
 discarded during stop are counted and logged. Dropping a `next()` future does not
 consume a later event or manufacture successful exhaustion.
 
+For graph-owned durable admission, ordinary graph stop first waits for an
+executing journal/producer transaction to finish before invoking plugin cleanup.
+A graceful deadline leaves that operation owned; after it finishes, stop can be
+retried. To deliberately interrupt the write, use explicit force cancellation
+over every registered user of its actual storage domain, then clean up and
+reconstruct before resolving the original session/sequence. Forced interruption
+is not a successful graceful drain or proof that the write rolled back.
+
 ## HTTP sink configuration
 
 ```json
@@ -413,7 +421,10 @@ host continuous-query evaluator between native endpoints.
 
 The durable cases also cover receipt conflicts/expiry, partial-batch prefixes,
 retirement, stopped consumers, abrupt process exit without a saved client receipt,
-and before/after-commit client timeout or source stop for both transports.
+and before/after-commit client timeout and forced cancellation for both transports.
+Separate cases prove graceful commit completion and deadline/retry behavior,
+including retry on both runtime flavors. Every interruption case retains exact
+acceptance and downstream-delivery checks after reconstruction.
 
 Query-role hosting, arbitrary native resource injection, adaptive transports,
 snapshot/live handover, in-place reconfiguration and hot unloading remain unsupported.

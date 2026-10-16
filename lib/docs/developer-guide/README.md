@@ -721,9 +721,9 @@ flowchart LR
 
 The ordinary `Query` path and the direct query both use the same parsers,
 indexes and `ComputationQuery` evaluator. Native processing loops now execute as
-graph-owned Tokio tasks, independently of the controller task. An ordinary
-query still owns its internal `ScopedGraph`; it is not required to obtain native
-component-level CPU concurrency. Mutable work on one component remains
+graph-owned Tokio tasks, independently of the controller task. Ordinary queries
+now use the same native query component directly in the instance graph, with
+no private `ScopedGraph` or additional query driver. Mutable work on one component remains
 serialized. Transaction containers retain their own ordered inner steps.
 
 Multiple independent native nodes can use different runtime workers. A
@@ -1232,7 +1232,8 @@ claim to simulate every disk or machine failure.
 
 Unlike the simple graph example, its query is wrapped with
 `TransactionTransformer::from_query(query)`. Standard `ContinuousQueryFactory`
-construction also uses a transaction query body. A raw immediate
+construction enables the same delivery tracking directly on
+`ContinuousQueryTransformer`, without that compatibility wrapper. A raw immediate
 `ContinuousQueryTransformer` alone is not sufficient wiring for tracked durable
 output handoff.
 

@@ -68,17 +68,56 @@ impl ContinuousQueryTransformer {
                     .await?;
             }
             if let Some(store) = resources.checkpoint_store() {
+                if self.runtime_compatibility {
+                    if let Some(hash) = self.legacy_hash {
+                        store
+                            .write_config_hash(
+                                crate::queries::config_hash::output_reset_in_progress_hash(hash),
+                            )
+                            .await?;
+                    }
+                }
                 store.write_output_generation(id, generation).await?;
             }
             let baseline = marker(false)?;
             query
                 .resource_transaction(|| async {
-                    resources.indexes().element_index.clear().await?;
-                    resources.indexes().archive_index.clear().await?;
-                    resources.indexes().result_index.clear().await?;
-                    query.future_queue().clear().await?;
+                    crate::indexes::check_clear(
+                        id,
+                        "clear element index",
+                        resources.indexes().element_index.clear().await,
+                        self.runtime_compatibility,
+                    )?;
+                    crate::indexes::check_clear(
+                        id,
+                        "clear archive index",
+                        resources.indexes().archive_index.clear().await,
+                        self.runtime_compatibility,
+                    )?;
+                    crate::indexes::check_clear(
+                        id,
+                        "clear result index",
+                        resources.indexes().result_index.clear().await,
+                        self.runtime_compatibility,
+                    )?;
+                    if self.runtime_compatibility {
+                        crate::indexes::check_clear(
+                            id,
+                            "reset result sequence",
+                            resources.indexes().result_index.apply_sequence(0, "").await,
+                            true,
+                        )?;
+                    }
+                    crate::indexes::check_clear(
+                        id,
+                        "clear future queue",
+                        query.future_queue().clear().await,
+                        self.runtime_compatibility,
+                    )?;
                     if let Some(store) = resources.checkpoint_store() {
-                        store.clear_checkpoints().await?;
+                        store.clear_checkpoints().await.map_err(|error| {
+                            crate::indexes::operation_error(id, "clear checkpoints", error)
+                        })?;
                         store.stage_result_sequence(id, 0).await?;
                     }
                     if let Some(outbox) = resources.outbox_writer() {

@@ -1,6 +1,11 @@
 # GPU Cluster Lab: presenter runbook
 
-Companion to the [implementation guide](gpu-cluster-demo.md). These are scripts and fixture contracts to implement, not claims that the demo is already running. Button names below define the intended UI.
+Historical companion to the [original implementation guide](gpu-cluster-demo.md).
+The scenario intent is retained here, but use the sibling demo's
+[current operating guide](../../drasi-server/examples/gpu-cluster-lab/embedded/README.md)
+for implemented controls, URLs, native transaction support and acceptance
+commands. The older UI names and setup instructions below are design records,
+not the current deployment procedure.
 
 ## Presentation order
 

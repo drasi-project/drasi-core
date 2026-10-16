@@ -58,8 +58,8 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
         .unwrap();
 
     {
-        use crate::computation::{runtime::QueryInstance, v1::*};
-        let native = query.as_any().downcast_ref::<QueryInstance>().unwrap();
+        use crate::computation::{runtime::NativeQuery, v1::*};
+        let native = query.as_any().downcast_ref::<NativeQuery>().unwrap();
         let snapshot = native.inspector().snapshot();
         let id = ComponentId::try_new("query").unwrap();
         let specification = &snapshot.desired.specifications[&id];

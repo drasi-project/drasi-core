@@ -59,8 +59,8 @@ delivery guarantee. Reconstructing it requires that external binding again.
 The graph normally receives outputs from components and supplies their inputs;
 components do not need to operate pipe senders/receivers themselves.
 Ordinary source/query/reaction APIs use adapters and pipeline builders over this
-runtime. Each DrasiLib has one root graph; ordinary queries have owned internal
-QueryGraphs using these same mechanisms.
+runtime. Each DrasiLib has one root graph; ordinary query components and their
+input/output helpers are members of that graph using these same mechanisms.
 
 Pipes are in-process connections. Network protocols and network ingestion belong
 to source/sink components; a durable pipe alone is not a durable network receiver.

@@ -24,13 +24,13 @@ For an architectural explanation rather than an API reference, use the
 | `ComputationInspector` | Consistent snapshots and the most recent 256 controller publications |
 | `ResourceHandle` | An actual supplied object and, where applicable, its cleanup owner |
 | `InstanceGraph` (internal) | Owns the DrasiLib instance's ComputationGraph task and cleanup |
-| `ScopedGraph` (internal) | Owns a query's QueryGraph task and cleanup |
+| `NativeQuery` (internal) | Generation-fenced API adapter for a query already owned by the instance graph; no evaluator or driver |
 | `ComponentBatch` | Component declarations and supplied bindings added to the instance graph |
-| `ComputationInventory` | Combined view of the ComputationGraph and its owned QueryGraphs |
+| `ComputationInventory` | Coherent view of the instance graph, including queries, their helpers and shared provider relationships |
 | `QueryApi` | Optional read capability for a graph-owned query's configuration, output and metrics |
 
-An instance's source/query/reaction records are owned by its graph. Compatibility
-inspection responses are derived from those records, not used to recover
+An instance's source/reaction objects and native query declarations are owned by
+its graph. Compatibility inspection responses are derived from its publications, not used to recover
 membership or decide removals. Ordinary component operations and any retained
 manager-style accessors are graph-backed APIs, not a second execution engine.
 
@@ -38,9 +38,9 @@ manager-style accessors are graph-backed APIs, not a second execution engine.
 `component_graph()` provides a weak, read-only asynchronous view with no
 node/relationship mutation methods or runtime-instance storage.
 
-DrasiLib owns its ComputationGraph task; native processing operations have
-independently scheduled, graph-owned tasks, and ordinary queries retain their
-owned QueryGraph tasks. Mutable calls to each component remain serialized.
+DrasiLib owns its ComputationGraph task; processing operations, including
+ordinary queries and their helpers, have independently scheduled, graph-owned
+tasks. Mutable calls to each component remain serialized.
 Task joins and cleanup ownership survive cancelled waiters. Independent native
 nodes can use different Tokio workers; transactional inner steps are not
 independent execution units.
@@ -652,7 +652,8 @@ let json = serde_json::to_string_pretty(&snapshot)?;
 
 The versioned result contains `instance` (the ordinary configuration) and
 `native_components` (native declarations and resource recipes in the same
-ComputationGraph). QueryGraphs are not independent user configuration.
+ComputationGraph). Generated ordinary-query helpers are reconstructed from the
+ordinary query configuration, not duplicated in the native section.
 
 The native section includes its desired topology and a configuration entry for every
 component: submitted values before construction, captured values from the
@@ -722,7 +723,7 @@ different surfaces and must not be assumed safe for public disclosure.
 | Factories and export/import | [`specification.rs`](../src/computation/v1/graph/specification.rs), [`topology.rs`](../src/computation/v1/graph/topology.rs) |
 | Query execution and ordering | [`query.rs`](../src/computation/v1/query.rs), [`ranked_pipe.rs`](../src/computation/v1/ranked_pipe.rs), [`query_scheduling.rs`](../src/computation/v1/query_scheduling.rs) |
 | Standalone graph middleware | [`middleware.rs`](../src/computation/v1/middleware.rs) |
-| Instance and query task ownership | [`instance.rs`](../src/computation/instance.rs), [`scoped_graph.rs`](../src/computation/scoped_graph.rs) |
+| Instance and query task ownership | [`instance.rs`](../src/computation/instance.rs), [`execution.rs`](../src/computation/v1/graph/execution.rs), [`query_assembly.rs`](../src/computation/runtime/query_assembly.rs) |
 | Ordinary APIs and plugin integration | [`runtime`](../src/computation/runtime), [`pipeline.rs`](../src/computation/v1/pipeline.rs), [`plugin_source.rs`](../src/computation/v1/plugin_source.rs), [`plugin_reaction.rs`](../src/computation/v1/plugin_reaction.rs) |
 | Inspection and inventory | [`entities.rs`](../src/computation/v1/entities.rs), [`inventory.rs`](../src/computation/v1/inventory.rs) |
 

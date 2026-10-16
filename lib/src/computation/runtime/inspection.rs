@@ -31,25 +31,13 @@ fn error_message(record: &Record, observed: &ObservedComponent) -> Option<String
         .failure
         .as_ref()
         .map(|failure| format!("{:#}", failure.cause))
-        .or_else(|| match &record.value {
-            Value::Query(query) => query.last_error(),
-            _ => None,
-        })
 }
 
 impl Runtime {
     pub(crate) async fn query_inspector(&self, id: &str) -> anyhow::Result<ComputationInspector> {
         let publication = self.control()?.registry_snapshot();
         self.query_observation_at(&publication, id)?;
-        match self
-            .records_at(&publication)
-            .await?
-            .get(id)
-            .map(|record| &record.value)
-        {
-            Some(Value::Query(query)) => Ok(query.inspector()),
-            _ => self.inspector(),
-        }
+        self.inspector()
     }
 
     pub(super) fn is_query_node(node: &NodeSnapshot) -> bool {
@@ -243,57 +231,32 @@ impl Runtime {
             None,
             ComputationTopology::new(&publication.desired, &publication.observed),
         )?;
-        for record in records.values() {
-            let Value::Query(query) = &record.value else {
-                continue;
-            };
-            let Some((execution, sources)) = query.execution_inspection() else {
-                continue;
-            };
-            let scope = root.nested(record.node.clone());
-            inventory.insert(
-                scope.clone(),
-                Some(ComputationScopeOwner {
-                    component: root.entity(GraphEntityId::Component(record.node.clone())),
-                    generation: publication.observed.components[&record.node].generation,
-                }),
-                execution.topology(),
-            )?;
-            for source in sources {
-                let Some(current) = records.get(source.source.id()) else {
+        for (id, declaration) in self.ordinary_queries_at(&publication)? {
+            for host in &declaration.sources {
+                let source = host.source()?;
+                let Some(current) = records.get(source.id()) else {
                     continue;
                 };
-                if !matches!(&current.value, Value::Source(current) if Arc::ptr_eq(current, source))
+                if !matches!(&current.value, Value::Source(current) if Arc::ptr_eq(&current.source, &source))
                 {
                     continue;
                 }
                 inventory.links.insert(ScopedGraphEntityLink {
-                    from: scope.entity(GraphEntityId::Resource(
-                        ComputationPipelineBuilder::source_resource_id(source.source.id())?,
+                    from: root.entity(GraphEntityId::Resource(
+                        ComputationPipelineBuilder::source_resource_id(source.id())?,
                     )),
                     to: root.entity(GraphEntityId::Component(current.node.clone())),
                     kind: GraphEntityLinkKind::UsesComponent,
                 });
             }
-            for resource in self.services.dependencies().values().flatten() {
-                if execution.desired.resources.contains_key(resource)
-                    && publication.desired.resources.contains_key(resource)
-                {
-                    inventory.links.insert(ScopedGraphEntityLink {
-                        from: scope.entity(GraphEntityId::Resource(resource.clone())),
-                        to: root.entity(GraphEntityId::Resource(resource.clone())),
-                        kind: GraphEntityLinkKind::UsesResource,
-                    });
-                }
-            }
-            if let Some(providers) = publication.desired.specifications[&record.node]
+            if let Some(providers) = publication.desired.specifications[&id]
                 .dependencies
-                .get("indexes")
+                .get("backend")
             {
                 for provider in providers {
                     inventory.links.insert(ScopedGraphEntityLink {
-                        from: scope.entity(GraphEntityId::Resource(
-                            ComputationPipelineBuilder::index_resource_id(&query.config.id)?,
+                        from: root.entity(GraphEntityId::Resource(
+                            ComputationPipelineBuilder::index_resource_id(id.as_str())?,
                         )),
                         to: root.entity(GraphEntityId::Resource(provider.clone())),
                         kind: GraphEntityLinkKind::UsesResource,
@@ -399,11 +362,7 @@ impl Runtime {
 
     pub(crate) async fn query_info(&self, id: &str) -> anyhow::Result<QueryRuntime> {
         let publication = self.control()?.registry_snapshot();
-        let records = self.records_at(&publication).await?;
-        let config = match records.get(id).map(|record| &record.value) {
-            Some(Value::Query(query)) => query.config.clone(),
-            _ => self.native_query_configuration_at(&publication, id)?,
-        };
+        let config = self.native_query_configuration_at(&publication, id)?;
         let observed = self.query_observation_at(&publication, id)?;
         Ok(QueryRuntime {
             id: id.to_owned(),
@@ -512,20 +471,7 @@ impl Runtime {
 
     pub(crate) async fn query_configurations(&self) -> anyhow::Result<Vec<QueryConfig>> {
         let publication = self.control()?.registry_snapshot();
-        let mut configs: Vec<_> = self
-            .records_at(&publication)
-            .await?
-            .into_values()
-            .filter_map(|record| match record.value {
-                Value::Query(query) => {
-                    let mut config = query.config.clone();
-                    config.auto_start =
-                        publication.desired.lifecycle_policies[&record.node].auto_start;
-                    Some(config)
-                }
-                _ => None,
-            })
-            .collect();
+        let mut configs: Vec<QueryConfig> = Vec::new();
         for node in publication
             .desired
             .nodes
@@ -550,13 +496,6 @@ impl Runtime {
 
     pub(crate) async fn query_configuration(&self, id: &str) -> anyhow::Result<QueryConfig> {
         let publication = self.control()?.registry_snapshot();
-        if let Some(record) = self.records_at(&publication).await?.get(id) {
-            if let Value::Query(query) = &record.value {
-                let mut config = query.config.clone();
-                config.auto_start = publication.desired.lifecycle_policies[&record.node].auto_start;
-                return Ok(config);
-            }
-        }
         self.native_query_configuration_at(&publication, id)
     }
 
@@ -729,15 +668,6 @@ impl Runtime {
                         bootstrap_provider: record.bootstrap_recipe.clone(),
                     });
                 }
-                Value::Query(query) => {
-                    let mut config = query.config.clone();
-                    config.auto_start = auto_start;
-                    snapshot.queries.push(QueryConfigurationSnapshot {
-                        id: id.clone(),
-                        config,
-                        status,
-                    });
-                }
                 Value::Reaction(reaction) => snapshot.reactions.push(ReactionSnapshot {
                     id: id.clone(),
                     reaction_type: reaction.reaction.type_name().to_owned(),
@@ -760,20 +690,39 @@ impl Runtime {
                 },
             ]);
         }
+        let ordinary_queries = self.ordinary_queries_at(publication)?;
+        for id in ordinary_queries.keys() {
+            let mut config = self.native_query_configuration_at(publication, id.as_str())?;
+            config.auto_start = publication.desired.lifecycle_policies[id].auto_start;
+            snapshot.queries.push(QueryConfigurationSnapshot {
+                id: id.to_string(),
+                config,
+                status: events::observed_status(
+                    self.query_observation_at(publication, id.as_str())?,
+                    ComponentStatus::Added,
+                ),
+            });
+            snapshot.edges.extend(super::snapshot::ownership_edges(
+                &self.config.id,
+                id.as_str(),
+            ));
+        }
         for (from, to) in publication.desired.subscriptions.iter() {
             snapshot.edges.push(GraphEdge {
                 from: from.to_string(),
                 to: to.to_string(),
                 relationship: RelationshipKind::Feeds,
             });
-            if matches!(
-                (
-                    records.get(from.as_str()).map(|record| &record.value),
-                    records.get(to.as_str()).map(|record| &record.value)
-                ),
-                (Some(Value::Source(_)), Some(Value::Query(_)))
-                    | (Some(Value::Query(_)), Some(Value::Reaction(_)))
-            ) {
+            if (matches!(
+                records.get(from.as_str()).map(|record| &record.value),
+                Some(Value::Source(_))
+            ) && ordinary_queries.contains_key(to))
+                || (ordinary_queries.contains_key(from)
+                    && matches!(
+                        records.get(to.as_str()).map(|record| &record.value),
+                        Some(Value::Reaction(_))
+                    ))
+            {
                 snapshot.edges.push(GraphEdge {
                     from: to.to_string(),
                     to: from.to_string(),

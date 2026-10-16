@@ -120,10 +120,6 @@ impl Runtime {
                     metadata.insert("kind".into(), source.source.type_name().into());
                     ComponentKind::Source
                 }
-                Value::Query(query) => {
-                    metadata.insert("query".into(), query.config.query.clone());
-                    ComponentKind::Query
-                }
                 Value::Reaction(reaction) => {
                     metadata.insert("kind".into(), reaction.reaction.type_name().into());
                     ComponentKind::Reaction
@@ -159,6 +155,13 @@ impl Runtime {
                     .auto_start
                     .to_string(),
             )]);
+            if kind == "query" {
+                metadata.insert(
+                    "query".into(),
+                    self.native_query_configuration_at(&publication, id.as_str())?
+                        .query,
+                );
+            }
             if let Some(failure) = &state.failure {
                 metadata.insert("error".into(), format!("{:#}", failure.cause));
             }

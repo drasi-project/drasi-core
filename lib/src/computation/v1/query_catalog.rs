@@ -116,6 +116,21 @@ impl CatalogSubscription {
             SubscriberReceiver::Broadcast(receiver) => receiver.recv().await.map_err(Into::into),
         }
     }
+
+    pub(crate) async fn receive_after_head(&mut self) -> anyhow::Result<ChangeEnvelope> {
+        loop {
+            let envelope = self.receive().await?;
+            if let Some(head) = &self.head {
+                let current = head.results.snapshot()?;
+                if current.generation == head.generation
+                    && QueryChangeCodec::query_sequence(&envelope)? <= head.sequence
+                {
+                    continue;
+                }
+            }
+            return Ok(envelope);
+        }
+    }
 }
 impl Drop for CatalogSubscription {
     fn drop(&mut self) {
@@ -275,8 +290,9 @@ impl QueryResultsCatalog {
         config: &crate::config::QueryConfig,
         hash: u64,
         metrics: Arc<crate::metrics::QueryOutputMetrics>,
+        default_capacity: usize,
     ) -> anyhow::Result<()> {
-        let capacity = config.dispatch_buffer_capacity.unwrap_or(1_000);
+        let capacity = config.dispatch_buffer_capacity.unwrap_or(default_capacity);
         anyhow::ensure!(capacity > 0, "query delivery capacity must be nonzero");
         let mut state = self
             .0
@@ -827,6 +843,86 @@ mod tests {
     use super::*;
     use std::num::NonZeroUsize;
 
+    #[tokio::test]
+    async fn fresh_query_subscription_filters_replayed_output_by_logical_sequence(
+    ) -> anyhow::Result<()> {
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        };
+        for mode in [crate::DispatchMode::Channel, crate::DispatchMode::Broadcast] {
+            let catalog = QueryResultsCatalog::new("subscription-head")?;
+            let stream = StreamId::try_new("query/out")?;
+            let config = crate::Query::cypher("query")
+                .query("MATCH (n:Person) RETURN n.name AS name")
+                .with_outbox_capacity(8)
+                .enable_bootstrap(false)
+                .build();
+            let mut config = config;
+            config.dispatch_mode = Some(mode);
+            let mut query = ContinuousQueryTransformer::new(
+                ContinuousQueryDefinition {
+                    graph_id: "subscription-head".into(),
+                    id: ComponentId::try_new("query")?,
+                    query: config.query.clone(),
+                    language: ComputationQueryLanguage::Cypher,
+                    output_stream: stream.clone(),
+                    outbox_capacity: NonZeroUsize::new(8).unwrap(),
+                },
+                Arc::new(drasi_core::computation::InMemoryComputationProvider),
+            )
+            .await?
+            .with_query_configuration(config)?
+            .with_result_catalog(&catalog)?;
+            query.start().await?;
+            let input = |sequence, name: &str| -> anyhow::Result<InputEnvelope> {
+                Ok(InputEnvelope {
+                    port: PortId::try_new("in")?,
+                    envelope: GraphChangeCodec::encode_change(
+                        SourceChange::Insert {
+                            element: Element::Node {
+                                metadata: ElementMetadata {
+                                    reference: ElementReference::new("source", name),
+                                    labels: vec!["Person".into()].into(),
+                                    effective_from: sequence,
+                                },
+                                properties: ElementPropertyMap::from(
+                                    serde_json::json!({ "name": name }),
+                                ),
+                            },
+                        },
+                        StreamId::try_new("source/out")?,
+                        sequence,
+                        None,
+                    )?,
+                })
+            };
+            let first = query
+                .transform(input(1, "Alice")?)
+                .await?
+                .remove(0)
+                .envelope;
+            let (mut subscription, head) = catalog.subscribe_query_at_head("query")?;
+            assert_eq!(head, 1);
+            let second = query.transform(input(2, "Bob")?).await?.remove(0).envelope;
+            for (envelope, transport) in [(&first, 99), (&second, 100)] {
+                catalog
+                    .publish(envelope.derive(
+                        emission_id(&stream, transport)?,
+                        envelope.changes().clone(),
+                        SystemMetadata::new(stream.clone(), transport),
+                    ))
+                    .await?;
+            }
+            let received =
+                tokio::time::timeout(Duration::from_secs(1), subscription.receive_after_head())
+                    .await??;
+            assert_eq!(received.system().sequence(), 100);
+            assert_eq!(QueryChangeCodec::query_sequence(&received)?, 2);
+            query.stop().await?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn native_delivery_replacement_refreshes_its_hash_without_overriding_runtime_configuration() {
         let catalog = QueryResultsCatalog::new("delivery").unwrap();
@@ -835,13 +931,13 @@ mod tests {
         let first = Arc::new(crate::metrics::QueryOutputMetrics::new());
         let replacement = Arc::new(crate::metrics::QueryOutputMetrics::new());
         catalog
-            .configure_native_delivery(&config, 10, first)
+            .configure_native_delivery(&config, 10, first, 1_000)
             .unwrap();
         let stream = StreamId::try_new("query/out").unwrap();
         let sequence = catalog.transport_sequence(&stream).unwrap();
         sequence.store(41, std::sync::atomic::Ordering::Release);
         catalog
-            .configure_native_delivery(&config, 20, replacement.clone())
+            .configure_native_delivery(&config, 20, replacement.clone(), 1_000)
             .unwrap();
         assert_eq!(
             catalog
@@ -867,7 +963,7 @@ mod tests {
             )
             .unwrap();
         catalog
-            .configure_native_delivery(&config, 40, replacement)
+            .configure_native_delivery(&config, 40, replacement, 1_000)
             .unwrap();
         assert_eq!(catalog.configured_hash(&id).unwrap(), Some(30));
         assert!(Arc::ptr_eq(

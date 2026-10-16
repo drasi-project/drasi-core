@@ -1202,8 +1202,10 @@ pub(crate) fn validate_definition(desired: &DesiredTopology) -> GraphResult<()> 
     if desired
         .control_connections
         .iter()
-        .chain(&desired.subscriptions)
         .any(|(from, to)| from == to || !ids.contains(from) || !ids.contains(to))
+        || desired.subscriptions.iter().any(|(from, to)| {
+            from == to || !ids.contains(to) || (!desired.allow_incomplete && !ids.contains(from))
+        })
         || desired
             .readiness_required
             .iter()

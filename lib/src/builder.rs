@@ -1183,7 +1183,7 @@ mod tests {
             };
             let GraphError::Creation {
                 component, source, ..
-            } = cause.as_ref()
+            } = cause.underlying()
             else {
                 panic!("unexpected creation failure: {cause:?}");
             };
@@ -1269,7 +1269,7 @@ mod tests {
             };
             let GraphError::Creation {
                 component, source, ..
-            } = cause.as_ref()
+            } = cause.underlying()
             else {
                 panic!("unexpected creation failure: {cause:?}");
             };
@@ -1325,7 +1325,7 @@ mod tests {
             };
             let GraphError::Creation {
                 component, source, ..
-            } = cause.as_ref()
+            } = cause.underlying()
             else {
                 panic!("unexpected creation failure: {cause:?}");
             };

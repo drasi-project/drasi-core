@@ -23,8 +23,8 @@ use crate::computation::v1::{
     DesiredTopology, FactoryRegistry, ResourceHandle, ResourceId, ResourceSpecification,
 };
 
-/// Declaratively managed components in a DrasiLib instance. QueryGraph
-/// internals and instance-provided services are not reconstruction recipes.
+/// Declaratively managed components in a DrasiLib instance. Generated query
+/// infrastructure and instance-provided services are not reconstruction recipes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredInstance {

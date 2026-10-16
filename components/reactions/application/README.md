@@ -39,11 +39,11 @@ properly integrated service supplies it.
 
 ### Native query wiring
 
-Ordinary `.with_query(...)` wrappers own internal QueryGraphs and expose no
-root data ports. Do not invent a `q1/out` endpoint on those wrappers. Use the
-existing native query pipeline (or a native query factory) to obtain declared
-root query ports. For example, on an initialized, not-yet-started instance with
-an ordinary source named `source`:
+Ordinary `.with_query(...)` declarations and explicit native query pipelines
+both create query components in the instance graph with declared `out` ports.
+Connect using the actual query component ID and its port, not a private graph.
+The following example explicitly assembles a native query pipeline on an
+initialized, not-yet-started instance with an ordinary source named `source`:
 
 ```rust,ignore
 use drasi_lib::{Query, computation::v1::*};

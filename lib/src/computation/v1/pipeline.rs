@@ -280,7 +280,7 @@ impl ComputationPipelineBuilder {
             .services
             .declare(ComputationGraph::builder(self.graph_id.as_str()))?;
         let assembly = self.queries.first().map(|query| query.id.as_str());
-        let catalog_id = match assembly.filter(|_| !self.runtime_compatibility) {
+        let catalog_id = match assembly {
             Some(query) => resource("query-catalog", query)?,
             None => ResourceId::try_new("query-catalog")?,
         };
@@ -295,7 +295,7 @@ impl ComputationPipelineBuilder {
                 catalog_id.clone(),
                 ResourceHandle::new(ResourceRole::QueryCatalog, Arc::new(self.catalog.clone())),
             )?;
-        let middleware_id = match assembly.filter(|_| !self.runtime_compatibility) {
+        let middleware_id = match assembly {
             Some(query) => resource("query-middleware", query)?,
             None => ResourceId::try_new("query-middleware")?,
         };
@@ -344,11 +344,10 @@ impl ComputationPipelineBuilder {
         }
         let source_factory = builtin_factory::<SourcePluginAdapterFactory>();
         let query_factory = builtin_factory::<ContinuousQueryFactory>();
-        let outlet_id =
-            ComponentId::try_new(match assembly.filter(|_| !self.runtime_compatibility) {
-                Some(query) => format!("query-results/{}", encoded(query)),
-                None => "__computation_results__".into(),
-            })?;
+        let outlet_id = ComponentId::try_new(match assembly {
+            Some(query) => format!("query-results/{}", encoded(query)),
+            None => "__computation_results__".into(),
+        })?;
         let outlet_factory = builtin_factory::<QueryResultsOutletFactory>();
         builder = builder
             .component(
@@ -842,9 +841,13 @@ impl ComputationPipelineBuilder {
                         endpoint(outlet_id.clone(), "in"),
                     ),
                     Box::new(BoundedPipeConfig {
-                        capacity: config
-                            .dispatch_buffer_capacity
-                            .unwrap_or(self.output_capacity),
+                        capacity: if self.runtime_compatibility {
+                            config.outbox_capacity.clamp(1, 1_000_000)
+                        } else {
+                            config
+                                .dispatch_buffer_capacity
+                                .unwrap_or(self.output_capacity)
+                        },
                     }),
                 );
         }

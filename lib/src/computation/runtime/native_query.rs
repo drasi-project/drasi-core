@@ -19,7 +19,7 @@ use crate::{
 };
 use async_trait::async_trait;
 
-fn query_members(
+pub(crate) fn query_members(
     publication: &GraphRegistrySnapshot,
     id: &ComponentId,
 ) -> std::collections::BTreeMap<ComponentId, ComponentGeneration> {
@@ -73,6 +73,16 @@ fn query_members(
         .collect()
 }
 
+fn member_needs_stop(observed: &ObservedComponent) -> bool {
+    super::needs_stop(observed) || observed.lifecycle == ComponentLifecycle::Stopping
+}
+
+pub(super) fn query_needs_stop(publication: &GraphRegistrySnapshot, id: &ComponentId) -> bool {
+    query_members(publication, id)
+        .keys()
+        .any(|member| member_needs_stop(&publication.observed.components[member]))
+}
+
 pub(super) async fn start_query(
     control: &GraphControl,
     id: &ComponentId,
@@ -98,9 +108,68 @@ pub(super) async fn start_query(
         "Query '{id}' cannot start while it is {:?}",
         state.lifecycle
     );
-    let report = control
-        .start_members(query_members(&publication, id))
-        .await?;
+    let members = query_members(&publication, id);
+    let declaration = publication
+        .desired
+        .specifications
+        .get(id)
+        .filter(|spec| {
+            spec.implementation
+                == ContinuousQueryFactory::default()
+                    .descriptor()
+                    .implementation
+        })
+        .and_then(|spec| spec.dependencies.get("declaration"))
+        .and_then(|resources| resources.first())
+        .map(|resource| {
+            publication
+                .resource(resource)?
+                .get::<OrdinaryQueryDeclaration>()
+        })
+        .transpose()?;
+    let mut subscriptions = Vec::new();
+    if let Some(declaration) = declaration {
+        if let Some(cause) = &declaration.failure {
+            return Err(GraphError::Reported {
+                cause: cause.clone(),
+            }
+            .into());
+        }
+        for member in members.keys() {
+            let Some(specification) = publication.desired.specifications.get(member) else {
+                continue;
+            };
+            if let Some(resources) = specification.dependencies.get("subscription") {
+                for resource in resources {
+                    let subscription = publication
+                        .resource(resource)?
+                        .get::<LegacySourceSubscription>()?;
+                    subscription.prepare_start();
+                    subscriptions.push(subscription);
+                }
+            }
+        }
+    }
+    let mut activation = Box::pin(control.start_members(members));
+    let report = if subscriptions.is_empty() {
+        activation.await?
+    } else {
+        let subscribed = async {
+            for subscription in subscriptions {
+                subscription.wait_subscribed().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::select! {
+            biased;
+            report = &mut activation => report?,
+            result = subscribed => {
+                result?;
+                // Only the reply waiter is dropped; the graph still owns startup and cleanup.
+                return Ok(());
+            }
+        }
+    };
     anyhow::ensure!(
         report.summary == OperationSummary::Completed,
         "query startup is incomplete: {report:?}"
@@ -123,14 +192,19 @@ pub(super) async fn stop_query(
         expected.map_or(true, |expected| expected == state.generation),
         GraphError::StaleGeneration
     );
-    super::ensure_stoppable("query", id.as_str(), state)?;
-    let report = control
-        .stop_members(query_members(&publication, id))
-        .await?;
-    anyhow::ensure!(
-        report.summary == OperationSummary::Completed,
-        "query stop is incomplete: {report:?}"
-    );
+    let members = query_members(&publication, id);
+    // The evaluator may stop before its subscription and output helpers.
+    if state.lifecycle != ComponentLifecycle::Stopped
+        || !members
+            .keys()
+            .any(|member| member_needs_stop(&publication.observed.components[member]))
+    {
+        super::ensure_stoppable("query", id.as_str(), state)?;
+    }
+    let report = control.stop_members(members).await?;
+    if report.summary != OperationSummary::Completed {
+        return Err(LifecycleReportError::Stop(report).into());
+    }
     Ok(())
 }
 
@@ -144,7 +218,10 @@ fn dependency(specification: &ComponentSpecification, name: &str) -> anyhow::Res
         .ok_or_else(|| anyhow::anyhow!("query has no unique '{name}' resource"))
 }
 
-fn resource_users(topology: &DesiredTopology, resource: &ResourceId) -> BTreeSet<ComponentId> {
+pub(super) fn resource_users(
+    topology: &DesiredTopology,
+    resource: &ResourceId,
+) -> BTreeSet<ComponentId> {
     let mut users = topology.component_resource_users(resource);
     let mut affected = BTreeSet::from([resource.clone()]);
     topology.include_resource_dependents(&mut affected);
@@ -170,7 +247,7 @@ pub(super) struct NativeQueryUpdate {
     pub(super) members: BTreeMap<ComponentId, ComponentGeneration>,
     pub(super) changes: Vec<DesiredMutation>,
     pub(super) bindings: TopologyBindings,
-    running: bool,
+    pub(super) running: bool,
 }
 
 impl NativeQueryUpdate {
@@ -276,8 +353,11 @@ impl Runtime {
             selection: GraphSelection::Exact(selected.iter().cloned().collect()),
             policy: RemovalPolicy::Reject,
         });
+        let infrastructure = self.infrastructure_resources(&publication, &BTreeSet::new())?;
         for resource in candidates {
-            if resource_users(&target, &resource.id).is_empty() {
+            if !infrastructure.contains(&resource.id)
+                && resource_users(&target, &resource.id).is_empty()
+            {
                 changes.push(DesiredMutation::RemoveResource {
                     resource: resource.id,
                     policy: RemovalPolicy::Reject,
@@ -339,6 +419,14 @@ impl Runtime {
         let control = self.control()?;
         let publication = control.registry_snapshot();
         self.query_observation_at(&publication, id)?;
+        if self
+            .ordinary_queries_at(&publication)?
+            .contains_key(&ComponentId::try_new(id)?)
+        {
+            return self
+                .ordinary_query_update_plan(&publication, id, config)
+                .await;
+        }
         let query_id = ComponentId::try_new(id)?;
         let original = publication
             .desired
@@ -637,13 +725,28 @@ impl Runtime {
     }
 }
 
-pub(super) struct NativeQuery {
+pub(crate) struct NativeQuery {
     pub(super) config: QueryConfig,
     pub(super) handle: ComponentHandle,
     pub(super) control: GraphControl,
+    pub(super) owner: std::sync::Weak<Runtime>,
 }
 
 impl NativeQuery {
+    pub(crate) fn inspector(&self) -> ComputationInspector {
+        self.control.inspector()
+    }
+
+    pub(crate) fn checkpoint_store(
+        &self,
+    ) -> anyhow::Result<Option<Arc<dyn drasi_core::interface::CheckpointStore>>> {
+        self.access()?
+            .catalog
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("query has no result catalog"))?
+            .checkpoint_store(&self.config.id)
+    }
+
     fn status_now(&self) -> ComponentStatus {
         if matches!(
             self.control.state(),
@@ -734,7 +837,7 @@ impl crate::channels::ChangeReceiver<crate::channels::QueryResult> for NativeRec
                 "query output owner is shut down"
             );
             tokio::select! {
-                result = self.receiver.receive() => {
+                result = self.receiver.receive_after_head() => {
                     let envelope = result?;
                     self.handle.observed()?;
                     return Ok(Arc::new(QueryChangeCodec::to_legacy_result(&envelope)?));
@@ -748,15 +851,17 @@ impl crate::channels::ChangeReceiver<crate::channels::QueryResult> for NativeRec
 #[async_trait]
 impl Query for NativeQuery {
     async fn start(&self) -> anyhow::Result<()> {
-        start_query(
-            &self.control,
-            self.handle.id(),
-            Some(self.handle.generation()),
-        )
-        .await
+        self.owner
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("instance runtime was dropped"))?
+            .start_query_handle(&self.handle)
+            .await
     }
     async fn stop(&self) -> anyhow::Result<()> {
-        if self.status_now() == ComponentStatus::Stopped {
+        self.handle.observed()?;
+        if self.status_now() == ComponentStatus::Stopped
+            && !query_needs_stop(&self.control.registry_snapshot(), self.handle.id())
+        {
             return Ok(());
         }
         stop_query(

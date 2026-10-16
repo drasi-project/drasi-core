@@ -20,9 +20,11 @@ use super::{ChangeEnvelope, ComponentId, ContextEntry, ContextValue, ContractErr
 
 const IDENTITY: &str = "drasi.query-recovery-identity.v1";
 
-/// The construction/instance scope, local graph/query identity and configuration,
+/// The construction/instance scope, logical graph/query identity and configuration,
 /// plus the volatile publication lifetime. Persistent queries omit the incarnation
 /// and keep their identity when the same scoped configuration and stores reopen.
+/// The logical graph identity can outlive a hosting arrangement: ordinary queries
+/// retain their original persisted scope when moving into the instance graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRecoveryIdentity {

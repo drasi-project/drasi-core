@@ -38,6 +38,15 @@ pub struct QueryExecutionSettings {
 
 pub struct QueryMiddlewareResource(pub Arc<MiddlewareTypeRegistry>);
 
+/// Ordinary API declaration metadata, not an execution or lifecycle owner.
+pub(crate) struct OrdinaryQueryDeclaration {
+    pub(crate) id: super::ComponentId,
+    pub(crate) failure: Option<Arc<super::GraphError>>,
+    pub(crate) backend: Option<Arc<dyn drasi_core::interface::IndexBackendPlugin>>,
+    pub(crate) default_dispatch_capacity: usize,
+    pub(crate) sources: Vec<Arc<super::SourcePluginHost>>,
+}
+
 impl QueryExecutionSettings {
     pub(crate) fn query_configuration(
         &self,

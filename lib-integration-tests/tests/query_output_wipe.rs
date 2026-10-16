@@ -385,7 +385,9 @@ async fn wait_for_snapshot_seq(core: &DrasiLib, min_seq: u64) -> Result<u64> {
             .get_query_instance(QUERY_ID)
             .await
             .map_err(anyhow::Error::msg)?;
-        let snapshot = query.fetch_snapshot().await?;
+        let snapshot = timeout(Duration::from_secs(10), query.fetch_snapshot())
+            .await
+            .context("query snapshot read timed out while waiting for sequence")??;
         if snapshot.as_of_sequence >= min_seq {
             return Ok(snapshot.as_of_sequence);
         }
@@ -444,7 +446,14 @@ fn assert_new_generation_outbox(sequences: &[u64], latest: u64, prior_high_water
 async fn wait_for_wipe(core: &DrasiLib, previous_generation: u64, high_water: u64) -> Result<u64> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let snapshot = fetch_query(core).await?.fetch_snapshot().await?;
+        let query = fetch_query(core).await?;
+        let snapshot = match timeout(Duration::from_secs(10), query.fetch_snapshot()).await {
+            Ok(snapshot) => snapshot?,
+            Err(error) => anyhow::bail!(
+                "query snapshot read timed out after replacement: {error}; observations: {:?}",
+                core.computation_control()?.observed().components
+            ),
+        };
         if snapshot.output_generation > previous_generation {
             assert_eq!(snapshot.as_of_sequence, high_water);
             assert!(snapshot.is_empty(), "reset must discard every old live row");
@@ -783,8 +792,12 @@ async fn seed_reaction_then_update_query(
         },
     )
     .await?;
-    start_running(&core).await?;
-    core.start_reaction(REACTION_ID).await?;
+    timeout(Duration::from_secs(15), start_running(&core))
+        .await
+        .context("initial query startup timed out")??;
+    timeout(Duration::from_secs(15), core.start_reaction(REACTION_ID))
+        .await
+        .context("initial reaction startup timed out")??;
     wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
 
     insert_person(&source, "p1", "Alice").await?;
@@ -802,7 +815,9 @@ async fn seed_reaction_then_update_query(
     let hash_v1 = snapshot.config_hash;
     // Callback delivery precedes checkpoint persistence; await the latter before stopping.
     wait_for_reaction_checkpoint_sequence(store.as_ref(), 3).await?;
-    stop_reaction_and_wait(&core).await?;
+    timeout(Duration::from_secs(15), stop_reaction_and_wait(&core))
+        .await
+        .context("reaction stop before query replacement timed out")??;
 
     let checkpoint = read_reaction_checkpoint(store.as_ref())
         .await?
@@ -810,8 +825,12 @@ async fn seed_reaction_then_update_query(
     assert_eq!(checkpoint.sequence, 3);
     assert_eq!(checkpoint.config_hash, hash_v1);
 
-    core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
-        .await?;
+    timeout(
+        Duration::from_secs(15),
+        core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2)),
+    )
+    .await
+    .context("query replacement with a stopped reaction timed out")??;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
     wait_for_wipe(&core, snapshot.output_generation, 3).await?;
     Ok((core, source, receiver, store, hash_v1))
@@ -835,7 +854,9 @@ async fn reaction_strict_hash_mismatch_fails_start() -> Result<()> {
     let hash_v2 = snapshot.config_hash;
     assert_ne!(hash_v2, hash_v1);
 
-    let result = core.start_reaction(REACTION_ID).await;
+    let result = timeout(Duration::from_secs(15), core.start_reaction(REACTION_ID))
+        .await
+        .context("mismatched reaction restart timed out")?;
     assert!(
         result.is_err(),
         "Strict policy should fail on config-hash mismatch"

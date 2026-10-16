@@ -78,6 +78,9 @@ pub(crate) fn query_reset_key(query: &str) -> String {
 
 #[path = "query_delivery.rs"]
 mod delivery;
+#[cfg(test)]
+#[path = "query_hosting_tests.rs"]
+mod hosting_tests;
 #[path = "query_recovery.rs"]
 mod recovery;
 
@@ -353,6 +356,9 @@ pub struct ContinuousQueryTransformer {
     output_persistence_view: Arc<RwLock<Option<bool>>>,
     publication_identity: Arc<RwLock<Option<uuid::Uuid>>>,
     recovery_scope: Arc<str>,
+    recovery_graph_id: String,
+    default_dispatch_capacity: usize,
+    declaration: Option<Arc<super::query_configuration::OrdinaryQueryDeclaration>>,
     scheduling: Option<Arc<super::QuerySchedulingResource>>,
     draining_futures: bool,
     delivery_tracking: bool,
@@ -395,7 +401,10 @@ impl ContinuousQueryTransformer {
         execution: QueryExecutionSettings,
         middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     ) -> anyhow::Result<Self> {
-        Self::construct(definition, provider, options, execution, middleware, false).await
+        Self::construct(
+            definition, provider, options, execution, middleware, false, false,
+        )
+        .await
     }
     async fn construct(
         definition: ContinuousQueryDefinition,
@@ -403,6 +412,7 @@ impl ContinuousQueryTransformer {
         options: QueryOptions,
         execution: QueryExecutionSettings,
         middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
+        runtime_compatibility: bool,
         defer_build: bool,
     ) -> anyhow::Result<Self> {
         execution.validate(middleware.as_deref())?;
@@ -425,9 +435,26 @@ impl ContinuousQueryTransformer {
             ))),
             notify: Arc::new(tokio::sync::Notify::new()),
         };
+        // Preserve ordinary queries' persisted namespace without retaining a private graph.
+        let recovery_graph_id = if runtime_compatibility {
+            format!(
+                "lib-query/{}",
+                definition
+                    .id
+                    .as_str()
+                    .bytes()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        } else {
+            definition.graph_id.clone()
+        };
         let mut instance = Self {
             descriptor: definition.descriptor_with_execution(&execution),
             recovery_scope: Arc::from(definition.graph_id.as_str()),
+            recovery_graph_id,
+            default_dispatch_capacity: 1_000,
+            declaration: None,
             definition,
             provider,
             query: None,
@@ -448,7 +475,7 @@ impl ContinuousQueryTransformer {
             api_view: std::sync::OnceLock::new(),
             metrics: Some(Arc::new(crate::metrics::QueryOutputMetrics::new())),
             reset_configuration: false,
-            runtime_compatibility: false,
+            runtime_compatibility,
             output_persistent: false,
             legacy_hash: None,
             checkpoint_view: Arc::new(RwLock::new(None)),
@@ -539,10 +566,17 @@ impl ContinuousQueryTransformer {
         if catalog.graph_id() != self.definition.graph_id {
             anyhow::bail!("query catalogue belongs to another graph");
         }
+        let configuration = self.api_configuration();
+        let hash = if self.runtime_compatibility {
+            crate::queries::compute_config_hash(&configuration)
+        } else {
+            self.definition.configuration_hash(&self.execution)?
+        };
         catalog.configure_native_delivery(
-            &self.api_configuration(),
-            self.definition.configuration_hash(&self.execution)?,
+            &configuration,
+            hash,
             self.metrics.clone().expect("query metrics"),
+            self.default_dispatch_capacity,
         )?;
         self.delivery_sequence = catalog.transport_sequence(&self.definition.output_stream)?;
         if let Some(metrics) = catalog.configured_metrics(&self.definition.id)? {
@@ -700,7 +734,7 @@ impl ContinuousQueryTransformer {
             .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? = None;
         let mut resources = self
             .provider
-            .create_indexes(&self.definition.graph_id, self.definition.id.as_str())
+            .create_indexes(&self.recovery_graph_id, self.definition.id.as_str())
             .await?;
         if self.runtime_compatibility {
             resources = resources.with_fallback_checkpoint(Arc::new(drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore::new()));
@@ -788,7 +822,7 @@ impl ContinuousQueryTransformer {
 
     fn recovery_identity(&self) -> anyhow::Result<super::QueryRecoveryIdentity> {
         Ok(super::QueryRecoveryIdentity::try_new(
-            self.definition.graph_id.clone(),
+            self.recovery_graph_id.clone(),
             self.definition.id.clone(),
             self.definition.configuration_hash(&self.execution)?,
             *self
@@ -1538,6 +1572,9 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if let Some(config) = &self.api_configuration {
             configuration["query_config"] = serde_json::to_value(config)?;
         }
+        if self.runtime_compatibility {
+            configuration["runtime_compatibility"] = true.into();
+        }
         Ok(configuration)
     }
 
@@ -1562,6 +1599,18 @@ impl ComputationComponent for ContinuousQueryTransformer {
             complete: false,
             progress: self.source_progress.clone(),
         };
+        if let Some(declaration) = &self.declaration {
+            if !self.provider.is_volatile() {
+                for source in &declaration.sources {
+                    anyhow::ensure!(
+                        source.source()?.supports_replay(),
+                        "IncompatibleSource: sources that do not support replay cannot feed persistent query '{}' (source '{}', supports_replay=false)",
+                        self.definition.id,
+                        source.id()
+                    );
+                }
+            }
+        }
         if let Some(provider) = &self.bootstrap {
             provider.validate_query_scope(
                 &self.recovery_scope,
@@ -1943,6 +1992,24 @@ impl Default for ContinuousQueryFactory {
                 },
                 dependencies: BTreeMap::from([
                     (
+                        Arc::from("declaration"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<
+                                super::query_configuration::OrdinaryQueryDeclaration,
+                            >(ResourceRole::Component)
+                        },
+                    ),
+                    (
+                        Arc::from("backend"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<
+                                Arc<dyn drasi_core::interface::IndexBackendPlugin>,
+                            >(ResourceRole::IndexBackend)
+                        },
+                    ),
+                    (
                         Arc::from("scheduling"),
                         ResourceRequirement {
                             minimum: 0,
@@ -1971,9 +2038,13 @@ impl Default for ContinuousQueryFactory {
                     ),
                     (
                         Arc::from("indexes"),
-                        ResourceRequirement::exactly_one::<QueryIndexProviderResource>(
-                            ResourceRole::IndexBackend,
-                        ),
+                        ResourceRequirement {
+                            // Failed declarations can precede index resolution.
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<QueryIndexProviderResource>(
+                                ResourceRole::IndexBackend,
+                            )
+                        },
                     ),
                     (
                         Arc::from("bootstrap"),
@@ -2129,6 +2200,35 @@ impl ComponentFactory for ContinuousQueryFactory {
         declarations: &BTreeMap<super::ResourceId, super::ResourceSpecification>,
         resources: &BTreeMap<super::ResourceId, super::ResourceHandle>,
     ) -> anyhow::Result<()> {
+        for id in spec.dependencies.get("declaration").into_iter().flatten() {
+            if let Some(resource) = resources.get(id) {
+                let declaration =
+                    resource.get::<super::query_configuration::OrdinaryQueryDeclaration>()?;
+                anyhow::ensure!(
+                    &declaration.id == spec.descriptor.id(),
+                    "query declaration belongs to another component"
+                );
+                if let Some(cause) = &declaration.failure {
+                    return Err(super::GraphError::Reported {
+                        cause: cause.clone(),
+                    }
+                    .into());
+                }
+                super::plugin_services::validate_service(
+                    spec,
+                    resources,
+                    "backend",
+                    declaration.backend.as_ref(),
+                    |provider: &Arc<dyn drasi_core::interface::IndexBackendPlugin>| provider,
+                )?;
+            }
+        }
+        anyhow::ensure!(
+            spec.dependencies
+                .get("indexes")
+                .is_some_and(|resources| resources.len() == 1),
+            "query construction requires one index provider"
+        );
         self.validate_resources(spec, declarations, resources)?;
         if let Some(ConfigurationValue::Literal(value)) = spec.configuration.get("execution") {
             let execution: QueryExecutionSettings = serde_json::from_value(value.clone())?;
@@ -2321,6 +2421,10 @@ impl ComponentFactory for ContinuousQueryFactory {
             execution,
             middleware,
             config
+                .get("runtime_compatibility")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            config
                 .get("defer_build")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
@@ -2333,10 +2437,20 @@ impl ComponentFactory for ContinuousQueryFactory {
             .get("reset_configuration")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        query.runtime_compatibility = config
-            .get("runtime_compatibility")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        if context
+            .specification
+            .dependencies
+            .contains_key("declaration")
+        {
+            if let Some(declaration) = context
+                .resources::<super::query_configuration::OrdinaryQueryDeclaration>("declaration")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+            {
+                query.default_dispatch_capacity = declaration.default_dispatch_capacity;
+                query.declaration = Some(declaration);
+            }
+        }
         if context
             .specification
             .dependencies
@@ -2391,7 +2505,7 @@ impl ComponentFactory for ContinuousQueryFactory {
             }
         }
         Ok(ConstructedComponent::query(Box::new(
-            super::TransactionTransformer::from_query(query),
+            query.track_delivery(),
         )))
     }
 }

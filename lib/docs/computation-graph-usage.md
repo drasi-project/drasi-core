@@ -193,15 +193,17 @@ factory and connection changes use computation operations.
 
 ## Inspect a problem
 
-Start with the component's status and error, then look at the query's own graph:
+Start with the component's status and error, then inspect its instance graph:
 
 ```rust,ignore
 let status = drasi.get_query_status("order-names").await?;
-let query_graph = drasi.inspect_query_computation("order-names").await?;
+let graph = drasi.inspect_query_computation("order-names").await?;
 let inventory = drasi.inspect_computation_inventory().await?;
 ```
 
-The inventory includes the ComputationGraph and its owned QueryGraphs.
+The inventory contains the instance's one ComputationGraph, including ordinary
+queries and their helpers. `inspect_query_computation` validates the query and
+returns that same graph's inspector; it does not create or expose a private query graph.
 Logs and metrics use the DrasiLib APIs. Failure objects may
 contain configuration or provider details; do not publish them as sanitized
 error messages without checking them.

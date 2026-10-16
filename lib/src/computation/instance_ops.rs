@@ -15,7 +15,7 @@
 use super::v1::{ComponentBatch, ComputationInfo, GraphSelection, ReconciliationReport};
 use crate::{DrasiError, DrasiLib, Result};
 
-/// Complete user configuration, excluding generated query-internal graphs.
+/// Complete user configuration, excluding generated ordinary-query infrastructure.
 /// The existing source/query/reaction representation is retained under `instance`.
 /// Configurations may contain secrets and must be stored as privileged data.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -55,6 +55,11 @@ impl DrasiLib {
                 }
                 Err(error) => return Err(DrasiError::from(error)),
             };
+            let mut query_members = BTreeSet::new();
+            for id in self.computation_runtime.ordinary_queries_at(&root)?.keys() {
+                query_members
+                    .extend(super::runtime::native_query::query_members(&root, id).into_keys());
+            }
             let ordinary: BTreeSet<_> = instance
                 .sources
                 .iter()
@@ -66,6 +71,7 @@ impl DrasiLib {
                         .iter()
                         .map(|reaction| reaction.id.as_str()),
                 )
+                .chain(query_members.iter().map(|id| id.as_str()))
                 .collect();
             let native_ids: BTreeSet<_> = root
                 .desired
@@ -150,7 +156,8 @@ impl DrasiLib {
     pub fn computation_component(&self, id: &str) -> Result<super::v1::ComponentHandle> {
         let id = super::v1::ComponentId::try_new(id)
             .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
-        self.computation_control()?
+        self.state_guard.require_initialized()?;
+        self.computation_runtime
             .component_handle(&id)
             .map_err(|error| {
                 DrasiError::operation_failed("component", id.as_str(), "get", error.to_string())
@@ -158,9 +165,9 @@ impl DrasiLib {
             })
     }
 
-    /// Inspect the ComputationGraph and its QueryGraphs. Scope ownership and
-    /// host-known shared dependencies are explicit; private plugin internals
-    /// are not inferred. Individual scopes are coherent, not globally atomic.
+    /// Inspect the instance's single ComputationGraph and host-known shared
+    /// dependencies from one coherent publication. Private plugin internals
+    /// are not inferred.
     pub async fn inspect_computation_inventory(&self) -> Result<super::v1::ComputationInventory> {
         self.state_guard.require_initialized()?;
         self.computation_runtime

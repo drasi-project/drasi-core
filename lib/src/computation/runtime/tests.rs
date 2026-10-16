@@ -228,9 +228,13 @@ async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
     let runtime = core.computation_runtime.as_ref();
     runtime.cleanup_candidates.write().await.clear();
     let records = runtime.current_records().await.unwrap();
-    assert!(["source", "query", "reaction"]
+    assert!(["source", "reaction"]
         .iter()
         .all(|id| records.contains_key(*id)));
+    assert!(runtime
+        .ordinary_queries_at(&runtime.control().unwrap().registry_snapshot())
+        .unwrap()
+        .contains_key(&ComponentId::try_new("query").unwrap()));
     assert!(core
         .list_sources()
         .await
@@ -424,7 +428,7 @@ async fn query_manager_is_a_shared_graph_backed_facade() {
         .get_query_instance("query")
         .await
         .unwrap();
-    assert!(query.as_any().is::<QueryInstance>());
+    assert!(query.as_any().is::<NativeQuery>());
     core.shutdown().await.unwrap();
 }
 
@@ -1087,11 +1091,15 @@ async fn next(receiver: &mut mpsc::UnboundedReceiver<QueryResult>) -> QueryResul
         .unwrap()
 }
 
-async fn component_handle(core: &DrasiLib, id: &str, kind: &str) -> ComponentHandle {
+async fn component_handle(core: &DrasiLib, id: &str, kind: &'static str) -> ComponentHandle {
     let runtime = core.computation_runtime.as_ref();
-    let record = runtime.record(id, kind).await.unwrap();
-    assert_eq!(record.node.as_str(), id);
-    runtime.handle_for(&record).unwrap()
+    let control = runtime.control().unwrap();
+    runtime
+        .component_observation_at(&control.registry_snapshot(), id, kind)
+        .unwrap();
+    control
+        .component_handle(&ComponentId::try_new(id).unwrap())
+        .unwrap()
 }
 
 async fn assert_creation_failed(core: &DrasiLib, handle: &ComponentHandle, message: &str) {
@@ -1277,12 +1285,12 @@ async fn invalid_query_addition_retains_the_original_declared_configuration() {
     assert_eq!(
         snapshot.desired.specifications[handle.id()]
             .configuration
-            .get("definition"),
+            .get("query_config"),
         Some(&ConfigurationValue::Literal(
             serde_json::to_value(invalid).unwrap()
         )),
     );
-    let declared = runtime.query("invalid").await.unwrap();
+    let declared = core.computation_runtime.query("invalid").await.unwrap();
     assert_eq!(
         declared.inspector().snapshot().desired.id,
         snapshot.desired.id
@@ -1957,6 +1965,25 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
     ] {
         assert_eq!(handle.id().as_str(), id);
         handle.wait_created().await.unwrap();
+        if kind == "query" {
+            let publication = runtime.control().unwrap().registry_snapshot();
+            assert!(runtime
+                .ordinary_queries_at(&publication)
+                .unwrap()
+                .contains_key(handle.id()));
+            assert_eq!(
+                publication.desired.specifications[handle.id()].role,
+                ComponentRole::Query
+            );
+            for (name, _) in services {
+                let id = ResourceId::try_new(format!("instance.{name}")).unwrap();
+                assert_eq!(
+                    publication.observed.resources[&id].generation,
+                    initial.observed.resources[&id].generation
+                );
+            }
+            continue;
+        }
         let record = runtime.record(id, kind).await.unwrap();
         assert_eq!(record.node, *handle.id());
         assert_eq!(
@@ -2036,7 +2063,8 @@ async fn configured_index_providers_are_borrowed_resources_with_the_original_han
             .desired
             .resources
             .values()
-            .filter(|resource| resource.role == ResourceRole::IndexBackend)
+            .filter(|resource| resource.role == ResourceRole::IndexBackend
+                && resource.id.as_str().starts_with("instance.index/"))
             .count(),
         2
     );
@@ -2113,7 +2141,8 @@ async fn index_aliases_share_one_node_and_query_dependencies_follow_reconfigurat
             .desired
             .resources
             .values()
-            .filter(|resource| resource.role == ResourceRole::IndexBackend)
+            .filter(|resource| resource.role == ResourceRole::IndexBackend
+                && resource.id.as_str().starts_with("instance.index/"))
             .count(),
         2
     );
@@ -2124,7 +2153,7 @@ async fn index_aliases_share_one_node_and_query_dependencies_follow_reconfigurat
         .unwrap();
     assert!(Arc::ptr_eq(bound.as_ref(), &primary));
     assert_eq!(
-        publication.desired.specifications[query.id()].dependencies["indexes"],
+        publication.desired.specifications[query.id()].dependencies["backend"],
         vec![primary_id.clone()]
     );
     assert!(control
@@ -2143,7 +2172,7 @@ async fn index_aliases_share_one_node_and_query_dependencies_follow_reconfigurat
     core.update_query("query", replacement).await.unwrap();
     let desired = control.desired_snapshot();
     assert_eq!(
-        desired.specifications[query.id()].dependencies["indexes"],
+        desired.specifications[query.id()].dependencies["backend"],
         vec![secondary_id]
     );
     control
@@ -2214,38 +2243,34 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     runtime.cleanup_candidates.write().await.clear();
     let inventory = core.inspect_computation_inventory().await.unwrap();
     let root = ComputationScope::root("__drasi_lib_runtime__");
-    let nested = root.nested(query_id.clone());
     let independent = independent_core
         .inspect_computation_inventory()
         .await
         .unwrap();
     assert_ne!(inventory.instance_id, independent.instance_id);
-    assert_eq!(inventory.scopes.len(), 2);
+    assert_eq!(inventory.scopes.len(), 1);
     assert_eq!(independent.scopes.len(), 1);
     assert_eq!(
-        inventory.scopes[&nested].topology.graph_id.as_ref(),
-        extra_id
+        inventory.scopes[&root].topology.graph_id.as_ref(),
+        "__drasi_lib_runtime__"
     );
     assert!(independent.scopes[&root].owner.is_none());
     assert!(independent.scopes[&root]
         .topology
         .nodes
         .contains_key(&GraphEntityId::Component(query_id.clone())));
-    let owner = inventory.scopes[&nested].owner.as_ref().unwrap();
+    assert!(inventory.scopes[&root].owner.is_none());
     assert_eq!(
-        owner.component,
-        root.entity(GraphEntityId::Component(query_id.clone()))
+        core.computation_component("query").unwrap().generation(),
+        handle.generation()
     );
-    assert_eq!(owner.generation, handle.generation());
-    for scope in [&root, &nested] {
-        assert!(inventory.scopes[scope]
-            .topology
-            .nodes
-            .contains_key(&GraphEntityId::Component(query_id.clone())));
-    }
+    assert!(inventory.scopes[&root]
+        .topology
+        .nodes
+        .contains_key(&GraphEntityId::Component(query_id.clone())));
     assert!(inventory
         .entities()
-        .any(|(id, entity)| id.scope == nested && matches!(entity, GraphEntity::Pipe(_))));
+        .any(|(id, entity)| id.scope == root && matches!(entity, GraphEntity::Pipe(_))));
     assert!(
         inventory
             .entities()
@@ -2267,13 +2292,13 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     let provider = root.entity(GraphEntityId::Resource(
         index_resource_id("primary").unwrap(),
     ));
-    let nested_provider = nested.entity(GraphEntityId::Resource(
+    let nested_provider = root.entity(GraphEntityId::Resource(
         ComputationPipelineBuilder::index_resource_id("query").unwrap(),
     ));
     assert!(inventory
         .dependencies(&nested_provider)
         .any(|link| link.to == provider));
-    let nested_source = nested.entity(GraphEntityId::Resource(
+    let nested_source = root.entity(GraphEntityId::Resource(
         ComputationPipelineBuilder::source_resource_id("source").unwrap(),
     ));
     let source = root.entity(GraphEntityId::Component(
@@ -2283,9 +2308,11 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         .dependencies(&nested_source)
         .any(|link| link.to == source));
     let state = ResourceId::try_new("instance.state").unwrap();
-    assert!(inventory
-        .dependencies(&nested.entity(GraphEntityId::Resource(state.clone())))
-        .any(|link| link.to == root.entity(GraphEntityId::Resource(state.clone()))));
+    assert!(inventory.scopes[&root]
+        .topology
+        .nodes
+        .contains_key(&GraphEntityId::Resource(state)));
+    assert!(inventory.links.iter().all(|link| link.from != link.to));
     // The fixture's legacy index interface cannot delete persistent namespaces.
     let mut memory = config("query", Some("source"));
     memory.storage_backend = Some(crate::indexes::StorageBackendRef::Inline(
@@ -2296,7 +2323,11 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     core.update_query("query", memory).await.unwrap();
     core.remove_query("query").await.unwrap();
     let after = core.inspect_computation_inventory().await.unwrap();
-    assert!(!after.scopes.contains_key(&nested));
+    assert_eq!(after.scopes.len(), 1);
+    assert!(!after.scopes[&root]
+        .topology
+        .nodes
+        .contains_key(&GraphEntityId::Component(query_id.clone())));
     assert!(independent_core
         .computation_component("query")
         .unwrap()
@@ -2305,9 +2336,12 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     assert!(!after
         .links
         .iter()
-        .any(|link| link.from.scope == nested || link.to.scope == nested));
+        .any(|link| link.from == nested_provider || link.to == nested_provider));
     assert!(
-        inventory.scopes.contains_key(&nested),
+        inventory.scopes[&root]
+            .topology
+            .nodes
+            .contains_key(&GraphEntityId::Component(query_id)),
         "earlier snapshots remain immutable"
     );
     core.shutdown().await.unwrap();
@@ -2614,12 +2648,7 @@ async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failu
             assert!(query.observed().unwrap().failure.is_some());
         } else {
             ready.unwrap();
-            let instance = core
-                .computation_runtime
-                .as_ref()
-                .query("query")
-                .await
-                .unwrap();
+            let instance = core.computation_runtime.query("query").await.unwrap();
             assert_eq!(
                 QueryTrait::status(instance.as_ref()).await,
                 ComponentStatus::Running
@@ -2880,13 +2909,13 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
         .unwrap();
     let runtime = core.computation_runtime.as_ref();
     let nodes = runtime.current_records().await.unwrap();
-    for id in ["a", "b", "q1", "q2", "reaction"] {
+    for id in ["a", "b", "reaction"] {
         assert_eq!(nodes[id].node.as_str(), id);
     }
     let a = nodes["a"].node.clone();
     let b = nodes["b"].node.clone();
-    let q1 = nodes["q1"].node.clone();
-    let q2 = nodes["q2"].node.clone();
+    let q1 = core.computation_component("q1").unwrap().id().clone();
+    let q2 = core.computation_component("q2").unwrap().id().clone();
     let reaction = nodes["reaction"].node.clone();
     let control_only = vec![(b.clone(), reaction.clone())];
     runtime
@@ -3731,12 +3760,12 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
         })
     ));
     let runtime = core.computation_runtime.as_ref();
-    let record = runtime.record("query", "query").await.unwrap();
-    let (_, _, first) = runtime.control_for(&record).unwrap();
+    let handle = core.computation_component("query").unwrap();
+    let first = handle.observed().unwrap();
     assert!(format!("{:#}", first.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));
     core.stop().await.unwrap();
     core.start().await.unwrap();
-    let (_, _, second) = runtime.control_for(&record).unwrap();
+    let second = handle.observed().unwrap();
     assert!(second.operation.0 > first.operation.0);
     assert!(format!("{:#}", second.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));
     core.shutdown().await.unwrap();
@@ -3762,7 +3791,10 @@ async fn running_query_replacement_rebinds_consumers_without_restarting_unaffect
     core.start_reaction("reaction").await.unwrap();
     let runtime = core.computation_runtime.as_ref();
     let source_token = runtime.record("source", "source").await.unwrap().token;
-    let unrelated_token = runtime.record("unrelated", "query").await.unwrap().token;
+    let unrelated_token = core
+        .computation_component("unrelated")
+        .unwrap()
+        .generation();
     insert(&core, "source").await;
     assert_eq!(next(&mut output).await.results.len(), 1);
 
@@ -3770,7 +3802,15 @@ async fn running_query_replacement_rebinds_consumers_without_restarting_unaffect
     updated.query = "MATCH (n:Person) RETURN n.name AS name, 'new' AS version".into();
     core.update_query("query", updated).await.unwrap();
     insert_person(&core, "source", "two", "Bob").await;
-    let result = next(&mut output).await;
+    let result = match tokio::time::timeout(Duration::from_secs(2), output.recv()).await {
+        Ok(Some(result)) => result,
+        other => panic!(
+            "replacement result missing: {other:?}; query rows: {:?}; graph: {:?}; reaction starts: {}",
+            core.query_manager().get_query_results("query").await,
+            core.computation_control().unwrap().observed().components,
+            reaction_control.starts.load(Ordering::Acquire)
+        ),
+    };
     assert!(matches!(&result.results[..],
         [crate::channels::ResultDiff::Add { data, .. }]
         if data == &serde_json::json!({"name":"Bob","version":"new"})));
@@ -3780,17 +3820,19 @@ async fn running_query_replacement_rebinds_consumers_without_restarting_unaffect
         source_token
     );
     assert_eq!(
-        runtime.record("unrelated", "query").await.unwrap().token,
+        core.computation_component("unrelated")
+            .unwrap()
+            .generation(),
         unrelated_token
     );
-    let query_token = runtime.record("query", "query").await.unwrap().token;
+    let query_token = core.computation_component("query").unwrap().generation();
 
     let (replacement, replacement_control, _replacement_output) =
         ControlledReaction::new("reaction", &["query"]);
     replacement_control.snapshot.store(true, Ordering::Release);
     core.update_reaction("reaction", replacement).await.unwrap();
     assert_eq!(
-        runtime.record("query", "query").await.unwrap().token,
+        core.computation_component("query").unwrap().generation(),
         query_token
     );
     assert_eq!(
@@ -3846,7 +3888,7 @@ async fn quiescing_ordinary_query_pauses_its_independently_driven_graph() {
         "a quiesced ordinary query must not keep evaluating on its nested driver"
     );
     query.start().await.unwrap();
-    let instance = runtime.query("query").await.unwrap();
+    let instance = core.computation_runtime.query("query").await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(2), output.recv())
         .await
         .unwrap_or_else(|error| {

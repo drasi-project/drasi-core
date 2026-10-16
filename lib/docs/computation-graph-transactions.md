@@ -17,8 +17,10 @@ The output event from one step is passed directly to the next.
 
 ## Query body
 
-`ContinuousQueryFactory` constructs a `TransactionTransformer` query body,
-including for ordinary DrasiLib queries. The reusable `QueryEvaluator` contains
+`ContinuousQueryFactory` constructs `ContinuousQueryTransformer` directly,
+including output-delivery tracking for ordinary DrasiLib queries.
+`TransactionTransformer` retains compatible query constructors for direct
+assembly. Both use the reusable `QueryEvaluator`, which contains
 the existing matching, change detection, projection, aggregation and middleware
 algorithms. The standalone `ContinuousQuery` API also uses that same evaluator;
 the graph does not construct a nested standalone runtime or copy query semantics.

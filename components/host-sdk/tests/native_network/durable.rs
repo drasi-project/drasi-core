@@ -86,112 +86,257 @@ fn gated_indexes(
     .with_durability(original.durability()))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitStop {
+    RequestTimeout,
+    Force,
+    Graceful,
+    RetryAfterDeadline,
+}
+
+async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gate = Arc::new(CommitGate {
+        armed: std::sync::atomic::AtomicBool::new(false),
+        before,
+        entered: Notify::new(),
+        resume: Notify::new(),
+    });
+    let port = free_port()?;
+    let mut harness = Harness::with_gate(
+        directory.path(),
+        port,
+        grpc,
+        Some(gate.clone()),
+        "facilities-db",
+    )
+    .await?;
+    let channel = harness.channel.clone();
+    let saved = harness
+        .drive(false, |control| {
+            let gate = gate.clone();
+            let channel = channel.clone();
+            async move {
+                let mut saved = None;
+                let replied = Notify::new();
+                let send = async {
+                    if grpc {
+                        let mut client = Client::connect(format!("http://127.0.0.1:{port}")).await?;
+                        let session = register(&mut client).await?;
+                        saved = Some(ProducerSession {
+                            incarnation: session.incarnation.parse()?,
+                            producer: ComponentId::try_new(session.producer.clone())?,
+                            epoch: session.epoch,
+                        });
+                        gate.armed.store(true, Ordering::Release);
+                        match client.admit(request(&session, 1, 1)).await {
+                            Ok(response) => assert!(matches!(
+                                response.into_inner().result,
+                                Some(proto::admit_response::Result::Error(error))
+                                    if error.kind == proto::ErrorKind::AcceptanceUnknown as i32
+                            )),
+                            Err(error) => assert!(
+                                [
+                                    tonic::Code::Cancelled,
+                                    tonic::Code::DeadlineExceeded,
+                                    tonic::Code::Unavailable,
+                                ]
+                                .contains(&error.code()),
+                                "{error:?}"
+                            ),
+                        }
+                    } else {
+                        let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+                        let base =
+                            format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
+                        let (_, session) =
+                            post(&client, &base, "producers/register", json!({"producer":"client"}))
+                                .await?;
+                        saved = Some(serde_json::from_value::<ProducerSession>(session.clone())?);
+                        gate.armed.store(true, Ordering::Release);
+                        let (_, outcome) = post(
+                            &client,
+                            &base,
+                            "events",
+                            json!({"session":session,"sequence":1,"event":http_event(1)}),
+                        )
+                        .await?;
+                        assert_eq!(outcome["error"]["kind"], "AcceptanceUnknown", "{outcome}");
+                        assert_eq!(outcome["receipts"], json!([]));
+                    }
+                    replied.notify_one();
+                    Ok::<(), anyhow::Error>(())
+                };
+                let interrupt = async {
+                    gate.entered.notified().await;
+                    let source = ComponentId::try_new("facilities-db")?;
+                    let selection = || GraphSelection::Exact(vec![source.clone()]);
+                    match stop {
+                        CommitStop::RequestTimeout => {}
+                        CommitStop::Force => {
+                            replied.notified().await;
+                            let report = control
+                                .force_cancel_components(GraphRevision(1), GraphSelection::All)
+                                .await?;
+                            assert_eq!(report.cleanup.summary, OperationSummary::Completed, "{report:?}");
+                            assert!(report.interrupted.contains_key(&source), "{report:?}");
+                        }
+                        CommitStop::Graceful => {
+                            let mut observed = control.subscribe_observed();
+                            let stopping = control.stop_components(GraphRevision(1), selection());
+                            tokio::pin!(stopping);
+                            let waiting = async {
+                                observed
+                                    .wait_for(|state| {
+                                        state.components[&source].lifecycle
+                                            == ComponentLifecycle::Quiescing
+                                    })
+                                    .await?;
+                                replied.notified().await;
+                                Ok::<(), anyhow::Error>(())
+                            };
+                            tokio::select! {
+                                result = &mut stopping => {
+                                    anyhow::bail!("graceful stop passed the held commit: {result:?}");
+                                }
+                                result = waiting => result?,
+                            }
+                            gate.resume.notify_one();
+                            let report = stopping.await?;
+                            assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
+                        }
+                        CommitStop::RetryAfterDeadline => {
+                            let error = control
+                                .stop_components(GraphRevision(1), selection())
+                                .await
+                                .expect_err("held commit must prevent graceful stop");
+                            assert!(matches!(&error, GraphError::ReconciliationTimeout), "{error:?}");
+                            gate.resume.notify_one();
+                            assert_eq!(channel.progress().await?.accepted, 1);
+                            let report =
+                                control.stop_components(GraphRevision(1), selection()).await?;
+                            assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+                tokio::try_join!(send, interrupt)?;
+                if stop == CommitStop::Force {
+                    assert!(
+                        channel.progress().await.is_err(),
+                        "interrupted commit must fence its owner"
+                    );
+                } else {
+                    if stop == CommitStop::RequestTimeout {
+                        gate.resume.notify_one();
+                    }
+                    assert_eq!(
+                        channel.progress().await?.accepted,
+                        1,
+                        "request timeout and graceful stop must not roll back graph work"
+                    );
+                }
+                saved.context("registered client session")
+            }
+        })
+        .await?;
+    drop(channel);
+    harness.shutdown().await?;
+
+    let port = free_port()?;
+    let mut harness = Harness::new(directory.path(), port, grpc).await?;
+    assert_eq!(
+        harness.channel.progress().await?.accepted,
+        u64::from(stop != CommitStop::Force || !before),
+        "grpc={grpc} before={before} stop={stop:?}"
+    );
+    let channel = harness.channel.clone();
+    let seen = harness.seen.clone();
+    harness
+        .drive(true, |_| async {
+            if grpc {
+                let mut client = Client::connect(format!("http://127.0.0.1:{port}")).await?;
+                let session: proto::ProducerSession = saved.into();
+                assert_eq!(register(&mut client).await?, session);
+                assert!(matches!(
+                    admit(&mut client, request(&session, 1, 1)).await?,
+                    proto::admit_response::Result::Receipt(value) if value.position == 1
+                ));
+            } else {
+                let client = reqwest::Client::new();
+                let base = format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
+                let (_, session) = post(
+                    &client,
+                    &base,
+                    "producers/register",
+                    json!({"producer":"client"}),
+                )
+                .await?;
+                assert_eq!(
+                    serde_json::from_value::<ProducerSession>(session.clone())?,
+                    saved
+                );
+                let (_, outcome) = post(
+                    &client,
+                    &base,
+                    "events",
+                    json!({"session":session,"sequence":1,"event":http_event(1)}),
+                )
+                .await?;
+                assert_eq!(outcome["receipts"][0]["position"], 1, "{outcome}");
+            }
+            while channel.progress().await?.processed["consumer"] != 1 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(channel.progress().await?.accepted, 1);
+            assert_eq!(*seen.lock().expect("capture lock"), [1]);
+            Ok(())
+        })
+        .await?;
+    drop(channel);
+    harness.shutdown().await
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn network_timeouts_and_source_stop_resolve_real_commits_without_duplicate_acceptance(
 ) -> Result<()> {
     for grpc in [false, true] {
         for before in [false, true] {
-            for stop in [false, true] {
-                let directory = tempfile::tempdir()?;
-                let gate = Arc::new(CommitGate {
-                    armed: std::sync::atomic::AtomicBool::new(false),
-                    before,
-                    entered: Notify::new(),
-                    resume: Notify::new(),
-                });
-                let port = free_port()?;
-                let mut harness = Harness::with_gate(
-                    directory.path(),
-                    port,
-                    grpc,
-                    Some(gate.clone()),
-                    "facilities-db",
-                )
-                .await?;
-                let channel = harness.channel.clone();
-                let saved = harness.drive(false, |control| {
-                    let gate = gate.clone();
-                    let channel = channel.clone();
-                    async move {
-                    let mut saved = None;
-                    let send = async {
-                        if grpc {
-                            let mut client = Client::connect(format!("http://127.0.0.1:{port}")).await?;
-                            let session = register(&mut client).await?;
-                            saved = Some(ProducerSession { incarnation: session.incarnation.parse()?, producer: ComponentId::try_new(session.producer.clone())?, epoch: session.epoch });
-                            gate.armed.store(true, Ordering::Release);
-                            match client.admit(request(&session, 1, 1)).await {
-                                Ok(response) => assert!(matches!(response.into_inner().result,
-                                    Some(proto::admit_response::Result::Error(error)) if error.kind == proto::ErrorKind::AcceptanceUnknown as i32)),
-                                Err(error) => assert!([tonic::Code::Cancelled, tonic::Code::DeadlineExceeded, tonic::Code::Unavailable].contains(&error.code()), "{error:?}"),
-                            }
-                        } else {
-                            let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
-                            let base = format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
-                            let (_, session) = post(&client, &base, "producers/register", json!({"producer":"client"})).await?;
-                            saved = Some(serde_json::from_value::<ProducerSession>(session.clone())?);
-                            gate.armed.store(true, Ordering::Release);
-                            let (_, outcome) = post(&client, &base, "events", json!({"session":session,"sequence":1,"event":http_event(1)})).await?;
-                            assert_eq!(outcome["error"]["kind"], "AcceptanceUnknown", "{outcome}");
-                            assert_eq!(outcome["receipts"], json!([]));
-                        }
-                        Ok::<(), anyhow::Error>(())
-                    };
-                    let interrupt = async {
-                        gate.entered.notified().await;
-                        if stop {
-                            let report = control.stop_components(GraphRevision(1), GraphSelection::Exact(vec![ComponentId::try_new("facilities-db")?])).await?;
-                            assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
-                        }
-                        Ok::<(), anyhow::Error>(())
-                    };
-                    let (sent, interrupted) = tokio::join!(send, interrupt);
-                    sent?;
-                    interrupted?;
-                    if stop {
-                        assert!(channel.progress().await.is_err(), "interrupted commit must fence its owner");
-                    } else {
-                        gate.resume.notify_one();
-                        assert_eq!(channel.progress().await?.accepted, 1, "client timeout does not roll back graph work");
-                    }
-                    saved.context("registered client session")
-                }}).await?;
-                drop(channel);
-                harness.shutdown().await?;
-                let port = free_port()?;
-                let mut harness = Harness::new(directory.path(), port, grpc).await?;
-                assert_eq!(
-                    harness.channel.progress().await?.accepted,
-                    u64::from(!stop || !before),
-                    "grpc={grpc} before={before} stop={stop}"
-                );
-                let channel = harness.channel.clone();
-                let seen = harness.seen.clone();
-                harness.drive(true, |_| async {
-                    if grpc {
-                        let mut client = Client::connect(format!("http://127.0.0.1:{port}")).await?;
-                        let session: proto::ProducerSession = saved.into();
-                        assert_eq!(register(&mut client).await?, session);
-                        assert!(matches!(admit(&mut client, request(&session, 1, 1)).await?, proto::admit_response::Result::Receipt(value) if value.position == 1));
-                    } else {
-                        let client = reqwest::Client::new();
-                        let base = format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
-                        let (_, session) = post(&client, &base, "producers/register", json!({"producer":"client"})).await?;
-                        assert_eq!(serde_json::from_value::<ProducerSession>(session.clone())?, saved);
-                        let (_, outcome) = post(&client, &base, "events", json!({"session":session,"sequence":1,"event":http_event(1)})).await?;
-                        assert_eq!(outcome["receipts"][0]["position"], 1, "{outcome}");
-                    }
-                    while channel.progress().await?.processed["consumer"] != 1 { tokio::task::yield_now().await; }
-                    assert_eq!(channel.progress().await?.accepted, 1);
-                    assert_eq!(*seen.lock().unwrap(), [1]);
-                    Ok(())
-                }).await?;
-                drop(channel);
-                harness.shutdown().await?;
+            for stop in [CommitStop::RequestTimeout, CommitStop::Force] {
+                network_commit_case(grpc, before, stop).await?;
             }
         }
     }
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn network_graceful_stop_finishes_submitted_commits() -> Result<()> {
+    for grpc in [false, true] {
+        for before in [false, true] {
+            network_commit_case(grpc, before, CommitStop::Graceful).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn graceful_stop_retries_after_deadline() -> Result<()> {
+    for grpc in [false, true] {
+        for before in [false, true] {
+            network_commit_case(grpc, before, CommitStop::RetryAfterDeadline).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn network_graceful_stop_retries_after_boundary_timeout() -> Result<()> {
+    graceful_stop_retries_after_deadline().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn network_graceful_stop_retries_after_boundary_timeout_multi_thread() -> Result<()> {
+    graceful_stop_retries_after_deadline().await
 }
 
 #[tokio::test(flavor = "current_thread")]

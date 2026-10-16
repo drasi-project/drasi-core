@@ -99,16 +99,19 @@ Exact API state names and transitions are in the
 
 ## Queries run independently
 
-A query added through DrasiLib owns a QueryGraph containing its source
-connections, evaluator, result delivery and storage bindings.
+A query added through DrasiLib is a `ContinuousQueryTransformer` in the
+instance's ComputationGraph. Its source readers, scheduled-work source and
+result outlet are components in that same graph, not a private query graph.
 
-Each QueryGraph has an owned Tokio task. Independent queries can therefore run
-on different workers in a multi-thread runtime. A single-thread runtime also
-works. ComputationGraph does not allocate one dedicated thread per component.
+The graph owns independently scheduled component tasks. Independent queries
+can therefore run on different workers in a multi-thread runtime. A
+single-thread runtime also works. ComputationGraph does not allocate one
+dedicated thread per component.
 
-Pausing the containing query waits for its QueryGraph to pause. Shutdown
-waits for its task before releasing query resources. Cancelling the caller's
-wait does not abandon that task.
+Generation-fenced lifecycle groups start and stop a query and its exclusive
+helpers without stopping a shared source. Shutdown waits for owned tasks and
+cleanup before releasing query resources. Cancelling the caller's wait does
+not abandon that work.
 
 ## How events are ordered and buffered
 
@@ -161,8 +164,8 @@ Queries keep current result rows, source progress, output sequence numbers and
 recent output history. The recent history lets consumers recover missed results
 without always rebuilding from a full snapshot.
 
-Query factories use a `TransactionTransformer` query body. It invokes the same
-`QueryEvaluator` as the standalone query API; solving, change detection and
+Query factories construct `ContinuousQueryTransformer` directly. It invokes the
+same `QueryEvaluator` as the standalone query API; solving, change detection and
 aggregation are not reimplemented. With a storage provider that supports atomic query output, index changes,
 source checkpoints, output sequence, retained outputs and current rows commit
 together. Only committed results become visible. Unconfirmed output is replayed
@@ -218,10 +221,10 @@ Borrowed providers remain the responsibility of their owner.
 
 ## What inspection shows
 
-Inspection includes the ComputationGraph and each query's QueryGraph. It shows
-components, connections, known resources, plugin versions and dependencies.
-Application component IDs are unique within the DrasiLib instance. QueryGraph
-internals are identified through their owning query.
+Inspection includes the instance's ComputationGraph, with queries and their
+helpers alongside other components. It shows connections, known resources,
+plugin versions and dependencies. Component IDs share the DrasiLib instance
+namespace; ordinary query APIs identify their exclusive lifecycle helpers.
 
 It reports actual supplied or reported objects, not guesses about private plugin
 internals. Resource links do not prove that a provider was used for every event.
@@ -229,8 +232,9 @@ Plugin references describe components' implementations, not every installed
 plugin binary.
 
 Logs, metrics, recent state changes and per-change timing data support diagnosis.
-Each graph's snapshot is consistent; combining the ComputationGraph with live
-QueryGraph observations is not a single atomic snapshot of all execution state.
+The inventory comes from one coherent graph registry publication, not a
+combination of separately observed query graphs. It is not an atomic snapshot
+of every provider's private processing state.
 
 ## Current limits
 

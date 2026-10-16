@@ -140,7 +140,7 @@ The supplied definition is authoritative for its managed members:
 - Failed cleanup remains visible and retryable; persistence does not make
   lifecycle effects atomically rollbackable.
 
-QueryGraphs and the internal observability source are runtime
+Generated ordinary-query helper components and the internal observability source are runtime
 implementation details, not user reconstruction recipes. In memory-only mode,
 unmanaged object-injected components may coexist; applying managed definitions
 does not implicitly adopt or delete them. Conflicting component or resource IDs
