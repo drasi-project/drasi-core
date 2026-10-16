@@ -124,7 +124,7 @@ def inventory(data, config):
     return sorted(crates, key=lambda p: p["name"]), sorted(plugins, key=lambda p: p["name"]), versions
 
 
-def freeze(root, destination, mode):
+def freeze(root, destination):
     root = root.resolve()
     require(not destination.exists(), f"Candidate output already exists: {destination}")
     data = metadata(root)
@@ -157,7 +157,7 @@ def freeze(root, destination, mode):
         "source_sha256": sha(archive),
         "lock_sha256": lock_hash,
         "baseline_lock_sha256": hashlib.sha256(baseline).hexdigest(),
-        "mode": mode,
+        "mode": "locked",
         "repository": os.environ.get("GITHUB_REPOSITORY", "drasi-project/drasi-core"),
         "run_id": os.environ.get("GITHUB_RUN_ID", "local"),
         "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "local"),
@@ -322,7 +322,6 @@ def main():
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--sha256")
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--mode", choices=["locked", "fresh"], default="locked")
     parser.add_argument("--registry", default="ghcr.io/drasi-project")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--target")
@@ -334,7 +333,7 @@ def main():
             output("certificate_identity",
                    publication_context(json.loads(os.environ["WORKFLOW_INPUTS"]), os.environ))
         elif args.command == "freeze":
-            freeze(args.root.resolve(), args.output.resolve(), args.mode)
+            freeze(args.root.resolve(), args.output.resolve())
         elif args.command == "restore":
             restore(args.bundle, args.sha256, args.root)
         elif args.command == "check":

@@ -61,7 +61,7 @@ class CandidateTests(unittest.TestCase):
                                      "GITHUB_REF": "refs/heads/main",
                                      "ALLOW_BRANCH_TEST": "false",
                                      "GITHUB_REPOSITORY": "drasi-project/drasi-core"}):
-            candidate.freeze(self.root, self.bundle, "locked")
+            candidate.freeze(self.root, self.bundle)
         self.expected = candidate.sha(self.bundle / "candidate.json")
         self.prepared = self.base / "prepared"
         self.data = candidate.restore(self.bundle, self.expected, self.prepared)
@@ -75,6 +75,7 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual({"candidate-fixture-base", "drasi-source-fixture"},
                          {p["name"] for p in self.data["crates"]})
         self.assertEqual(["drasi-source-fixture"], [p["name"] for p in self.data["plugins"]])
+        self.assertEqual("locked", self.data["mode"])
         self.assertEqual(self.data["baseline_lock_sha256"], self.data["lock_sha256"])
         self.assertEqual(candidate.sha(self.root / "Cargo.lock"), candidate.sha(self.prepared / "Cargo.lock"))
 
@@ -82,7 +83,7 @@ class CandidateTests(unittest.TestCase):
         (self.root / "plugin/CHANGELOG.md").write_text("# First release\n")
         (self.root / "unrelated-secret.txt").write_text("must-not-be-bundled")
         bundle = self.base / "with-changelog"
-        candidate.freeze(self.root, bundle, "locked")
+        candidate.freeze(self.root, bundle)
         restored = self.base / "with-changelog-source"
         candidate.restore(bundle, candidate.sha(bundle / "candidate.json"), restored)
         self.assertEqual("# First release\n", (restored / "plugin/CHANGELOG.md").read_text())
@@ -105,7 +106,7 @@ class CandidateTests(unittest.TestCase):
         self.command("git", "add", ".")
         self.command("cargo", "check", "--locked", "--offline", "-p", "drasi-source-fixture")
         broken = self.base / "broken"
-        candidate.freeze(self.root, broken, "locked")
+        candidate.freeze(self.root, broken)
         digest = candidate.sha(broken / "candidate.json")
         extracted = self.base / "broken-source"
         candidate.restore(broken, digest, extracted)
@@ -207,6 +208,7 @@ class CandidateTests(unittest.TestCase):
         self.produce(*self.handoff_fixture())
         result = json.loads((self.base / "ready.json").read_text())
         self.assertEqual(8, len(result["artifacts"]))
+        self.assertEqual("locked", result["mode"])
         self.assertEqual(candidate.IDENTITY, result["certificate_identity"])
         self.assertEqual("nightly-candidate-123-2", result["candidate_artifact"])
 
@@ -224,7 +226,7 @@ class CandidateTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "GITHUB_REF": "refs/heads/test/release", "ALLOW_BRANCH_TEST": "true",
         }):
-            candidate.freeze(self.root, destination, "locked")
+            candidate.freeze(self.root, destination)
         result = json.loads((destination / "candidate.json").read_text())
         self.assertTrue(result["branch_test"])
         self.assertEqual("refs/heads/test/release", result["source_ref"])
@@ -269,6 +271,14 @@ class CandidateTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_freeze_rejects_removed_dependency_refresh_mode(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / ".github/scripts/release-candidate.py"),
+             "freeze", "--mode", "fresh"],
+            capture_output=True, text=True)
+        self.assertEqual(2, result.returncode)
+        self.assertIn("unrecognized arguments: --mode fresh", result.stderr)
+
     def test_publication_context_limits_branch_opt_in_to_isolated_nightly(self):
         env = {
             "GITHUB_REPOSITORY": "drasi-project/drasi-core",
@@ -338,9 +348,12 @@ class WorkflowTests(unittest.TestCase):
     def test_nightly_is_locked_signed_and_isolated(self):
         document = repair_tests.workflow(ROOT / ".github/workflows/nightly.yml")
         inputs = document["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual({"fresh_dependencies", "allow_branch_test"}, set(inputs))
+        self.assertEqual({"allow_branch_test"}, set(inputs))
         self.assertFalse(inputs["allow_branch_test"]["default"])
         jobs = document["jobs"]
+        prepare_script = "\n".join(s.get("run", "") for s in jobs["prepare"]["steps"])
+        self.assertIn("release-plz update", prepare_script)
+        self.assertNotIn("cargo update", prepare_script)
         publish = jobs["publish-plugins"]
         self.assertEqual(candidate.TEST_REGISTRY, publish["with"]["registry"])
         self.assertTrue(publish["with"]["sign"])
@@ -352,6 +365,44 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("github.event_name == 'workflow_dispatch'", jobs["prepare"]["if"])
         self.assertEqual("${{ inputs.allow_branch_test == true }}",
                          publish["with"]["allow_branch_test"])
+
+    def test_nightly_selection_accepts_inherited_dispatch_inputs(self):
+        nightly = repair_tests.workflow(ROOT / ".github/workflows/nightly.yml")
+        publication = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
+        dispatch_defaults = {
+            name: definition["default"]
+            for name, definition in nightly["on"]["workflow_dispatch"]["inputs"].items()
+        }
+        selection = publication["jobs"]["select-mode"]["steps"][1]["run"]
+        for branch, branch_test in (("main", False), ("ruokun-niu-core-release-safeguards", True)):
+            with self.subTest(branch=branch), tempfile.TemporaryDirectory() as directory:
+                ref = f"refs/heads/{branch}"
+                outputs = Path(directory) / "outputs"
+                # Include caller inputs, as observed in run 38933476222.
+                inputs = repair_tests.repair.PUBLISH_DEFAULTS | dispatch_defaults | {
+                    "allow_branch_test": branch_test,
+                    "candidate_artifact": "nightly-candidate-38933476222-1",
+                    "candidate_sha256": "d18f9f5f11d2232d29bb8bbf1ac708a9cbb626efbeaa20e0b8427fcc0ae2ff07",
+                    "registry": candidate.TEST_REGISTRY,
+                    "tag": "nightly-38933476222-1",
+                }
+                result = subprocess.run(
+                    ["bash", "-e", "-c", selection], cwd=ROOT, capture_output=True, text=True,
+                    env=os.environ | {
+                        "WORKFLOW_INPUTS": json.dumps(inputs),
+                        "GITHUB_REPOSITORY": "drasi-project/drasi-core",
+                        "GITHUB_REF": ref,
+                        "GITHUB_EVENT_NAME": "workflow_dispatch",
+                        "GITHUB_WORKFLOW_REF":
+                            f"drasi-project/drasi-core/.github/workflows/nightly.yml@{ref}",
+                        "GITHUB_RUN_ID": "38933476222", "GITHUB_RUN_ATTEMPT": "1",
+                        "GITHUB_OUTPUT": str(outputs),
+                    })
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual({
+                    "certificate_identity": candidate.IDENTITY.replace("refs/heads/main", ref),
+                    "mode": "publish",
+                }, dict(line.split("=", 1) for line in outputs.read_text().splitlines()))
 
     def test_all_targets_consume_same_candidate_and_keep_native_checks(self):
         document = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")

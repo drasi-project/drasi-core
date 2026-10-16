@@ -15,11 +15,6 @@ on:
         required: false
         type: boolean
         default: false
-      fresh_dependencies:
-        description: 'Explicit fresh-dependency rehearsal instead of the committed baseline'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   # Least privilege by default; elevated scopes are granted per-job below.
@@ -51,16 +46,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: release-plz update
 
-      - name: Explicit fresh-dependency update
-        if: ${{ inputs.fresh_dependencies == true }}
-        run: cargo update
-
       - name: Freeze prepared source and lockfile
         id: freeze
         env:
-          MODE: ${{ inputs.fresh_dependencies && 'fresh' || 'locked' }}
           ALLOW_BRANCH_TEST: ${{ inputs.allow_branch_test == true }}
-        run: python3 .github/scripts/release-candidate.py freeze --output "$RUNNER_TEMP/candidate" --mode "$MODE"
+        run: python3 .github/scripts/release-candidate.py freeze --output "$RUNNER_TEMP/candidate"
 
       - name: Retain exact prepared candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

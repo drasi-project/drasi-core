@@ -262,10 +262,12 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
 
 ### [nightly.yml](nightly.yml)
 
-Scheduled nightly uses the committed lockfile baseline and the same release-plz
-configuration as release preparation. Manual `fresh_dependencies: true` explicitly
-refreshes dependencies in the temporary candidate and marks the handoff `fresh`.
-It does not commit changes or silently replace the scheduled release-parity lane.
+Scheduled and manually dispatched nightlies use the committed lockfile baseline
+and the same release-plz configuration as release preparation. There is no
+dependency-refresh mode; intentional dependency updates must be reviewed and
+committed in `Cargo.lock` before the rehearsal. Release-plz still prepares versions
+and reconciles workspace lock entries as described above. The candidate and handoff
+always record `mode: locked`; nightly does not commit the prepared changes.
 There are no skip/reuse-tag inputs that can produce a ready incomplete candidate.
 
 #### Temporary pre-merge branch rehearsal
@@ -276,7 +278,7 @@ and pushing the candidate branch to **drasi-project/drasi-core** (not a fork), r
 ```bash
 gh workflow run nightly.yml --repo drasi-project/drasi-core \
   --ref ruokun-niu-core-release-safeguards \
-  -f allow_branch_test=true -f fresh_dependencies=false
+  -f allow_branch_test=true
 ```
 
 This dispatches the workflow revision on the named branch; no merge is needed.
