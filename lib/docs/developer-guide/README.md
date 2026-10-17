@@ -73,6 +73,7 @@ components are replaced or work is replayed.
 
 ## Contents
 
+- [Choosing the right public interface](#choosing-the-right-public-interface)
 - [A Rust project and a complete example](#a-rust-project-and-a-complete-example)
 - [The application model](#the-application-model)
 - [Modeling input](#modeling-input)
@@ -95,6 +96,41 @@ components are replaced or work is replayed.
 - [Observing the application](#observing-the-application)
 - [Errors, cancellation and cleanup](#errors-cancellation-and-cleanup)
 - [Choosing a production boundary](#choosing-a-production-boundary)
+
+## Choosing the right public interface
+
+**17 October 2026 clarification.** These entry points serve different purposes;
+their presence does not imply another runtime or interchangeable plugin types.
+
+| What you are building | Public starting point |
+|---|---|
+| An application embedding Drasi | `DrasiLib`, `DrasiLibBuilder`, `Query` and `config` |
+| An in-process native component or graph | `drasi_lib::computation::v1` |
+| A dynamically loaded native component | `drasi-computation-plugin-sdk` traits and `drasi-computation-contracts` messages; no dependency on `drasi-lib` merely for plugin data |
+| An existing ordinary source, reaction or bootstrap provider | The documented `sources`, `reactions`, `bootstrap`, `channels` and `context` modules; root exports remain identical |
+| A host-owned storage/configuration service | `indexes`, `state_store`, `wal` and `management` |
+| Inspection, logs and measurements | `ComponentGraphView`, `observability`, `metrics` and optional `profiling` |
+
+Run `cargo doc -p drasi-lib --no-deps --open` from Core for the generated API
+reference. The crate overview links these interfaces, explains ownership and
+includes compiled import examples. The
+[plugin architecture guide](../../../components/plugin-architecture.md) and
+[native SDK guide](../../../components/computation-plugin-sdk/README.md) explain
+the separate dynamic-library boundary.
+
+`compatibility` contains deprecated query helpers, not the query implementation.
+Prefer `QueryConfigurationSnapshot` for settings and `QueryResultSnapshot` for
+rows. Old names and `managers` logging imports remain available; use
+`observability` for new logging code. Some implementation modules are public for
+existing callers but hidden from the generated index. They are not crate-private,
+and this documentation cleanup neither removes them nor makes them the preferred
+extension interface.
+
+The graph owns component and resource lifecycle. Keep auxiliary workers owned
+until joined; do not treat a cancelled wait as completed cleanup. A borrowed
+provider handle does not grant independent commit authority or permission to
+keep using it after replacement. See the ownership sections below before
+implementing providers or background work.
 
 ## A Rust project and a complete example
 

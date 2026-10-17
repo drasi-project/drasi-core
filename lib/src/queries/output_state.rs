@@ -148,7 +148,7 @@ impl QueryOutputState {
 
     /// Apply diffs and install a sequence that was already staged to durable storage.
     ///
-    /// Unlike [`advance_sequence_and_push`], this does not independently increment
+    /// Unlike [`Self::advance_sequence_and_push`], this does not independently increment
     /// `as_of_sequence`. The caller must pass the sequence written inside the
     /// session transaction so in-memory state cannot diverge from durable output.
     /// In-memory sequence still only moves after that durable commit succeeds.
@@ -268,7 +268,7 @@ impl QueryOutputState {
     /// The sequence is never lowered: `as_of_sequence` becomes
     /// `max(current, as_of_sequence)`. Outbox entries are sorted and trimmed to
     /// `outbox_capacity`, keeping the newest. Callers must validate durable
-    /// consistency with [`reconcile_durable_output`] before invoking this.
+    /// consistency with the internal `reconcile_durable_output` helper before invoking this.
     ///
     /// Hydrate is a startup-only operation from uninitialized state. Calling it
     /// after [`initialized`](Self::initialized) is a programming error; debug

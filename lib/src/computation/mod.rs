@@ -16,7 +16,7 @@
 //! Existing [`crate::Source`] and [`crate::Reaction`] plugins are hosted through
 //! explicit adapters; they do not select a separate execution engine.
 //!
-//! Only versioned namespaces are public. [`v1::ComputationGraph`] runs native
+//! Only versioned namespaces are public. [`crate::computation::v1::ComputationGraph`] runs native
 //! components over capability-checked pipes, with explicit adapters for existing
 //! plugins and graph-owned query recovery. Server configuration and plugin loading
 //! remain the embedding host's responsibility; legacy plugin ABIs are unchanged.

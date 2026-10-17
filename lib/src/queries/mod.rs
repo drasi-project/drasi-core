@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Ordinary query APIs and the result-reading types used by existing consumers.
+//!
+//! Use [`crate::Query`] to configure a query and [`crate::DrasiLib`] to operate it.
+//! The manager delegates to the instance graph's native query component.
+//! [`crate::queries::SnapshotResponse`], [`crate::queries::OutboxResponse`] and
+//! [`crate::queries::FetchError`] remain active
+//! read contracts. Deprecated query base/state/dedup helpers are retained through
+//! [`crate::compatibility`]; they do not run the current query pipeline.
+
 pub mod base;
 pub mod config_hash;
 pub mod label_extractor;

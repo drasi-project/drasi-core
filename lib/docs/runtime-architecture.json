@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "source_fingerprint": "fnv1a64:47124c2877f3bbea",
+  "source_fingerprint": "fnv1a64:72cb699654261df5",
   "source_files": [
     "components/computation-contracts/src/a2_bridge.rs",
     "components/computation-contracts/src/admission_messages.rs",
@@ -11556,7 +11556,7 @@
       "name": "drasi_lib::bootstrap::ApplicationBootstrapConfig",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 216,
+      "line": 218,
       "condition": "",
       "fields": []
     },
@@ -11564,35 +11564,35 @@
       "name": "drasi_lib::bootstrap::BootstrapContext",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 51,
+      "line": 53,
       "condition": "",
       "fields": [
         {
           "name": "server_id",
           "declaration": "String",
           "variant": "",
-          "line": 64,
+          "line": 66,
           "condition": ""
         },
         {
           "name": "source_id",
           "declaration": "String",
           "variant": "",
-          "line": 66,
+          "line": 68,
           "condition": ""
         },
         {
           "name": "sequence_counter",
           "declaration": "Arc < AtomicU64 >",
           "variant": "",
-          "line": 68,
+          "line": 70,
           "condition": ""
         },
         {
           "name": "properties",
           "declaration": "Arc < HashMap < String , serde_json :: Value > >",
           "variant": "",
-          "line": 70,
+          "line": 72,
           "condition": ""
         }
       ]
@@ -11601,7 +11601,7 @@
       "name": "drasi_lib::bootstrap::BootstrapProvider",
       "kind": "trait",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 157,
+      "line": 159,
       "condition": "",
       "fields": []
     },
@@ -11609,35 +11609,35 @@
       "name": "drasi_lib::bootstrap::BootstrapProviderConfig",
       "kind": "enum",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 293,
+      "line": 295,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "PostgresBootstrapConfig",
           "variant": "Postgres",
-          "line": 298,
+          "line": 300,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "ApplicationBootstrapConfig",
           "variant": "Application",
-          "line": 300,
+          "line": 302,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "ScriptFileBootstrapConfig",
           "variant": "ScriptFile",
-          "line": 302,
+          "line": 304,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "PlatformBootstrapConfig",
           "variant": "Platform",
-          "line": 305,
+          "line": 307,
           "condition": ""
         }
       ]
@@ -11646,7 +11646,7 @@
       "name": "drasi_lib::bootstrap::BootstrapProviderFactory",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 310,
+      "line": 312,
       "condition": "",
       "fields": []
     },
@@ -11654,35 +11654,35 @@
       "name": "drasi_lib::bootstrap::BootstrapRequest",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 38,
+      "line": 40,
       "condition": "",
       "fields": [
         {
           "name": "query_id",
           "declaration": "String",
           "variant": "",
-          "line": 41,
+          "line": 43,
           "condition": ""
         },
         {
           "name": "node_labels",
           "declaration": "Vec < String >",
           "variant": "",
-          "line": 42,
+          "line": 44,
           "condition": ""
         },
         {
           "name": "relation_labels",
           "declaration": "Vec < String >",
           "variant": "",
-          "line": 45,
+          "line": 47,
           "condition": ""
         },
         {
           "name": "request_id",
           "declaration": "String",
           "variant": "",
-          "line": 48,
+          "line": 50,
           "condition": ""
         }
       ]
@@ -11691,21 +11691,21 @@
       "name": "drasi_lib::bootstrap::BootstrapResult",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 135,
+      "line": 137,
       "condition": "",
       "fields": [
         {
           "name": "event_count",
           "declaration": "usize",
           "variant": "",
-          "line": 153,
+          "line": 155,
           "condition": ""
         },
         {
           "name": "source_position",
           "declaration": "Option < Bytes >",
           "variant": "",
-          "line": 154,
+          "line": 156,
           "condition": ""
         }
       ]
@@ -11714,21 +11714,21 @@
       "name": "drasi_lib::bootstrap::PlatformBootstrapConfig",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 255,
+      "line": 257,
       "condition": "",
       "fields": [
         {
           "name": "query_api_url",
           "declaration": "Option < String >",
           "variant": "",
-          "line": 270,
+          "line": 272,
           "condition": ""
         },
         {
           "name": "timeout_seconds",
           "declaration": "u64",
           "variant": "",
-          "line": 275,
+          "line": 277,
           "condition": ""
         }
       ]
@@ -11737,7 +11737,7 @@
       "name": "drasi_lib::bootstrap::PostgresBootstrapConfig",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 198,
+      "line": 200,
       "condition": "",
       "fields": []
     },
@@ -11745,14 +11745,14 @@
       "name": "drasi_lib::bootstrap::ScriptFileBootstrapConfig",
       "kind": "struct",
       "file": "lib/src/bootstrap/mod.rs",
-      "line": 234,
+      "line": 236,
       "condition": "",
       "fields": [
         {
           "name": "file_paths",
           "declaration": "Vec < String >",
           "variant": "",
-          "line": 251,
+          "line": 253,
           "condition": ""
         }
       ]
@@ -17021,238 +17021,238 @@
       "name": "drasi_lib::computation::v1::graph::ComputationGraph",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 1328,
+      "line": 1329,
       "condition": "",
       "fields": [
         {
           "name": "snapshot",
           "declaration": "GraphSnapshot",
           "variant": "",
-          "line": 1347,
+          "line": 1348,
           "condition": ""
         },
         {
           "name": "nodes",
           "declaration": "Vec < NodeSnapshot >",
           "variant": "",
-          "line": 1349,
+          "line": 1350,
           "condition": ""
         },
         {
           "name": "edges",
           "declaration": "BTreeMap < usize , EdgeSnapshot >",
           "variant": "",
-          "line": 1350,
+          "line": 1351,
           "condition": ""
         },
         {
           "name": "components",
           "declaration": "Vec < Arc < controller :: InstanceSlot > >",
           "variant": "",
-          "line": 1351,
+          "line": 1352,
           "condition": ""
         },
         {
           "name": "providers",
           "declaration": "BTreeMap < usize , Arc < dyn PipeProvider > >",
           "variant": "",
-          "line": 1352,
+          "line": 1353,
           "condition": ""
         },
         {
           "name": "factories",
           "declaration": "BTreeMap < ImplementationIdentity , Arc < dyn ComponentFactory > >",
           "variant": "",
-          "line": 1353,
+          "line": 1354,
           "condition": ""
         },
         {
           "name": "next_generation",
           "declaration": "u64",
           "variant": "",
-          "line": 1354,
+          "line": 1355,
           "condition": ""
         },
         {
           "name": "next_edge",
           "declaration": "usize",
           "variant": "",
-          "line": 1355,
+          "line": 1356,
           "condition": ""
         },
         {
           "name": "next_binding_generation",
           "declaration": "u64",
           "variant": "",
-          "line": 1356,
+          "line": 1357,
           "condition": ""
         },
         {
           "name": "next_resource_generation",
           "declaration": "u64",
           "variant": "",
-          "line": 1357,
+          "line": 1358,
           "condition": ""
         },
         {
           "name": "order",
           "declaration": "Vec < usize >",
           "variant": "",
-          "line": 1358,
+          "line": 1359,
           "condition": ""
         },
         {
           "name": "ids",
           "declaration": "BTreeMap < ComponentId , usize >",
           "variant": "",
-          "line": 1359,
+          "line": 1360,
           "condition": ""
         },
         {
           "name": "reserved_components",
           "declaration": "BTreeSet < Arc < str > >",
           "variant": "",
-          "line": 1360,
+          "line": 1361,
           "condition": ""
         },
         {
           "name": "observed",
           "declaration": "watch :: Sender < Arc < ObservedGraph > >",
           "variant": "",
-          "line": 1361,
+          "line": 1362,
           "condition": ""
         },
         {
           "name": "desired",
           "declaration": "watch :: Sender < Arc < GraphSnapshot > >",
           "variant": "",
-          "line": 1362,
+          "line": 1363,
           "condition": ""
         },
         {
           "name": "state",
           "declaration": "watch :: Sender < GraphState >",
           "variant": "",
-          "line": 1363,
+          "line": 1364,
           "condition": ""
         },
         {
           "name": "cleanup_timeout",
           "declaration": "Duration",
           "variant": "",
-          "line": 1364,
+          "line": 1365,
           "condition": ""
         },
         {
           "name": "resource_handles",
           "declaration": "BTreeMap < ResourceId , ResourceHandle >",
           "variant": "",
-          "line": 1365,
+          "line": 1366,
           "condition": ""
         },
         {
           "name": "pending_resource_cleanup",
           "declaration": "BTreeMap < ResourceId , ResourceHandle >",
           "variant": "",
-          "line": 1366,
+          "line": 1367,
           "condition": ""
         },
         {
           "name": "registry",
           "declaration": "watch :: Sender < Arc < GraphRegistrySnapshot > >",
           "variant": "",
-          "line": 1367,
+          "line": 1368,
           "condition": ""
         },
         {
           "name": "inspector",
           "declaration": "super :: ComputationInspector",
           "variant": "",
-          "line": 1368,
+          "line": 1369,
           "condition": ""
         },
         {
           "name": "execution_scope",
           "declaration": "Arc < str >",
           "variant": "",
-          "line": 1369,
+          "line": 1370,
           "condition": ""
         },
         {
           "name": "peers",
           "declaration": "Arc < super :: ControlPlane >",
           "variant": "",
-          "line": 1370,
+          "line": 1371,
           "condition": ""
         },
         {
           "name": "rejected_additions",
           "declaration": "Arc < std :: sync :: Mutex < Vec < Arc < addition :: RejectedAddition > > > >",
           "variant": "",
-          "line": 1371,
+          "line": 1372,
           "condition": ""
         },
         {
           "name": "rejected_resources",
           "declaration": "Vec < Arc < addition :: RejectedResources > >",
           "variant": "",
-          "line": 1372,
+          "line": 1373,
           "condition": ""
         },
         {
           "name": "pending_metadata",
           "declaration": "BTreeMap < (ComponentId , bool) , controller :: Command >",
           "variant": "",
-          "line": 1373,
+          "line": 1374,
           "condition": ""
         },
         {
           "name": "deferred_activation",
           "declaration": "BTreeSet < ComponentId >",
           "variant": "",
-          "line": 1374,
+          "line": 1375,
           "condition": ""
         },
         {
           "name": "protected_components",
           "declaration": "BTreeSet < ComponentId >",
           "variant": "",
-          "line": 1375,
+          "line": 1376,
           "condition": ""
         },
         {
           "name": "protected_resources",
           "declaration": "BTreeSet < ResourceId >",
           "variant": "",
-          "line": 1376,
+          "line": 1377,
           "condition": ""
         },
         {
           "name": "reported_resources",
           "declaration": "BTreeMap < ComponentId , BTreeSet < ResourceId > >",
           "variant": "",
-          "line": 1377,
+          "line": 1378,
           "condition": ""
         },
         {
           "name": "management_protected",
           "declaration": "Arc < std :: sync :: atomic :: AtomicBool >",
           "variant": "",
-          "line": 1378,
+          "line": 1379,
           "condition": ""
         },
         {
           "name": "retirement",
           "declaration": "Option < Arc < retirement :: RetirementState > >",
           "variant": "",
-          "line": 1379,
+          "line": 1380,
           "condition": ""
         },
         {
           "name": "tasks",
           "declaration": "Arc < controller :: ExecutionTasks >",
           "variant": "",
-          "line": 1380,
+          "line": 1381,
           "condition": ""
         }
       ]
@@ -17389,14 +17389,14 @@
       "name": "drasi_lib::computation::v1::graph::DeliveryWork",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 2076,
+      "line": 2077,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "Arc < FlowProgress >",
           "variant": "",
-          "line": 2076,
+          "line": 2077,
           "condition": ""
         }
       ]
@@ -17495,21 +17495,21 @@
       "name": "drasi_lib::computation::v1::graph::FlowProgress",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 2051,
+      "line": 2052,
       "condition": "",
       "fields": [
         {
           "name": "in_flight",
           "declaration": "AtomicUsize",
           "variant": "",
-          "line": 2053,
+          "line": 2054,
           "condition": ""
         },
         {
           "name": "notify",
           "declaration": "tokio :: sync :: Notify",
           "variant": "",
-          "line": 2054,
+          "line": 2055,
           "condition": ""
         }
       ]
@@ -17518,84 +17518,84 @@
       "name": "drasi_lib::computation::v1::graph::GraphControl",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 1267,
+      "line": 1268,
       "condition": "",
       "fields": [
         {
           "name": "cancel",
           "declaration": "watch :: Sender < bool >",
           "variant": "",
-          "line": 1271,
+          "line": 1272,
           "condition": ""
         },
         {
           "name": "state",
           "declaration": "watch :: Receiver < GraphState >",
           "variant": "",
-          "line": 1272,
+          "line": 1273,
           "condition": ""
         },
         {
           "name": "commands",
           "declaration": "controller :: CommandSender",
           "variant": "",
-          "line": 1273,
+          "line": 1274,
           "condition": ""
         },
         {
           "name": "observed",
           "declaration": "watch :: Receiver < Arc < ObservedGraph > >",
           "variant": "",
-          "line": 1274,
+          "line": 1275,
           "condition": ""
         },
         {
           "name": "desired",
           "declaration": "watch :: Receiver < Arc < GraphSnapshot > >",
           "variant": "",
-          "line": 1275,
+          "line": 1276,
           "condition": ""
         },
         {
           "name": "inspector",
           "declaration": "super :: ComputationInspector",
           "variant": "",
-          "line": 1276,
+          "line": 1277,
           "condition": ""
         },
         {
           "name": "peers",
           "declaration": "Arc < super :: ControlPlane >",
           "variant": "",
-          "line": 1277,
+          "line": 1278,
           "condition": ""
         },
         {
           "name": "registry",
           "declaration": "watch :: Receiver < Arc < GraphRegistrySnapshot > >",
           "variant": "",
-          "line": 1278,
+          "line": 1279,
           "condition": ""
         },
         {
           "name": "rejected_additions",
           "declaration": "Arc < std :: sync :: Mutex < Vec < Arc < addition :: RejectedAddition > > > >",
           "variant": "",
-          "line": 1279,
+          "line": 1280,
           "condition": ""
         },
         {
           "name": "management_protected",
           "declaration": "Arc < std :: sync :: atomic :: AtomicBool >",
           "variant": "",
-          "line": 1280,
+          "line": 1281,
           "condition": ""
         },
         {
           "name": "management_access",
           "declaration": "bool",
           "variant": "",
-          "line": 1281,
+          "line": 1282,
           "condition": ""
         }
       ]
@@ -17894,63 +17894,63 @@
       "name": "drasi_lib::computation::v1::graph::GraphRun",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 1747,
+      "line": 1748,
       "condition": "",
       "fields": [
         {
           "name": "future",
           "declaration": "Option < BoxFuture < 'a , GraphResult < () > > >",
           "variant": "",
-          "line": 1752,
+          "line": 1753,
           "condition": ""
         },
         {
           "name": "control",
           "declaration": "GraphControl",
           "variant": "",
-          "line": 1753,
+          "line": 1754,
           "condition": ""
         },
         {
           "name": "state",
           "declaration": "watch :: Sender < GraphState >",
           "variant": "",
-          "line": 1754,
+          "line": 1755,
           "condition": ""
         },
         {
           "name": "finished",
           "declaration": "bool",
           "variant": "",
-          "line": 1755,
+          "line": 1756,
           "condition": ""
         },
         {
           "name": "observed",
           "declaration": "watch :: Sender < Arc < ObservedGraph > >",
           "variant": "",
-          "line": 1756,
+          "line": 1757,
           "condition": ""
         },
         {
           "name": "inspector",
           "declaration": "super :: ComputationInspector",
           "variant": "",
-          "line": 1757,
+          "line": 1758,
           "condition": ""
         },
         {
           "name": "registry",
           "declaration": "watch :: Sender < Arc < GraphRegistrySnapshot > >",
           "variant": "",
-          "line": 1758,
+          "line": 1759,
           "condition": ""
         },
         {
           "name": "tasks",
           "declaration": "Arc < controller :: ExecutionTasks >",
           "variant": "",
-          "line": 1759,
+          "line": 1760,
           "condition": ""
         }
       ]
@@ -18109,56 +18109,56 @@
       "name": "drasi_lib::computation::v1::graph::Incoming",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 1884,
+      "line": 1885,
       "condition": "",
       "fields": [
         {
           "name": "edge",
           "declaration": "usize",
           "variant": "",
-          "line": 1885,
+          "line": 1886,
           "condition": ""
         },
         {
           "name": "port",
           "declaration": "PortId",
           "variant": "",
-          "line": 1886,
+          "line": 1887,
           "condition": ""
         },
         {
           "name": "receiver",
           "declaration": "Box < dyn EnvelopeReceiver >",
           "variant": "",
-          "line": 1887,
+          "line": 1888,
           "condition": ""
         },
         {
           "name": "acknowledgement_required",
           "declaration": "bool",
           "variant": "",
-          "line": 1888,
+          "line": 1889,
           "condition": ""
         },
         {
           "name": "pending",
           "declaration": "Option < PendingInput >",
           "variant": "",
-          "line": 1889,
+          "line": 1890,
           "condition": ""
         },
         {
           "name": "exhausted",
           "declaration": "bool",
           "variant": "",
-          "line": 1890,
+          "line": 1891,
           "condition": ""
         },
         {
           "name": "progress",
           "declaration": "Arc < FlowProgress >",
           "variant": "",
-          "line": 1891,
+          "line": 1892,
           "condition": ""
         }
       ]
@@ -18211,14 +18211,14 @@
       "name": "drasi_lib::computation::v1::graph::NodeWorkBudget",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 2258,
+      "line": 2259,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "std :: sync :: atomic :: AtomicU8",
           "variant": "",
-          "line": 2259,
+          "line": 2260,
           "condition": ""
         }
       ]
@@ -18227,56 +18227,56 @@
       "name": "drasi_lib::computation::v1::graph::Outgoing",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 1894,
+      "line": 1895,
       "condition": "",
       "fields": [
         {
           "name": "edge",
           "declaration": "usize",
           "variant": "",
-          "line": 1895,
+          "line": 1896,
           "condition": ""
         },
         {
           "name": "port",
           "declaration": "PortId",
           "variant": "",
-          "line": 1896,
+          "line": 1897,
           "condition": ""
         },
         {
           "name": "sender",
           "declaration": "Arc < dyn EnvelopeSender >",
           "variant": "",
-          "line": 1897,
+          "line": 1898,
           "condition": ""
         },
         {
           "name": "progress",
           "declaration": "Arc < FlowProgress >",
           "variant": "",
-          "line": 1898,
+          "line": 1899,
           "condition": ""
         },
         {
           "name": "multicast",
           "declaration": "Option < ResourceId >",
           "variant": "",
-          "line": 1899,
+          "line": 1900,
           "condition": ""
         },
         {
           "name": "admission_channel",
           "declaration": "Option < Arc < super :: QosChannel > >",
           "variant": "",
-          "line": 1900,
+          "line": 1901,
           "condition": ""
         },
         {
           "name": "destination",
           "declaration": "Option < Arc < super :: OutputDestination > >",
           "variant": "",
-          "line": 1901,
+          "line": 1902,
           "condition": ""
         }
       ]
@@ -18285,21 +18285,21 @@
       "name": "drasi_lib::computation::v1::graph::PendingInput",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 2098,
+      "line": 2099,
       "condition": "",
       "fields": [
         {
           "name": "delivery",
           "declaration": "Delivery",
           "variant": "",
-          "line": 2099,
+          "line": 2100,
           "condition": ""
         },
         {
           "name": "work",
           "declaration": "DeliveryWork",
           "variant": "",
-          "line": 2100,
+          "line": 2101,
           "condition": ""
         }
       ]
@@ -18308,14 +18308,14 @@
       "name": "drasi_lib::computation::v1::graph::PipeGuard",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 1870,
+      "line": 1871,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "BTreeMap < usize , Arc < dyn PipeControl > >",
           "variant": "",
-          "line": 1870,
+          "line": 1871,
           "condition": ""
         }
       ]
@@ -18324,28 +18324,28 @@
       "name": "drasi_lib::computation::v1::graph::SourceRouting",
       "kind": "struct",
       "file": "lib/src/computation/v1/graph.rs",
-      "line": 2250,
+      "line": 2251,
       "condition": "",
       "fields": [
         {
           "name": "graph_id",
           "declaration": "& 'a str",
           "variant": "",
-          "line": 2251,
+          "line": 2252,
           "condition": ""
         },
         {
           "name": "downstream",
           "declaration": "& 'a [ComponentId]",
           "variant": "",
-          "line": 2252,
+          "line": 2253,
           "condition": ""
         },
         {
           "name": "transitive_recovery",
           "declaration": "bool",
           "variant": "",
-          "line": 2253,
+          "line": 2254,
           "condition": ""
         }
       ]
@@ -35551,21 +35551,21 @@
       "name": "drasi_lib::reactions::snapshot_fetcher::InProcessSnapshotFetcher",
       "kind": "struct",
       "file": "lib/src/reactions/snapshot_fetcher.rs",
-      "line": 68,
+      "line": 69,
       "condition": "",
       "fields": [
         {
           "name": "query_provider",
           "declaration": "Arc < RwLock < Option < Arc < dyn QueryProvider > > > >",
           "variant": "",
-          "line": 75,
+          "line": 76,
           "condition": ""
         },
         {
           "name": "allowed_queries",
           "declaration": "HashSet < String >",
           "variant": "",
-          "line": 76,
+          "line": 77,
           "condition": ""
         }
       ]
@@ -35574,7 +35574,7 @@
       "name": "drasi_lib::reactions::snapshot_fetcher::SnapshotFetcher",
       "kind": "trait",
       "file": "lib/src/reactions/snapshot_fetcher.rs",
-      "line": 43,
+      "line": 44,
       "condition": "",
       "fields": []
     },
@@ -35682,7 +35682,7 @@
       "name": "drasi_lib::sources::Publisher",
       "kind": "trait",
       "file": "lib/src/sources/mod.rs",
-      "line": 29,
+      "line": 37,
       "condition": "",
       "fields": []
     },
@@ -43499,7 +43499,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "shared strong / HashMap entries",
-      "line": 70,
+      "line": 72,
       "condition": ""
     },
     {
@@ -43509,7 +43509,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "shared strong / HashMap entries",
-      "line": 70,
+      "line": 72,
       "condition": ""
     },
     {
@@ -43519,7 +43519,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 64,
+      "line": 66,
       "condition": ""
     },
     {
@@ -43529,7 +43529,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 66,
+      "line": 68,
       "condition": ""
     },
     {
@@ -43539,7 +43539,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 68,
+      "line": 70,
       "condition": ""
     },
     {
@@ -43549,7 +43549,7 @@
       "variant": "Application",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 300,
+      "line": 302,
       "condition": ""
     },
     {
@@ -43559,7 +43559,7 @@
       "variant": "Platform",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 305,
+      "line": 307,
       "condition": ""
     },
     {
@@ -43569,7 +43569,7 @@
       "variant": "Postgres",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 298,
+      "line": 300,
       "condition": ""
     },
     {
@@ -43579,7 +43579,7 @@
       "variant": "ScriptFile",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 302,
+      "line": 304,
       "condition": ""
     },
     {
@@ -43589,7 +43589,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 42,
+      "line": 44,
       "condition": ""
     },
     {
@@ -43599,7 +43599,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 41,
+      "line": 43,
       "condition": ""
     },
     {
@@ -43609,7 +43609,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 45,
+      "line": 47,
       "condition": ""
     },
     {
@@ -43619,7 +43619,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 48,
+      "line": 50,
       "condition": ""
     },
     {
@@ -43629,7 +43629,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 154,
+      "line": 156,
       "condition": ""
     },
     {
@@ -43639,7 +43639,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 270,
+      "line": 272,
       "condition": ""
     },
     {
@@ -43649,7 +43649,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 251,
+      "line": 253,
       "condition": ""
     },
     {
@@ -47809,7 +47809,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeSet entries",
-      "line": 1374,
+      "line": 1375,
       "condition": ""
     },
     {
@@ -47819,7 +47819,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1359,
+      "line": 1360,
       "condition": ""
     },
     {
@@ -47829,7 +47829,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1373,
+      "line": 1374,
       "condition": ""
     },
     {
@@ -47839,7 +47839,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeSet entries",
-      "line": 1375,
+      "line": 1376,
       "condition": ""
     },
     {
@@ -47849,7 +47849,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1377,
+      "line": 1378,
       "condition": ""
     },
     {
@@ -47859,7 +47859,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1366,
+      "line": 1367,
       "condition": ""
     },
     {
@@ -47869,7 +47869,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeSet entries",
-      "line": 1376,
+      "line": 1377,
       "condition": ""
     },
     {
@@ -47879,7 +47879,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / BTreeSet entries",
-      "line": 1377,
+      "line": 1378,
       "condition": ""
     },
     {
@@ -47889,7 +47889,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1365,
+      "line": 1366,
       "condition": ""
     },
     {
@@ -47899,7 +47899,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1353,
+      "line": 1354,
       "condition": ""
     },
     {
@@ -47909,7 +47909,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / shared strong / trait object; concrete implementation erased",
-      "line": 1352,
+      "line": 1353,
       "condition": ""
     },
     {
@@ -47919,7 +47919,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1370,
+      "line": 1371,
       "condition": ""
     },
     {
@@ -47929,7 +47929,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1350,
+      "line": 1351,
       "condition": ""
     },
     {
@@ -47939,7 +47939,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1362,
+      "line": 1363,
       "condition": ""
     },
     {
@@ -47949,7 +47949,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1347,
+      "line": 1348,
       "condition": ""
     },
     {
@@ -47959,7 +47959,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value",
-      "line": 1363,
+      "line": 1364,
       "condition": ""
     },
     {
@@ -47969,7 +47969,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 1349,
+      "line": 1350,
       "condition": ""
     },
     {
@@ -47979,7 +47979,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "shared strong / Mutex / Vec entries / shared strong",
-      "line": 1371,
+      "line": 1372,
       "condition": ""
     },
     {
@@ -47989,7 +47989,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries / shared strong",
-      "line": 1372,
+      "line": 1373,
       "condition": ""
     },
     {
@@ -47999,7 +47999,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1373,
+      "line": 1374,
       "condition": ""
     },
     {
@@ -48009,7 +48009,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1380,
+      "line": 1381,
       "condition": ""
     },
     {
@@ -48019,7 +48019,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries / shared strong",
-      "line": 1351,
+      "line": 1352,
       "condition": ""
     },
     {
@@ -48029,7 +48029,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1367,
+      "line": 1368,
       "condition": ""
     },
     {
@@ -48039,7 +48039,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 1379,
+      "line": 1380,
       "condition": ""
     },
     {
@@ -48049,7 +48049,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / shared strong / trait object; concrete implementation erased",
-      "line": 1353,
+      "line": 1354,
       "condition": ""
     },
     {
@@ -48059,7 +48059,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1366,
+      "line": 1367,
       "condition": ""
     },
     {
@@ -48069,7 +48069,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries",
-      "line": 1365,
+      "line": 1366,
       "condition": ""
     },
     {
@@ -48079,7 +48079,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1368,
+      "line": 1369,
       "condition": ""
     },
     {
@@ -48089,7 +48089,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1361,
+      "line": 1362,
       "condition": ""
     },
     {
@@ -48099,7 +48099,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1378,
+      "line": 1379,
       "condition": ""
     },
     {
@@ -48109,7 +48109,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1364,
+      "line": 1365,
       "condition": ""
     },
     {
@@ -48369,7 +48369,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 2076,
+      "line": 2077,
       "condition": ""
     },
     {
@@ -48479,7 +48479,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 2053,
+      "line": 2054,
       "condition": ""
     },
     {
@@ -48489,7 +48489,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 2054,
+      "line": 2055,
       "condition": ""
     },
     {
@@ -48499,7 +48499,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1277,
+      "line": 1278,
       "condition": ""
     },
     {
@@ -48509,7 +48509,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1275,
+      "line": 1276,
       "condition": ""
     },
     {
@@ -48519,7 +48519,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value",
-      "line": 1272,
+      "line": 1273,
       "condition": ""
     },
     {
@@ -48529,7 +48529,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "shared strong / Mutex / Vec entries / shared strong",
-      "line": 1279,
+      "line": 1280,
       "condition": ""
     },
     {
@@ -48539,7 +48539,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1273,
+      "line": 1274,
       "condition": ""
     },
     {
@@ -48549,7 +48549,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1278,
+      "line": 1279,
       "condition": ""
     },
     {
@@ -48559,7 +48559,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1276,
+      "line": 1277,
       "condition": ""
     },
     {
@@ -48569,7 +48569,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1274,
+      "line": 1275,
       "condition": ""
     },
     {
@@ -48579,7 +48579,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1280,
+      "line": 1281,
       "condition": ""
     },
     {
@@ -48919,7 +48919,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1753,
+      "line": 1754,
       "condition": ""
     },
     {
@@ -48929,7 +48929,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value",
-      "line": 1754,
+      "line": 1755,
       "condition": ""
     },
     {
@@ -48939,7 +48939,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1759,
+      "line": 1760,
       "condition": ""
     },
     {
@@ -48949,7 +48949,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1758,
+      "line": 1759,
       "condition": ""
     },
     {
@@ -48959,7 +48959,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1757,
+      "line": 1758,
       "condition": ""
     },
     {
@@ -48969,7 +48969,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value / shared strong",
-      "line": 1756,
+      "line": 1757,
       "condition": ""
     },
     {
@@ -48979,7 +48979,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / task/future/callback handle; captures and output not inferred",
-      "line": 1752,
+      "line": 1753,
       "condition": ""
     },
     {
@@ -49259,7 +49259,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1886,
+      "line": 1887,
       "condition": ""
     },
     {
@@ -49269,7 +49269,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1891,
+      "line": 1892,
       "condition": ""
     },
     {
@@ -49279,7 +49279,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 1889,
+      "line": 1890,
       "condition": ""
     },
     {
@@ -49289,7 +49289,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "owned box / trait object; concrete implementation erased",
-      "line": 1887,
+      "line": 1888,
       "condition": ""
     },
     {
@@ -49359,7 +49359,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 2259,
+      "line": 2260,
       "condition": ""
     },
     {
@@ -49369,7 +49369,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1896,
+      "line": 1897,
       "condition": ""
     },
     {
@@ -49379,7 +49379,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 1899,
+      "line": 1900,
       "condition": ""
     },
     {
@@ -49389,7 +49389,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 1898,
+      "line": 1899,
       "condition": ""
     },
     {
@@ -49399,7 +49399,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 1901,
+      "line": 1902,
       "condition": ""
     },
     {
@@ -49409,7 +49409,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong / trait object; concrete implementation erased",
-      "line": 1897,
+      "line": 1898,
       "condition": ""
     },
     {
@@ -49419,7 +49419,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 1900,
+      "line": 1901,
       "condition": ""
     },
     {
@@ -49429,7 +49429,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 2100,
+      "line": 2101,
       "condition": ""
     },
     {
@@ -49439,7 +49439,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 2099,
+      "line": 2100,
       "condition": ""
     },
     {
@@ -49449,7 +49449,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "BTreeMap entries / shared strong / trait object; concrete implementation erased",
-      "line": 1870,
+      "line": 1871,
       "condition": ""
     },
     {
@@ -49459,7 +49459,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "borrow",
-      "line": 2252,
+      "line": 2253,
       "condition": ""
     },
     {
@@ -64899,7 +64899,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "shared strong / RwLock / Option / shared strong / trait object; concrete implementation erased",
-      "line": 75,
+      "line": 76,
       "condition": ""
     },
     {
@@ -64909,7 +64909,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashSet entries",
-      "line": 76,
+      "line": 77,
       "condition": ""
     },
     {
@@ -66996,7 +66996,7 @@
     },
     {
       "name": "drasi_lib",
-      "code_lines": 88,
+      "code_lines": 82,
       "types": 0,
       "files": [
         "lib/src/lib.rs"
@@ -68068,7 +68068,7 @@
     },
     {
       "name": "drasi_lib::management::runtime",
-      "code_lines": 1153,
+      "code_lines": 1160,
       "types": 4,
       "files": [
         "lib/src/management/runtime.rs"

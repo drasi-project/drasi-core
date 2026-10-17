@@ -20,12 +20,13 @@
 //!
 //! # Architecture
 //!
-//! The trait is designed to be FFI-safe:
+//! Each side implements the same Rust-facing trait; the trait object itself
+//! does not cross the library boundary:
 //!
-//! - **In-process reactions** receive an [`InProcessSnapshotFetcher`] backed
-//!   by the host's [`QueryProvider`].
+//! - **In-process reactions** receive an internal `InProcessSnapshotFetcher`
+//!   backed by the host's query provider.
 //! - **cdylib plugin reactions** receive an FFI proxy (`FfiSnapshotFetcherProxy`)
-//!   backed by a [`SnapshotFetcherVtable`] with `extern "C"` callbacks.
+//!   backed by the ordinary SDK's `SnapshotFetcherVtable` with C-compatible callbacks.
 //!
 //! Both sides use the same [`SnapshotStream`] return type, and the FFI layer
 //! reuses the same streaming iterator protocol as bootstrap.
@@ -42,7 +43,7 @@ use crate::reactions::QueryProvider;
 
 /// Trait for fetching query snapshots on-demand at runtime.
 ///
-/// Reactions receive an `Arc<dyn SnapshotFetcher>` via [`ReactionRuntimeContext`]
+/// Reactions receive an `Arc<dyn SnapshotFetcher>` via [`crate::ReactionRuntimeContext`]
 /// and can call `fetch_snapshot()` at any time to get the current result set
 /// of a subscribed query.
 ///

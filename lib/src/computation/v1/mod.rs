@@ -91,13 +91,21 @@
 //! Cancellation is not rollback. Cleanup errors preserve their causes and leave
 //! `CleanupRequired`.
 //!
-//! For prompt cancellation, call [`GraphControl::cancel`] and keep awaiting the
-//! run. It drops pending data operations before awaiting stop hooks, without a
-//! component lock. Cleanup has a configurable shared deadline and attempts every
-//! hook. Dropping a run drops all scoped operations and closes pipes immediately,
-//! but cannot await async hooks: call [`ComputationGraph::shutdown`] afterwards.
-//! Dropping the graph without explicit cleanup cannot stop resources spawned by
-//! component implementations. No async cleanup is claimed on `Drop`.
+//! Use [`GraphControl::stop_components`] for graceful drain of selected components.
+//! A drain timeout does not authorize abandoning accepted work. For explicit
+//! cancellation, call [`GraphControl::cancel`] and keep awaiting the run so the
+//! graph can join its owned work and attempt stop hooks. Cancellation is a request,
+//! not proof that a task or external effect has ended.
+//!
+//! Dropping an unfinished [`GraphRun`] requests cancellation, drops the caller's
+//! controller future and publishes [`GraphState::CleanupRequired`]. Component
+//! tasks and resources remain tracked by the graph until cleanup is awaited.
+//! Call [`ComputationGraph::shutdown`] afterwards; use
+//! [`ComputationGraph::dispose`] to also release graph-owned external resources.
+//! The configured cleanup timeout is reused by cleanup operations; it is not one
+//! overall startup/shutdown deadline. No asynchronous cleanup is performed by
+//! `Drop`, and arbitrary component-owned threads or blocking work cannot be
+//! assumed stopped when a run is dropped.
 //!
 //! # Routing and volatile boundaries
 //!

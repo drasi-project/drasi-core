@@ -78,11 +78,11 @@ pub struct SourceSnapshot {
     pub status: ComponentStatus,
     /// Whether the source was configured to auto-start
     pub auto_start: bool,
-    /// Configuration properties from [`Source::properties()`], including secrets.
+    /// Configuration properties from [`crate::Source::properties()`], including secrets.
     ///
     /// This is the authoritative config used to persist and recreate the source.
     /// It intentionally contains sensitive values — see the persistence contract
-    /// on [`Source::properties()`] for details.
+    /// on [`crate::Source::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
     /// Bootstrap provider configuration, if one is attached to this source
     pub bootstrap_provider: Option<BootstrapSnapshot>,
@@ -128,11 +128,11 @@ pub struct ReactionSnapshot {
     pub auto_start: bool,
     /// Query IDs this reaction subscribes to
     pub queries: Vec<String>,
-    /// Configuration properties from [`Reaction::properties()`], including secrets.
+    /// Configuration properties from [`crate::Reaction::properties()`], including secrets.
     ///
     /// This is the authoritative config used to persist and recreate the reaction.
     /// It intentionally contains sensitive values — see the persistence contract
-    /// on [`Reaction::properties()`] for details.
+    /// on [`crate::Reaction::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
 }
 

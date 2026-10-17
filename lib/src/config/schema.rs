@@ -482,7 +482,7 @@ pub struct QueryConfig {
     pub storage_backend: Option<StorageBackendRef>,
     /// Recovery policy when a source cannot honor a requested resume position.
     /// `None` inherits the global default (itself defaulting to `Strict`).
-    /// See [`RecoveryPolicy`](crate::RecoveryPolicy).
+    /// See [`RecoveryPolicy`].
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

@@ -98,6 +98,19 @@ impl ResourceConstructor for ManagedResource {
     }
 }
 
+async fn close_failed_restore(
+    store: &dyn ConfigurationSession,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match store.close().await {
+        Ok(()) => error,
+        Err(cleanup) => error.context(crate::error::OperationFailures::new(
+            "configuration restore cleanup also failed",
+            vec![cleanup],
+        )),
+    }
+}
+
 impl Management {
     pub(crate) fn persistent(&self) -> bool {
         self.status.borrow().persistent
@@ -117,21 +130,16 @@ impl Management {
         let current = match &store {
             Some(store) => match store.load().await {
                 Ok(current) => current,
-                Err(error) => {
-                    store
-                        .close()
-                        .await
-                        .context("release failed configuration restore")?;
-                    return Err(error);
-                }
+                Err(error) => return Err(close_failed_restore(store.as_ref(), error).await),
             },
             None => CommittedConfiguration::default(),
         };
         if let Err(error) = normalize(current.desired.clone()) {
+            let error = error.context("invalid persisted desired configuration");
             if let Some(store) = &store {
-                store.close().await?;
+                return Err(close_failed_restore(store.as_ref(), error).await);
             }
-            return Err(error.context("invalid persisted desired configuration"));
+            return Err(error);
         }
         let (desired, desired_rx) = watch::channel(current.clone());
         let (status, status_rx) = watch::channel(ManagementStatus {

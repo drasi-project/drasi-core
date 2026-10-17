@@ -773,7 +773,8 @@ impl ComputationGraphBuilder {
         self
     }
 
-    /// Shared deadline for each cleanup pass. Every attempted component's stop
+    /// Timeout reused by cleanup passes, not one overall shutdown deadline.
+    /// Every attempted component's stop
     /// is polled, even if an earlier hook exhausts the deadline. Timeouts/errors
     /// leave CleanupRequired; caller drop cannot await asynchronous cleanup.
     pub fn cleanup_timeout(mut self, timeout: Duration) -> Self {

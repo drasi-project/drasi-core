@@ -671,7 +671,7 @@ impl SourceBase {
     /// recovering from a WAL-head/checkpoint restore. The next dispatched event
     /// will receive at least `sequence + 1`.
     ///
-    /// Funnels through [`raise_next_sequence`](Self::raise_next_sequence), so it
+    /// Uses the shared internal sequence-floor update, so it
     /// **never lowers** the counter and composes safely with the resume-floor
     /// applied on subscribe regardless of ordering.
     pub fn set_next_sequence(&self, sequence: u64) {

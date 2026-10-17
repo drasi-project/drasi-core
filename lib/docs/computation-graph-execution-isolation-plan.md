@@ -1,7 +1,7 @@
 # Independent execution and isolated DrasiLib instances
 
-**Detailed implementation plan - selected implementation and acceptance complete;
-broader inventory and production qualification remain open.**
+**Detailed implementation plan - partly implemented and qualified.**
+**Approved startup/shutdown deadlines and graph-size publication work remain unfinished.**
 **Authorized: 12 October 2026. Qualified checkpoint: 13 October 2026.
 Implementation baseline: `4587bd5e`.**
 
@@ -19,15 +19,23 @@ approach. No combined child-transformer facade or remote component-method
 execution is selected. Unresolved protocol/limit details remain explicit review
 gates; a phase is complete only with its required evidence.
 
-## Current checkpoint - 13 October 2026
+<a id="current-checkpoint---13-october-2026"></a>
 
-The selected E1/E2/B1/H1/H2/N1/Q1 work is implemented and qualified within the
-boundaries below. This is a development-branch checkpoint, not a release,
-complete native connector migration or closure of every referenced CW package.
+## Recorded checkpoint - 13 October 2026
+
+The table records implemented portions of E1/E2/B1/H1/H2/N1/Q1 and their
+qualification at that checkpoint. It does not establish completion of the
+whole selected package. In particular, the per-step/per-owner and overall
+startup/shutdown deadline policy ([CW-06](computation-graph-remaining-work.md#cw-06))
+and proportional graph-status publication
+([CW-31](computation-graph-remaining-work.md#cw-31)) were approved requirements,
+not optional production follow-ups. Their implementation/evidence is still
+incomplete. This correction was made on 17 October 2026; the dated test results
+below remain historical evidence, not new runs.
 
 | Area | Implemented/evidenced | Still open |
 |---|---|---|
-| E1/E2 | Owned processing, reconfiguration, preparation, pipe/metadata retirement and rejected-resource disposal; shared reconciliation command servicing, weak physical-domain reservations, scoped force and retained joins. Both runtime flavors protect force with idle never-started peers. Final default/no-default profiles each passed 1,685 cases; extra capabilities passed 1,838; selected integration passed 143. Workspace Clippy and protected-runner checks passed. | Non-yielding synchronous work, started blocking I/O, native abort and unsafe memory faults are not forcibly preemptible in-process. Broader graph-size/resource/production qualification remains separate. |
+| E1/E2 | Owned processing, reconfiguration, preparation, pipe/metadata retirement and rejected-resource disposal; shared reconciliation command servicing, weak physical-domain reservations, scoped force and retained joins. Both runtime flavors protect force with idle never-started peers. Final default/no-default profiles each passed 1,685 cases; extra capabilities passed 1,838; selected integration passed 143. Workspace Clippy and protected-runner checks passed. | **E2 is not complete:** the full deadline policy and graph-size publication requirement remain CW-06/CW-31. Separately, non-yielding synchronous work, started blocking I/O, native abort and unsafe memory faults are not forcibly preemptible in-process; broader production qualification is not established. |
 | Native SDK/Host boundary | Current separately rebuilt libraries: 22 plugin SDK units, 185 Host SDK units and 14 native pipeline cases passed, including subprocess-driven recovery helpers. | Universal abort/memory-fault protection is not an in-process guarantee. |
 | B1 | Native source/sink links, explicit admission profiles, identity/receipt persistence, bounded portable decoding, seal/cut capabilities and shared Host/Server mutual-TLS recipe; 18 package cases and Clippy passed. | Windows, physical production cross-machine partitions and production performance qualification. |
 | H1/H2 | Normal Unix host/supervisor, accepted-definition readiness, parent/child/grandchild lifecycle, child-only plugin loading, control, cuts and namespace ownership. macOS/Linux each passed 7 units and 10 local process cases. Both passed 51 query/merger cases, including actual child deaths and real RocksDB reopen. | Windows, hard kernel resource containment, all providers/reset boundaries and production-duration qualification. |
@@ -40,8 +48,9 @@ policy-context transaction contract and runs native-input checks in full
 acceptance. Atomic configuration and stale-policy completion regressions protect
 that claim. The separate durable network stop investigation also resolved its
 force/graceful test mismatch and repaired pause bookkeeping after a timeout.
-These targeted changes do not close the broader deadline, graph-size,
-stock-Server packaging or production-qualification items in the work inventory.
+These targeted changes do not complete the approved deadline and graph-size
+requirements, or the separate stock-Server packaging and production-qualification
+items in the work inventory.
 
 The real-process cases required corrections to fixture plugin provenance,
 readiness interpretation and cancellation cleanup. A prior compiling host
@@ -518,6 +527,11 @@ cleanup remain owned after caller/run cancellation.
 
 ### E2 - Independent lifecycle, selective recovery and fair cleanup
 
+**Current status: partial.** The owned-task and independent-operation mechanisms
+exist. The per-owner/phase and overall deadline requirement below is not complete,
+and graph-size publication cost is still unresolved. Do not treat the earlier
+checkpoint's passing subsets as closure of these requirements.
+
 **Depends on:** E1. **CW:** remaining 05, 06/07/08/10, targeted 31/33/34/35.
 
 Work:
@@ -643,6 +657,10 @@ qualification. No arbitrary remote provisioning or distributed lease service is
 claimed.
 
 ### Q1 - Integrated acceptance, native registration and documentation
+
+**Current status: partial.** Recorded integration and demo results cover named
+paths. They do not close unfinished E2 requirements or the wider replacement
+workflow checks.
 
 **Depends on:** E2, H2 and N1; test development accompanies earlier phases.
 **CW:** 36/37/39/40/41, selected 38/44/45/46/47.

@@ -320,7 +320,7 @@ The fingerprint covers parsed Rust sources and all four scoped crate manifests.
 
 ## Alphabetical type inventory
 
-Generated from **363 source files**; **1181 named types**. Source fingerprint: `fnv1a64:47124c2877f3bbea`.
+Generated from **363 source files**; **1181 named types**. Source fingerprint: `fnv1a64:72cb699654261df5`.
 
 Names below are definition-site paths, not duplicate public re-export paths. Block-local declarations use an explicit `<local@line>` lexical identifier because Rust provides no importable path for them. Traits and aliases are included, but are not extra runtime objects.
 
@@ -771,16 +771,16 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_core_types::schema::PropertyType` — enum; [source](../../core-types/src/schema.rs#L114).
 - `drasi_core_types::schema::RelationSchema` — struct; [source](../../core-types/src/schema.rs#L69).
 - `drasi_core_types::schema::SourceSchema` — struct; [source](../../core-types/src/schema.rs#L31).
-- `drasi_lib::bootstrap::ApplicationBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L216).
-- `drasi_lib::bootstrap::BootstrapContext` — struct; [source](../../lib/src/bootstrap/mod.rs#L51).
-- `drasi_lib::bootstrap::BootstrapProvider` — trait; [source](../../lib/src/bootstrap/mod.rs#L157).
-- `drasi_lib::bootstrap::BootstrapProviderConfig` — enum; [source](../../lib/src/bootstrap/mod.rs#L293).
-- `drasi_lib::bootstrap::BootstrapProviderFactory` — struct; [source](../../lib/src/bootstrap/mod.rs#L310).
-- `drasi_lib::bootstrap::BootstrapRequest` — struct; [source](../../lib/src/bootstrap/mod.rs#L38).
-- `drasi_lib::bootstrap::BootstrapResult` — struct; [source](../../lib/src/bootstrap/mod.rs#L135).
-- `drasi_lib::bootstrap::PlatformBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L255).
-- `drasi_lib::bootstrap::PostgresBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L198).
-- `drasi_lib::bootstrap::ScriptFileBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L234).
+- `drasi_lib::bootstrap::ApplicationBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L218).
+- `drasi_lib::bootstrap::BootstrapContext` — struct; [source](../../lib/src/bootstrap/mod.rs#L53).
+- `drasi_lib::bootstrap::BootstrapProvider` — trait; [source](../../lib/src/bootstrap/mod.rs#L159).
+- `drasi_lib::bootstrap::BootstrapProviderConfig` — enum; [source](../../lib/src/bootstrap/mod.rs#L295).
+- `drasi_lib::bootstrap::BootstrapProviderFactory` — struct; [source](../../lib/src/bootstrap/mod.rs#L312).
+- `drasi_lib::bootstrap::BootstrapRequest` — struct; [source](../../lib/src/bootstrap/mod.rs#L40).
+- `drasi_lib::bootstrap::BootstrapResult` — struct; [source](../../lib/src/bootstrap/mod.rs#L137).
+- `drasi_lib::bootstrap::PlatformBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L257).
+- `drasi_lib::bootstrap::PostgresBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L200).
+- `drasi_lib::bootstrap::ScriptFileBootstrapConfig` — struct; [source](../../lib/src/bootstrap/mod.rs#L236).
 - `drasi_lib::bootstrap::component_graph::ComponentGraphBootstrapProvider` — struct; [source](../../lib/src/bootstrap/component_graph.rs#L35).
 - `drasi_lib::builder::DrasiLibBuilder` — struct; [source](../../lib/src/builder.rs#L86).
 - `drasi_lib::builder::Query` — struct; [source](../../lib/src/builder.rs#L664).
@@ -969,26 +969,26 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::entities::ResourceEntity` — struct; [source](../../lib/src/computation/v1/entities.rs#L130).
 - `drasi_lib::computation::v1::entities::SubscriptionPipeEntity` — struct; [source](../../lib/src/computation/v1/entities.rs#L219).
 - `drasi_lib::computation::v1::graph::Component` — enum; [source](../../lib/src/computation/v1/graph.rs#L419).
-- `drasi_lib::computation::v1::graph::ComputationGraph` — struct; [source](../../lib/src/computation/v1/graph.rs#L1328).
+- `drasi_lib::computation::v1::graph::ComputationGraph` — struct; [source](../../lib/src/computation/v1/graph.rs#L1329).
 - `drasi_lib::computation::v1::graph::ComputationGraphBuilder` — struct; [source](../../lib/src/computation/v1/graph.rs#L595).
-- `drasi_lib::computation::v1::graph::DeliveryWork` — struct; [source](../../lib/src/computation/v1/graph.rs#L2076).
+- `drasi_lib::computation::v1::graph::DeliveryWork` — struct; [source](../../lib/src/computation/v1/graph.rs#L2077).
 - `drasi_lib::computation::v1::graph::EdgeDefinition` — struct; [source](../../lib/src/computation/v1/graph.rs#L330).
 - `drasi_lib::computation::v1::graph::EdgeSnapshot` — struct; [source](../../lib/src/computation/v1/graph.rs#L352).
 - `drasi_lib::computation::v1::graph::Endpoint` — struct; [source](../../lib/src/computation/v1/graph.rs#L318).
-- `drasi_lib::computation::v1::graph::FlowProgress` — struct; [source](../../lib/src/computation/v1/graph.rs#L2051).
-- `drasi_lib::computation::v1::graph::GraphControl` — struct; [source](../../lib/src/computation/v1/graph.rs#L1267).
+- `drasi_lib::computation::v1::graph::FlowProgress` — struct; [source](../../lib/src/computation/v1/graph.rs#L2052).
+- `drasi_lib::computation::v1::graph::GraphControl` — struct; [source](../../lib/src/computation/v1/graph.rs#L1268).
 - `drasi_lib::computation::v1::graph::GraphError` — enum; [source](../../lib/src/computation/v1/graph.rs#L62).
 - `drasi_lib::computation::v1::graph::GraphResult` — type alias; [source](../../lib/src/computation/v1/graph.rs#L60).
-- `drasi_lib::computation::v1::graph::GraphRun` — struct; [source](../../lib/src/computation/v1/graph.rs#L1747).
+- `drasi_lib::computation::v1::graph::GraphRun` — struct; [source](../../lib/src/computation/v1/graph.rs#L1748).
 - `drasi_lib::computation::v1::graph::GraphSnapshot` — struct; [source](../../lib/src/computation/v1/graph.rs#L361).
 - `drasi_lib::computation::v1::graph::GraphState` — enum; [source](../../lib/src/computation/v1/graph.rs#L302).
-- `drasi_lib::computation::v1::graph::Incoming` — struct; [source](../../lib/src/computation/v1/graph.rs#L1884).
+- `drasi_lib::computation::v1::graph::Incoming` — struct; [source](../../lib/src/computation/v1/graph.rs#L1885).
 - `drasi_lib::computation::v1::graph::NodeSnapshot` — struct; [source](../../lib/src/computation/v1/graph.rs#L342).
-- `drasi_lib::computation::v1::graph::NodeWorkBudget` — struct; [source](../../lib/src/computation/v1/graph.rs#L2258).
-- `drasi_lib::computation::v1::graph::Outgoing` — struct; [source](../../lib/src/computation/v1/graph.rs#L1894).
-- `drasi_lib::computation::v1::graph::PendingInput` — struct; [source](../../lib/src/computation/v1/graph.rs#L2098).
-- `drasi_lib::computation::v1::graph::PipeGuard` — struct; [source](../../lib/src/computation/v1/graph.rs#L1870).
-- `drasi_lib::computation::v1::graph::SourceRouting` — struct; [source](../../lib/src/computation/v1/graph.rs#L2250).
+- `drasi_lib::computation::v1::graph::NodeWorkBudget` — struct; [source](../../lib/src/computation/v1/graph.rs#L2259).
+- `drasi_lib::computation::v1::graph::Outgoing` — struct; [source](../../lib/src/computation/v1/graph.rs#L1895).
+- `drasi_lib::computation::v1::graph::PendingInput` — struct; [source](../../lib/src/computation/v1/graph.rs#L2099).
+- `drasi_lib::computation::v1::graph::PipeGuard` — struct; [source](../../lib/src/computation/v1/graph.rs#L1871).
+- `drasi_lib::computation::v1::graph::SourceRouting` — struct; [source](../../lib/src/computation/v1/graph.rs#L2251).
 - `drasi_lib::computation::v1::graph::addition::ComponentAddition` — struct; [source](../../lib/src/computation/v1/graph/addition.rs#L257).
 - `drasi_lib::computation::v1::graph::addition::ComponentHandle` — struct; [source](../../lib/src/computation/v1/graph/addition.rs#L350).
 - `drasi_lib::computation::v1::graph::addition::RejectedAddition` — struct; [source](../../lib/src/computation/v1/graph/addition.rs#L23).
@@ -1475,8 +1475,8 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::reactions::common::templates::TemplateRouting` — trait; [source](../../lib/src/reactions/common/templates.rs#L227).
 - `drasi_lib::reactions::common::templates::TemplateSpec` — struct; [source](../../lib/src/reactions/common/templates.rs#L24).
 - `drasi_lib::reactions::manager::ReactionManager` — struct; [source](../../lib/src/reactions/manager.rs#L28).
-- `drasi_lib::reactions::snapshot_fetcher::InProcessSnapshotFetcher` — struct; [source](../../lib/src/reactions/snapshot_fetcher.rs#L68).
-- `drasi_lib::reactions::snapshot_fetcher::SnapshotFetcher` — trait; [source](../../lib/src/reactions/snapshot_fetcher.rs#L43).
+- `drasi_lib::reactions::snapshot_fetcher::InProcessSnapshotFetcher` — struct; [source](../../lib/src/reactions/snapshot_fetcher.rs#L69).
+- `drasi_lib::reactions::snapshot_fetcher::SnapshotFetcher` — trait; [source](../../lib/src/reactions/snapshot_fetcher.rs#L44).
 - `drasi_lib::reactions::traits::QueryProvider` — trait; [source](../../lib/src/reactions/traits.rs#L50).
 - `drasi_lib::reactions::traits::Reaction` — trait; [source](../../lib/src/reactions/traits.rs#L60).
 - `drasi_lib::recovery::ReactionRecoveryPolicy` — enum; [source](../../lib/src/recovery.rs#L40).
@@ -1484,7 +1484,7 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::recovery::RecoveryPolicy` — enum; [source](../../lib/src/recovery.rs#L23).
 - `drasi_lib::secret_store::MemorySecretStoreProvider` — struct; [source](../../lib/src/secret_store/mod.rs#L98).
 - `drasi_lib::secret_store::SecretStoreProvider` — trait; [source](../../lib/src/secret_store/mod.rs#L69).
-- `drasi_lib::sources::Publisher` — trait; [source](../../lib/src/sources/mod.rs#L29).
+- `drasi_lib::sources::Publisher` — trait; [source](../../lib/src/sources/mod.rs#L37).
 - `drasi_lib::sources::base::SourceBase` — struct; [source](../../lib/src/sources/base.rs#L160).
 - `drasi_lib::sources::base::SourceBaseParams` — struct; [source](../../lib/src/sources/base.rs#L51).
 - `drasi_lib::sources::component_graph_source::ComponentGraphSource` — struct; [source](../../lib/src/sources/component_graph_source.rs#L65).
@@ -1692,7 +1692,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_core_types::profiling` | 243 | 6 |
 | `drasi_core_types::query` | 77 | 2 |
 | `drasi_core_types::schema` | 181 | 8 |
-| `drasi_lib` | 88 | 0 |
+| `drasi_lib` | 82 | 0 |
 | `drasi_lib::api` | 3 | 0 |
 | `drasi_lib::bootstrap` | 170 | 10 |
 | `drasi_lib::bootstrap::component_graph` | 161 | 1 |
@@ -1826,7 +1826,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::lib_core_ops::reaction_ops` | 132 | 0 |
 | `drasi_lib::lib_core_ops::source_ops` | 132 | 0 |
 | `drasi_lib::management` | 259 | 5 |
-| `drasi_lib::management::runtime` | 1153 | 4 |
+| `drasi_lib::management::runtime` | 1160 | 4 |
 | `drasi_lib::management::store` | 80 | 6 |
 | `drasi_lib::management::transitions` | 511 | 3 |
 | `drasi_lib::managers` | 2 | 0 |

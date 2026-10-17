@@ -754,6 +754,152 @@ async fn factory_objects_in_persistent_builder_are_explicitly_rejected() -> Resu
     Ok(())
 }
 
+mod restore_errors {
+    use super::*;
+    use drasi_lib::error::OperationFailures;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum StoreFailure {
+        Load,
+        Close,
+    }
+
+    impl std::fmt::Display for StoreFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(match self {
+                Self::Load => "injected configuration load failure",
+                Self::Close => "injected configuration close failure",
+            })
+        }
+    }
+
+    impl std::error::Error for StoreFailure {}
+
+    struct RestoreStore(Arc<RestoreSession>);
+
+    struct RestoreSession {
+        invalid_topology: bool,
+        close_fails: bool,
+        loads: AtomicUsize,
+        closes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ConfigurationStore for RestoreStore {
+        async fn open(&self, _: &str) -> Result<Arc<dyn ConfigurationSession>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[async_trait]
+    impl ConfigurationSession for RestoreSession {
+        async fn load(&self) -> Result<CommittedConfiguration> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            if !self.invalid_topology {
+                return Err(
+                    anyhow::Error::new(StoreFailure::Load).context("reading stored definition")
+                );
+            }
+            let mut configuration = CommittedConfiguration::default();
+            configuration.desired.topology.version = 0;
+            Ok(configuration)
+        }
+
+        async fn commit(&self, _: u64, _: &str, _: &DesiredInstance) -> Result<AcceptanceReceipt> {
+            panic!("failed restore must not commit configuration");
+        }
+
+        async fn receipt(&self, _: &str) -> Result<Option<AcceptanceReceipt>> {
+            panic!("failed restore must not read receipts");
+        }
+
+        async fn snapshot(&self, _: &str) -> Result<CommittedConfiguration> {
+            panic!("failed restore must not save snapshots");
+        }
+
+        async fn load_snapshot(&self, _: &str) -> Result<Option<CommittedConfiguration>> {
+            panic!("failed restore must not load named snapshots");
+        }
+
+        async fn close(&self) -> Result<()> {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            if self.close_fails {
+                Err(anyhow::Error::new(StoreFailure::Close).context("closing failed restore"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    async fn verify_restore_errors() {
+        for invalid_topology in [false, true] {
+            for close_fails in [false, true] {
+                let session = Arc::new(RestoreSession {
+                    invalid_topology,
+                    close_fails,
+                    loads: AtomicUsize::new(0),
+                    closes: AtomicUsize::new(0),
+                });
+                let error = DrasiLib::builder()
+                    .with_id("restore-failure")
+                    .with_configuration_store(Arc::new(RestoreStore(session.clone())))
+                    .build()
+                    .await
+                    .err()
+                    .expect("invalid stored configuration must fail construction");
+
+                assert_eq!(session.loads.load(Ordering::SeqCst), 1);
+                assert_eq!(session.closes.load(Ordering::SeqCst), 1);
+                if invalid_topology {
+                    assert!(
+                        matches!(error.downcast_ref::<GraphError>(),
+                            Some(GraphError::Topology { reason })
+                                if reason == "unsupported desired topology version"),
+                        "original validation cause was lost: {error:#}"
+                    );
+                    assert!(
+                        format!("{error:#}").contains("invalid persisted desired configuration")
+                    );
+                } else {
+                    assert_eq!(
+                        error.downcast_ref::<StoreFailure>(),
+                        Some(&StoreFailure::Load),
+                        "original load cause was lost: {error:#}"
+                    );
+                    assert!(format!("{error:#}").contains("reading stored definition"));
+                }
+                let cleanup = error.downcast_ref::<OperationFailures>();
+                if close_fails {
+                    let failures = cleanup
+                        .expect("cleanup failure must remain inspectable")
+                        .failures();
+                    assert_eq!(failures.len(), 1);
+                    assert_eq!(
+                        failures[0].downcast_ref::<StoreFailure>(),
+                        Some(&StoreFailure::Close)
+                    );
+                    assert!(format!("{error:#}").contains("injected configuration close failure"));
+                } else {
+                    assert!(
+                        cleanup.is_none(),
+                        "successful cleanup must not add a failure"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configuration_restore_retains_primary_and_cleanup_failures_current_thread() {
+        verify_restore_errors().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configuration_restore_retains_primary_and_cleanup_failures_multi_thread() {
+        verify_restore_errors().await;
+    }
+}
+
 struct FaultStore {
     inner: Arc<RedbConfigurationStore>,
     fault: Arc<AtomicUsize>,

@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Ordinary reaction integration used by existing applications and plugins.
+//!
+//! [`Reaction`], [`ReactionBase`] and [`SnapshotFetcher`] remain public contracts.
+//! The [`crate::reactions::ReactionManager`] routes operations to the instance graph; it does not
+//! own another execution engine. Native dynamic sinks and handled consumers
+//! use the separate `drasi-computation-plugin-sdk` interfaces.
+//! Snapshot access does not by itself prove that an external effect completed.
+
 pub mod bootstrap_context;
 pub mod checkpoint;
 pub mod common;

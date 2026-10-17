@@ -579,7 +579,7 @@ impl ReactionBase {
     /// 7. Breaks when `shutdown_rx` fires.
     ///
     /// # Arguments
-    /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
+    /// * `shutdown_rx` — receiver created via [`Self::create_shutdown_channel`].
     /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
     ///   orchestration). The loop uses these for dedup and preserves each
     ///   query's `config_hash` when advancing the sequence.

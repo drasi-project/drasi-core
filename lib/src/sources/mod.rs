@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Ordinary source integration used by existing applications and source plugins.
+//!
+//! [`Source`], [`SourceBase`] and [`SourceBaseParams`] are also exported at the
+//! crate root. These components execute through graph-owned adapters; the
+//! [`crate::sources::SourceManager`] is an API facade, not a separate runtime.
+//! New dynamically loaded native sources use `NativeSource` from
+//! `drasi-computation-plugin-sdk`, not this trait.
+
 pub mod base;
 pub mod component_graph_source;
 pub mod durability_config;

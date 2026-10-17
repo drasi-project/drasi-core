@@ -14,10 +14,12 @@
 
 //! Bootstrap provider architecture for Drasi
 //!
-//! This module provides a pluggable bootstrap system that separates bootstrap
-//! concerns from source streaming logic. Bootstrap providers can be reused
-//! across different source types while maintaining access to their parent
-//! source configuration.
+//! Public ordinary bootstrap contracts, separate from source streaming logic.
+//! Providers own their typed configuration and receive the documented
+//! [`crate::bootstrap::BootstrapContext`] during execution; that context is not the source's
+//! configuration object. These are the existing Source/Reaction-family
+//! interfaces. Native dynamic bootstrap providers use `NativeBootstrapProvider`
+//! from `drasi-computation-plugin-sdk`.
 //!
 //! # Included Providers
 //!
@@ -147,7 +149,7 @@ use crate::channels::BootstrapEventSender;
 ///   checkpoint so crash-recovery after bootstrap can resume without
 ///   re-bootstrapping.
 ///
-///   Must be at most [`SourceBase::MAX_SOURCE_POSITION_BYTES`] (64 KB).
+///   Must be at most [`crate::SourceBase::MAX_SOURCE_POSITION_BYTES`] (64 KB).
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapResult {
     pub event_count: usize,

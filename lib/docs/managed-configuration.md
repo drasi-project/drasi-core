@@ -238,6 +238,15 @@ management pass with live component observations; `reconcile_desired_state()`
 waits for another pass. Inspect operation, resource and component failures rather than
 treating an accepted request as a fully operational graph.
 
+If loading or validating the initial saved definition fails, the builder still
+attempts to close the acquired configuration session. A second failure during
+close no longer replaces the original restore error. `DrasiError::downcast_ref`
+can recover the original typed cause; an attached `OperationFailures` retains
+the cleanup cause for separate inspection. If closing succeeds, the original
+error is returned without a cleanup-failure wrapper.
+This preserves diagnostics; it does not claim that failed cleanup released
+ownership or that cancelled management close is fully resolved.
+
 Definition revisions differ from the ComputationGraph's `GraphRevision`.
 Expected-revision checks prevent lost concurrent updates. Reusing a request ID
 with the same definition returns its original receipt; different content under
