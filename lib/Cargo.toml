@@ -75,6 +75,10 @@ name = "computation_instance"
 [[example]]
 name = "computation_runtime"
 
+[[example]]
+name = "stockroom_native"
+path = "docs/developer-guide/stockroom/src/main.rs"
+
 [dependencies]
 drasi-core-types = { workspace = true }
 drasi-computation-contracts = { workspace = true }
@@ -125,7 +129,7 @@ drasi-computation-contracts = { workspace = true, features = ["test-support"] }
 tempfile = "3.8"
 mockall = "0.12"
 tokio-test = "0.4"
-tokio = { version = "1.0", features = ["rt-multi-thread", "test-util"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "test-util", "fs", "signal", "io-std", "io-util"] }
 assert_matches = "1.5"
 serial_test = "3.0"
 pretty_assertions = "1.4"

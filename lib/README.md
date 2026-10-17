@@ -7,10 +7,10 @@ DrasiLib is a Rust library that brings [Drasi](https://drasi.io/) change process
 
 DrasiLib is part of the [Drasi project](https://github.com/drasi-project), a [CNCF Sandbox](https://www.cncf.io/projects/drasi/) Data Change Processing platform.
 
-**New to the Rust library? Start with the [Rust developer guide](docs/developer-guide/README.md).**
-Learn application construction, direct graph composition, recovery, runtime
-management and extension development through a complete inventory application
-and focused alternatives. The guide covers this development branch.
+**New to the Rust library? Start with the [drasi-lib developer book](docs/developer-guide/README.md).**
+Build a native Rust inventory application, then develop its queries, processing
+pipeline, recovery, deployment, and operations in order. The book includes
+a complete file-driven starter project and a retained-output recovery companion.
 
 ## How It Works
 
@@ -40,9 +40,9 @@ tokio = { version = "1", features = ["full"] }
 
 This path assumes your application is beside a matching `drasi-core` checkout.
 The APIs in this branch are not necessarily available in published crate versions.
-The [development setup](docs/developer-guide/README.md#a-rust-project-and-a-complete-example) includes the application
-source/reaction dependencies and required toolchain. Non-jq examples do not need
-jq build tools.
+The [development setup](docs/developer-guide/README.md#1-run-your-first-application)
+includes a complete native application, its dependencies, and the required
+toolchain. Non-jq examples do not need jq build tools.
 
 ## ComputationGraph runtime
 
@@ -64,7 +64,7 @@ Start with the guide for your task:
 
 | Guide | What it covers |
 |---|---|
-| [Rust developer guide](docs/developer-guide/README.md) | A complete application, configuration choices, recovery, operations and extension development |
+| [drasi-lib developer book](docs/developer-guide/README.md) | A linear path from a native application through queries, composition, recovery, deployment and operations |
 | [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |

@@ -1,440 +1,637 @@
-# Developing Rust applications with drasi-lib
+# The drasi-lib developer guide
 
-**Implementation snapshot: 13 October 2026 - current development checkout**
+**drasi-lib is an embedded data-processing runtime for Rust applications.**
+You connect components into a computation graph to ingest data, transform it,
+maintain state, and perform actions. A graph can use custom processing logic,
+continuous queries that maintain answers as data changes, or both. An extensible
+library of plugin components connects the graph to external systems, handling
+change detection or ingestion and notification delivery for supported
+integrations. Your application controls the graph's configuration, resources,
+and lifecycle.
 
-The API and execution descriptions were checked against Core
-[`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8).
-For the concrete capabilities added over the older runtime, see the
-[ComponentGraph comparison](../componentgraph-vs-computationgraph.md#new-built-in-capabilities).
+This developer guide teaches you how to use drasi-lib to design, build, extend,
+and operate data-processing applications. It covers the library's programming
+model and capabilities, from data ingestion and component composition to
+continuous queries, state, recovery, configuration, lifecycle management, and
+deployment. The chapters build on one another, taking you from your first
+working application to advanced processing and operational concerns.
 
-For engineers changing Drasi itself, the separate
-[ComputationGraph maintainer's guide](../computation-graph-maintainers-guide.md)
-explains runtime design and implementation ownership.
+You will apply these concepts by building **Stockroom**, a running example
+application that keeps a live view of products that need replenishment.
+Stockroom evolves throughout the guide: it starts as a complete in-memory
+program, gains processing and operational controls, and develops the storage
+and delivery contracts needed to recover unfinished work. The same techniques
+apply to monitoring, data integration, event-driven automation, and other
+embedded applications.
 
-## Drasi in your application
-
-Drasi maintains the answers to queries as data changes. A query can join data
-from several systems, detect a condition, maintain a total, or notice that a
-condition has remained true for a specified time. Your application receives
-the changes to the answer rather than repeatedly fetching and comparing whole
-datasets.
-
-**drasi-lib embeds that capability in a Rust process.** You supply sources,
-queries and consumers, choose storage, and control their lifecycle. Drasi Server,
-Kubernetes and a separate Drasi service are not prerequisites. Database
-connectors and output integrations live in separate component crates; the
-library supplies the runtime and the contracts that connect them.
-
-The runtime in this branch is **ComputationGraph**. It can run the familiar
-source-query-reaction arrangement, or an explicitly connected graph containing
-queries and other processing components. These are two ways to assemble the
-same runtime, not competing query engines.
-
-This guide explains those choices through **Stockroom**, a complete application
-that maintains a low-stock inventory view. Its runnable companions include
-ordinary components, an explicit graph, saved query state, and recovery of an
-unfinished alert. Smaller alternatives illustrate capabilities the inventory
-application does not need. Read the guide in order for the concepts, or use the
-contents to return to a particular decision.
-
-The examples target `agentofreality-parallel-computation-graph`, where
-`drasi-lib` is version `0.9.3`. Use matching checkouts of the component crates;
-do not assume these development APIs exist in an arbitrary published release.
-The guide assumes familiarity with Rust, async code and Cargo, but not Drasi's
-Rust interfaces.
-
-## Terminology
-
-| Term | Meaning in this guide |
-|---|---|
-| Element | A node or relationship, identified within a source, with labels and properties |
-| Source | A component that supplies changes to elements or other records |
-| Continuous query | A query whose current results are maintained as inputs change |
-| Result difference | An addition, update, deletion or aggregation change to those results |
-| Reaction | An ordinary Drasi plugin that consumes query result changes |
-| Bootstrap | Loading the starting data before continuing with changes |
-| ComputationGraph | The runtime owner of components, their connections, resources and lifecycle |
-| Native component | A component using the graph's envelope/port contracts directly, rather than an ordinary source/reaction adapter |
-| Transformer / sink / service | A component that changes data / handles data / runs an activity without data ports |
-| Port / edge / pipe | A named input or output / a connection between ports / the transport implementing that connection |
-| Envelope / stream | One identified group of changes and its metadata / an ordered sequence produced by one output |
-| Checkpoint | A saved processing or handling position; its owner determines what completion it proves |
-| Outbox / journal | Saved query output awaiting replay / retained transport entries and their progress |
-| Admission / handling | Accepting responsibility for input / completing the work promised by a consumer |
-| Recovery domain | The actual storage owners and components whose saved state must remain consistent |
-| Desired / observed state | What the application requests / what the runtime has actually constructed and started |
-| Factory / resource | A reconstructible component constructor / a supplied service such as storage or credentials |
-| Quiesce / deprovision | Park processing at safe boundaries / permanently remove component-owned state |
-
-An **instance** is a `DrasiLib` owner. A **generation** identifies one incarnation
-of a component within it. A **row signature** identifies a query result row;
-it is not the JSON value of that row. These distinctions become important when
-components are replaced or work is replayed.
+You should be comfortable with Rust, Cargo, and `async`/`await`. No prior knowledge
+of Drasi, graph databases, or stream-processing frameworks is assumed.
 
 ## Contents
 
-- [Choosing the right public interface](#choosing-the-right-public-interface)
-- [A Rust project and a complete example](#a-rust-project-and-a-complete-example)
-- [The application model](#the-application-model)
-- [Modeling input](#modeling-input)
-- [Writing continuous queries](#writing-continuous-queries)
-- [Normalizing incoming data](#normalizing-incoming-data)
-- [Consuming results correctly](#consuming-results-correctly)
-- [Assembling an explicit graph](#assembling-an-explicit-graph)
-- [Independent instances and process isolation](#independent-instances-and-process-isolation)
-- [Choosing queues, ordering and backpressure](#choosing-queues-ordering-and-backpressure)
-- [Making state survive a restart](#making-state-survive-a-restart)
-- [Coordinating bootstrap and replay](#coordinating-bootstrap-and-replay)
-- [Recovering native input and unfinished output](#recovering-native-input-and-unfinished-output)
-- [Completing effects and maintaining consumer state](#completing-effects-and-maintaining-consumer-state)
-- [Preserving source transactions](#preserving-source-transactions)
-- [Operating and changing a running application](#operating-and-changing-a-running-application)
-- [Factories, resources and saved applications](#factories-resources-and-saved-applications)
-- [Writing ordinary sources and reactions](#writing-ordinary-sources-and-reactions)
-- [Extending native processing](#extending-native-processing)
-- [Credentials, secrets and provider integration](#credentials-secrets-and-provider-integration)
-- [Observing the application](#observing-the-application)
-- [Errors, cancellation and cleanup](#errors-cancellation-and-cleanup)
-- [Choosing a production boundary](#choosing-a-production-boundary)
+**Part I - Build a working application**
 
-## Choosing the right public interface
+1. [Run your first application](#1-run-your-first-application)
+2. [Model changing data](#2-model-changing-data)
+3. [Write continuous queries](#3-write-continuous-queries)
+4. [Maintain an application view](#4-maintain-an-application-view)
 
-**17 October 2026 clarification.** These entry points serve different purposes;
-their presence does not imply another runtime or interchangeable plugin types.
+**Part II - Compose and operate**
 
-| What you are building | Public starting point |
-|---|---|
-| An application embedding Drasi | `DrasiLib`, `DrasiLibBuilder`, `Query` and `config` |
-| An in-process native component or graph | `drasi_lib::computation::v1` |
-| A dynamically loaded native component | `drasi-computation-plugin-sdk` traits and `drasi-computation-contracts` messages; no dependency on `drasi-lib` merely for plugin data |
-| An existing ordinary source, reaction or bootstrap provider | The documented `sources`, `reactions`, `bootstrap`, `channels` and `context` modules; root exports remain identical |
-| A host-owned storage/configuration service | `indexes`, `state_store`, `wal` and `management` |
-| Inspection, logs and measurements | `ComponentGraphView`, `observability`, `metrics` and optional `profiling` |
+5. [Compose a processing pipeline](#5-compose-a-processing-pipeline)
+6. [Control flow, ordering, and memory](#6-control-flow-ordering-and-memory)
+7. [Own the runtime lifecycle](#7-own-the-runtime-lifecycle)
+8. [Observe and diagnose the application](#8-observe-and-diagnose-the-application)
 
-Run `cargo doc -p drasi-lib --no-deps --open` from Core for the generated API
-reference. The crate overview links these interfaces, explains ownership and
-includes compiled import examples. The
-[plugin architecture guide](../../../components/plugin-architecture.md) and
-[native SDK guide](../../../components/computation-plugin-sdk/README.md) explain
-the separate dynamic-library boundary.
+**Part III - Make processing recoverable**
 
-`compatibility` contains deprecated query helpers, not the query implementation.
-Prefer `QueryConfigurationSnapshot` for settings and `QueryResultSnapshot` for
-rows. Old names and `managers` logging imports remain available; use
-`observability` for new logging code. Some implementation modules are public for
-existing callers but hidden from the generated index. They are not crate-private,
-and this documentation cleanup neither removes them nor makes them the preferred
-extension interface.
+9. [Make query state durable](#9-make-query-state-durable)
+10. [Join snapshots to live input](#10-join-snapshots-to-live-input)
+11. [Retain input and replay output](#11-retain-input-and-replay-output)
+12. [Complete business work](#12-complete-business-work)
+13. [Preserve transactions](#13-preserve-transactions)
 
-The graph owns component and resource lifecycle. Keep auxiliary workers owned
-until joined; do not treat a cancelled wait as completed cleanup. A borrowed
-provider handle does not grant independent commit authority or permission to
-keep using it after replacement. See the ownership sections below before
-implementing providers or background work.
+**Part IV - Build a deployable application**
 
-## A Rust project and a complete example
+14. [Turn components into reusable factories](#14-turn-components-into-reusable-factories)
+15. [Save and restore an application](#15-save-and-restore-an-application)
+16. [Change a running application](#16-change-a-running-application)
+17. [Package and isolate extensions](#17-package-and-isolate-extensions)
+18. [Capstone: a recoverable Stockroom](#18-capstone-a-recoverable-stockroom)
 
-The checkout's `rust-toolchain.toml` selects Rust **1.95.0**, rustfmt and Clippy.
-Install Rust through rustup and a C/C++ toolchain: Xcode Command Line Tools on
-macOS, build-essential on Debian/Ubuntu, or Visual Studio C++ Build Tools on
-Windows. RocksDB builds can additionally require CMake and libclang. The
-in-memory example needs no database, Docker or jq.
+[Appendix A: Vocabulary](#appendix-a-vocabulary) |
+[Appendix B: API and example navigation](#appendix-b-api-and-example-navigation)
 
-Use an existing matching checkout, or obtain this branch:
+## Part I - Build a working application
+
+Many applications need a current picture of their data and a way to respond
+when something important changes. drasi-lib lets you maintain state such as
+running totals, current inventory, or devices needing attention, and connect
+changes in that state to notifications and actions.
+
+An extensible library of source and sink plugins connects that processing to
+external systems. Sources automate the system-specific work of detecting or
+receiving changes; sinks deliver results and notifications to external
+destinations. For supported integrations, you configure and compose plugins
+rather than develop custom change-capture and delivery code.
+
+Continuous queries are a key use case. You declare the answer to maintain, and
+the runtime reports additions, updates, and removals as input changes. A query
+can join data from different external systems, maintain aggregates, and detect
+time-based conditions without application code repeatedly fetching whole
+datasets and comparing snapshots. You can also compose processing components
+without a query, enabling live views, monitoring, data integration, and
+event-driven workflows.
+
+### 1. Run your first application
+
+Keep Stockroom running while you edit an inventory file. You will lower a
+product's quantity, see it enter the low-stock view, and restock it to make
+the alert disappear. You control the input by editing and saving that file.
+
+#### Copy and run the starter
+
+Install Rust through rustup and obtain a `drasi-core` checkout containing this
+book. The [starter project](stockroom) includes its Cargo manifest, lockfile,
+toolchain selection, source code, and initial inventory. Its path dependencies
+are already configured for a project beside that checkout.
+
+From the root of `drasi-core`, copy the whole project to a fresh sibling
+directory:
 
 ```sh
-git clone --branch agentofreality-parallel-computation-graph \
-  https://github.com/drasi-project/drasi-core.git
-cd drasi-core
-rustup show
-cargo run --locked -p drasi-lib --example stockroom -- basic
-cargo run --locked -p drasi-lib --example stockroom -- graph
+cp -R lib/docs/developer-guide/stockroom ../stockroom
+cd ../stockroom
+RUST_LOG=warn cargo run --locked
 ```
 
-Both modes insert a product with quantity 3, update it to 2, delete it, and check
-the resulting view. The complete implementation is
-[`stockroom.rs`](../../examples/stockroom.rs), including imports, component
-implementations, startup waits, result handling and cleanup. The excerpts below
-come from that application or explicitly identified alternatives; they are not
-instructions to assemble an application from disconnected fragments.
+Use a destination that does not already exist. Keep `stockroom` and `drasi-core`
+beside each other so the supplied dependency paths remain valid.
 
-For an independent binary beside `drasi-core`, the matching manifest is:
+Your copy contains:
 
-```toml
-[package]
-name = "stockroom"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-anyhow = "1"
-async-trait = "0.1"
-serde_json = "1"
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
-drasi-lib = { path = "../drasi-core/lib" }
-drasi-core = { path = "../drasi-core/core", features = ["computation"] }
-drasi-source-application = { path = "../drasi-core/components/sources/application" }
-drasi-reaction-application = { path = "../drasi-core/components/reactions/application" }
+```text
+stockroom/
+  Cargo.toml
+  Cargo.lock
+  rust-toolchain.toml
+  rustfmt.toml
+  inventory.json
+  src/main.rs
 ```
 
-Copy `lib/examples/stockroom.rs` into that binary's `src/main.rs` and the
-checkout's toolchain file into its root. Keep its generated `Cargo.lock`.
-Path dependencies must all resolve to the same Drasi revision.
+The first build can take a little time. Once the application is ready, it prints:
 
-Later snippets use `anyhow::Context`, `std::{sync::Arc, time::Duration}` and
-positive-size types from `std::num`, with native contracts imported from
-`drasi_lib::computation::v1`. Ordinary result types come from
-`drasi_lib::channels`; the root `Query` is the builder, whereas
-`drasi_lib::queries::Query` is a trait. Statement excerpts use the instance or
-component just constructed in their surrounding example.
-
-Add dependencies as the chosen alternatives require them. These entries,
-added to the manifest's dependency section, support the native codec,
-observability and persistence examples:
-
-```toml
-bytes = "1"
-futures = "0.3"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
-drasi-index-rocksdb = { path = "../drasi-core/components/indexes/rocksdb" }
-drasi-wal-redb = { path = "../drasi-core/components/wals/redb" }
-drasi-state-store-redb = { path = "../drasi-core/components/state_stores/redb", features = ["configuration"] }
+```text
+Watching inventory.json for low-stock. Save the file to change inventory; press Ctrl-C to stop.
 ```
 
-Stockroom runs on `#[tokio::main(flavor = "current_thread")]`. For a
-multi-threaded executor, enable Tokio's `rt-multi-thread` and use
-`#[tokio::main]`. There is no separate Drasi worker-count setting. Components
-must work on either executor; a blocking database call is not made safe merely
-by placing it inside an `async fn`.
+Leave this terminal running. `RUST_LOG=warn` suppresses routine runtime logs
+while leaving warnings and application output visible.
 
-The library's default Cargo features are empty, but the full graph runtime is
-still present. `computation` is a compatibility feature name, not an engine
-switch. Enable middleware features when needed, as explained below.
-`computation-rocksdb-tests` enables additional integration-test wiring; choosing
-RocksDB for an application is done by supplying a provider. There is no
-`management` Cargo feature. Avoid `--all-features` as a setup shortcut: it pulls
-in unrelated implementations and native build requirements.
+#### Make your first change
 
-## The application model
+Open **your copied project's** `inventory.json` in an editor. It starts with:
 
-Stockroom's ordinary form has three application components:
+```json
+[
+  {
+    "sku": "bolts",
+    "quantity": 8,
+    "minimum": 5,
+    "warehouse": "west"
+  }
+]
+```
+
+Quantity 8 is above minimum 5, so there is no low-stock result to print.
+Change `quantity` from **8 to 3** and save the file. The running terminal shows:
+
+```text
+low-stock: [{"quantity":3,"sku":"bolts"}]
+```
+
+You changed the input, and the maintained answer changed with it. You did not
+restart the application or ask it to run the query again.
+
+Make the following edits one at a time, saving and observing the result after
+each one:
+
+| Edit `inventory.json` and save | Terminal output |
+|---|---|
+| Change quantity from 3 to 2 | `low-stock: [{"quantity":2,"sku":"bolts"}]` |
+| Restock by changing quantity to 8 | `low-stock: []` |
+| Lower quantity to 3 again | `low-stock: [{"quantity":3,"sku":"bolts"}]` |
+| Remove the product object, leaving `[]` | `low-stock: []` |
+
+Restocking removes a result even though the product still exists. Removing the
+product also retracts its result, but for a different reason. Both changes
+matter to a consumer maintaining the current low-stock view.
+
+Try changing a quantity between two values above the minimum. There is no new
+low-stock output: the input changed, but the answer did not. Saving the same
+inventory again likewise produces no notification.
+
+The file source checks for a valid snapshot every 250 milliseconds and emits
+changes only for products that were added, modified, or removed. Invalid JSON
+or a read error produces a warning and leaves the last valid inventory intact;
+fix and save the file to continue. It samples the file's current state, so edits
+between reads can be coalesced. It is not a durable change log.
+
+Restore the original product with quantity 8 before continuing. Press **Ctrl-C**
+when you want to stop; the application awaits runtime shutdown.
+
+#### Understand the query
+
+Here is the query:
+
+```cypher
+MATCH (p:Product)
+WHERE p.quantity < p.minimum
+RETURN p.sku AS sku, p.quantity AS quantity
+```
+
+`MATCH` finds product nodes. `WHERE` decides which products belong in the answer.
+`RETURN` determines the fields visible to the application. Quantity changes
+are input; membership and value changes in this answer are output.
+
+#### Follow one change through the program
 
 ```mermaid
 flowchart LR
-    App["Rust inventory code"] -->|SourceChange| S["ApplicationSource: inventory"]
-    S --> Q["Query: low-stock"]
-    Q -->|ResultDiff| R["ApplicationReaction: alerts"]
-    R --> V["Rust keyed result view"]
-    Q -. current rows .-> Read["get_query_results"]
+    File["Your saved inventory.json"] --> Inventory["Inventory source"]
+    Inventory --> Query["low-stock query"]
+    Query --> Alerts["Alerts sink: keyed result view"]
+    Alerts --> Terminal["Terminal notification"]
 ```
 
-The condition belongs in the query, not in the source:
+The runtime owns `Inventory`, the query, and `Alerts`. `Inventory` compares
+valid file snapshots and turns product changes into graph messages. The query
+updates its answer, and `Alerts` maintains and prints the resulting view.
+Bounded graph pipes connect the components.
+
+The [complete source](stockroom/src/main.rs) is the running companion for
+the first two parts of the book. The following excerpts explain pieces of that
+program; you do not need to assemble another application from them. Its
+memory-backed processing state and small file source are starting points:
+storage providers and source/sink plugins support persistent state and other
+external systems.
+
+The query is a `ContinuousQueryTransformer`:
 
 ```rust
-const LOW_STOCK: &str = "
-MATCH (p:Product)
-WHERE p.quantity < p.minimum
-RETURN p.sku AS sku, p.quantity AS quantity";
-```
-
-The central construction is:
-
-```rust
-let (source, input) = ApplicationSource::new(
-    "inventory",
-    ApplicationSourceConfig {
-        properties: Default::default(),
-        durability: None,
+let query = ContinuousQueryTransformer::new(
+    ContinuousQueryDefinition {
+        graph_id: GRAPH.into(),
+        id: ComponentId::try_new("low-stock")?,
+        query: LOW_STOCK.into(),
+        language: ComputationQueryLanguage::Cypher,
+        output_stream: StreamId::try_new("low-stock/out")?,
+        outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
     },
-)?;
-let (reaction, output) =
-    ApplicationReaction::new("alerts", vec!["low-stock".into()]);
-let mut receiver = output
-    .take_receiver()
-    .await
-    .context("alerts receiver was already taken")?;
+    Arc::new(InMemoryComputationProvider),
+)
+.await?;
+let results = query.results();
+```
 
+The imports, `LOW_STOCK`, and `GRAPH` are at the top of the companion.
+`GRAPH` is `"__drasi_lib_runtime__"`, the graph identity used by a
+`ComponentBatch` inside `DrasiLib`. It is not the application's instance ID.
+The memory provider supplies the state needed to evaluate the query.
+
+`ComponentBatch` groups components and their connections. After constructing
+the source and sink, the program adds them with the query:
+
+```rust
+let mut batch = ComponentBatch::builder()
+    .source(Box::new(inventory))
+    .query(Box::new(query))
+    .sink(Box::new(alerts));
+```
+
+An output has a named port and a stream identity. The companion's `endpoint`
+helper builds a component/port pair. For example:
+
+```rust
+batch = batch
+    .bind_stream(
+        endpoint("inventory", "out")?,
+        StreamId::try_new("inventory/out")?,
+    )
+    .connect(
+        EdgeDefinition::new(
+            endpoint("inventory", "out")?,
+            endpoint("low-stock", "in")?,
+        ),
+        Box::new(BoundedPipeConfig { capacity: 8 }),
+    );
+```
+
+The query output is bound and connected to `alerts/in` in the same way.
+Every declared port must be connected. The batch checks that producers and
+consumers agree on their data format; a misspelled port or incompatible
+connection is an error, not a disconnected pipeline that quietly does nothing.
+
+Finally, the application gives the batch to its runtime owner:
+
+```rust
 let core = DrasiLib::builder()
     .with_id("stockroom")
-    .with_source(source)
-    .with_query(
-        Query::cypher("low-stock")
-            .query(LOW_STOCK)
-            .from_source("inventory")
-            .enable_bootstrap(false)
-            .build(),
-    )
-    .with_reaction(reaction)
+    .with_components(batch.build()?)
     .build()
     .await?;
 ```
 
-The runtime owns `source` and `reaction`; the application keeps `input` and the
-result receiver. Bootstrap is disabled because this program supplies all data
-after startup. `build()` constructs and validates the instance. `start()` is a
-separate lifecycle operation.
+`DrasiLib` owns a **ComputationGraph**: the connected processing components,
+their resources, and their lifecycle. Starting the instance drives the file
+source, query, and sink together.
+
+#### Start, wait, and finish
+
+Construction and execution are separate. Start the instance, then wait for
+the components the application needs:
 
 ```rust
 core.start().await?;
 tokio::time::timeout(
     Duration::from_secs(5),
     core.computation_component("alerts")?.wait_started(),
-).await??;
-
-let properties = PropertyMapBuilder::new()
-    .with_string("sku", "bolts")
-    .with_integer("quantity", 3)
-    .with_integer("minimum", 5)
-    .build();
-input.send_node_insert("bolts", vec!["Product"], properties).await?;
+)
+.await??;
+tokio::time::timeout(Duration::from_secs(5), results.wait_ready()).await??;
 ```
 
-Successful submission means the source accepted the change, not that every
-query or consumer has finished. Stockroom awaits a result before reading and
-checking the current rows. An application that sends an email after receiving
-that result has introduced another completion boundary; the application
-reaction does not know whether the email succeeded.
+The complete program waits for all three components. The two `?` operators
+unwrap different failures: an application deadline and a failed runtime
+operation.
 
-Use a stable, distinct instance ID when saving state. The builder defaults to
-`"drasi-lib"`; `DrasiLibConfig::default()` instead generates a UUID. Source and
-query IDs, stream identities and storage names also participate in recovery.
-Treat renaming them as a design change, not a cosmetic edit.
+Processing continues while `main` waits for Ctrl-C. Each query output updates
+the sink's view; inputs that do not change the answer produce no output.
+Saving the file is not a synchronous promise that processing has finished:
+the terminal notification shows the view after the sink handles a result.
 
-The builder is the usual construction interface. `DrasiLibConfig` serializes
-instance ID, global input/output capacities, storage declarations and queries;
-it is not an executable manifest for arbitrary source/reaction Rust objects.
-`RuntimeConfig` holds the constructed providers and defaults. Prefer the
-builder to hand-assembling that internal-facing configuration.
+On Ctrl-C, the program awaits `core.shutdown()` and reports any cleanup failure
+before returning. This pattern matters even in a small program: Rust cannot
+await runtime cleanup in `Drop`.
 
-## Modeling input
+**Summary.** You have a complete embedded application with a live query, explicit
+data connections, bounded queues, and awaited startup and shutdown. Next, make
+the meaning of its input precise; query correctness begins with data identity.
 
-A node's identity is `ElementReference { source_id, element_id }`.
-`inventory/bolts` and `catalog/bolts` are distinct even if their properties are
-identical. Labels describe types; they do not replace identity. Updates and
-deletes must preserve the original reference.
+### 2. Model changing data
 
-ApplicationSource offers `send_node_insert`, `send_node_update`, `send_delete`
-and relationship helpers. Its `send(SourceChange)` exposes the full model when
-you need exact timestamps, richer values or source-qualified relationship
-endpoints:
+Stockroom needs to distinguish a product changing from a different product
+arriving. In this chapter, the input becomes a property graph with stable
+identities, explicit update semantics, and source time.
+
+#### Describe entities, not query results
+
+A property graph contains **nodes** and **relationships**. Both have identity,
+labels, properties, and an effective time. A node might represent a product or
+warehouse; a relationship might say that a product is stored in a warehouse.
+The source describes these facts. It should not pre-filter products using the
+low-stock condition: a restock must still reach the query so it can remove the
+old result.
+
+The file source parses each entry as a `Product`. Its `element` method maps
+that product to the graph:
 
 ```rust
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
-};
+impl Product {
+    fn element(&self, time: u64) -> Element {
+        Element::Node {
+            metadata: metadata(&self.sku, time),
+            properties: ElementPropertyMap::from(serde_json::json!({
+                "sku": self.sku,
+                "quantity": self.quantity,
+                "minimum": self.minimum,
+                "warehouse": self.warehouse,
+            })),
+        }
+    }
+}
+```
 
-fn product_change(quantity: i64, effective_from: u64) -> SourceChange {
+When a SKU first appears, the source emits `SourceChange::Insert`; when the
+same SKU's properties change, it emits `SourceChange::Update`. Removing a SKU
+from the file produces `SourceChange::Delete`. Its metadata helper is:
+
+```rust
+fn metadata(sku: &str, time: u64) -> ElementMetadata {
+    ElementMetadata {
+        reference: ElementReference::new("inventory", sku),
+        labels: vec!["Product".into()].into(),
+        effective_from: time,
+    }
+}
+```
+
+The element's identity is the pair **source ID, element ID**.
+`inventory/bolts` and `catalog/bolts` are different elements. The `"Product"`
+label describes the element's type; it does not identify an individual
+product. A mutable property such as a display name is usually a poor element ID.
+
+Use source-qualified references for relationship endpoints too.
+`Element::Relation` contains `in_node` and `out_node` references as well as its
+own metadata and properties. Changing a referenced node does not create a new
+relationship identity. When the relationship itself has a business identity or
+properties, publish it as an element rather than inferring it from equal values.
+
+#### Distinguish inserts, patches, and deletions
+
+The file source has a complete product image for each update. Other sources
+may know only the changed fields. For a quantity-only update, they can send:
+
+```rust
+fn quantity_update(sku: &str, quantity: i64, time: u64) -> SourceChange {
     SourceChange::Update {
         element: Element::Node {
-            metadata: ElementMetadata {
-                reference: ElementReference::new("inventory", "bolts"),
-                labels: vec!["Product".into()].into(),
-                effective_from,
-            },
-            properties: ElementPropertyMap::from(
-                serde_json::json!({"quantity": quantity}),
-            ),
+            metadata: metadata(sku, time),
+            properties: ElementPropertyMap::from(serde_json::json!({"quantity": quantity})),
         },
     }
 }
 ```
 
-`effective_from` is the source's effective time in milliseconds, not receipt time
-or a delivery sequence. The shared evaluator reports and skips strictly older
-mutations while continuing processing. Equal-time differences follow admitted
-order. Identical full elements are no-ops; Insert is a full-row upsert rather
-than another aggregate contribution, while Update merges supplied properties.
-Set a property to null to clear it. A live node/relationship identity collision
-fails explicitly before modification.
+The query retains `sku` and `minimum`. At the graph-change boundary:
 
-Deleting even an absent element records a transactional source-time frontier,
-preventing stale resurrection after reconstruction. These frontiers do not expire
-automatically without a source-watermark/retention contract. Native query
-configuration identities include the mutation semantics (formats 5/6); incompatible
-saved identities require explicit reset/rebootstrap or a designed migration.
-Never discard pending-output obligations to make an upgrade succeed.
+| Change | Meaning |
+|---|---|
+| `Insert` | A full-row upsert. Repeating the same complete element is not another contribution to an aggregate. |
+| `Update` | Merge the supplied properties into the element. Omitted properties remain; a supplied null clears a property. |
+| `Delete` | Remove the element identified by its metadata. No property payload is required. |
 
-An `Element::Relation` has the same metadata/properties plus `in_node` and
-`out_node` references. For example, a `STORED_IN` relationship can connect
-`inventory/bolts` to `catalog/west-warehouse`. Supply both source-qualified
-references; a coincidentally equal string ID in another source is not the same
-endpoint.
+Updates and deletions must use the original element reference. Generating a
+new ID for each update creates different elements instead of updating one.
+A live node and relationship cannot share one element identity; that collision
+fails before modifying state.
 
-Properties support strings, integers/floats, booleans, null, lists, objects and
-supported temporal values. `PropertyMapBuilder` is convenient for common
-scalars; `drasi_core::models::ElementValue` and `ElementPropertyMap` provide
-full control. A string containing a timestamp remains a string unless you
-parse or construct the temporal value.
+Properties can contain scalars, lists, objects, and supported temporal values.
+`ElementValue` and `ElementPropertyMap` preserve the typed model. A string that
+looks like a date is still a string unless you construct or parse a temporal
+value.
 
-`send_batch(changes)` is convenient submission of several changes. It does
-**not** assert that the originating database committed them together or that a
-query will publish them as one transaction. Use the source-transaction contract
-when those intermediate states must not be visible.
+#### Supply meaningful time
 
-## Writing continuous queries
+`effective_from` is the source's effective time in **milliseconds**. It is not
+an output sequence or the time a downstream consumer happened to receive the
+change. Stockroom timestamps changes when it reads a valid file snapshot, using
+Unix epoch milliseconds. That is an observation time: the file source does not
+claim to know the exact instant a person made each edit. A connector with an
+upstream change timestamp should preserve that timestamp instead.
 
-### Query shape, sources and joins
+The evaluator reports and skips mutations that are strictly older than the
+element's accepted source time. Equal-time changes follow admitted order.
+Deleting an absent element still records a source-time frontier, so an older
+insertion cannot resurrect it after recovery. Those frontiers are not
+automatically expired without an appropriate retention contract.
 
-`Query::cypher(id)` and `Query::gql(id)` choose the parser. GQL is the graph query
-language, not GraphQL. Both feed the same continuous evaluation machinery.
-Match patterns, filters, projections, optional matches and aggregation let the
-query describe the maintained answer. Continuous results do not support
-`ORDER BY`, `LIMIT` or `SKIP`; sort and page the application's current view.
-Do not assume every function from another graph database is available: the
-[Cypher function registrations](../../../functions-cypher/src/lib.rs) and
-[query examples/tests](../../../shared-tests/src) show the implemented language.
+Do not use a receive timestamp to disguise unavailable source time. If an
+upstream system cannot provide ordering or time guarantees, that limitation
+belongs in the source's contract.
 
-An alternative to individual alerts is a total by warehouse:
+#### Publish through a native source
+
+The graph calls the source's `next` method. Stockroom drains the changes from
+its latest valid file comparison, then waits for another poll. Unchanged files
+produce no changes. Its publication branch is:
 
 ```rust
-let totals = Query::cypher("stock-by-warehouse")
-    .query("MATCH (p:Product) RETURN p.warehouse AS warehouse, sum(p.quantity) AS total")
-    .from_source("inventory")
-    .from_source("returns")
-    .build();
+if let Some(change) = self.pending.pop_front() {
+    self.sequence = self.sequence.checked_add(1).context("sequence exhausted")?;
+    return Ok(Some(OutputEnvelope {
+        port: PortId::try_new("out")?,
+        envelope: GraphChangeCodec::encode_change(
+            change,
+            StreamId::try_new("inventory/out")?,
+            self.sequence,
+            None,
+        )?,
+    }));
+}
 ```
 
-These sources contribute elements to one query graph. This is not a union of
-two precomputed result streams. An aggregate row may represent many elements;
-its changes must be handled as result changes, not as source updates.
+`GraphChangeCodec` translates the typed graph change into a `ChangeEnvelope`.
+The source does not write its own JSON wire format. `None` in the codec call
+means that this example supplies no envelope-level source timestamp; the
+element still has `effective_from`. A source-time merger needs that additional
+timestamp, as Chapter 6 explains.
 
-For explicit source label selection, modify the built `QueryConfig`:
-`query.sources[0].nodes = vec!["Product".into()]` and
-`query.sources[0].relations = vec!["STORED_IN".into()]`. Empty lists leave the
-normal query/source label-selection behavior in place.
+Returning `Ok(None)` means **finite exhaustion**, not "no data right now."
+A listening source should wait while idle. A lost database connection should
+surface an error or an explicit recovery operation, not masquerade as normal
+end of input.
 
-When two systems have matching keys but no relationship records, declare a
-synthetic join:
+`Inventory` also implements `ComputationComponent`. Its descriptor declares
+one output, `out`, with the `GraphChangeCodec` schema. Its first start validates
+and loads the file. A later stop/start preserves any changes still awaiting
+emission. The graph owns the polling work, so the source has no independently
+spawned watcher to stop or join.
+
+#### Keep the layers of identity separate
+
+An envelope carries a change set, stream metadata, and context:
+
+| Identity | What it identifies |
+|---|---|
+| `ElementReference` | A node or relationship in a source namespace |
+| `RecordId` | A schema-defined record; its namespace and bytes are both significant |
+| `ChangeSetId` and operation ordinal | One identified group of changes and each operation's place in that group |
+| Stream and sequence | A producer's ordered emissions from one output |
+| Source position | An opaque upstream resume position, if the source supplies one |
+
+One output owns one stream. Its new emissions must have increasing sequences;
+gaps can be valid, but regression is not. A reconnect must not silently reuse
+an old logical identity for different content.
+
+A `ChangeOperation` is Added, Updated, or Deleted. Records describe their
+image as Full, Patch, or Partial, and updates explicitly distinguish Patch
+from Replace. Consumers must support the image they receive. A delete may
+contain only a validated `RecordReference`, with no before image.
+
+`SystemMetadata` belongs to the framework boundary; business attributes belong
+in records. Append context for attribution, and derive a new envelope when
+creating new output. Do not mutate an input shared with another branch.
+
+Putting several changes in a collection does not prove that their source
+committed them atomically. Whole source transactions have a separate contract
+in Chapter 13.
+
+**Summary.** Stable source-qualified identity makes updates and deletions
+meaningful. Explicit images and timestamps prevent accidental replacement,
+stale resurrection, and invented ordering. The source now supplies facts the
+query can maintain rather than approximations of the desired answer.
+
+### 3. Write continuous queries
+
+The first query finds individual low-stock products. Extend that answer to
+warehouse totals, joined catalog data, and conditions that depend on time.
+These are changes to the maintained calculation, not new polling loops.
+
+#### Think in changing answer sets
+
+For each accepted input, Drasi updates the query's graph and emits differences
+in its answer. A change can add a result, change its values, remove it, or
+produce no visible difference. One input can affect several result rows.
+
+The low-stock query illustrates three cases:
+
+| Input | Answer |
+|---|---|
+| Product quantity becomes 3, below minimum 5 | Add the product |
+| Quantity becomes 2 | Change the existing answer row |
+| Quantity becomes 8 | Remove the row, while retaining the product in query state |
+
+An empty answer is a valid state. It does not mean the query is stopped.
+Conversely, a running component is not evidence that an expected business
+condition occurred.
+
+`ComputationQueryLanguage::Cypher` and `ComputationQueryLanguage::Gql` select
+the parser; both use the continuous evaluator. GQL is the graph query language,
+not GraphQL. Use the syntax and functions supported by Drasi rather than
+assuming compatibility with every feature of another graph database.
+
+#### Aggregate by warehouse
+
+The companion's products also have a `warehouse` property. Stop Stockroom with
+Ctrl-C, restore the original one-product file with quantity 8, and restart your
+copied project in aggregation mode:
+
+```sh
+RUST_LOG=warn cargo run --locked -- totals
+```
+
+This mode uses a query named `stock-by-warehouse`:
+
+```cypher
+MATCH (p:Product)
+RETURN p.warehouse AS warehouse, sum(p.quantity) AS total
+```
+
+The non-aggregate projection groups the answer by warehouse. Its initial total
+comes from the current file:
+
+```text
+stock-by-warehouse: [{"total":8.0,"warehouse":"west"}]
+```
+
+Change quantity to 3 and save. The total becomes 3.0. Change it to 2, then 8,
+saving each time: both edits change the total, even though 8 did not belong in
+the low-stock query's answer. Remove the product, leaving `[]`, and the
+maintained total becomes 0.0.
+
+When one product changes, the corresponding aggregate changes. It is not an
+independent event to add to a counter in application code; the output describes
+the new maintained total. This sum produces a floating-point value and a
+default zero for the emptied group. Deleting the last product therefore does
+not have the same output shape as deleting a low-stock match.
+
+For grouped applications, include keys that identify the business group in
+the projection. Handle group creation and disappearance as well as updates.
+Optional matches can retain a result when a related record is absent; decide
+how the application should represent those null values.
+
+Continuous answers are not an ordered page. `ORDER BY`, `LIMIT`, and `SKIP`
+are not supported. Sort and page a maintained application view when presenting
+results to a user.
+
+#### Join another source
+
+Suppose `inventory` supplies products with `warehouse_code`, and `catalog`
+supplies warehouses with `code` and `name`. Connect both sources to the
+query's `in` port. They contribute elements to one query graph; they are not
+two previously computed result sets.
+
+If the sources do not publish relationship elements, declare a synthetic join:
 
 ```rust
 use drasi_lib::config::{QueryJoinConfig, QueryJoinKeyConfig};
 
-let query = Query::cypher("warehouse-alerts")
-    .query(
-        "MATCH (p:Product)-[:STORED_IN]->(w:Warehouse)
-         WHERE p.quantity < p.minimum
-         RETURN p.sku AS sku, w.name AS warehouse"
-    )
-    .from_source("inventory")
-    .from_source("catalog")
-    .with_joins(vec![QueryJoinConfig {
+let execution = QueryExecutionSettings {
+    joins: vec![QueryJoinConfig {
         id: "STORED_IN".into(),
         keys: vec![
-            QueryJoinKeyConfig { label: "Product".into(), property: "warehouse_code".into() },
-            QueryJoinKeyConfig { label: "Warehouse".into(), property: "code".into() },
+            QueryJoinKeyConfig {
+                label: "Product".into(),
+                property: "warehouse_code".into(),
+            },
+            QueryJoinKeyConfig {
+                label: "Warehouse".into(),
+                property: "code".into(),
+            },
         ],
-    }])
-    .build();
+    }],
+    ..Default::default()
+};
 ```
 
-Drasi maintains this relationship as either side changes. Use actual
-relationship elements instead when the relationship itself has identity or
-properties.
+The corresponding query is:
 
-### Time and history
+```cypher
+MATCH (p:Product)-[:STORED_IN]->(w:Warehouse)
+WHERE p.quantity < p.minimum
+RETURN p.sku AS sku, p.quantity AS quantity, w.name AS warehouse
+```
 
-To report products that have stayed below their minimum for five seconds:
+Construct it with `ContinuousQueryTransformer::new_configured`, passing the
+definition, index provider, `QueryOptions::default()`, these execution settings,
+and `None` for the optional middleware registry. The join is maintained when
+either side changes.
+
+The join declaration describes a relationship between equal key values. It does
+not make keys unique or repair inconsistent identifiers. Prefer actual
+relationship records when the relationship has its own properties or business
+lifecycle.
+
+Adding a source name to configuration alone does not connect it to a native
+query. Data routing still belongs to the graph. Later, `QueryExecutionSettings`
+also selects source-specific middleware; those settings do not create data
+edges.
+
+#### Ask questions about time
+
+Stockroom can wait until a product has remained below minimum for five seconds:
 
 ```cypher
 MATCH (p:Product)
@@ -442,2200 +639,451 @@ WHERE drasi.trueFor(p.quantity < p.minimum, duration({ seconds: 5 }))
 RETURN p.sku AS sku
 ```
 
-The query's future queue schedules reevaluation even if no source update
-arrives. `drasi.trueLater` schedules a condition for a future time;
-`drasi.trueNowOrLater` can match immediately when appropriate;
-`drasi.trueUntil` supports expiry. Their time arguments and examples are shown
-in the [heartbeat queries](../../../shared-tests/src/use_cases/sensor_heartbeat/queries.rs).
-These are different policies, not aliases for a periodic application timer.
+The query schedules reevaluation. It does not need another inventory update
+or a periodic application task to wake it.
 
-`drasi.previousValue` and `drasi.previousDistinctValue` support comparisons
-with preceding values; `drasi.slidingWindow` supports rolling calculations.
-For element versions at a particular time or throughout an interval, use
-`drasi.getVersionByTimestamp` and `drasi.getVersionsByTimeRange`.
-There is no `drasi.past` function.
+Choose the time function for the condition you mean. `drasi.trueLater`
+schedules a future condition; `drasi.trueNowOrLater` permits an immediate match
+when appropriate; `drasi.trueUntil` supports expiry. These are distinct
+policies, not alternative names for one timer. The
+[heartbeat query examples](../../../shared-tests/src/use_cases/sensor_heartbeat/queries.rs)
+show their time arguments in context.
 
-Historical version access requires an archive-enabled backend:
+Scheduled work shares the query's state and publication boundary. In a durable
+query, removing a due notification, reevaluating it, and saving its output
+belong to the transaction. A scheduling hint is not itself a completed timer,
+and it must not advance a real source's checkpoint.
+
+#### Compare with previous and historical values
+
+`drasi.previousValue` and `drasi.previousDistinctValue` compare with preceding
+values; `drasi.slidingWindow` supports rolling calculations. Historical element
+versions are a different facility:
+
+```cypher
+MATCH (p:Product)
+WITH p, drasi.getVersionByTimestamp(p, p.observed_at - 1) AS previous
+RETURN p.sku AS sku, previous.quantity AS previous_quantity
+```
+
+Here `observed_at` is a supplied integer millisecond property.
+`drasi.getVersionsByTimeRange` retrieves versions over an interval.
+Version access requires an archive-enabled index provider; Chapter 9 shows
+where to select that capability.
+
+An archive contains versions Drasi received. It does not import the source
+database's earlier history, and an in-memory archive does not survive process
+loss. Saving historical versions and saving future scheduled work are separate
+requirements.
+
+For additional language constructs, consult the
+[query examples](../../../shared-tests/src/use_cases) and the
+[Cypher](../../../functions-cypher/src/lib.rs) and
+[GQL](../../../functions-gql/src/lib.rs) function registrations. Keep parser
+choice, query text, joins, and middleware together when versioning an
+application: all can change the meaning of saved query state.
+
+**Summary.** Queries describe maintained answers over connected source data.
+Joins, aggregation, and temporal conditions belong in that calculation; sorting
+a display and performing business effects belong outside it. The next chapter
+turns answer differences into a correct application view.
+
+### 4. Maintain an application view
+
+The application must distinguish two equal-looking rows, retract results that
+stop matching, and avoid confusing a current snapshot with a live subscription.
+Stockroom's in-memory result view is enough for a disposable display, provided
+those rules are explicit.
+
+#### Receive native query output
+
+The query emits `QueryChangeCodec` records, not source graph elements. Stockroom's
+`Alerts` sink updates a keyed view and prints it. Its normal handling path is:
 
 ```rust
-use drasi_lib::{StorageBackendRef, StorageBackendSpec};
+#[async_trait]
+impl EnvelopeSink for Alerts {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
 
-let history = Query::cypher("history")
-    .query(
-        "MATCH (p:Product)
-         WITH p, drasi.getVersionByTimestamp(p, p.observed_at - 1) AS previous
-         RETURN p.sku AS sku, previous.quantity AS previous_quantity"
-    )
-    .from_source("inventory")
-    .with_storage_backend(StorageBackendRef::Inline(
-        StorageBackendSpec::Memory { enable_archive: true },
-    ))
-    .build();
-```
-
-Here `observed_at` is an integer millisecond property supplied by the
-application. An archive records versions Drasi actually received; it does not
-import a database's past history. This memory archive also disappears on
-restart. Saved historical versions and saved scheduled notifications are
-separate capabilities.
-
-### Initial loading and query configuration
-
-Database queries generally need both existing records and later changes.
-`enable_bootstrap(true)` requests that initial load; it is the Rust query
-builder's default. The source must actually have a bootstrap provider.
-`with_bootstrap_for_source` attaches a constructed provider to a named source.
-A provider configuration alone does not load its implementation.
-
-`with_bootstrap_timeout_secs(60)` changes the default 300-second deadline for
-snapshot/history fetches waiting on bootstrap. It is not a deadline for every
-network operation. `with_bootstrap_buffer_size` retains the default 10,000
-configuration field for compatibility; live graph input is bounded by
-`with_priority_queue_capacity`, not by a second bootstrap queue.
-
-The Rust builder requests `auto_start(true)` unless changed. Use
-`auto_start(false)` when an operator must start the query explicitly.
-`with_recovery_policy` overrides the instance's default recovery policy;
-otherwise Strict applies. `with_storage_backend` chooses a named provider or
-an inline memory specification. `with_outbox_capacity` bounds saved result
-emissions, with default 1,000 and effective minimum one. Input/output queue
-choices are explained with transport below.
-
-`QueryConfig` is serializable, but its Rust fields—not builder method names—are
-the serialized keys. For example, the fields include `query_language`,
-`bootstrap_buffer_size` and `storage_backend`. Serialize the actual struct
-rather than copying Drasi Server YAML into an embedded application.
-
-## Normalizing incoming data
-
-Middleware changes source elements before evaluation. A named definition is
-not automatically active: the source subscription's ordered `pipeline` selects
-which definitions to apply.
-
-For a product containing `payload: "{\"quantity\":3}"`, enable
-`middleware-parse-json` on `drasi-lib` and configure:
-
-```rust
-let payloads = Query::cypher("payloads")
-    .query("MATCH (p:Product) RETURN p.parsed.quantity AS quantity")
-    .with_middleware(serde_json::from_value(serde_json::json!({
-        "kind": "parse_json",
-        "name": "read-payload",
-        "config": {
-            "target_property": "payload",
-            "output_property": "parsed",
-            "on_error": "fail",
-            "max_json_size": 65536,
-            "max_nesting_depth": 8
-        }
-    }))?)
-    .from_source_with_pipeline("inventory", vec!["read-payload".into()])
-    .build();
-```
-
-Without `output_property`, parsing replaces the input property. The defaults
-allow 1 MiB and nesting depth 20. Choose `on_error: "skip"` only when deliberately
-skipping the failing transformation is preferable to stopping; it is not input
-validation. Keep malformed-data handling visible in your application's logs.
-
-The following are alternative named definitions in the same
-`{kind, name, config}` shape. They illustrate different jobs, not one pipeline
-that must be enabled in full.
-
-**Decode before parsing.** With `middleware-decoder`, decode a base64 property
-into a string, then select the parse step after it:
-
-```json
-{"kind":"decoder","name":"decode-payload","config":{
-  "encoding_type":"base64","target_property":"encoded",
-  "output_property":"payload","strip_quotes":false,
-  "on_error":"fail","max_size_bytes":65536
-}}
-```
-
-Other encodings are `base64url`, `hex`, `url` and `json_escape`.
-`strip_quotes` defaults false; the default size bound is 1 MiB.
-Omitting the output property replaces the input. Decoding bytes is not the same
-operation as interpreting the decoded text as JSON.
-
-**Promote and relabel.** With `middleware-promote`, extract nested properties
-without rewriting the entire element:
-
-```json
-{"kind":"promote","name":"quantity-at-root","config":{
-  "mappings":[{"path":"$.parsed.quantity","target_name":"quantity"}],
-  "on_conflict":"fail","on_error":"fail"
-}}
-```
-
-Conflict handling is `overwrite` by default, or `skip`/`fail`; error handling is
-`fail` by default or `skip`. With `middleware-relabel`, normalize a connector's
-type names:
-
-```json
-{"kind":"relabel","name":"product-label","config":{
-  "labelMappings":{"inventory_product":"Product"}
-}}
-```
-
-**Map elements.** With `middleware-map`, per-label operation arrays select and
-reshape data using JSONPath. For example:
-
-```json
-{"kind":"map","name":"product-shape","config":{
-  "RawProduct":{
-    "insert":[{"selector":"$","label":"Product",
-               "properties":{"sku":"$.sku","quantity":"$.available"}}],
-    "update":[{"selector":"$","label":"Product",
-               "properties":{"sku":"$.sku","quantity":"$.available"}}],
-    "delete":[{"selector":"$","label":"Product"}]
-  }
-}}
-```
-
-The example preserves the input element's identity, including identity-only
-deletes. Each mapping can instead specify an `id` expression, `condition`,
-an explicit `op` (`Insert`, `Update`,
-`Delete`) and `elementType`. The latter is `Node` or a `Relation` with
-`inNodeId` and `outNodeId`. Multiple outputs let one incoming record produce
-several elements. Preserve stable IDs on updates and deletions; an expression
-that produces a new ID each time creates new elements rather than changing old
-ones. Check the source's delete image contains the fields your mapping needs.
-
-**Use jq when expression-based reshaping is clearer.**
-
-```json
-{"kind":"jq","name":"product-jq","config":{
-  "RawProduct":{
-    "insert":[{"label":"\"Product\"",
-               "query":"{sku: .sku, quantity: .available}","haltOnError":true}],
-    "update":[{"label":"\"Product\"",
-               "query":"{sku: .sku, quantity: .available}","haltOnError":true}],
-    "delete":[{"label":"\"Product\"","query":".","haltOnError":true}]
-  }
-}}
-```
-
-jq label and optional ID fields are jq expressions, hence the quoted string
-expression for Product. This example preserves input identity and uses an
-explicit pass-through expression for deletion. Mappings also support operation
-and element-type overrides. `query` defaults
-to an empty expression and `haltOnError` defaults false; set error behavior
-deliberately. `middleware-jq` uses system libjq;
-`middleware-bundled-jq` builds jq and requires its native toolchain. Select the
-appropriate build path rather than enabling both by habit.
-
-**Expand an array into maintained children.** With `middleware-unwind`:
-
-```json
-{"kind":"unwind","name":"warehouse-bins","config":{
-  "Warehouse":[{"selector":"$.bins[*]","label":"Bin",
-                "key":"$.code","relation":"HAS_BIN"}]
-}}
-```
-
-`condition` can restrict expansion; `key` gives each child stable identity and
-`relation` requests parent-child relationships. Unwind remembers prior children
-so an update can delete those removed from the array. An omitted array is an
-empty selection, not “leave old children unchanged.” This is a stateful
-transformation.
-
-Enable `middleware-promote`, `middleware-relabel`, `middleware-map` and
-`middleware-unwind` only as required. `middleware-all` enables all implementations
-but is seldom the right starting dependency. `default_middleware_registry`
-contains only compiled-in kinds. A custom `SourceMiddlewareFactory` can be
-registered in `MiddlewareTypeRegistry`; an instance exposes its registry through
-`middleware_registry`.
-
-The same middleware can run without a query in `MiddlewareTransformer`.
-Its definition has an ID, output stream, named middleware and an ordered
-pipeline. `DurableMiddlewareOptions` adds a graph ID and positive outbox bound
-when a real atomic persistent provider is supplied. A transaction step is
-another way to use middleware; neither a stateful unwind nor arbitrary plugin
-code becomes transactional just because it appears between two durable pipes.
-The [middleware examples](../../../middleware) contain operation-specific
-cases for more elaborate selectors.
-
-## Consuming results correctly
-
-### Changes and current rows
-
-`QueryResult` includes query ID, a monotonically increasing query sequence,
-timestamp, result differences, metadata and optional profiling information.
-`ResultDiff::Add` and `Delete` carry `data`; `Update` carries before and after
-values (and optional grouping keys); `Aggregation` has an optional before
-value and an after value; `Noop` changes no row.
-
-Maintain a view by **row signature**, not by JSON equality. Two distinct rows
-can contain equal JSON. Stockroom uses:
-
-```rust
-#[derive(Default)]
-struct ResultView(std::collections::BTreeMap<u64, serde_json::Value>);
-
-impl ResultView {
-    fn apply(&mut self, result: &QueryResult) {
-        for diff in &result.results {
-            match diff {
-                ResultDiff::Add { row_signature, data } => {
-                    self.0.insert(*row_signature, data.clone());
-                }
-                ResultDiff::Update { row_signature, after, .. }
-                | ResultDiff::Aggregation { row_signature, after, .. } => {
-                    self.0.insert(*row_signature, after.clone());
-                }
-                ResultDiff::Delete { row_signature, .. } => {
-                    self.0.remove(row_signature);
-                }
-                ResultDiff::Noop => {}
-            }
-        }
+    async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        let mut view = self.view.borrow().clone();
+        view.apply(&input.envelope)?;
+        let message = format!(
+            "{}: {}\n",
+            self.query_id,
+            serde_json::to_string(&view.rows())?
+        );
+        self.output.write_all(message.as_bytes()).await?;
+        self.output.flush().await?;
+        self.view.send_replace(view);
+        Ok(())
     }
 }
 ```
 
-Raising quantity from 3 to 8 removes the row from the low-stock result without
-deleting the product. An aggregation can change even when no individual source
-row corresponds to the result's identity.
+`Handled` means this sink finished its declared work: updating and printing a
+volatile view. It does not mean the rows were saved to disk or a replenishment
+order was placed. A sink that merely queues work for another worker must report
+`Accepted` instead. Completion is about the promised work, not just successful
+receipt.
 
-`core.get_query_results("low-stock").await?` returns current rows without
-rerunning the query. It is suitable for an inspection endpoint. It does not
-establish a recoverable live subscription.
+The sink publishes the completed view through a Tokio watch channel so other
+application code can observe its current state. Watch notifications can coalesce;
+they are not a retained stream of every result change. Terminal writes use
+`AsyncWriteExt` and are flushed before the new view is published.
 
-### Snapshots, replay and a race-free handover
+#### Key the view by record identity
 
-A consumer joining after startup needs a defined starting point. A
-`SnapshotResponse` provides rows and `as_of_sequence`; recovery metadata also
-identifies configuration and output generation where supported. The ordinary
-query/reaction fetch interfaces expose snapshots and outbox history.
+Two result rows can have identical values. Do not use JSON equality as their
+identity, and do not derive identity from a field that may change.
+`QueryChangeCodec` includes the query namespace and row signature in each
+record's `RecordId`.
 
-Use `SnapshotResponse.stream_keyed`, then `SnapshotStream::next_keyed` or
-`collect_keyed_vec`, when building a local view. These retain
-`(row_signature, row)`. Ordinary `Stream` iteration yields values only and
-discards those signatures. `collect_keyed_vec_capped` is useful for a preview,
-but truncation is not a complete restorable view.
+The companion stores:
 
-The important sequence is:
+```rust
+#[derive(Clone, Default)]
+struct ResultView(HashMap<RecordId, serde_json::Value>);
+```
+
+Its update method is:
+
+```rust
+impl ResultView {
+    fn apply(&mut self, envelope: &ChangeEnvelope) -> anyhow::Result<()> {
+        ensure!(
+            !QueryChangeCodec::is_snapshot(envelope)
+                && !QueryChangeCodec::is_progress_only(envelope),
+            "this live-only view requires a coordinated recovery owner for resets"
+        );
+        let mut next = self.0.clone();
+        for operation in envelope.changes().operations() {
+            match operation {
+                ChangeOperation::Added { after, .. }
+                | ChangeOperation::Updated { after, .. } => {
+                    let row = QueryChangeCodec::decode_row(after)?;
+                    next.insert(
+                        after.identity().clone(),
+                        QueryChangeCodec::row_values_to_json(&row.values),
+                    );
+                }
+                ChangeOperation::Deleted { identity, .. } => {
+                    next.remove(identity.identity());
+                }
+            }
+        }
+        self.0 = next;
+        Ok(())
+    }
+}
+```
+
+The temporary map prevents a decode failure midway through an envelope from
+publishing a partial batch. It is suitable for this small view. A large view
+should use an appropriate transactional or staged update mechanism rather than
+copying its entire state for every change.
+
+The delete path needs only identity. The update path uses the new row rather
+than applying an assumed numeric increment. Aggregation updates additionally
+carry `QueryRowKind::Aggregation` metadata, including grouping and default-value
+information; preserve it when implementing logic that depends on how the
+aggregate changed.
+
+`decode_row` yields typed `VariableValue` values, a query ID, a signature, and
+a row kind. `row_values_to_json` is useful for a JSON presentation. Keep the
+typed values when business logic depends on temporal types, element references,
+or distinctions a JSON projection cannot adequately represent.
+
+#### Read current results without rerunning the query
+
+Keep `query.results()` before transferring the query into the batch. After
+readiness:
+
+```rust
+let snapshot = results.snapshot()?;
+let sequence = snapshot.as_of_sequence;
+for record in snapshot.rows.values() {
+    let row = QueryChangeCodec::decode_row(record)?;
+    println!("{sequence}: {}", QueryChangeCodec::row_values_to_json(&row.values));
+}
+```
+
+`QueryResultSnapshot` contains keyed records, a logical output position, and a
+generation. `core.get_query_results("low-stock").await?` is a convenient JSON
+read for an inspection endpoint. Neither call executes the query again, and
+neither establishes a live subscription.
+
+The query's logical sequence counts output emissions, not products, source
+events, or individual operations. Native replay can use a fresh transport
+sequence while preserving the logical query sequence. Use
+`QueryChangeCodec::query_sequence`, `query_generation`, and `metadata` instead
+of inferring those identities from unrelated fields.
+
+#### Bring a new consumer up to date
+
+Reading a snapshot and then subscribing leaves a gap in which changes can
+be missed. Applying both a snapshot and overlapping output can apply the same
+change twice. A correct handover must coordinate the live connection, snapshot
+boundary, retained history, and consumer progress.
 
 ```mermaid
 sequenceDiagram
     participant C as Consumer
     participant Q as Query output owner
-    C->>Q: Subscribe and capture current head together
-    Q-->>C: Live receiver and head
-    C->>Q: Fetch keyed snapshot / retained output
-    Q-->>C: Rows through sequence S, identity and generation
-    C->>C: Replace local rows; save completed position S
-    Q-->>C: Buffered/live results, possibly overlapping S
-    C->>C: Ignore covered sequences; apply later results in order
+    C->>Q: Establish live input before fetching recovery state
+    Q-->>C: Keyed snapshot through S and retained output
+    C->>C: Replace the view and complete its recovery boundary
+    Q-->>C: Buffered and live output
+    C->>C: Discard covered output; handle later sequences in order
 ```
 
-Do not separately read the current rows and only then subscribe: changes can
-fall between those operations. Do not apply both a snapshot and its overlapping
-live results twice. `OutboxStream` yields complete `QueryResult` emissions,
-not individual JSON rows. A query sequence counts emissions, not source
-events, and differs from the transport sequence used during native replay.
+The library supplies this machinery through `QueryReplayTransformer` and
+`CheckpointedSink`; Chapter 11 connects them. `QueryResultsCatalog` with a
+connected `QueryResultsOutlet` supports live query-result subscriptions.
+A `QueryResults` reader alone is not such an outlet.
 
-Fetch failures are meaningful: `NotRunning` means no available running output
-owner, `TimedOut` means the configured readiness deadline elapsed, and
-`OutboxGap` means the requested history has been pruned. Increasing the receive
-timeout cannot recreate missing history. Use the built-in reaction bootstrap
-or `QueryReplayTransformer` rather than inventing an uncoordinated handover.
+`results.replay(after)` reads bounded retained output after a logical sequence.
+`recovery_view` reads a coherent recovery identity, snapshot, and optional
+retained history. If the required range is unavailable, increasing a timeout
+cannot recreate it. The application needs an explicit rebuild or gap policy.
 
-## Assembling an explicit graph
+A snapshot envelope means **replace the view**. A progress-only envelope
+means a recovery decision without business rows; it is not permission to
+silently skip work. Stockroom's simple live-only view rejects both rather than
+pretending to implement recovery. Add a recovery-aware owner before accepting
+them.
 
-### What changes, and what does not
+**Summary.** A result view is keyed state, not a list of notifications.
+Use native row identity, apply all operation kinds, and distinguish query
+position from transport position. A late-joining or restartable consumer needs
+coordinated recovery, not merely another call to read current rows.
 
-Stockroom's `graph` mode inserts an audit transformer:
+## Part II - Compose and operate
+
+### 5. Compose a processing pipeline
+
+Add a processing step before Stockroom's query without changing its answer.
+Then use the same connection model to normalize real input, expand records,
+and perform work that is not itself a query.
+
+#### Add the audit step
+
+Stop Stockroom with Ctrl-C, restore the original inventory with quantity 8,
+and restart your copied project in audit mode:
+
+```sh
+RUST_LOG=warn cargo run --locked -- audit
+```
+
+Change quantity to 3 and save. The answer is unchanged, but the sink also
+reports the annotation it received from an intermediate transformer:
+
+```text
+audit: checked-by=stockroom
+low-stock: [{"quantity":3,"sku":"bolts"}]
+```
 
 ```mermaid
 flowchart LR
-    I["Inventory : EnvelopeSource"] --> A["Audit : Transformer"]
-    A --> Q["ContinuousQueryTransformer"]
-    Q --> O["Alerts : EnvelopeSink"]
+    Inventory --> Audit
+    Audit --> LowStock["low-stock"]
+    LowStock --> Alerts
 ```
 
-The ordinary `Query` path and the direct query both use the same parsers,
-indexes and `ComputationQuery` evaluator. Native processing loops now execute as
-graph-owned Tokio tasks, independently of the controller task. Ordinary queries
-now use the same native query component directly in the instance graph, with
-no private `ScopedGraph` or additional query driver. Mutable work on one component remains
-serialized. Transaction containers retain their own ordered inner steps.
-
-Multiple independent native nodes can use different runtime workers. A
-current-thread runtime remains supported but cannot supply multicore execution.
-Throughput still depends on graph shape, shared transaction owners, storage and
-consumer behavior; independent task execution is not a production scaling SLO.
-Graph-invoked preflight, pipe creation, in-place reconfiguration and retirement
-also have owned task boundaries. Reconciliation services unrelated lifecycle
-commands while retaining conflicting ownership. Qualification and separately
-scoped management work remain explicit in the
-[work inventory](../computation-graph-remaining-work.md).
-
-Use direct composition when data should pass through custom transformations,
-queries should participate in a wider graph, or transport/recovery boundaries
-must be explicit. Ordinary examples document currently retained behavior; the
-selected migration target is native components, not new adapter bridges.
-
-### Records and envelopes
-
-`ComputationComponent` supplies a descriptor and lifecycle. Execution comes
-from `EnvelopeSource`, `Transformer`, `EnvelopeSink` or `ComputationService`.
-The first produces `OutputEnvelope`; a transformer consumes an `InputEnvelope`
-and produces zero or more outputs; a sink handles an input.
-
-An envelope contains immutable shared changes, system metadata and branch-local
-context annotations. `ChangeSetId` identifies a change group; each operation
-has an ordinal. `RecordId` identifies a record within a namespace.
-`ChangeOperation` is Added, Updated or Deleted. Deletion can contain only a
-`RecordReference`, so validation must work without a payload.
-
-`RecordImage::Full`, `Patch` and `Partial` describe the supplied image.
-`UpdateSemantics::Patch` preserves omitted values; Replace means a replacement.
-The schema/consumer must support the selected form rather than silently
-interpreting a patch as a full record.
-
-`GraphChangeCodec` converts Drasi `SourceChange` values into graph envelopes.
-Stockroom's source uses:
+The `Audit` component has a graph-change input and output. Its transform method
+derives a new envelope, assigns its own output stream and sequence, and appends
+context:
 
 ```rust
-let envelope = GraphChangeCodec::encode_change(
-    change,
-    StreamId::try_new("inventory/out")?,
-    sequence,
-    None,
+let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
+self.sequence = self.sequence.checked_add(1).context("sequence exhausted")?;
+let mut envelope = GraphChangeCodec::derive_changes(
+    &input.envelope,
+    &changes,
+    StreamId::try_new("audit/out")?,
+    self.sequence,
+)?;
+envelope.append_annotation(ContextEntry::try_new(
+    self.descriptor.id().clone(),
+    "checked-by",
+    ContextValue::String("stockroom".into()),
+)?)?;
+Ok(vec![OutputEnvelope {
+    port: PortId::try_new("out")?,
+    envelope,
+}])
+```
+
+These are statements inside `Audit::transform` in the companion.
+The original graph records keep their identities. The new envelope has the
+transformer's emission identity and retains input context and lineage.
+Appending an annotation affects this branch, not a sibling's envelope.
+Repeated annotation keys are history entries, not assignments that overwrite
+old entries.
+
+The batch replaces `inventory -> low-stock` with two edges, adds the transformer,
+and binds `audit/out`. It also verifies that the annotation reaches the query's
+output. This is ordinary composition within the same `DrasiLib`, not a nested
+runtime.
+
+The annotation is not a durable audit record. This component has volatile
+sequence state and does not claim a recovery contract. A durable audit trail
+needs storage and a defined completion boundary.
+
+#### Use component roles deliberately
+
+The graph supports several kinds of work:
+
+| Role | Processing contract |
+|---|---|
+| Source | `EnvelopeSource` produces envelopes |
+| Transformer | `Transformer` consumes an envelope and produces zero or more outputs |
+| Query | A query component maintains results using the transformer data boundary |
+| Sink | `EnvelopeSink` accepts or handles input without data outputs |
+| Service | `ComputationService` runs an activity with no data ports |
+
+All implement `ComputationComponent` for description and lifecycle.
+Several complete pipelines can coexist in one instance. A pipeline can also
+contain no query at all: normalization, routing, and custom calculations do
+not require inventing query text.
+
+Connections must agree on the **complete schema descriptor**, including
+version, encoding, and definition. A query-result record is not a graph node,
+even if both contain a property called `quantity`. To feed one query's results
+into another query, explicitly map rows into graph changes with stable
+identities and correct deletion handling. Do not connect incompatible ports
+and expect implicit conversion.
+
+Data connections form a directed acyclic graph. Control relationships, covered
+in Chapter 7, have a different purpose; do not create a data cycle to carry
+readiness signals.
+
+#### Normalize input with middleware
+
+Suppose inventory arrives with a JSON string in `payload`, such as
+`"{\"quantity\":3}"`. Keep the low-stock calculation unchanged by normalizing
+that property before evaluation.
+
+For the file-based application, first extend `Product` and `Product::element`
+to carry that property. The starter's input model accepts only its declared
+product fields; adding an unknown JSON field alone is not enough.
+
+Add the required features to the application's existing `drasi-lib` dependency:
+
+```toml
+drasi-lib = { path = "../drasi-core/lib", features = [
+    "middleware-parse-json",
+    "middleware-promote"
+] }
+```
+
+Construct a normalization component:
+
+```rust
+let normalize = MiddlewareTransformer::new(
+    MiddlewareTransformerDefinition {
+        id: ComponentId::try_new("normalize")?,
+        output_stream: StreamId::try_new("normalize/out")?,
+        middleware: serde_json::from_value(serde_json::json!([
+            {
+                "kind": "parse_json",
+                "name": "read-payload",
+                "config": {
+                    "target_property": "payload",
+                    "output_property": "parsed",
+                    "on_error": "fail",
+                    "max_json_size": 65536,
+                    "max_nesting_depth": 8
+                }
+            },
+            {
+                "kind": "promote",
+                "name": "quantity-at-root",
+                "config": {
+                    "mappings": [{
+                        "path": "$.parsed.quantity",
+                        "target_name": "quantity"
+                    }],
+                    "on_conflict": "overwrite",
+                    "on_error": "fail"
+                }
+            }
+        ]))?,
+        pipeline: vec!["read-payload".into(), "quantity-at-root".into()],
+    },
+    DrasiLib::default_middleware_registry(),
 )?;
 ```
 
-`sequence` must advance within that producer's stream. `SystemMetadata` carries
-stream/sequence and optional timing/position information. It is not business
-data. Use `append_context` for attribution that should follow a branch and
-`derive` when producing a new identified change group while retaining context.
-Do not mutate an input shared with another branch.
+Add it as a transformer, bind `normalize/out`, and connect
+`inventory/out -> normalize/in -> low-stock/in`. Keep `sku` and `minimum`
+in the input, or map them as well. A normalization pipeline cannot manufacture
+business fields it was never supplied.
 
-### Query construction and graph wiring
+`middleware` declares named instances; `pipeline` selects them in execution
+order. Declaring a middleware instance does not automatically run it.
+Unknown kinds, duplicate names, and missing pipeline entries are errors.
+The registry contains the implementations enabled in the build.
 
-The direct query makes its graph and output identity explicit:
-
-```rust
-let query = ContinuousQueryTransformer::new(
-    ContinuousQueryDefinition {
-        graph_id: "__drasi_lib_runtime__".into(),
-        id: ComponentId::try_new("low-stock")?,
-        query: LOW_STOCK.into(),
-        language: ComputationQueryLanguage::Cypher,
-        output_stream: StreamId::try_new("low-stock/out")?,
-        outbox_capacity: NonZeroUsize::new(128).unwrap(),
-    },
-    Arc::new(InMemoryComputationProvider),
-).await?;
-```
-
-`ComponentBatch` uses `__drasi_lib_runtime__`, not the instance's `with_id`
-value, as its graph ID. A standalone `ComputationGraph::builder` uses the graph
-ID you choose. Names must match their actual owner.
-
-`new_with_options` additionally accepts `QueryOptions`; Strict recovery and
-Atomic publication are defaults. NonAtomic is an explicitly weaker
-compatibility mode: state may commit before output publication, and incomplete
-publication requires recovery rather than being treated as success.
-`new_configured` also takes `QueryExecutionSettings` and a middleware registry.
-Those settings carry joins, named middleware, ordered source/pipeline
-configuration and optional source-transaction limits.
-
-Get `query.results()` before transferring the query when a direct reader is
-needed. `QueryResults::wait_ready`, `snapshot`, `replay(after)` and
-`recovery_view` read maintained output; **they are not a live subscription**.
-For live results, connect an output or use `QueryResultsCatalog` with a
-`QueryResultsOutlet`. A component's `query_api` can expose read-only query
-capabilities without introducing another evaluator.
-
-The companion constructs Inventory, Audit and Alerts, then passes them to
-`ComponentBatch::builder().source(...).transformer(...).query(...).sink(...)`.
-Each connection names actual ports:
+The same normalization can run inside a query by passing middleware definitions
+and source-specific pipelines through `QueryExecutionSettings`, along with
+the registry to `new_configured`. For example, a source entry is:
 
 ```rust
-let edge = EdgeDefinition::new(
-    Endpoint::new(ComponentId::try_new("audit")?, PortId::try_new("out")?),
-    Endpoint::new(ComponentId::try_new("low-stock")?, PortId::try_new("in")?),
-);
-let pipe = BoundedPipeConfig { capacity: 8 };
-```
-
-Supply that pair to `connect`, bind each output's unique stream with
-`bind_stream`, build the batch, and supply it through `with_components`.
-Port schemas, directions and pipe capabilities are validated. One stream has
-one producer; a data graph must be acyclic. There can be several consumers,
-but fan-out forwards in declared edge order, so a slow branch can backpressure
-its siblings.
-
-Alerts in the basic direct example queues output to Rust application code.
-It correctly reports `SinkCompletion::Accepted`, not Handled. A sink should
-report Handled only when its `handle` return really means the promised work
-finished. This distinction is used by recovery and drain checks.
-
-A standalone graph is useful for finite pipelines or an independently owned
-computation. Its `run()` must remain awaited; cancellation and restart rules
-are covered under cleanup. A batch inside `DrasiLib` adds components to the
-existing owner rather than creating a second runtime.
-
-## Independent instances and process isolation
-
-The `drasi-instance-host` package hosts a normal DrasiLib in each process.
-Parent, child and grandchild use the same library implementation and native
-component contracts. Process supervision is a portless native service;
-`drasi-computation-source-bridge` and `drasi-computation-sink-bridge` supply
-independently selectable data endpoints.
-There is no remote `transform()` method or special child evaluator.
-
-The current owned-child host is Unix-only. It retains process handles, stable
-instance/state identity, bounded control/diagnostics and generation-fenced
-operations. Process liveness alone is not readiness. Required components use
-the graph's declared readiness contract; an independent health value of Unknown
-does not itself imply failed startup. Readiness follows accepted configuration,
-including persisted empty configurations, rather than an obsolete startup seed.
-
-Bridge profiles explicitly distinguish volatile queue acceptance from durable
-receiver admission. Neither proves completion of the child subgraph or external
-effects. Source times, origin identity, configured namespaces, ordering, bounded
-backpressure and actual receipt/replay contracts remain significant across links.
-Standard portable schemas are supported; child-only executable validators are
-not loaded into the parent. Mutual-TLS transport exists, but this does not claim
-all cross-machine failure/platform qualification is complete. The selected
-macOS/Linux checkpoint runs actual parent/child/grandchild processes and a
-prepared mutual-TLS Linux-VM peer with receipt faults and persistent reopen.
-Windows hosting, physical cross-machine production partitions and hard kernel
-resource isolation are not qualified.
-
-Keep transaction containers and actual shared-storage groups inside one instance.
-Each instance owns its graph/resources; matching database paths do not create
-cross-process atomicity. The host's explicit tree-stop cuts coordinate returning
-data and control traffic; a local `DrasiLib::stop` is not proof of composition
-drain. Force termination affects the selected whole child instance.
-
-Within one graph, scoped force must select the complete registered actual
-resource domain. Its report distinguishes interrupted work from cleanup;
-successful cleanup does not repair a damaged generation. Idle observers of
-never-started/quiesced members remain graph-owned, rather than falsely becoming
-interrupted work. After forced generation damage, reconstruct a fresh normal
-owner and recover its producer before retiring pending output or replacing
-bindings; force is not rollback or permission to discard that output.
-
-See the [host configuration/lifecycle guide](../../../components/instance-host/README.md)
-and [bridge profiles, resources and cuts](../../../components/computation-plugins/common/bridge/README.md)
-for the exact implemented configuration. The
-[execution/isolation plan](../computation-graph-execution-isolation-plan.md) and
-[inventory](../computation-graph-remaining-work.md) identify remaining work;
-they are not stronger runtime guarantees.
-
-## Choosing queues, ordering and backpressure
-
-### Three different capacities
-
-For an ordinary query:
-
-```rust
-let bounded = Query::cypher("low-stock")
-    .query(LOW_STOCK)
-    .from_source("inventory")
-    .with_priority_queue_capacity(256)
-    .with_dispatch_buffer_capacity(64)
-    .with_dispatch_mode(drasi_lib::DispatchMode::Channel)
-    .with_outbox_capacity(512)
-    .build();
-```
-
-The input queue holds work awaiting evaluation, the dispatch buffer holds
-outgoing delivery, and the outbox retains completed emissions for replay.
-Their defaults are respectively 10,000, 1,000 and 1,000. Instance-level input
-and dispatch defaults are set on `DrasiLibBuilder`; per-query settings override
-them. Larger buffers absorb bursts, not a permanently slow consumer.
-
-The **source's** dispatch mode determines query input behavior: Channel waits
-when full; Broadcast permits loss of incoming events. The **query's** mode
-controls outgoing result dispatch. Changing the latter does not fix source
-input loss.
-
-Ordinary inputs merge available source heads by event time and declared source
-rank, while preserving each source's logical order. Ties favor earlier
-`from_source` declarations. There is no promise to wait for a quiet source's
-unseen event or move a late event before work already processed.
-
-### Transport choices for explicit connections
-
-A bounded pipe is a volatile FIFO with backpressure. A broadcast pipe has a
-capacity and a lag policy: Report fails visibly on lag, while
-SkipWithNotification deliberately continues after reporting skipped data.
-Broadcast is suitable for disposable observations, not a way to guarantee
-every reorder action.
-
-`RankedInputPipeConfig` uses a shared queue resource and supplies capacity,
-source rank, optional source ID and `drop_when_full`. It is how ordered source
-admission is represented; the queue resource must be the actual shared object.
-Direct graph input merge is Arrival by default; `EventTimeAcrossStreams`
-orders available stream heads without breaking their individual sequence.
-
-For an explicitly buffered cross-source time merge, use the native
-[`SourceTimeMergeTransformer`](../computation-graph-time-merge.md). It requires
-source-supplied change timestamps, can reorder within each source, and has
-count/byte limits, maximum waiting, optional idle-source handling and explicit
-late-event policies. The default late policy fails and retains the event;
-separate routing and deliberate discard are opt-ins. Its durable constructor
-persists the buffer/frontier and unconfirmed output and requires durable output
-pipes. This is explicit native topology, not an ordinary queue setting.
-
-A retained pipe connects to a declared retained-store resource. Its capacity,
-durable declaration, retention policy and replay-gap policy must match actual
-capabilities. Backpressure preserves unhandled history; PruneOldest trades it
-away. Strict rejects a missing replay position;
-SkipWithNotification explicitly reports and skips the gap.
-
-A `QosChannel` is different from separate per-consumer queues: one append
-creates an entry shared by named subscribers, each with its own cursor.
-Its definition sets stream, capacity, durability, retention and a nonempty
-subscriber map. A new subscriber starts at Earliest, Latest, or After a
-position. Reconnecting an existing subscriber preserves its cursor.
-Disconnecting is **not** retirement; explicit retirement or a member-definition
-change releases its obligation. A lossless full channel backpressures while
-required subscribers still owe work.
-
-Reducing lossless capacity cannot discard those obligations. QoS
-`SkipWithNotification` logs the exact half-open skipped range only after its
-cursor advancement succeeds; a cancelled or failed advance does not claim a
-successful skip. The notification is a diagnostic log, not a durable audit
-record.
-
-`definition.pipe(resource_id, subscriber)` creates a `QosPipeConfig` with a
-Strict gap policy. The graph must receive both the resource declaration and
-the actual channel handle. Its optional `shared_storage` names a real shared
-transaction group, not an optimization hint.
-
-Graph-level `requirements` add transport assertions to per-port
-`PipeRequirements`. `require_recovery` asks the runtime to verify a selected
-consumer's path against a failure scope and guarantees. These checks reject
-unknown or insufficient evidence; they do not install persistence or retries.
-
-### Byte budgets and bounded history caches
-
-Count-only capacities remain the default. For variable-sized envelopes, replace
-the explicit graph's `BoundedPipeConfig` with:
-
-```rust
-let pipe = ByteBoundedPipeConfig {
-    capacity: 8,
-    max_bytes: 1024 * 1024,
-};
-```
-
-Both limits must be positive. The byte charge is the complete binary envelope:
-payload, identities, metadata, annotations and lineage, not just application
-JSON. Each independent fan-out pipe charges its own full envelope. FIFO capacity
-is released when the receiver takes the envelope, **not when handling finishes**.
-One oversized envelope may occupy an otherwise empty pipe exclusively, so this
-is a queue budget, not a hard maximum message size or process-memory cap.
-
-Retained stores and non-shared QoS journals also support optional byte quotas.
-Use the retained store's `new_with_byte_budget`/`try_new_with_byte_budget`,
-`QosChannel::volatile_with_byte_budget`, or
-`QosChannel::persistent_with_options` with `QosJournalOptions::max_bytes`.
-Their charge is once per journal, not once per subscriber. Under Backpressure,
-only history handled by all required consumers can be reclaimed; a rejected
-append cannot partially prune it. An oversized singleton requires safe removal
-of the prior window. Reopening with a smaller byte quota preserves existing
-work and blocks new admission until safe pruning.
-
-Persistent retained stores accept `IndexedJournalOptions` through
-`IndexedEnvelopeStore::try_new_with_options`; persistent QoS uses
-`QosJournalOptions`. Their optional `page_limits` accepts
-`drasi_core::interface::OutboxPageLimits { max_records, max_bytes }`, with positive
-`NonZeroUsize` fields. **Page bytes count stored records**, whereas admission
-quotas count binary envelopes; these are different limits. An oversized stored
-record is returned alone. Startup still scans and validates all history, but
-the payload cache stays bounded instead of holding every decoded envelope.
-Optional byte accounting retains one size per record, and storage buffers,
-metadata and downstream work remain separate costs. Unsupported providers fail
-explicitly; the in-memory and both RocksDB outbox implementations support pages.
-
-Shared transactional QoS supports a bounded cache through
-`SharedStorageGroup::channel_with_page_limits` or
-`QosChannel::shared_with_page_limits`, but its admission reservations remain
-count-only. Reads stay under the actual group transaction gate. Cancellation
-of an active shared refill can fence the group until cleanup and reconstruction.
-Do not bypass journal ownership with independent storage reads or writes.
-
-Byte/page settings belong to the resource owner. Reconstruct them explicitly in
-application code or a custom resource resolver; standard Host/Server recipes do
-not expose these options. Ranked and broadcast pipes remain count-bounded.
-There is no built-in pipe rate/burst limiter, and acknowledged subscribers still
-have one outstanding delivery each. Neither byte quotas nor larger queues
-change those contracts. See the
-[queue resource limits](../computation-graph-qos.md#optional-journal-resource-limits)
-for the provider and recovery boundaries.
-
-## Making state survive a restart
-
-### Choose what must survive
-
-There are several independent kinds of saved state:
-
-```mermaid
-flowchart LR
-    W["Source WAL / input journal"] --> Q["Query indexes + checkpoint"]
-    Q --> O["Live results + output outbox"]
-    O --> J["Output journal / consumer checkpoint"]
-    J --> E["Completed business effect"]
-    C["Saved desired configuration"] -. reconstructs owners .-> Q
-```
-
-Saving the configuration does not save query rows. Saving query indexes does
-not prove an HTTP recipient acted. A memory state store wrapped in a class with
-“persistent” in its name is still memory.
-
-`StorageDurability` is a struct with `process_restart`, `power_loss` and
-`storage_loss` fields. Each field is a `FailureSurvival`: Unknown,
-NotGuaranteed or Guaranteed. Constants such as `UNKNOWN`, `VOLATILE`,
-`LOCAL_PROCESS_RESTART` and `LOCAL_POWER_LOSS` express common combinations.
-A local disk guarantee does not imply survival of losing that disk.
-`RecoveryScope::MemoryLifetime` and `RecoveryScope::Failure(FailureMode::...)`
-make the requested boundary explicit.
-
-### The persistent Stockroom variant
-
-[`stockroom_persistent.rs`](../../examples/stockroom_persistent.rs) uses a redb
-source WAL and a RocksDB query backend:
-
-```sh
-cargo run --locked -p drasi-lib --example stockroom_persistent -- ./stockroom-db write
-cargo run --locked -p drasi-lib --example stockroom_persistent -- ./stockroom-db read
-```
-
-Use a fresh directory for `write`. `read` reconstructs the providers and
-instance, submits no inventory, and verifies the saved low-stock row.
-It demonstrates input/query recovery, **not durable application-reaction
-completion**.
-
-The essential decisions are a named RocksDB provider selected by the query,
-`with_wal_provider`, source `DurabilityConfig { enabled: true, max_events:
-10_000, capacity_policy: RejectIncoming }`, and Strict query recovery.
-Merely providing a WAL does not opt every source into using it.
-
-By default, sources have durability disabled, with a 10,000-event configured
-limit and RejectIncoming capacity policy. OverwriteOldest deliberately sacrifices
-retained input. `WriteAheadLogConfig` requires at least 16 events. A full WAL
-and a slow downstream consumer are operational conditions that need explicit
-handling, not reasons to acknowledge dropped input as accepted.
-
-`with_default_index_provider` changes the instance default;
-`with_index_provider(name, provider)` registers a named choice.
-`StorageBackendRef::Named` selects it. An inline
-`StorageBackendSpec::Memory { enable_archive }` is supported; plugin backends
-must be injected rather than dynamically constructed from an inline name.
-`add_storage_backend` records a named `StorageBackendConfig { id, spec }`;
-`StorageBackendSpec::Plugin { kind }` still needs the corresponding provider.
-
-### Atomic query state and recovery policies
-
-An atomic query commit includes the participating indexes, source checkpoint,
-live results and outbox. A provider must actually put those writers in the same
-transaction. `IndexBackendPlugin` can be adapted using
-`LegacyIndexProviderAdapter`; a native `ComputationIndexProvider` returns
-`ComputationIndexes` directly. Matching filenames or transaction labels do not
-establish shared ownership.
-
-Strict recovery refuses incompatible query configuration, incomplete bootstrap,
-missing history or damaged state rather than silently starting over.
-AutoReset explicitly permits rebuilding where the relevant recovery contract
-allows it. Do not enable it just to make a startup error disappear: the
-source must be able to reconstruct the required data, and pending tracked
-output obligations cannot be discarded by a reset.
-
-Query text, source order, middleware and other processing semantics can affect
-the saved configuration identity. Stop/start is not a schema migration. Memory
-providers, archive providers and persistent backends must be chosen for the
-capabilities the actual query needs.
-
-## Coordinating bootstrap and replay
-
-### Ordinary source bootstrap
-
-An ordinary `BootstrapProvider` receives a `BootstrapRequest` selecting query,
-node/relation labels and request ID, and a source bootstrap context containing
-server/instance scope, source ID and the shared sequence counter. It streams
-`BootstrapEvent` values and returns `BootstrapResult { event_count,
-source_position }`.
-
-`BootstrapProviderConfig` can describe Postgres, Application, ScriptFile,
-Platform or Noop. Postgres and Application carriers have no extra settings;
-ScriptFile supplies ordered `file_paths`; Platform supplies optional
-`query_api_url` and a timeout defaulting to 300 seconds. The built-in factory
-only constructs Noop. Other implementations come from their connector crates.
-
-A snapshot read independently from the live subscription can miss changes.
-A source must coordinate the boundary, or clearly document its weaker
-semantics. A saved “bootstrap completed” marker is not a per-source checkpoint:
-one source lacking a checkpoint can still need initialization.
-
-### Coordinated native bootstrap
-
-`ComputationBootstrapProvider` makes the lifecycle explicit. Before consuming
-any snapshot rows, `prepare` establishes subscription readiness.
-`prepare_with_state` additionally receives the query owner's borrowed
-`BootstrapState` service.
-
-Preparation returns Ready when existing state can be used, RefreshVolatile when
-volatile input needs refreshing, or ResetRequired when reuse would be invalid.
-`has_pending_snapshot` distinguishes a real snapshot for this start from
-checkpoint-based replay. Then `snapshot` or `snapshot_with_state` supplies a
-stream of changes and source watermarks. `complete_snapshot` supplies boundaries
-that are known only after the stream closes.
-
-A snapshot result has this shape:
-
-```rust
-fn empty_initial_snapshot() -> anyhow::Result<ComputationBootstrapSnapshot> {
-    Ok(ComputationBootstrapSnapshot {
-        changes: Box::pin(futures::stream::empty()),
-        watermarks: vec![BootstrapWatermark {
-            stream: StreamId::try_new("inventory/out")?,
-            source_id: Some("inventory".into()),
-            sequence: 0,
-            position: None,
-        }],
-    })
+drasi_lib::config::SourceSubscriptionConfig {
+    source_id: "inventory".into(),
+    nodes: vec!["Product".into()],
+    relations: vec![],
+    pipeline: vec!["read-payload".into(), "quantity-at-root".into()],
 }
 ```
 
-This is valid only for a source whose coordinated initial state really is
-empty at that boundary; it is not a fallback for a failed database snapshot.
-Watermarks identify the live work already covered by initial rows. Framework
-sequence, source ID and opaque source position must describe the same boundary.
-
-For initialization that creates an external subscription, persist intent
-through `BootstrapState::write` **before** creating that subscription.
-On restart, `read` lets the provider recover the same subscription rather than
-create another. Return final handover bytes from `completion_state`; the query
-commits those bytes with all watermarks and its completed-bootstrap marker.
-For example, the bytes can encode a replication-slot name and the snapshot
-boundary. Validate that recovered slot against the configured database before
-using it.
-
-This state is bounded initialization metadata, not arbitrary application
-storage: it must contain 1–65,536 bytes. It survives an explicit query reset so
-the provider can cleanly reuse or release external initialization; deprovision
-removes it. The borrowed state service cannot be retained after its callback.
-Snapshot rows are not automatically one upstream transaction.
-
-Providers scoped to one query should implement `validate_query_scope`.
-If a provider uses committed source progress, its `recovery_reader` must be
-bound to the actual processing owner; matching graph/query strings is not
-enough.
-
-Dropping the snapshot stream must cancel its work. `stop` must await owned
-worker cleanup, retaining unfinished workers after timeout or cancellation.
-`freeze_for_retirement` is a stronger, held stopped lifecycle that prevents
-reuse until accepted retirement or confirmed rejection. A successful `stop`
-alone is not that proof.
-
-## Recovering native input and unfinished output
-
-### A complete retained pipeline
-
-The third companion,
-[`stockroom_native_persistent.rs`](../../examples/stockroom_native_persistent.rs),
-connects persistent producer admission, the query and transactional alert
-handling:
-
-```mermaid
-flowchart LR
-    Client["producer session + client sequence"] --> I["SourceAdmission"]
-    I --> IJ["persistent QoS input"]
-    IJ --> Q["TransactionTransformer query body"]
-    Q --> OJ["persistent QoS output + replay receipts"]
-    OJ --> D["DeliveryRunner"]
-    D --> S["alert state + operation completion"]
-```
-
-```sh
-cargo run --locked -p drasi-lib --example stockroom_native_persistent -- ./native-stockroom-db stage
-cargo run --locked -p drasi-lib --example stockroom_native_persistent -- ./native-stockroom-db resume
-```
-
-`stage` requires a new directory. It submits one product, retries the identical
-submission, verifies the same admission receipt, and stops **before handling**
-the retained alert. `resume` reconstructs the pipeline, sends no new inventory
-and handles that alert. This is an intentional restart demonstration, not a
-claim to simulate every disk or machine failure.
-
-Unlike the simple graph example, its query is wrapped with
-`TransactionTransformer::from_query(query)`. Standard `ContinuousQueryFactory`
-construction enables the same delivery tracking directly on
-`ContinuousQueryTransformer`, without that compatibility wrapper. A raw immediate
-`ContinuousQueryTransformer` alone is not sufficient wiring for tracked durable
-output handoff.
-
-### Configure services and bind their real resources
-
-The input channel opts into Admission; the output channel opts into Replay.
-Both use persistent indexes, bounded registered codecs, durable declarations
-and Backpressure retention. For example, the output channel is opened with:
-
-```rust
-let outgoing = QosChannel::persistent_with_recovery(
-    channel_definition("low-stock/out", "alerts")?,
-    provider.create_indexes(GRAPH, "output-journal").await?,
-    codec()?,
-    "low-stock",
-    QosRecoveryOptions::Replay(ReplayOptions {
-        failure_scope: FailureMode::ProcessRestart,
-        receipt_capacity: NonZeroUsize::new(32).unwrap(),
-    }),
-).await?;
-```
-
-Here `channel_definition`, `provider`, `GRAPH` and `codec` are the concrete
-helpers and owners in the companion. The codec registers GraphChangeCodec and
-QueryChangeCodec and limits an encoded envelope to 1 MiB.
-
-The graph declaration must then include the channel's resource handle and use
-its pipe on the real edge:
-
-```rust
-let id = ResourceId::try_new("output-journal")?;
-let handle = outgoing.resource();
-let declaration = ResourceSpecification {
-    id: id.clone(),
-    role: handle.role(),
-    ownership: ResourceOwnership::Graph,
-    binding: "output-journal".into(),
-};
-let pipe = outgoing.definition().pipe(id, "alerts");
-```
-
-The companion passes these through `declare_resource`, `provide_resource`
-and `connect`. A channel constructor without that binding does not make an
-unrelated bounded edge durable.
-
-`QosRecoveryOptions::Disabled` is the default. Admission and Replay cannot
-coexist on one channel, and reopening must request the same recovery service
-rather than silently interpreting saved metadata under another mode.
-Admission bounds are at most 1,024 producers, 1,024 receipts per producer and
-16,384 receipts overall. Replay retains at most 1,024 receipts.
-
-### Submission uncertainty and stable identities
-
-`SourceAdmission::new(channel, port)` binds admission to an actual source output.
-The source returns that service from `admission`; the graph drives its bounded
-mailbox rather than calling `next` to publish the same input again.
-
-Register a `ComponentId` to obtain a `ProducerSession`, then submit consecutive
-client sequences beginning with the next expected sequence:
-
-```rust
-let session = admission
-    .register_producer(ComponentId::try_new("stockroom-app")?).await?;
-let receipt = admission.admit(&session, 1, &input).await?;
-let retry = admission.admit(&session, 1, &input).await?;
-anyhow::ensure!(receipt == retry);
-```
-
-Persist the session/sequence on the client as needed. After a lost response,
-use `producer_status` and `admission_receipt` to resolve uncertainty. Retry with
-the **same content**, not merely the same ID. Conflicting or expired retries
-must not become new input. `retire_producer` explicitly ends the session after
-its obligations permit retirement; disconnecting a network client does not
-reset its epoch.
-
-The receipt proves acceptance at the configured storage boundary, not that
-the query or an external system finished. The query's logical output sequence
-also differs from the sequence used to transport a replay. Deduplicate by the
-appropriate logical identity, not by a fresh transport ID.
-
-Tracked output records its destination membership with the producer's state.
-While output remains unconfirmed, do not change its port, consumer/subscriber
-identity or journal UUID. A destination's implementation can be replaced under
-the same component identity when allowed; that does not authorize dropping its
-outstanding work. Destination membership is bounded to 256.
-
-### Query replay without a retained pipe
-
-A consumer can instead recover from the query's snapshot/outbox using
-`QueryReplayTransformer` and `CheckpointedSink`. A concrete destination is a
-saved keyed view. Unlike a memory map with a persistent checkpoint, this keeps
-the rows as well as progress across reconstruction:
-
-```rust
-struct SavedQueryView {
-    descriptor: ComponentDescriptor,
-    store: Arc<dyn drasi_lib::StateStoreProvider>,
-}
-
-impl SavedQueryView {
-    const PARTITION: &'static str = "stockroom/alert-view";
-
-    fn new(store: Arc<dyn drasi_lib::StateStoreProvider>) -> anyhow::Result<Self> {
-        Ok(Self {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("alerts")?,
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?, PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?,
-            store,
-        })
-    }
-    fn key(id: &RecordId) -> String {
-        let bytes = id.value().iter().map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        format!("{}/{bytes}", id.namespace())
-    }
-}
-
-#[async_trait::async_trait]
-impl ComputationComponent for SavedQueryView {
-    fn descriptor(&self) -> &ComponentDescriptor { &self.descriptor }
-    async fn start(&mut self) -> anyhow::Result<()> { Ok(()) }
-    async fn stop(&mut self) -> anyhow::Result<()> { Ok(()) }
-}
-
-#[async_trait::async_trait]
-impl EnvelopeSink for SavedQueryView {
-    fn completion(&self) -> SinkCompletion { SinkCompletion::Handled }
-    fn supports_snapshot(&self) -> bool { true }
-    async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        for operation in input.envelope.changes().operations() {
-            match operation {
-                ChangeOperation::Added { after, .. }
-                | ChangeOperation::Updated { after, .. } => {
-                    let row = QueryChangeCodec::decode_row(after)?;
-                    self.store.set(Self::PARTITION, &Self::key(after.identity()),
-                                   serde_json::to_vec(&row.values)?).await?;
-                }
-                ChangeOperation::Deleted { identity, .. } => {
-                    self.store.delete(Self::PARTITION,
-                                      &Self::key(identity.identity())).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-    async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        self.store.clear_store(Self::PARTITION).await?;
-        self.handle(input).await
-    }
-}
-```
-
-Its writes and deletions are idempotent; a repeated operation has the same final
-view. Snapshot replacement can be interrupted, so the recovery owner must
-retry the replacement before advancing progress. The dedicated view partition
-must not contain checkpoint records or another instance's rows.
-
-Wrap that sink and give replay and checkpointing the same progress store:
-
-```rust
-fn recoverable_consumer(
-    results: QueryResults,
-    store: Arc<dyn drasi_lib::state_store::StateStoreProvider>,
-) -> anyhow::Result<(QueryReplayTransformer, CheckpointedSink)> {
-    let inner = Box::new(SavedQueryView::new(store.clone())?);
-    let progress: Arc<dyn ConsumerProgressStore> = Arc::new(
-        StateStoreConsumerProgress::new("stockroom", "alerts", store)?,
-    );
-    let replay = QueryReplayTransformer::new(
-        ComponentId::try_new("alert-replay")?,
-        "low-stock".into(),
-        StreamId::try_new("alert-replay/out")?,
-        results,
-        progress.clone(),
-        ConsumerRecoveryPolicy::Strict,
-    );
-    let sink = CheckpointedSink::new(inner, progress)?;
-    Ok((replay, sink))
-}
-```
-
-Connect query output to replay and replay output to the sink, binding
-`alert-replay/out` as the replay output stream. Supply the store through the
-host and keep its lifetime through both components' shutdown.
-`MemoryConsumerProgress` is volatile;
-StateStoreConsumerProgress inherits its actual store's durability.
-
-Strict rejects a gap or incompatible identity. AutoReset replaces the
-consumer's view from a snapshot; AutoSkipGap explicitly skips unavailable
-history. A sink must opt into skipped resets with `allow_skipped_resets`.
-Progress carries sequence, generation and query identity so an unrelated
-replacement cannot masquerade as the continuation of the old output.
-
-## Completing effects and maintaining consumer state
-
-### External actions
-
-`DeliveryRunner` provides bounded per-operation progress for a native sink.
-It records exact input identity/content before destination work and advances
-only the completed prefix. If the second operation fails, retry does not
-pretend the third already completed.
-
-Use `DeliveryRunner::new` for external handling. A `DeliveryHandler` must return
-only after the promised effect completed. This alternative writes an identified
-operation to an application-owned acknowledgement service:
-
-```rust
-#[async_trait::async_trait]
-trait ConfirmedOrders: Send + Sync {
-    async fn complete(
-        &self,
-        operation_id: &str,
-        operation: &ChangeOperation,
-    ) -> anyhow::Result<()>;
-}
-
-struct ReorderHandler(Arc<dyn ConfirmedOrders>);
-
-#[async_trait::async_trait]
-impl DeliveryHandler for ReorderHandler {
-    async fn handle(&mut self, item: DeliveryItem<'_>) -> anyhow::Result<()> {
-        self.0.complete(&item.id.to_string(), item.operation).await
-    }
-}
-```
-
-`ConfirmedOrders` is an application contract: its implementation must perform
-or verify the actual action, using the operation ID for deduplication. Returning
-after placing an order on an untracked local queue violates that contract.
-An HTTP 202 “queued” response is not completed handling.
-
-Select `DeliveryOptions` with the failure scope, stream bound, receipt bound
-and explicit retry policy. The default is one attempt and zero delay. A
-handler's `retryable` classification controls which errors may be retried;
-do not classify validation errors or arbitrary unknown failures as transient.
-Limits are 256 streams, 1,024 receipts per stream, 4,096 receipts overall,
-32 attempts and a 60-second maximum retry delay.
-
-The runner owns its `ComputationIndexes` and codec. Keep the upstream envelope
-until the full batch completes and await `shutdown` before releasing storage.
-A local completion ledger cannot atomically commit a remote effect. If the
-remote action succeeds but its acknowledgement is lost, the remote system
-needs a deduplication/confirmation protocol.
-
-For whole-envelope network transport, `DeliveryBatch` and
-`DeliveryBatchIdentity` avoid sending the full envelope once per operation;
-`DeliveryItem::batch_identity()` associates each item with that batch.
-The receiving service must derive an identity from **actual decoded content
-and its configured consumer scope**, compare it with the request, and only then
-perform effects. A digest supplied by the caller is not proof of its content.
-The transport owner still needs bounded endpoint admission and orderly shutdown.
-
-### Transactional consumer state
-
-For state wholly inside Drasi's transaction owner, use
-`DeliveryRunner::new_transactional` and `deliver_transactional`.
-The handler receives a borrowed `TransactionContext`; its state updates and
-one operation's completion commit together.
-
-Stockroom's persistent native handler decodes an added/updated query row, saves
-the quantity under the record's stable identity, or removes that identity on
-delete. It also maintains a count:
-
-```rust
-async fn count_handled(state: &TransactionContext<'_>) -> anyhow::Result<()> {
-    use drasi_core::models::ElementValue;
-    let count = match state.get("handled").await? {
-        None => 0,
-        Some(ElementValue::Integer(value)) => value,
-        value => anyhow::bail!("invalid handled count: {value:?}"),
-    };
-    state.put("handled", ElementValue::Integer(count + 1)).await?;
-    Ok(())
-}
-```
-
-Call that inside `TransactionalDeliveryHandler::handle`, as the complete
-`SaveAlert` implementation does. A failed operation rolls back both its count
-and its completion. Do not keep commit-sensitive counters in mutable handler
-fields, make external calls expecting atomicity, start a nested transaction or
-write through an independent store.
-
-Besides key/value `get`, `put` and `remove`, the context supports
-`get_element`, `put_element` and `remove_element` for graph elements, and
-`derive` for output carrying the proper context. It cannot outlive the
-callback. This is per-operation atomicity, not a promise that every consumer
-sees a whole upstream transaction simultaneously.
-
-### Sharing a producer's commit with its output journal
-
-`SharedStorageGroup` is an opt-in alternative for one built-in producer and its
-QoS journals using a proven Core transaction group. Declare its IndexBackend
-resource independently of the producer and name it in each participating
-pipe's `shared_storage`.
-
-Capacity is reserved before processing; producer state and journal append then
-commit under the actual shared storage gate. Subscriber acknowledgements remain
-available when a quiesced producer stops. An interrupted active transaction can
-fence the whole group. This is not established by giving independent providers
-the same database path, and it is not needed by ordinary volatile pipes.
-
-## Preserving source transactions
-
-Suppose one warehouse transfer decrements one bin and increments another in the
-same database commit. Publishing each row independently could briefly make the
-total wrong. A `SourceTransactionBuilder` assembles the complete group before
-making it publishable.
-
-The known-upstream-commit path is:
-
-```rust
-fn committed_group(
-    changes: Vec<drasi_core::models::SourceChange>,
-    transaction_id: bytes::Bytes,
-    position: bytes::Bytes,
-) -> anyhow::Result<SourceTransaction> {
-    let limits = SourceTransactionLimits {
-        max_changes: NonZeroUsize::new(100).unwrap(),
-        max_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
-        max_duration_ms: NonZeroU64::new(5000).unwrap(),
-    };
-    let mut group = SourceTransactionBuilder::new("inventory", limits)?;
-    for change in changes {
-        group.push(change)?;
-    }
-    Ok(group.commit(transaction_id, position)?)
-}
-```
-
-Only call this after the upstream commit is known. Convert the returned
-transaction with `into_envelope` for initial delivery or `into_replay_envelope`
-for replay. The complete group is one typed record, not a sequence of unrelated
-row envelopes.
-
-When the source owns the database transaction, use `prepare` instead of
-`commit`. It returns an inert `PreparedSourceTransaction`. Store its `encode()`
-bytes in the **same source database transaction** as the changes, commit that
-database transaction, and only then call `confirm_committed()`. There is
-deliberately no envelope API on the prepared value. After restart,
-`SourceTransactionCodec::decode_committed` validates a stored committed frame.
-Preparing or encoding bytes is not evidence that the database committed.
-
-Enforce the assembly deadline while waiting for rows, for example with a
-Tokio deadline around the receive operation; calling `push` eventually is not
-enough if the upstream stream stalls. A rejected change poisons the assembly:
-do not publish its accepted prefix. Transaction IDs contain 1–256 bytes;
-source positions contain 1–65,536 bytes. `max_bytes` bounds the complete encoded
-frame, including identity and position, not just the sum of row payloads.
-
-Configure a direct query's `QueryExecutionSettings.source_transactions` with
-matching limits. Its input schema then becomes SourceTransactionCodec rather
-than GraphChangeCodec. The configured limit can be raised to resume rejected
-input without redefining the underlying grouped semantics.
-
-For several processing steps that must share one commit, use a
-`TransactionTransformerDefinition`: graph ID, component ID, output stream,
-ordered `TransactionStepDefinition` values and an outbox capacity. Each step
-has a stable ID, implementation identity, configuration version and
-configuration. A `TransactionalTransformerFactory` constructs steps whose
-`transform_in_transaction` uses the borrowed context described above.
-
-The [complete transaction example](../computation-graph-transactions.md)
-shows real step registration, middleware and query bodies. Each step receives
-isolated state within the owning transaction. This is a **linear** container;
-it does not make arbitrary branches or external services one graph-wide
-transaction.
-
-## Operating and changing a running application
-
-### Readiness, lifecycle and health are different
-
-Adding a component accepts a definition. `wait_created` waits for construction;
-`wait_started` waits for its running boundary. Give waits an application deadline:
-
-```rust
-let handle = core.add_query_with_handle(query_config).await?;
-tokio::time::timeout(Duration::from_secs(10), handle.wait_started()).await??;
-```
-
-A failed addition remains visible and retryable when its failure permits retry.
-Stopping unfinished or retryable failed construction can acknowledge that
-outcome and allow a later retry. Unchanged terminal creation failures require
-repair rather than repeated construction. Overlapping individual lifecycle
-requests remain ordered; a stop can supersede a queued start with
-`StartSuperseded`. Disjoint starts/stops can progress while another owner waits
-for a lifecycle/drain boundary. Conflicting operations still reject or wait under
-their documented contract. Awaited reconciliation phases service the same bounded
-command dispatcher: component and actual-resource reservations reject conflicting
-changes while disjoint lifecycle operations continue. Latest-only resource/plugin
-metadata is generation-fenced and deferred until reconciliation finishes. Broader
-combined accepted-management qualification remains open; this is not a promise
-that every arbitrary provider or non-yielding callback can be interrupted.
-Inspect returned lifecycle/deployment reports: a graph handle can exist while
-one component is CreationFailed, another is Running, and an edge is unbound.
-`OperationSummary::CompletedWithFailures` is not a successful start of every
-member.
-
-Observed state separates realization, lifecycle, health, binding and data
-availability. A running source can be Idle because nothing changed, Degraded
-because one remote service is slow, or Unavailable because its connection
-failed. An Exhausted finite source is different from a temporarily idle one.
-
-The ordinary `add/start/stop/update/remove` source, query and reaction methods
-delegate to graph ownership. Updates supply replacement objects or query
-definitions; metadata forms preserve an explicit connector kind and
-configuration properties for inspection. The lower-level manager accessors are
-facades, not independent registries; prefer `DrasiLib` methods for ordinary
-application code.
-
-### Preview and reconcile graph changes
-
-For unmanaged native components, preview a revision-bound change:
-
-```rust
-let control = core.computation_control()?;
-let preview = control.preview(
-    control.desired_snapshot().revision,
-    vec![DesiredMutation::Restart(GraphSelection::Exact(vec![
-        ComponentId::try_new("alerts")?,
-    ]))],
-).await?;
-let report = control.reconcile(preview, TopologyBindings::default()).await?;
-anyhow::ensure!(
-    report.summary == OperationSummary::Completed,
-    "graph change failed: {:?}",
-    report.failures,
-);
-```
-
-The plan identifies creation, replacement, updates, restart, pause/resume and
-binding work. Another accepted change invalidates its revision. Real new
-components, factories, providers, resource constructors and custom pipes belong
-in `TopologyBindings`; serializable names do not substitute for those objects.
-Its readiness/deferred-activation/subscription settings describe actual assembly,
-not a way to suppress validation. Internal validation-error carriers are not
-application bypass switches.
-
-`GraphSelection::Exact`, Dependencies, Dependents and All select the intended
-members. A desired mutation can set a whole topology, put or replace a
-component, update a reconfigurable component, remove selected components,
-bind/unbind edges, change subscriptions, put/rebind/remove resources, restart
-or retry. Replace reconstructs even when descriptions match; Update requires
-explicit factory support. Retry is for retained failed work, not permission to
-open a second owner of unfinished resources.
-
-For incremental Rust construction, `ComponentAddition` accepts an instance or
-factory specification, resources, stream bindings, auto-start and readiness
-requirements. `defer_activation` lets a host finish wiring before activation.
-Returned `ComponentHandle` values are generation-bound; an old handle cannot
-silently control a replacement. Batches default to auto-start, and
-`ComponentBatch::auto_start(false)` changes that start intent.
-
-### Dependency policies and removal
-
-Relationships should express why one component depends on another:
-
-```rust
-let policy = RelationshipPolicy {
-    required_for_creation: true,
-    activation: ActivationCoupling::RequiresRunning,
-    propagate_failure: true,
-    ..RelationshipPolicy::default()
-};
-```
-
-For example, a source requiring a prepared downstream service can use explicit
-readiness instead of assuming add order. `require_downstream_ready` holds
-upstream activation until the consumer confirms readiness.
-
-By default an edge is not required for creation, is required for binding, is
-dynamically replaceable, and has independent activation. Consumer replacement
-does not automatically rebind it (`rebind_on_consumer_replace` is false).
-Failure does not propagate by default, and the producer is not automatically
-fenced on consumer failure. Enable `fence_producer_on_failure` when continued
-production would violate the intended boundary. `orphan_permitted` is false:
-survival without the relationship must be intentional.
-
-Removal Reject refuses broken required relationships; Cascade includes
-dependents; Orphan leaves only survivors whose policies allow it; Drain requires
-the supported in-flight/retained work to finish before ownership is released.
-No policy overrides an unresolved persistent recovery obligation.
-
-**Quiescing is not a universal drain.** It parks selected processing at safe
-boundaries. Incoming work from selected producers drains first; other input
-queues remain owned and retained. It does not prove every queued item or
-external effect completed. `start_components`, `start_requested`,
-`quiesce_components`, `stop_components` and `set_lifecycle_policy` make those
-actions explicit.
-
-`core.stop()` permits later `start()`. `shutdown()` is terminal owner cleanup.
-Graph `dispose()` releases owned graph resources. Deprovision permanently
-removes component-owned state and is a separate decision.
-`remove_source`/`remove_reaction` have a cleanup argument; query removal
-deprovisions its own state. Do not use removal as a pause button.
-
-### Configuration snapshots
-
-`get_config` returns original configuration; `get_current_config` projects
-current ordinary definitions. `snapshot_configuration` and
-`snapshot_computation_configuration` capture the corresponding reconstruction
-information, with native component configuration marked declared, available or
-unavailable rather than invented for opaque objects.
-
-`GraphSnapshot::select` exports all or a subset into `DesiredTopology`.
-The latter records descriptors, roles, completion boundaries, streams,
-lifecycle/merge policies and construction recipes, plus relationships, resources
-and dependencies. Subset boundaries stay explicit; they do not become invented
-external components. Recovery requirements, control connections, subscriptions,
-readiness, resource usage and plugin provenance travel with the description.
-`allow_incomplete` preserves incomplete declarations for later reconciliation,
-not permission to process invalid data.
-
-These exports are **privileged**: source/reaction properties and native
-configuration can contain credentials. Public topology inspection is not
-permission to publish the richer export. A configuration snapshot is not a
-backup of query indexes, pending messages or external systems.
-
-## Factories, resources and saved applications
-
-### From a Rust constructor to a recipe
-
-A factory separates pure description/validation from acquiring resources and
-constructing an instance. This lets a saved definition recreate the component.
-It does not require a dynamic library.
-
-The following alternative is a small managed heartbeat service. It is
-intentionally separate from Stockroom's data pipeline: it demonstrates a real
-nonempty application that can be saved and reconstructed. Its interval is a
-typed resource; its message is ordinary configuration.
-
-```rust
-struct Heartbeat {
-    descriptor: ComponentDescriptor,
-    period: Duration,
-    message: String,
-}
-
-#[async_trait::async_trait]
-impl ComputationComponent for Heartbeat {
-    fn descriptor(&self) -> &ComponentDescriptor { &self.descriptor }
-    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
-        Ok(serde_json::json!({"message": self.message}))
-    }
-    async fn start(&mut self) -> anyhow::Result<()> { Ok(()) }
-    async fn stop(&mut self) -> anyhow::Result<()> { Ok(()) }
-}
-
-#[async_trait::async_trait]
-impl ComputationService for Heartbeat {
-    async fn run(&mut self) -> anyhow::Result<()> {
-        let mut timer = tokio::time::interval(self.period);
-        loop {
-            timer.tick().await;
-            tracing::info!(message = %self.message, "application heartbeat");
-        }
-    }
-}
-```
-
-The graph polls `run` in its owned service task, independently of the controller;
-no worker is detached. Quiescence drops the `run` future, calls `quiesce`, and
-waits for the owned processing operation to complete. The default hook needs
-no extra action here because the heartbeat owns no additional worker.
-A service owning other workers must pause them in
-`quiesce` and resume them on the next `run`. The service body must still yield:
-an infinite synchronous loop cannot be preempted by these task boundaries.
-This heartbeat has no durable timer contract and must not claim stateless recovery.
-
-Here is its complete factory:
-
-```rust
-struct HeartbeatFactory(FactoryDescriptor);
-
-impl HeartbeatFactory {
-    fn new() -> anyhow::Result<Self> {
-        Ok(Self(FactoryDescriptor {
-            implementation: ImplementationIdentity::try_new("example/heartbeat", "1")?,
-            role: ComponentRole::Service,
-            configuration_version: 1,
-            configuration: ConfigurationSchema {
-                fields: [("message".into(), ConfigurationField {
-                    value_type: ConfigurationType::String,
-                    required: true,
-                    secret: false,
-                })].into(),
-                allow_additional: false,
-            },
-            dependencies: [("period".into(),
-                ResourceRequirement::exactly_one::<Duration>(ResourceRole::Component)
-            )].into(),
-        }))
-    }
-}
-
-#[async_trait::async_trait]
-impl ComponentFactory for HeartbeatFactory {
-    fn descriptor(&self) -> &FactoryDescriptor { &self.0 }
-    fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
-        anyhow::ensure!(spec.descriptor.ports().is_empty(), "heartbeat has no data ports");
-        Ok(())
-    }
-    async fn create(
-        &self,
-        context: ConstructionContext,
-    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
-        let create = || -> anyhow::Result<ConstructedComponent> {
-            let period = context.resources::<Duration>("period")?
-                .into_iter().next().context("missing period")?;
-            anyhow::ensure!(!period.is_zero(), "period must be positive");
-            let message = context.configuration().get("message")
-                .and_then(serde_json::Value::as_str).context("missing message")?;
-            Ok(ConstructedComponent::service(Box::new(Heartbeat {
-                descriptor: context.specification.descriptor.clone(),
-                period: *period,
-                message: message.into(),
-            })))
-        };
-        create().map_err(ComponentCreationError::terminal)
-    }
-}
-```
-
-Generic validation checks the configuration and dependency schema before
-`validate`. `validate_resources` and `validate_scope` allow additional pure
-checks against declarations/handles and graph identity. `record_schemas`
-reports executable schemas for this factory's records; metadata discovery must
-not connect to services or perform I/O.
-
-Construction must not start processing. Acquisition errors can be classified
-retryable; invalid definitions are terminal. `supports_reconfiguration` defaults
-false. To support true in-place changes, opt in and implement the component's
-`reconfigure` without changing its descriptor or mutating configuration during
-ordinary processing.
-
-Within one live graph, reuse the registered factory `Arc` when supplying
-replacement bindings. An implementation identity cannot be rebound to a
-different factory object merely because its name and version match.
-
-### Bind real resources
-
-An identity resource declaration does not itself contain credentials; an
-IndexBackend declaration does not open storage. A `ResourceSpecification`
-identifies role, ownership and binding; `ResourceHandle` holds the actual typed
-object. For this service, the resource is simply a checked `Duration`.
-A management resolver recreates it from a saved recipe:
-
-```rust
-struct HeartbeatResources;
-
-#[async_trait::async_trait]
-impl drasi_lib::management::ManagementResourceResolver for HeartbeatResources {
-    async fn resolve(
-        &self,
-        _instance: &str,
-        _graph: &str,
-        spec: &ResourceSpecification,
-        config: &serde_json::Value,
-    ) -> anyhow::Result<ResourceHandle> {
-        anyhow::ensure!(
-            spec.role == ResourceRole::Component && spec.binding.as_ref() == "heartbeat-period",
-            "unknown heartbeat resource"
-        );
-        let ms = config.get("milliseconds").and_then(serde_json::Value::as_u64)
-            .context("missing milliseconds")?;
-        anyhow::ensure!((1..=86_400_000).contains(&ms), "period is out of range");
-        Ok(ResourceHandle::new(ResourceRole::Component, Arc::new(Duration::from_millis(ms))))
-    }
-}
-```
-
-Graph ownership means the graph awaits the handle's `ResourceCleanup::shutdown`.
-Borrowed ownership means another application/instance owns that lifetime.
-`with_shared_identity` identifies the same actual resource across wrappers;
-matching strings do not. Requirements constrain role, minimum/maximum count
-and optionally concrete Rust type. `exactly_one::<T>` is the common typed case.
-
-Resource roles distinguish bootstrap, middleware, inspection, identity,
-indexes, secrets, state, WAL, pipes, checkpoints, outboxes, live results, future
-queues, source/reaction hosts and subscriptions, query catalogs, and generic
-component services. They do not make those services automatically available.
-
-For dependent resources, declare `resource_dependency` and its required role.
-`ResourceConstructor::construct_with_dependencies` and
-`ManagementResourceResolver::resolve_with_dependencies` receive only the actual
-declared prerequisite handles. Construction follows dependency order; cleanup
-runs in reverse. A borrowed resource cannot retain a graph-owned prerequisite
-that may disappear underneath it. Constructors/resolvers have a 30-second
-deadline; default graph cleanup is five seconds and can be configured through
-`cleanup_timeout`. Partial acquisitions must remain cancellation-safe.
-
-For example, cancellation after binding a socket must release that partial
-acquisition; a timeout is not permission to leak it or open a second owner.
-If cleanup fails, the graph retains the owner and its prerequisite resources
-for retry. External port contention leaves an accepted managed target available
-for reconciliation after the port becomes free.
-
-### Build a nonempty desired application
-
-The factory specification preserves all choices needed for reconstruction:
-
-```rust
-fn heartbeat_desired() -> anyhow::Result<drasi_lib::management::DesiredInstance> {
-    let factory = HeartbeatFactory::new()?;
-    let period = ResourceId::try_new("heartbeat-period")?;
-    let descriptor = ComponentDescriptor::try_new(
-        ComponentId::try_new("heartbeat")?, vec![],
-    )?;
-    let spec = ComponentSpecification {
-        descriptor: descriptor.clone(),
-        role: ComponentRole::Service,
-        completion: None,
-        implementation: factory.descriptor().implementation.clone(),
-        configuration_version: 1,
-        configuration: [("message".into(),
-            ConfigurationValue::Literal(serde_json::json!("Stockroom is running"))
-        )].into(),
-        dependencies: [("period".into(), vec![period.clone()])].into(),
-    };
-    let mut desired = drasi_lib::management::DesiredInstance::default();
-    desired.topology.components.push(DesiredComponent {
-        descriptor,
-        role: ComponentRole::Service,
-        completion: None,
-        streams: Default::default(),
-        lifecycle: LifecyclePolicy { auto_start: true },
-        input_merge: InputMergePolicy::Arrival,
-        construction: ComponentConstruction::Factory(spec),
-    });
-    desired.topology.resources.push(ResourceSpecification {
-        id: period.clone(),
-        role: ResourceRole::Component,
-        ownership: ResourceOwnership::Graph,
-        binding: "heartbeat-period".into(),
-    });
-    desired.topology.resource_configurations.insert(
-        period, serde_json::json!({"milliseconds": 1000}),
-    );
-    desired.normalized()
-}
-```
-
-Register the actual factory in `FactoryRegistry::standard`, provide the
-resolver, and provide a `ConfigurationStore`. This function applies the
-definition only on first use, then also works when the same store is reopened:
-
-```rust
-async fn open_heartbeat(
-    store: Arc<dyn drasi_lib::management::ConfigurationStore>,
-) -> anyhow::Result<DrasiLib> {
-    let mut factories = FactoryRegistry::standard();
-    factories.register(Arc::new(HeartbeatFactory::new()?))?;
-    let core = DrasiLib::builder()
-        .with_id("stockroom-managed")
-        .with_component_factories(factories)
-        .with_management_resources(Arc::new(HeartbeatResources))
-        .with_configuration_store(store)
-        .build().await?;
-    let setup = async {
-        let current = core.desired_configuration()?;
-        if current.revision == 0 {
-            core.apply_desired_state(0, "install-heartbeat", heartbeat_desired()?).await?;
-        }
-        let status = core.reconcile_desired_state().await?;
-        anyhow::ensure!(status.converged(), "heartbeat definition did not converge");
-        core.start().await?;
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            core.computation_component("heartbeat")?.wait_started(),
-        ).await??;
-        Ok::<_, anyhow::Error>(())
-    }.await;
-    if let Err(error) = setup {
-        if let Err(cleanup) = core.shutdown().await {
-            tracing::error!(error = %cleanup, "heartbeat cleanup also failed");
-        }
-        return Err(error);
-    }
-    Ok(core)
-}
-```
-
-For a concrete disk store, the separate `drasi-state-store-redb` crate supplies
-`RedbConfigurationStore::new(database_path, key)` with an externally supplied
-32-byte encryption key. A host can call `open_heartbeat(Arc::new(store))`,
-await shutdown, reconstruct the store with the same key, and call it again.
-No caller resubmits the definition on the second open. The
-[Host SDK managed example](../../../components/host-sdk/examples/managed_instance.rs)
-shows concrete store opening and key-file handling, as well as dynamic
-factory loading. Configuration encryption does not encrypt processing stores.
-
-Omit the store and use `ManagementOptions` when desired configuration should
-exist only in memory. That object groups factories, resource resolver and
-optional store; the builder's individual methods set the same services.
-
-### Acceptance is not runtime success
-
-The configuration store commits desired state and its acceptance receipt
-**before** construction or lifecycle effects. A missing factory or unavailable
-database can therefore leave a durable accepted definition that has not
-converged. Inspect `management_status`, `reconcile_desired_state` and
-`status.converged()`, not just the receipt.
-
-`expected_revision` prevents overwriting a concurrent change. After uncertain
-acceptance, query `configuration_receipt` or retry the same request ID with
-identical content. Reusing that ID for changed content is an error.
-`receipt.durable`, `configuration_is_persistent` and
-`has_managed_configuration` describe configuration management—not processing
-durability.
-
-Unavailable secrets/providers or mismatched factory/configuration versions do
-not replace the accepted definition with an empty graph. Restore the dependency
-and reconcile. Damaged encrypted records and unsupported persisted configuration
-versions fail explicitly; do not overwrite them with defaults to make startup
-appear successful.
-
-Managed configuration mutations must use `apply_desired_state`; imperative
-changes to those members are rejected. A later `register_component_factory`
-can resolve an accepted missing implementation. Persistent mode needs factories
-and reconstructible provider recipes, not opaque `with_source(object)` values.
-Memory-only managed and unmanaged members can coexist; reconciliation preserves
-unmanaged members and instance-provided services.
-
-Named snapshots use `snapshot_desired_configuration(name)`,
-`load_configuration_snapshot(name)` and
-`restore_configuration_snapshot(name, expected_revision, request_id)`.
-Restoring submits a new definition; it does not roll processing data back.
-An operational stop/start also does not rewrite persisted auto-start policy.
-
-### Bound configuration history and rotate keys
-
-The heartbeat example uses the default configuration-store policy: arbitrary
-request IDs and their receipts remain valid indefinitely. For a long-lived
-deployment, redb can instead use
-`RedbConfigurationStore::new_with_options(path, key, ConfigurationStoreOptions {
-receipt_batch_capacity: Some(capacity) })`, where `capacity` is a caller-chosen
-`NonZeroUsize`. This bounds accepted receipts per instance, not database bytes,
-snapshots or the number of instance namespaces.
-
-With expiry enabled, replace the example's literal `"install-heartbeat"` ID
-with one from `core.new_configuration_request_id().await?`. Save it with the
-operation and reuse it for identical retries. This helper also works with the
-default indefinite policy. Do not generate a new ID to resolve an uncertain
-acceptance.
-
-Expiry is by **batch**, not elapsed time or a sliding window. After a batch has
-accepted its configured number of requests, generating the next ID expires that
-whole batch, including unused IDs generated in it. Accepted no-op changes count.
-`RequestBatchFull` rejects an unused ID submitted to a full batch;
-`RequestExpired` rejects old or foreign batch IDs, and
-`GeneratedRequestIdRequired` rejects arbitrary IDs. Expiry means the outcome
-is no longer retained, not that the operation failed. Inspect current desired
-state before deciding whether a genuinely new operation is appropriate.
-
-Enabling expiry on an existing database immediately expires its legacy receipts,
-preserves definitions/snapshots and changes the format so older software cannot
-reopen it with indefinite-retry semantics. Reopening requires the same explicit
-capacity; silently disabling or resizing the policy is rejected. Plan this
-choice before handing out long-lived retry IDs.
-
-For named snapshots, `core.list_configuration_snapshots(after, limit).await?`
-returns a bounded page of names and saved revisions. Pass the last name as the
-next exclusive cursor. `core.delete_configuration_snapshot(name,
-expected_revision).await?` deletes only that saved revision, returns false when
-absent, and rejects a revision mismatch. Memory management and redb implement
-both operations. There is no automatic age policy; deleting a snapshot changes
-neither current configuration nor processing state or request receipts.
-
-Redb also provides `store.rotate_key(replacement_key).await?`. First provision
-the replacement key externally, retain both keys, and close **every**
-configuration session, normally by awaiting each instance's shutdown.
-Rotation atomically rewrites live configuration, snapshots, receipts and policy
-metadata. A cancelled caller does not release ownership of ongoing storage work.
-If commit is uncertain, the provider fences writes; reopen with the externally
-retained keys to establish which key is active before proceeding.
-
-Rotation may require substantial temporary disk space. It does not re-encrypt
-old free pages, backups or filesystem snapshots, and is not secure erasure.
-Standard Host/Server recipes do not expose the receipt-expiry owner option;
-automatic key-provider integration and snapshot-age policies are not supplied.
-See [managed configuration housekeeping](../managed-configuration.md#bounded-request-history)
-for the full lifecycle and recovery contract.
-
-### Configuration references and secrets
-
-A value can be literal or a reference:
-
-```rust
-let token = ConfigurationValue::Reference {
-    resource: ResourceId::try_new("warehouse-secrets")?,
-    key: "api-token".into(),
-    secret: true,
-};
-```
-
-`ConfigurationSchema` fields declare Boolean, Integer, String, Object, Array
-or general Json, whether required, and whether secret. Additional fields are
-rejected by default. A secret field requires a secret reference and a resource
-declared with role SecretStore, not a plaintext literal.
-
-Reference resolution also needs a **typed**
-`ConfigurationResolverResource`. A plausible resource name is insufficient:
-
-```rust
-struct SecretReferences(Arc<dyn drasi_lib::SecretStoreProvider>);
-
-#[async_trait::async_trait]
-impl ConfigurationResolver for SecretReferences {
-    fn validate_reference(&self, key: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(!key.is_empty(), "empty secret key");
-        Ok(())
-    }
-    async fn resolve(&self, key: &str) -> anyhow::Result<serde_json::Value> {
-        Ok(serde_json::Value::String(self.0.get_secret(key).await?))
-    }
-}
-
-fn secret_resource(store: Arc<dyn drasi_lib::SecretStoreProvider>) -> ResourceHandle {
-    ResourceHandle::new(
-        ResourceRole::SecretStore,
-        Arc::new(ConfigurationResolverResource(Arc::new(SecretReferences(store)))),
-    )
-}
-```
-
-Declare/provide that handle under `warehouse-secrets`; managed reconstruction
-needs a resolver that recreates it. `validate_reference` is pure; `resolve`
-performs the lookup during construction. Resolved values are runtime-only and
-are available through `ConstructionContext::configuration`.
-
-### Retiring storage and packaging implementations
-
-Normal recovery-domain retirement requires actual owners to prove drain,
-completed cleanup and held exclusion against reuse. Source admission, pending
-output, subscriber cursors, scheduled work and consumer completion all matter.
-No absent live handle or matching file path proves a store is empty.
-
-For deliberate loss, `RecoveryRetirementAuthorization` carries the source
-revision, `allow_data_loss`, and exact resource/component sets. It requires
-persistent configuration and removal of complete domains, including actual
-live users. It authorizes abandoning those obligations; it does **not** reset,
-acknowledge or delete stored data. It cannot excuse unfinished cleanup, missing
-owners or unhealthy transaction gates. Do not manufacture it automatically
-after a startup failure. Uncertain acceptance keeps retirement ownership held;
-only confirmed rejection permits reuse of the old owners.
-
-Static Rust factories are sufficient for all of the example above. Dynamic
-packaging uses the separate plugin and Host SDKs: the host verifies and loads
-trusted libraries, retains them while instances/resources exist, and supplies
-factories/resolvers to drasi-lib. A saved plugin path never authorizes downloading
-or executing code.
-
-Native dynamic source, transformer, sink/service and participating transaction
-steps are supported. Arbitrary dynamic query-role hosting, unrestricted resource
-injection, in-place dynamic reconfiguration and hot unloading are not general
-capabilities. Keep allocator choices compatible with the System allocator
-used across these boundaries. Configuration housekeeping is an explicit
-application policy, not an automatic side effect of loading plugins.
-
-## Writing ordinary sources and reactions
-
-### A source with honest replay behavior
-
-Ordinary plugins are useful when integrating with existing Drasi connectors or
-exposing `SourceChange` rather than native records. Their graph adapters own
-lifecycle; the plugins must cooperate through the supplied runtime context.
-
-This minimal push source has no database, workers or replay history. It
-delegates dispatch/subscription bookkeeping to `SourceBase`:
-
-```rust
-use drasi_lib::{
-    channels::{ComponentStatus, SubscriptionResponse},
-    config::SourceSubscriptionSettings,
-    context::SourceRuntimeContext,
-    sources::{SourceBase, SourceBaseParams},
-    Source,
-};
-
-struct ManualInventory { base: SourceBase }
-
-impl ManualInventory {
-    fn new() -> anyhow::Result<(Self, SourceBase)> {
-        let base = SourceBase::new(
-            SourceBaseParams::new("inventory").with_dispatch_buffer_capacity(64),
-        )?;
-        let input = base.clone_shared();
-        Ok((Self { base }, input))
-    }
-}
-
-#[async_trait::async_trait]
-impl Source for ManualInventory {
-    fn id(&self) -> &str { &self.base.id }
-    fn type_name(&self) -> &str { "manual-inventory" }
-    fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        Default::default()
-    }
-    fn supports_replay(&self) -> bool { false }
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
-    }
-    async fn start(&self) -> anyhow::Result<()> {
-        self.base.set_status(ComponentStatus::Running, None).await;
-        Ok(())
-    }
-    async fn stop(&self) -> anyhow::Result<()> { self.base.stop_common().await }
-    async fn status(&self) -> ComponentStatus { self.base.get_status().await }
-    async fn subscribe(&self, settings: SourceSubscriptionSettings)
-        -> anyhow::Result<SubscriptionResponse>
-    {
-        self.base.subscribe_with_bootstrap(&settings, self.type_name()).await
-    }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    async fn remove_position_handle(&self, query_id: &str) {
-        self.base.remove_position_handle(query_id).await;
-    }
-    async fn set_bootstrap_provider(
-        &self, provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider>,
-    ) {
-        self.base.set_bootstrap_provider(provider).await;
-    }
-    async fn set_identity_provider(
-        &self, provider: Arc<dyn drasi_lib::identity::IdentityProvider>,
-    ) {
-        self.base.set_identity_provider(provider).await;
-    }
-}
-```
-
-Pass the source to `with_source`, disable query bootstrap, start/wait for its
-consumer, then submit a full Product insert through `input.dispatch_source_change`.
-Later `input.dispatch_source_change(product_change(2, 2)).await?` patches its
-quantity using the helper from the input-modeling section.
-The input is a shared base handle, not another lifecycle owner. Coordinate the
-application's publishing tasks so they stop submitting before shutdown. A
-production network connector normally owns its listener/worker and makes that
-submission boundary explicit.
-
-The important override is `supports_replay() -> false`: the trait's default is
-**true**. Leaving the default on a volatile custom source would promise a
-capability it does not have. `properties` must preserve reconstruction
-configuration, including sensitive fields when present; protect exports rather
-than silently removing required settings.
-
-SourceBase defaults to Channel, a 1,000-item dispatch buffer and auto-start.
-Its parameters can supply a different mode/capacity, an explicit state store,
-bootstrap provider and start policy. An explicit source state store takes
-precedence over the runtime context fallback. Expose changed mode/start settings
-through the corresponding `Source` methods rather than relying on their defaults.
-Use `deprovision_common` only for permanent owned-state cleanup.
-
-### Sequences, positions and upstream acknowledgements
-
-Framework sequence is source-local and monotonic, starting at one for live
-events. Source position is an opaque offset in the upstream system; they are
-not interchangeable. `dispatch_source_change` serializes sequence allocation
-with dispatch. If constructing wrappers yourself, serialize allocation and
-publication together; two producer tasks must not dispatch sequence 12 before
-11.
-
-On restart, restore the sequence floor using durable source progress/WAL head
-and `set_next_sequence(last_sequence)`; the next allocation is at least
-`last_sequence + 1`. `subscribe_with_bootstrap` and
-`subscribe_with_replay` perform the base-level resume bookkeeping;
-`subscribe_with_wal` chooses replay based on the subscription settings.
-`resume_from`, `resume_sequence` and `request_position_handle` describe an actual
-subscription, alongside query/source identity, labels and bootstrap selection.
-Filter labels the source does not own.
-
-`create_position_handle(query_id)` starts at `u64::MAX`, meaning **unconfirmed**.
-The handle returned in `SubscriptionResponse.position_handle` is advanced by
-the query after commit. `compute_confirmed_position` finds the minimum
-confirmed position, ignoring `u64::MAX` handles; it returns None when none is
-confirmed. This is why connectors needing all initial subscribers must retain
-the startup feedback fence rather than treating an unconfirmed reader as
-“everything is complete.”
-
-For a database connector, map framework sequences to upstream positions using
-SourceBase's position tracking. `compute_confirmed_source_position` gives the
-safe upstream boundary. Acknowledge that boundary upstream first, and prune
-the position map/history **only after acknowledgement succeeds**. Otherwise a
-failed acknowledgement can destroy the information needed to retry it.
-`remove_position_handle` releases a stopped query's obligation.
-`on_subscriptions_complete` is the startup fence for connectors that must wait
-until initial subscribers are known before advancing upstream feedback.
-
-If implementing `PositionComparator`, `position_reached(event, resume)` means
-**strictly after** the resume position, despite its name. Equal positions are
-already covered. Byte-lexicographic comparison is suitable only for a position
-encoding whose ordering actually has that meaning, such as fixed-width
-big-endian offsets. Positions are bounded to 64 KiB.
-
-### An ordinary reaction and its processing loop
-
-The host subscribes to queries on a reaction's behalf and forwards results
-through `enqueue_query_result`. Do not subscribe again inside `start`.
-This small alternative reacts immediately by logging sequence information:
-
-```rust
-use drasi_lib::{
-    context::ReactionRuntimeContext,
-    reactions::{ReactionBase, ReactionBaseParams},
-    Reaction,
-};
-
-struct SequenceLog { base: ReactionBase }
-
-impl SequenceLog {
-    fn new() -> Self {
-        Self { base: ReactionBase::new(
-            ReactionBaseParams::new("sequence-log", vec!["low-stock".into()]),
-        ) }
-    }
-}
-
-#[async_trait::async_trait]
-impl Reaction for SequenceLog {
-    fn id(&self) -> &str { self.base.get_id() }
-    fn type_name(&self) -> &str { "sequence-log" }
-    fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        Default::default()
-    }
-    fn query_ids(&self) -> Vec<String> { self.base.get_queries().to_vec() }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
-    }
-    async fn start(&self) -> anyhow::Result<()> {
-        self.base.set_status(ComponentStatus::Running, None).await;
-        Ok(())
-    }
-    async fn stop(&self) -> anyhow::Result<()> { self.base.stop_common().await }
-    async fn status(&self) -> ComponentStatus { self.base.get_status().await }
-    async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
-        tracing::info!(query = %result.query_id, sequence = result.sequence, "result observed");
-        Ok(())
-    }
-    async fn set_identity_provider(
-        &self, provider: Arc<dyn drasi_lib::identity::IdentityProvider>,
-    ) {
-        self.base.set_identity_provider(provider).await;
-    }
-}
-```
-
-Use `with_reaction(SequenceLog::new())` in place of or beside ApplicationReaction.
-It is not a durable business consumer. Ordinary reaction adapters remain
-acceptance-oriented; implementing a callback does not automatically enable the
-native DeliveryRunner contract.
-
-For queued processing, delegate enqueue to `base.enqueue_query_result`.
-`ReactionBaseParams` configures query IDs, queue capacity (10,000 default),
-auto-start (true) and optional recovery override. Create the shutdown channel
-before spawning the processor, then register the processor in its owned slot.
-`run_standard_loop(shutdown_receiver, initial_checkpoints, policy, handler)`
-dequeues one result, awaits the handler and advances completed progress.
-The handler receives `Arc<QueryResult>` and must return only after its work
-finishes. The [log reaction implementation](../../../components/reactions/log/src/log.rs)
-shows the complete base-backed lifecycle.
-
-`is_durable` defaults false. Set it true when a persistent state store is
-required; startup validates that requirement. `needs_snapshot_on_fresh_start`
-defaults false; set it true for a maintained destination view that needs current
-rows before changes. `default_recovery_policy` defaults Strict, and
-ReactionBaseParams can override it per instance.
-
-### Reaction bootstrap and checkpoint discipline
-
-`Reaction::bootstrap` receives a **reaction** `BootstrapContext` containing
-query ID, `is_reset`, snapshot/outbox access and checkpoint helpers. It is not
-`drasi_lib::bootstrap::BootstrapContext`, which belongs to source initial loading.
-The reaction context is valid **only during the bootstrap call**; never store
-it for later, including when a Rust type does not express that lifetime. FFI
-backends can contain callbacks that become invalid when the call returns.
-
-For an idempotently replaceable destination, a bootstrap helper can persist a
-complete keyed view before its checkpoint:
-
-```rust
-async fn replace_saved_view(
-    context: &drasi_lib::reactions::BootstrapContext,
-    store: &dyn drasi_lib::StateStoreProvider,
-    partition: &str,
-) -> anyhow::Result<()> {
-    let snapshot = context.fetch_snapshot().await?;
-    let checkpoint = drasi_lib::reactions::ReactionCheckpoint {
-        sequence: snapshot.as_of_sequence,
-        config_hash: snapshot.config_hash,
-    };
-    let rows = snapshot.collect_keyed_vec().await;
-    store.set(partition, "rows", serde_json::to_vec(&rows)?).await?;
-    context.write_checkpoint(&checkpoint).await?;
-    Ok(())
-}
-```
-
-If interrupted between those writes, repeat the replacement; do not assume the
-two stores committed atomically. Subsequent live processing must load/update
-the same view by signature and only then advance the checkpoint. For
-non-idempotent external actions, use the stronger completion protocol discussed
-earlier rather than copying this two-write pattern.
-
-For batching, `CheckpointState` and `batch_checkpoint_candidates` separate
-candidate positions from completed work. `advance_completed_after_ack` advances
-only acknowledged work and writes per query, **not** one atomic multi-query
-transaction. Lazy checkpoint seeding preserves the host-supplied `config_hash`;
-do not replace it with zero or your own unrelated hash.
-
-`persist_with_recovery_policy` makes failure handling explicit: Strict returns
-an immediate error, AutoReset uses four bounded attempts, and AutoSkipGap logs
-and continues. `FailureAction::Stop` and SkipAndContinue express the chosen
-outcome. AutoSkipGap intentionally permits loss; it is not reliability at a
-lower logging level.
-
-Reactions awaiting submitted effects should use
-`stop_common_gracefully`. A timeout retains the processor without aborting its
-submitted work. It does not persist an in-memory queue or make acceptance-only
-delivery durable. Serialize start/stop/restart and retain a cleanup-required
-guard until teardown really completes.
-
-### Formatting, batching and sharing existing plugins
-
-Reusable reaction helpers do not change every reaction automatically.
-`TemplateSpec` holds a template and optionally a flattened typed extension.
-Per-operation templates can be configured as:
-
-```rust
-use drasi_lib::reactions::common::{QueryConfig as Templates, TemplateSpec};
-let templates: Templates = Templates {
-    added: Some(TemplateSpec::new("Reorder {{after.sku}}")),
-    updated: Some(TemplateSpec::new("Stock changed: {{after.quantity}}")),
-    deleted: Some(TemplateSpec::new("No longer low: {{before.sku}}")),
-};
-```
-
-The selected reaction renders them. `TemplateRouting` chooses per-query routes
-or a default using OperationType Add, Update or Delete.
-`TemplateSpec::with_extension` carries reaction-specific fields alongside the
-template. An empty template is the default, not an automatically generated
-message.
-
-`AdaptiveBatchConfig` gives an implementing reaction a minimum size (1),
-maximum (100), window (10 units of 100 ms, range 1–255) and timeout (1,000 ms).
-For example, a database writer can prefer 50-row batches while ensuring low
-traffic flushes within the timeout. Batching does not change when the effect
-is considered completed.
-
-To share a source owned by another instance, use `borrow_computation_source`;
-`SourcePluginHost::{owned, borrowed, recreatable}` describe lifecycle and
-reconstruction ownership. `LegacySourceSubscription` and SourcePluginAdapter
-bridge its changes. `SourceSubscriptionOptions` defaults to bootstrap false,
-empty label lists, borrowed recovery false, broadcast-loss permission false and
-a 300-second bootstrap timeout. Enable borrowed recovery only when the plugin
-supports an isolated additional subscription. Allowing broadcast loss does not
-disable replay consistency checks.
-
-`ReactionPluginHost::{owned, borrowed, recreatable}` and ReactionPluginAdapter
-provide the equivalent reaction path, with QueryResultsCatalog supplying
-outputs. `ReactionPluginOptions` defaults to no recovery override and a
-300-second bootstrap timeout. Borrowed adapters do not stop or deprovision the
-owner. [`computation_instance.rs`](../../examples/computation_instance.rs)
-shows two instances sharing ownership correctly.
-
-`core.computation_pipeline()` assembles these subscriptions, queries, middleware
-registry, per-query providers and result services into a batch; its catalog
-and services connect ordinary consumers. Query source lists must name real
-subscriptions. For arbitrary native incoming edges, use direct query
-construction instead of an empty-source ordinary query recipe.
-
-## Extending native processing
-
-### Schemas validate records, not just names
-
-A `SchemaDescriptor` has ID, version, encoding and descriptor bytes.
-Its `RecordValidator` checks actual identities and payloads. An illustrative
-one-byte quantity encoding can validate identity-only deletes independently:
-
-```rust
-struct QuantityValidator;
-
-fn quantity_descriptor() -> anyhow::Result<SchemaDescriptor> {
-    Ok(SchemaDescriptor::try_new(
-        SchemaId::try_new("example.quantity")?,
-        SchemaVersion::try_new(1)?,
-        "quantity-u8",
-        bytes::Bytes::from_static(b"sku:utf8;quantity:u8;full-only"),
-    )?)
-}
-
-impl RecordValidator for QuantityValidator {
-    fn validate_identity(
-        &self, schema: &SchemaDescriptor, id: &RecordId,
-    ) -> std::result::Result<(), RecordValidationError> {
-        let expected = quantity_descriptor()
-            .map_err(|error| RecordValidationError::new("schema", error.to_string()))?;
-        if schema != &expected || id.namespace() != "sku"
-            || id.value().is_empty() || std::str::from_utf8(id.value()).is_err()
-        {
-            return Err(RecordValidationError::new("identity", "expected a UTF-8 sku"));
-        }
-        Ok(())
-    }
-    fn validate(
-        &self, schema: &SchemaDescriptor, id: &RecordId,
-        image: RecordImage, payload: &[u8],
-    ) -> std::result::Result<(), RecordValidationError> {
-        self.validate_identity(schema, id)?;
-        if image != RecordImage::Full || payload.len() != 1 {
-            return Err(RecordValidationError::new("image", "expected one full quantity byte"));
-        }
-        Ok(())
-    }
-}
-```
-
-Construct a `Schema` from that descriptor and validator, then use
-`Record::try_new`/`RecordReference::try_new` so malformed records are rejected.
-The [finite computation example](../../examples/computation_graph.rs) shows a
-complete custom binary source, arithmetic transformers and collecting sink.
-
-`EnvelopeCodec` is a concrete bounded JSON codec, not a trait;
-`BinaryEnvelopeCodec` is its binary alternative. Register every permitted
-schema explicitly and choose a maximum encoded size. An envelope-count capacity
-does not bound memory if individual payloads are unlimited. Unknown schemas
-must not be accepted merely because their bytes deserialize as JSON.
-
-### Decode query output without losing its meaning
-
-`QueryChangeCodec::decode_row(record)` returns query ID, row signature, typed
-values and row kind. The values are `VariableValue`, not arbitrary
-`ElementValue` or untyped JSON; inspect them with the appropriate accessors:
-
-```rust
-fn quantities(envelope: &ChangeEnvelope) -> anyhow::Result<Vec<(u64, i64)>> {
-    let mut rows = Vec::new();
-    for operation in envelope.changes().operations() {
-        if let ChangeOperation::Added { after, .. }
-            | ChangeOperation::Updated { after, .. } = operation
-        {
-            let row = QueryChangeCodec::decode_row(after)?;
-            let quantity = row.values.get("quantity")
-                .and_then(|value| value.as_i64()).context("expected quantity")?;
-            rows.push((row.signature, quantity));
-        }
-    }
-    Ok(rows)
-}
-```
-
-A real view must also process deletions using their identity. Use
-`QueryChangeCodec::metadata`, `query_sequence`, `query_generation`,
-`is_snapshot` and `is_progress_only` to distinguish output identity, replacement
-snapshots and progress-only envelopes. A progress marker advances recovery
-without adding a business row. A snapshot replaces a view; it is not a batch
-of unrelated live insertions. The envelope's system sequence can change during
-replay while the logical query sequence remains the same.
-
-### Bounded continuations and time-driven work
-
-A transformer returning a huge output vector can monopolize its processing task
-and retain excessive pending data. Retain bounded pending emissions and emit
-bounded chunks instead:
+Use a separate transformer when several downstream consumers need the same
+normalized stream. Use query-local middleware when normalization belongs to
+that query's processing state. In either case, native data connections still
+determine which input reaches the query.
+
+#### Choose transformations by their data contract
+
+| Middleware | Use in Stockroom | Important constraint |
+|---|---|---|
+| `decoder` | Decode base64, base64url, hex, URL, or JSON-escaped properties | Decoding text is not parsing it; order the parsing step afterward |
+| `parse_json` | Interpret a string property as structured data | Bound input size and nesting; choose fail/skip behavior explicitly |
+| `promote` | Copy nested values to named properties | Decide whether conflicting destination values overwrite, skip, or fail |
+| `relabel` | Map upstream labels to the application's graph vocabulary | Labels on deletions must be normalized too |
+| `map` | Select and reshape changes using JSONPath | Preserve IDs and account for the fields available in delete images |
+| `jq` | Express more elaborate selection and reshaping | jq expressions have their own quoting and error behavior |
+| `unwind` | Expand warehouse bins into maintained child nodes and relationships | Stable child keys and previous-element state are essential |
+
+Each kind has a corresponding `middleware-*` Cargo feature.
+`middleware-jq` uses system libjq; `middleware-bundled-jq` builds it.
+Do not enable every feature as a setup shortcut when the application needs
+only two transformations.
+
+Unwind illustrates why apparently simple transformation can be stateful.
+When a bin disappears from a warehouse's array, the old child must be deleted.
+The transformer needs the previous parent and children to compute that change.
+An omitted selected array is an empty selection, not "leave old children
+unchanged." Later steps must preserve the identities and fields needed for the
+next update.
+
+`MiddlewareTransformer::new` keeps its state in memory. Its `new_durable`
+constructor uses `DurableMiddlewareOptions` and an atomic persistent provider
+to save prior elements, input progress, and output together. Durable outgoing
+connections are required. Two durable pipes around a volatile stateful
+transformer do not make the middle of the pipeline recoverable.
+
+The [middleware guide](../computation-graph-middleware.md) and
+[middleware configurations](../../../middleware/README.md) provide larger
+mapping examples and exact options.
+
+#### Bound expansion and scheduled work
+
+A transformer can emit no outputs to filter an input, or several to expand it.
+Returning a huge vector keeps all those outputs in memory and can monopolize
+processing. For incremental output, keep a bounded pending queue:
 
 ```rust
 fn next_chunk(
@@ -2646,296 +1094,303 @@ fn next_chunk(
 }
 ```
 
-In `transform`, populate the owned queue and return its first chunk.
-`has_pending_emissions` reports whether it remains nonempty;
-`continue_transform` returns the next chunk. The graph finishes all
-continuations before accepting another input or acknowledging the original.
-Each derived output still needs a valid producer sequence. Bounded chunk size
-does not justify unbounded pending storage; cap admission/expansion as well.
+Return the first chunk from `transform`, report remaining work with
+`has_pending_emissions`, and produce later chunks from `continue_transform`.
+The graph completes the continuations before accepting another input or
+acknowledging the original. Bound the retained queue too: small chunks do not
+justify unlimited total expansion.
 
-For scheduled work, return an `Arc<dyn WakeupSource>` from `wakeup_source`:
+For time-driven work, expose a `WakeupSource` and implement `on_wakeup`.
+`wait` must actually suspend until work may be ready; `has_pending` lets a
+finite graph account for outstanding scheduled work. Persist both schedules
+and their completion when timers must recover. A wall-clock alarm held only in
+a Rust field is volatile.
+
+A `ComputationService` can run a periodic health activity without data ports.
+Its `run` future must yield, and its quiesce/stop hooks must account for any
+workers it owns. Use a data source when the activity produces records that
+belong in the pipeline instead.
+
+**Summary.** Composition separates ingestion, normalization, calculation, and
+consumption without adding another execution engine. Schemas keep boundaries
+explicit; continuations and wakeups let components do bounded work. Next,
+choose how connected components share capacity and ordering.
+
+### 6. Control flow, ordering, and memory
+
+Stockroom works while every component is fast. Now consider a burst of inventory
+updates, a quiet catalog, or an alert consumer that slows down. Queue and ordering
+choices determine what the application does under those conditions.
+
+#### Follow backpressure upstream
+
+The first program uses bounded FIFO pipes. When `alerts` cannot finish writing
+its output, its graph input fills, the query's forwarding waits, and pressure
+eventually reaches `inventory`. This is useful: the producer cannot create an
+unlimited hidden backlog in the graph pipes.
+
+A buffer absorbs a temporary imbalance. It does not increase the sustained
+throughput of the slowest required stage. Count all buffering locations:
+application channels, graph pipes, a transformer's pending output, retained
+journals, and any destination client queues.
+
+Keep three different purposes separate:
+
+| Buffer | Holds | Freed by |
+|---|---|---|
+| Volatile input/dispatch queue | Work waiting to be received | The receiver taking work |
+| Query outbox | Retained logical query emissions | Its retention and output-confirmation rules |
+| Acknowledged journal | Work owed to required consumers | The required progress/retirement rules |
+
+A queue slot becoming available is not evidence that business work completed.
+
+#### Select a transport policy
+
+Use `BoundedPipeConfig` for ordinary lossless-in-memory FIFO and backpressure.
+Use `BroadcastPipeConfig` only when its lag policy fits the consumer:
+Report fails visibly on lag; SkipWithNotification explicitly reports skipped
+data and continues. A disposable dashboard can accept a rebuild after lag;
+a replenishment order processor usually cannot.
+
+`RetainedPipe` retains unacknowledged work through a supplied store.
+`QosChannel` shares one journal among named subscribers with separate cursors.
+Their persistence and recovery choices are developed in Chapter 11.
+Retention under Backpressure preserves outstanding obligations; PruneOldest
+deliberately trades them away.
+
+Port `PipeRequirements` and graph-level `requirements` assert required
+capabilities. They do not add those capabilities to a provider. A memory pipe
+must reject a durable-acceptance requirement rather than accept the declaration
+and continue with weaker behavior.
+
+Fan-out shares immutable payloads but forwards in edge declaration order.
+A slow required branch can backpressure its siblings through the producer.
+Adding independent edges does not guarantee branch isolation, and partial
+fan-out is possible if an earlier branch accepts before a later one fails.
+
+#### Bound bytes as well as messages
+
+For variable-sized input, replace a bounded edge's configuration with:
 
 ```rust
-struct OneDeadline {
-    due: tokio::time::Instant,
-    pending: std::sync::atomic::AtomicBool,
-}
-
-#[async_trait::async_trait]
-impl WakeupSource for OneDeadline {
-    async fn wait(&self) -> anyhow::Result<()> {
-        tokio::time::sleep_until(self.due).await;
-        Ok(())
-    }
-    async fn has_pending(&self) -> anyhow::Result<bool> {
-        Ok(self.pending.load(std::sync::atomic::Ordering::Acquire))
-    }
+ByteBoundedPipeConfig {
+    capacity: 8,
+    max_bytes: 1024 * 1024,
 }
 ```
 
-The transformer's `on_wakeup` performs the due work and clears or reschedules
-the pending flag. `wait` must wait rather than busy-loop while a deadline is
-future; `has_pending` tells a finite graph whether scheduled work remains.
-This example is volatile. A recoverable timer must persist the schedule and
-its completion under the appropriate owner.
+Both limits must be positive. The charge covers the complete binary envelope,
+including identifiers, metadata, annotations, and lineage, not only the JSON
+payload. Each independent fan-out pipe charges its own envelope.
 
-Built-in query scheduling uses `QuerySchedulingResource` and
-`QueryScheduledSource` to merge future work with ordered inputs. Do not invent
-source updates to drive time functions or reserve a business source name for
-timers. The source observes due work without removing it; the query transaction
-removes and evaluates actual due work together with its resulting output.
-Duplicate hints do not themselves complete a timer or advance live-source
-checkpoints. Future-deadline sleeps are capped at five seconds before wall-clock
-rechecking, and hints preserve the scheduled timestamp. This is not a real-time
-deadline guarantee; deterministic scheduling-source clock tests do not establish
-all whole-query clock changes combined with persistent recovery.
+An oversized envelope may occupy an otherwise empty byte-bounded pipe by itself.
+The budget is therefore **not a maximum message size or a process-memory cap**.
+Use bounded codecs and input validation for a hard message-size limit.
+The budget excludes component state, work already received, serialization
+scratch space, and backend caches.
 
-The data runner bounds continuously ready work per node, allowing live inputs,
-timers and lifecycle controls to progress. Native processing runs in owned
-independent tasks, but custom component code must still yield and bound its
-work. Task cancellation cannot preempt a synchronous callback that never yields;
-process isolation has its own explicit termination boundary.
+Retained stores and non-shared QoS journals have optional byte quotas too.
+The journal charges an envelope once, not once per subscriber. Under lossless
+retention, only safely handled history can be reclaimed. Reopening with a
+smaller quota preserves existing obligations and blocks new admission until
+safe pruning is possible.
 
-`WalSourceResource`/`WalReplaySource` similarly adapt a real WAL partition
-and source-progress owner, with `resume_after` selecting the replay boundary.
+Persistent journals can use `OutboxPageLimits` through `IndexedJournalOptions`
+or `QosJournalOptions` to bound the decoded payload cache. Page bytes measure
+stored records, while admission quotas measure binary envelopes; they are
+different quantities. Startup still validates the complete history. Paging
+does not make it safe to ignore damaged older entries.
 
-### Control notifications
+Shared-storage QoS has bounded history pages but count-based admission
+reservations. Ranked and broadcast pipes remain count-bounded. Select these
+limits at the actual resource owner and preserve them in its reconstruction
+recipe. See [journal resource limits](../computation-graph-qos.md#optional-journal-resource-limits)
+for the supported constructors.
 
-`bind_control` receives a generation-bound `ComponentControl`. A component
-requiring explicit readiness sets `requires_readiness_confirmation` and calls
-`control.ready()` only when usable. Ready/NotReady change the sender's readiness;
-Available/Unavailable describe availability instead.
+#### Decide what "ordered" means
 
-For receipt, return a handler from `control_handler`:
+FIFO orders a producer's emissions by sequence. With several inputs, the
+default `InputMergePolicy::Arrival` processes available work without imposing
+a global source-time order.
 
-```rust
-struct CatalogNotifications(tokio::sync::watch::Sender<u64>);
+`InputMergePolicy::EventTimeAcrossStreams` compares available stream heads.
+It preserves each stream's order and does not wait for unseen input from a
+quiet producer. `RankedInputPipeConfig` additionally uses an actual shared
+ranked queue and declared source ranks; it is not a switch that makes unrelated
+queues one globally ordered stream.
 
-#[async_trait::async_trait]
-impl ControlHandler for CatalogNotifications {
-    async fn on_message(
-        &self, message: PeerMessage, _control: ComponentControl,
-    ) -> anyhow::Result<()> {
-        if let ControlNotification::Custom { kind, payload } = message.notification {
-            anyhow::ensure!(kind == "catalog-refreshed", "unsupported notification");
-            let version = payload.get("version").and_then(serde_json::Value::as_u64)
-                .context("missing catalog version")?;
-            self.0.send_replace(version);
-        }
-        Ok(())
-    }
-}
+Neither policy can move a late event before work already evaluated. If a
+warehouse total must use a bounded source-time reorder window, make that
+processing stage explicit.
+
+#### Merge by source-change time
+
+Place `SourceTimeMergeTransformer` before the query:
+
+```mermaid
+flowchart LR
+    Inventory --> Merge["source-time merge"]
+    Catalog --> Merge
+    Merge --> Query["warehouse query"]
+    Merge -. optional late output .-> Late["late-event handler"]
 ```
 
-The neighboring sender uses `notify_downstream`, `notify_upstream` or
-`notify_neighbor` with `Custom { kind, payload }`. Notifications go only to
-authorized immediate control neighbors, not arbitrary components. Replacement
-invalidates stale generations/connections. A bounded fan-out accepts every
-target or rejects the operation. Payloads are limited to 16 KiB and JSON child
-depth 64; use data edges for bulk data. A handler may be cancelled when its
-connection is invalidated, which cannot undo effects already performed.
-
-### Recovery declarations describe implementation, not intent
-
-The default `ComponentRecovery` is unknown. `stateless()` is valid only for a
-deterministic transformation preserving replay identity with no hidden state,
-timers, workers or external effects. `transactional(&indexes)` identifies the
-actual state/progress/output transaction; `transactional_consumer(&indexes)`
-identifies atomic consumer state and completion.
-
-`admitted(durability)` declares an acceptance boundary.
-`replay_until(consumer)` retains input until that actual consumer commits;
-`replay_to_durable_delivery` retains until durable outgoing acceptance.
-Committed source progress must be published by the real processing owner and
-bound through its resource. `recovery_reader` can expose the appropriate read
-capability; `recovery_progress` binds an immediate consumer's owner and does not
-permit arbitrary fan-out to another boundary.
-
-Durable producers implement `bind_output_destinations` and
-`delivery_completed`. The latter follows acceptance by every outgoing branch,
-not downstream handling. Retain unfinished output after cancellation/failure.
-The graph captures contracts outside the per-envelope path and verifies recovery
-requirements against actual participants. A stronger assertion never upgrades
-an unknown implementation.
-
-### Custom transport without invented guarantees
-
-A custom `PipeProvider` creates a fresh `ProvidedPipe`: the pipe owns its sender
-and single receiver, while its separate control handle owns lifecycle.
-Capabilities must be side-effect-free and honest. This wrapper imposes an
-application limit while retaining the built-in transport's real semantics:
+For example:
 
 ```rust
-struct SmallPipe(BoundedPipeConfig);
-
-impl PipeProvider for SmallPipe {
-    fn specification(&self) -> Option<DesiredPipe> { self.0.specification() }
-    fn capabilities(&self) -> std::result::Result<PipeCapabilities, PipeError> {
-        if self.0.capacity > 128 { return Err(PipeError::InvalidCapacity); }
-        self.0.capabilities()
-    }
-    fn create(&self) -> std::result::Result<ProvidedPipe, PipeError> {
-        self.capabilities()?;
-        self.0.create()
-    }
-}
+let merger = SourceTimeMergeTransformer::new(
+    SourceTimeMergeDefinition {
+        graph_id: GRAPH.into(),
+        id: ComponentId::try_new("merge")?,
+        sources: vec![
+            StreamId::try_new("inventory/out")?,
+            StreamId::try_new("catalog/out")?,
+        ],
+        output_stream: StreamId::try_new("merge/out")?,
+        late_output_stream: None,
+        reorder_window_ms: 2_000,
+        max_wait_ms: 5_000,
+        idle_timeout_ms: Some(10_000),
+        max_buffered_events: NonZeroUsize::new(256).expect("positive capacity"),
+        max_buffered_bytes: NonZeroUsize::new(1024 * 1024).expect("positive capacity"),
+        late_policy: LateEventPolicy::FailAndRetain,
+    },
+    GraphChangeCodec::schema(),
+)?;
+let observations = merger.subscribe();
 ```
 
-It delegates sender, receiver, metrics and control through the created bounded
-pipe; it does not claim persistence. For a genuinely new transport, implement
-`EnvelopeSender::send`, `EnvelopeReceiver` and `PipeControl`, including waking
-blocked waiters on closure. `resource_dependencies`, `exclusive_resources`,
-`validate_resources` and `create_with_resources` bind actual provider state.
-Multicast providers must identify their shared channel and independent
-subscriber instead of appending once per edge.
+Connect both sources to `merge/in`, bind `merge/out`, and connect it to the
+query. Every input needs `SystemMetadata::timestamp()` containing its actual
+source-change time. In the first source, that means replacing the codec's
+`None` timestamp argument with the source-supplied value. Element
+`effective_from` is not an automatic substitute.
 
-An `EnqueueReceipt` means acceptance only; its optional journal position differs
-from producer sequence. On failure, `SendFailure::acceptance()` distinguishes
-NotAccepted from Unknown. Cancellation before receiving a response is also
-ambiguous. `BatchSendFailure` retains already accepted receipts, the failed
-envelope and not-attempted envelopes; `send_batch` is not atomic.
+The merger can reorder timestamps within a source while requiring that
+source's logical input sequences arrive in order. Ties use declared source
+order and logical sequence among buffered events. A complete envelope remains
+indivisible.
 
-A received `Delivery` separates its envelope from an optional
-`Acknowledgement`. Complete that handle with `HandlingOutcome::Handled` or
-Failed after the declared work. Dropping it is not acknowledgement, and neither
-a successful transform nor a queue receipt implicitly completes it.
+An event becomes eligible when all active sources' observed progress permits
+early release, or when its maximum residence wait expires. Optional idle
+detection prevents a silent source from blocking the early-release calculation
+forever. Idleness is not a watermark proving there can be no earlier event.
+`max_wait_ms` is an eligibility bound, not a delivery deadline under
+backpressure.
 
-`PipeControl::close` ends new admission while permitting supported draining;
-`cancel` cancels the transport. `is_idle` must prove absence of buffered,
-replayable and provider-in-flight work after the producer is parked. If it
-cannot, return an error rather than claiming drain from an empty local queue.
-The graph separately tracks work already received by a consumer.
+An input older than the emitted time frontier is late. FailAndRetain holds it
+and reports a typed error; Route sends it to an explicitly connected `late`
+output; Discard explicitly drops it and reports that choice. Routing late data
+does not automatically correct answers already published by the query.
 
-## Credentials, secrets and provider integration
+The count and byte limits include held and unconfirmed work. Unlike the
+byte-bounded FIFO, this merger rejects an individually oversized input.
+Capacity errors do not create an overflow queue or an implicit retry policy.
+The upstream owner must retain input if it needs another attempt.
 
-### Credentials are contextual; secrets are named values
+`new_durable` adds atomic persistence of the buffer, progress, held input,
+and unconfirmed output, with lossless durable output requirements.
+Reconstruction validates the configuration and restarts residence waits;
+downtime does not invent source progress. Its persistence cost grows with
+the bounded saved window. The
+[source-time merge guide](../computation-graph-time-merge.md)
+details release rules and recovery.
 
-For a fixed username/password, `PasswordIdentityProvider::new(username,
-password)` supplies an identity provider. For application-owned credential
-acquisition, use `ApplicationIdentityProvider`:
+#### Understand concurrency
 
-```rust
-use drasi_lib::identity::{
-    ApplicationIdentityProvider, CredentialContext, Credentials, IdentityProvider,
-};
+Top-level native nodes run in independently scheduled, graph-owned Tokio tasks.
+Mutable work on one component remains serialized. On a multi-threaded executor,
+independent nodes can use different workers; on a current-thread executor,
+they interleave but cannot perform CPU work on several cores at once.
 
-fn environment_identity() -> Arc<dyn IdentityProvider> {
-    Arc::new(ApplicationIdentityProvider::new_sync(|context| {
-        anyhow::ensure!(context.get("hostname") == Some("warehouse.internal"),
-                        "unexpected credential destination");
-        Ok(Credentials::UsernamePassword {
-            username: std::env::var("WAREHOUSE_USER")?,
-            password: std::env::var("WAREHOUSE_PASSWORD")?,
-        })
-    }))
-}
-```
+Shared storage gates, graph shape, and slow consumers still constrain parallelism.
+The runtime bounds continuously ready work per node, but it cannot preempt
+an infinite synchronous loop inside custom code. Use asynchronous I/O and
+bounded computation; merely placing a blocking call inside `async fn` does
+not make it nonblocking.
 
-For asynchronous secret acquisition, copy the needed context before returning
-the future:
+**Summary.** Capacity controls burst absorption, ordering controls which
+available change is next, and retention controls what can be recovered.
+They are different decisions. Bounded work and explicit backpressure keep
+Stockroom understandable when input or consumers stop behaving ideally.
 
-```rust
-fn secret_backed_identity(
-    secrets: Arc<dyn drasi_lib::SecretStoreProvider>,
-) -> Arc<dyn IdentityProvider> {
-    Arc::new(ApplicationIdentityProvider::new(move |context| {
-        let host = context.get("hostname").map(str::to_owned);
-        let secrets = secrets.clone();
-        async move {
-            anyhow::ensure!(host.as_deref() == Some("warehouse.internal"),
-                            "unexpected credential destination");
-            Ok(Credentials::Token {
-                username: "stockroom".into(),
-                token: secrets.get_secret("warehouse-api-token").await?,
-            })
-        }
-    }))
-}
-```
+### 7. Own the runtime lifecycle
 
-Set an instance default with `with_identity_provider`. A source/reaction's
-explicit `set_identity_provider` override wins over the context-injected
-default. Custom plugins must delegate that setter to their base or implement
-equivalent precedence; the trait's optional default hook does not acquire
-credentials for you.
+An embedded runtime is part of the application's lifetime. Stockroom needs to
+know when it is usable, stop without abandoning ownership, and distinguish an
+idle source from a damaged component.
 
-`CredentialContext::new().with_property("hostname", "warehouse.internal")`
-can also include provider-defined strings such as port and database. Obtain
-credentials with `get_credentials(&context).await?`; use
-`try_into_auth_pair` for password/token credentials or `try_into_certificate`
-for PEM certificate/key credentials with optional username. These fallible
-conversions prevent treating a certificate as a password.
+#### Separate acceptance, construction, and readiness
 
-`SecretStoreProvider` retrieves a named value. In a test, a
-MemorySecretStoreProvider can be initialized with `with_secret`, changed with
-`set_secret`, and have a value removed with `remove_secret`. Production values
-belong in an appropriate external provider, not source files or logs. Mutating
-a secret does not force already connected components to refresh credentials;
-their reconnect/refresh policy remains explicit.
+A successful addition accepts a component definition. It does not prove that
+a database connection opened or that processing is ready.
+`ComponentHandle::wait_created` waits for construction; `wait_started` waits
+for the running boundary. Bound waits with an application deadline.
 
-These services do not authenticate your application's administration endpoint.
-The host must protect that endpoint and its configuration/inspection outputs.
+A failed definition remains inspectable. Retryable acquisition failures can be
+retried after their cause is repaired; unchanged terminal validation failures
+need a corrected definition. An instance can contain a running query, a failed
+sink, and an unbound edge at the same time. Inspect per-component outcomes,
+not just whether a graph handle exists.
 
-### State stores and WAL providers
+Observed state separates realization, lifecycle, health, binding, and
+availability. Running is not the same as healthy; a healthy source can be idle;
+an exhausted finite source is not an unavailable listening source.
 
-`StateStoreProvider` stores bytes under a store/partition ID and key. Use
-`get`/`set`/`delete`, existence/key-list operations, partition clearing and
-explicit synchronization according to the provider's contract. The default
-memory store is disposable.
+#### Use readiness and control relationships
 
-```rust
-async fn save_preferences(
-    store: &dyn drasi_lib::StateStoreProvider,
-    instance_partition: &str,
-    minimum: i64,
-) -> anyhow::Result<()> {
-    store.set(
-        instance_partition, "minimum",
-        serde_json::to_vec(&serde_json::json!({"minimum": minimum}))?,
-    ).await?;
-    Ok(())
-}
-```
+A component needing explicit readiness opts into
+`requires_readiness_confirmation`. Its `bind_control` hook receives a
+generation-bound `ComponentControl`; it calls `ready` only after the required
+initialization is complete.
 
-Choose partition IDs that cannot collide across your components/instances.
-`get_many`, `set_many` and batch deletion are convenience operations, not a
-general multi-key transaction guarantee. A failure can follow some successful
-writes; design idempotent retry or use an actual transaction owner when
-all-or-nothing state is required. `sync()` success does not override the
-provider's declared durability.
+`require_downstream_ready` can hold upstream activation until required
+consumers confirm readiness. Do not depend on construction order or add an
+arbitrary sleep before sending input.
 
-**`WalProvider` is one partition-keyed trait; there is no `WriteAheadLog`
-trait.** Register the partition with WriteAheadLogConfig before appending.
-Repeated registration with the same configuration is idempotent. Append returns
-a framework sequence; `read_from` is inclusive, as is `prune_up_to`.
-`head_sequence` is the highest allocated number and can exceed the highest
-persisted event after a failed write. Do not infer successful persistence just
-from the head. `oldest_sequence` and `event_count` describe retained history;
-`delete_wal` permanently removes the partition. Future/timer events cannot be
-appended as source changes.
+Control notifications communicate with authorized immediate neighbors through
+`notify_downstream`, `notify_upstream`, or `notify_neighbor`. Ready/NotReady
+describe readiness; Available/Unavailable describe availability.
+A `ControlHandler` receives peer notifications independently of ordinary
+mutable data operations.
 
-A WAL provider must preserve capacity, replay and partial-failure semantics,
-not just write a JSON list to a file. An index provider must supply the actual
-index set, transaction/session control and supported checkpoint/live-result/
-outbox writers. Report Unknown for unproven durability instead of inferring
-survival from the backend's name.
+Custom notifications can carry small configuration-independent signals, such
+as "catalog refreshed." They are bounded control messages, not a bulk-data
+transport or durable work queue. Replacement invalidates old generations and
+connections. A handler may be cancelled when its connection becomes invalid;
+that cannot undo an external action already performed.
 
-`ConsumerProgressStore` supplies monotonic handled checkpoints and conditional
-recovery commits. `ConfigurationStore`/`ConfigurationSession` have a different
-job: exclusive instance ownership, revision checks, atomic desired-definition
-and receipt acceptance, named snapshots and awaited close. Implementing one of
-these does not automatically implement the others.
+#### Choose the right stop operation
 
-### Owned workers and status propagation
+| Operation | Purpose |
+|---|---|
+| Quiesce selected components | Park processing at supported safe boundaries while retaining ownership |
+| Stop components or `DrasiLib::stop` | Stop processing with awaited lifecycle work; the instance supports a later start |
+| `DrasiLib::shutdown` | Perform terminal instance cleanup |
+| Standalone graph `dispose` | Release graph-owned resources after its run/cleanup boundary |
+| Deprovision | Permanently remove component-owned processing state |
 
-Both plugin contexts contain instance/component identity, state store, update
-sender, identity provider and resource observer. Source context additionally
-provides WAL; reaction context provides snapshot fetching. QueryRuntimeContext
-contains instance/query identity and its update sender. Always retain and use
-the supplied context; constructing a private replacement disconnects observation
-and resource ownership.
+Quiescence is not a universal drain. Work from selected producers drains to
+the supported boundary, while other queued input can remain owned.
+It does not prove every retained message or external effect completed.
 
-Use the owned-worker helpers when a connector needs a background task:
+Graceful stop accounts for admitted operations, continuations, and required
+forwarding before stop hooks. A timeout reports unfinished work. It does not
+mean that a write rolled back or that the application may open another owner
+of the same resource.
+
+Deprovision is not a pause button. Similarly, a configuration change that
+removes a component is not an ordinary stop; its recovery obligations need
+separate consideration in Chapter 16.
+
+#### Keep background work owned
+
+The graph already owns component processing tasks. Add auxiliary workers only
+when a component genuinely needs them, such as a listener or blocking I/O
+operation with a separate lifetime.
+
+The helpers in `drasi_lib::context::workers` acquire a vacant owner slot
+before spawning work:
 
 ```rust
 async fn start_owned(
@@ -2946,106 +1401,117 @@ async fn start_owned(
         if stop.await.is_err() {
             tracing::warn!("worker stop owner was dropped");
         }
-    }).await?;
+    })
+    .await?;
     Ok(())
 }
 ```
 
-The slot is acquired **before** Tokio spawn. `spawn_owned_blocking_worker`
-applies the same ownership rule to blocking work. Do not spawn first and only
-later try to register the handle.
+This example requires a `tracing` dependency. Its owner must subsequently signal
+the worker and await a join. `spawn_owned_blocking_worker` applies the same
+ownership-before-spawn rule to blocking work.
 
 `join_owned_worker` requests abort on timeout but retains the handle until
-actual exit. `join_owned_worker_gracefully` retains it without aborting; this
-is appropriate for submitted effects or child connections that must drain.
-`cancel_owned_worker` and the plural helper also retain ownership until exit.
-Never take/drain/replace unfinished handles before awaiting, or detach a
-stop-time blocking task holding the only OS-thread join handle.
+actual exit. `join_owned_worker_gracefully` retains it without aborting, which
+is appropriate when the worker owns submitted effects or connections that
+must drain. Neither permits replacing an unfinished handle.
 
-Lifecycle methods must serialize restart with cleanup, including after a
-cancelled or timed-out stop. The component's `ComponentStatusHandle` updates
-local status through the supplied observer. Its `ComponentUpdateSender` graph
-mailbox coalesces updates while preserving readiness, the first unobserved
-failure and latest status. It is not event history. Converting an ordinary MPSC
-sender retains ordinary queue semantics.
+Do not take or drain handles out of their slots before an awaited join. If that
+wait is cancelled, ownership must still be available for cleanup. Serialize
+restart with cleanup, including after a timeout or cancellation.
 
-## Observing the application
+For services, quiescence can drop the `run` future. Pause any independently
+owned workers in `quiesce` and resume them when processing resumes.
+A clean no-worker service can use the default hook; a listener cannot treat
+dropping its controller future as proof that its connections stopped.
 
-### Operational views
+#### Preserve errors across cleanup
 
-Use `list_sources/queries/reactions`, their info/status methods and
-`get_query_results` for application-oriented inspection. Query configuration
-and source schemas have dedicated reads. `get_graph`, `get_dependencies`,
-`get_dependents` and `can_remove_component` expose the compatibility dependency
-view.
+Public `DrasiLib` operations return `DrasiError`; graph APIs expose `GraphError`;
+component and provider contracts commonly use `anyhow::Result`.
+Use `DrasiError::classification()` for a public category and `downcast_ref()`
+for retained typed causes.
 
-Native inspection adds `inspect_computation_inventory`, `computation_info`,
-`inspect_computation_graph`, and `inspect_query_computation` for an ordinary
-query's internal graph. `ComputationInspector` provides coherent snapshots,
-topology, changes and bounded history; the control handle's observed snapshot
-and subscription provide runtime state. Generation and revision matter when
-comparing observations across replacement.
+An operation and its cleanup can both fail. `OperationFailures` retains every
+cause even though the standard error source chain follows only the primary
+one. Lifecycle reports likewise contain per-member failures.
+`OperationSummary::CompletedWithFailures` is not success for all members.
+Do not collapse a typed aggregate into a formatted string.
 
-`ComputationTopologySource` can publish native topology as queryable graph data,
-using a real ComputationInspectionResource. This differs from the built-in
-`__component_graph__` source's compatibility view. Neither is a second mutable
-registry.
+`ComputationCleanupError` can itself retain a failed construction or
+registration owner. Keep it and await its `cleanup` operation. Rejected supplied
+objects can be recovered through `RejectedAddition`; otherwise their cleanup
+remains graph-owned.
 
-### Schema discovery and resource provenance
+A protected component panic quarantines that generation. Successful cleanup
+does not repair it; reconstruct a fresh instance. A task boundary does not
+contain a process abort, unsafe native memory fault, or synchronous code that
+never yields. Chapter 17 provides a process boundary for those concerns.
 
-`Source::describe_schema` reports metadata for humans and tools. For Stockroom:
+#### Own a standalone graph when appropriate
 
-```rust
-fn inventory_schema() -> drasi_lib::schema::SourceSchema {
-    use drasi_lib::schema::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
-    let mut product = NodeSchema::new("Product");
-    product.properties = vec![
-        PropertySchema {
-            name: "sku".into(), data_type: Some(PropertyType::String),
-            description: Some("Stable warehouse product code".into()),
-        },
-        PropertySchema {
-            name: "quantity".into(), data_type: Some(PropertyType::Integer),
-            description: None,
-        },
-    ];
-    SourceSchema { nodes: vec![product], relations: vec![] }
-}
-```
+`ComputationGraph::builder` is useful for a finite pipeline or independently
+owned computation. `start()` returns a caller-polled `GraphRun`; creating
+the future alone does no work.
 
-Return `Some(inventory_schema())` from the source hook.
-`RelationSchema` adds optional from/to labels and properties.
-Property hints include String, Integer, Float, Boolean, Timestamp and Json;
-unknown information can remain absent. `get_source_schema` and
-`get_graph_schema` expose the source and merged views, including sources without
-schema. This metadata does **not** replace native RecordValidator checks.
+For cancellation, request `GraphControl::cancel` and continue awaiting the run.
+Dropping an unfinished run leaves cleanup required; subsequently await
+`shutdown` or `dispose`. Only naturally completed standalone runs can restart
+with retained component ownership. This is different from a supported
+`DrasiLib::stop`/`start` cycle.
 
-`ComponentResourceObserver` receives the complete set of **actual provider
-handles** selected by one component generation. A report replaces the previous
-inventory, including an empty report. SourceBase/ReactionBase report their
-selected bootstrap/identity/state/WAL/secret providers where applicable.
-Custom selection paths should report the real handles, not configuration names.
-Report failures explicitly and signal component error status.
+Use a `ComponentBatch` when the pipeline belongs to an existing `DrasiLib`.
+Do not introduce another graph merely to obtain a handle to one query.
 
-`PluginOrigin { id, version }` records explicit host-known provenance;
-`ComponentDescriptor::with_plugin_identity` records native plugin identity.
-`with_semantic_kind` describes the meaning of a wrapper independently of its
-execution role. Neither changes its behavior. Dynamic plugin-private providers
-are not inferred by the host, and a component's configuration version is not a
-plugin version.
+**Summary.** Readiness is an explicit boundary, cancellation is a request, and
+cleanup is awaited work. Retain the owner after unsuccessful operations instead
+of hiding it behind a timeout. These rules make both recovery and live
+replacement possible.
 
-### Tracing, component logs and events
+<a id="observing-the-application"></a>
 
-When Drasi owns tracing initialization, call
-`drasi_lib::observability::get_or_init_global_registry()`.
-It initializes the global registry and worker and attempts subscriber
-installation once. A builder also uses this shared registry. Install tracing
-once per process, not per query.
+### 8. Observe and diagnose the application
 
-An existing host subscriber cannot be retrofitted by that helper. Include
-`ComponentLogLayer` in the host's setup. This concrete setup reserves a reloadable
-slot, initializes Drasi's worker after the host subscriber exists, then fills
-the slot:
+When Stockroom stops producing expected alerts, first establish where progress
+stopped. Observation should expose the actual running owners and their
+boundaries, not maintain another copy of the graph.
+
+#### Start with state, then inspect history
+
+Use `inspect_computation_inventory`, `inspect_computation_graph`, and
+`computation_info` for native inventory and topology. `ComputationInspector`
+and the control handle expose coherent observed snapshots and bounded change
+history. `list_queries` and `get_query_results` provide application-oriented
+query inspection.
+
+Include component generation and graph revision in observations. A health
+probe started before replacement must not report on the new incarnation.
+`report_health` checks the applicable revision, generation, and ownership.
+
+Distinguish three kinds of snapshot:
+
+| Snapshot | Answers |
+|---|---|
+| Observed graph state | What is constructed, running, bound, or failing now? |
+| Query result snapshot | What rows are maintained through this output position? |
+| Configuration snapshot | What definitions and resource recipes describe the application? |
+
+`QueryResultSnapshot` is about rows. `QueryConfigurationSnapshot` is about
+settings and status. A configuration export is not a processing-state backup.
+
+`ComputationTopologySource` can publish topology as graph data using an actual
+`ComputationInspectionResource`, allowing continuous queries over the running
+application's structure. It observes the authoritative registry; it is not
+a second mutable owner of components.
+
+#### Install tracing once
+
+For a small host that lets Drasi initialize tracing, use
+`observability::get_or_init_global_registry`. If your application already
+owns the subscriber, integrate `ComponentLogLayer` into that setup instead.
+An existing global subscriber cannot be retrofitted by installing another one.
+
+Add `tracing = "0.1"` and `tracing-subscriber = "0.3"` to use this host setup:
 
 ```rust
 fn init_host_tracing() -> anyhow::Result<()> {
@@ -3065,242 +1531,1980 @@ fn init_host_tracing() -> anyhow::Result<()> {
 }
 ```
 
-This belongs before constructing components; it requires `tracing` and
-`tracing-subscriber` dependencies in the host. If a static global subscriber is
-already installed without a compatible slot/layer, change that initialization
-instead of attempting a second subscriber.
+Call it before constructing components. The reload slot lets the host install
+its subscriber before initializing the shared Drasi log worker.
 
-Component logs are routed from spans with `component_id`, `component_type`
-and `instance_id`. Preserve those fields in plugin-owned workers, for example
-by instrumenting the worker future with the parent component span. A component
-ID logged only as an arbitrary message field does not establish span identity.
+Component spans carry `component_id`, `component_type`, and `instance_id`.
+Preserve that span when spawning auxiliary work, for example by instrumenting
+the future. Merely placing a component ID in an arbitrary message field does
+not establish component log routing.
 
-Use `subscribe_source_logs`, query/reaction equivalents or
-`subscribe_computation_logs` for recent history plus a live receiver.
-Native logs use their actual `Source`, `Transformer`, `Query`, `Sink` or
-`Service` role. `LogMessage.component_type` and `ComponentLogKey.component_type`
-use `ComponentLogType`, separate from the unchanged lifecycle-event
-`ComponentType`. Ordinary Source/Query/Reaction service adapters keep their
-existing labels, and existing log categories retain their serialized form.
+`subscribe_computation_logs` supplies recent history plus a live receiver
+for the actual Source, Transformer, Query, Sink, or Service category.
+Use `ComponentRole` or `ComponentLogType` when selecting it.
+Handle receiver lag explicitly. Log channels are bounded and diagnostic;
+they are not a durable audit ledger.
 
-Pass `ComponentRole` or `ComponentLogType` to `subscribe_computation_logs`.
-Existing `ComponentType` constructor and subscription arguments remain accepted;
-the former Query category for transformers/services and Reaction category for
-sinks select the correct native stream, not a duplicate history. Returned
-messages always carry the actual log category. Unrelated categories are errors.
-Code constructing log fields directly or matching their type should use
-`ComponentLogType` (or convert an existing `ComponentType` with `.into()`).
+Lifecycle-event history and subscriptions can explain transitions, but the
+current observed snapshot is authoritative. A consumer that missed an event
+must not infer that the transition never happened.
 
-Handle broadcast lag explicitly rather than treating it as normal stream end.
-The global log worker uses a bounded channel and can drop entries when full;
-component logs are diagnostics, not a durable audit ledger.
+#### Follow pressure and progress
 
-Component event subscriptions (`subscribe_all_component_events` or per-kind
-subscriptions) provide status events with identity, type, time and optional
-message. History getters and `get_all_events` expose retained events.
-Use observed state for the current truth, not the assumption that your live
-receiver saw every past transition.
+Inspect queue occupancy, native pipe metrics, query output metrics, and
+lifecycle metrics at their respective owners. Useful Stockroom signals include:
 
-### Metrics, profiling and health
+| Signal | What to investigate |
+|---|---|
+| Input pressure grows | Query/storage throughput, blocked downstream branches, or a stopped consumer |
+| Query advances but alerts do not | Outgoing bindings, sink lifecycle, and consumer completion |
+| Retained history approaches capacity | The slowest required subscriber and its handled cursor |
+| Startup waits indefinitely | Missing readiness, failed acquisition, or incomplete bootstrap |
+| A replacement fails to settle | Old-owner cleanup, stale handles, resource dependencies, or recovery obligations |
 
-`get_query_output_metrics`, `get_reaction_metrics` and `get_lifecycle_metrics`
-report their respective boundaries. Native pipe metrics describe pressure and
-delivery where implemented. None starts a Prometheus server, exports data or
-enforces rate limits automatically.
+Metrics do not automatically install an exporter or a Prometheus endpoint.
+Your application chooses how to expose them.
 
-Profiling timestamps measure elapsed time, including queues and storage, not
-CPU time. Source-to-query, query processing, output dispatch and reaction
-completion are separate intervals. Missing replay timing is not zero cost.
-Use ProfilingMetadata's elapsed helpers/summary for the intervals actually
-recorded.
+Profiling metadata measures elapsed intervals, including queueing and storage,
+not CPU time. Source-to-query delay, evaluation, output dispatch, and destination
+completion are distinct intervals. Missing replay timing is not a zero-duration
+measurement. `ProfilingConfig` is disabled by default; configuring sampling does
+not itself instrument a custom source or install an output writer.
 
-`ProfilingConfig` defaults disabled, with sampling rate 1.0, bootstrap included
-and no profiler reactions. `enabled().with_sampling_rate(0.1)` configures a
-decision; the rate is clamped to 0–1 and `should_profile` chooses a sample.
-The source/transformer/reaction must actually attach and update metadata.
-A configuration object alone installs no instrumentation or file writer.
+Do not feed Drasi-generated telemetry back into the same ingestion path.
+Telemetry sources should reject records marked with
+`SOURCE_ORIGIN_ATTRIBUTE = "drasi.source.origin"` and
+`SOURCE_ORIGIN_DERIVED = "derived"` when that would create a feedback loop.
 
-Profiler reaction configuration selects query, HumanReadable/Csv/Json format,
-optional output interval in seconds/events and destination Stdout, File or Both.
-This profiling `OutputDestination` is different from the native durable-output
-destination type. Choose one instrumentation owner rather than assuming both
-will automatically coordinate.
+#### Expose metadata without exposing secrets
 
-Sources ingesting telemetry should reject records marked
-`SOURCE_ORIGIN_ATTRIBUTE = "drasi.source.origin"` with
-`SOURCE_ORIGIN_DERIVED = "derived"`. Otherwise Drasi-generated telemetry can
-re-enter its own query and create a feedback loop.
+Factories and schema descriptors support discovery before activation.
+Executable record validation remains necessary; a human-readable schema
+description does not validate incoming bytes.
 
-External health reporting through `report_health` is guarded by desired
-revision, component generation and operation ownership. Report health for the
-actual observed incarnation; a delayed result from a replaced probe must not
-mark the replacement healthy.
+`ComponentDescriptor::with_plugin_identity` records explicit plugin provenance.
+`with_semantic_kind` distinguishes the component's meaning from a wrapper's
+execution role. Resource observations must identify actual provider handles,
+not infer sharing from names or paths. A newer complete resource observation
+replaces the previous inventory, including when the new inventory is empty.
 
-## Errors, cancellation and cleanup
+Configuration snapshots can contain sensitive values, even when ordinary
+topology inspection is safe to expose. Protect administrative endpoints,
+configuration exports, logs, and key material according to their contents.
+A credential provider does not authenticate your application's control API.
 
-### Preserve the whole failure
+**Summary.** Observe the actual generation, distinguish state from history,
+and measure progress at the owner that can prove it. Stockroom now has both
+a processing pipeline and the operational information needed to diagnose it.
+The next part makes that progress survive reconstruction.
 
-Ordinary public APIs return `DrasiError`; internal/plugin contracts commonly
-use `anyhow::Result`. `DrasiError::with_cause` preserves the public classification
-while carrying typed context, potentially inside an outer Internal variant.
-Match `error.classification()`, not just the outer enum variant, and use
-`downcast_ref` for a typed cause.
+## Part III - Make processing recoverable
+
+### 9. Make query state durable
+
+Stockroom can rebuild its current inventory from the file, but that does not
+restore query history, scheduled work, or unfinished alerts. This chapter adds
+persistent query state; the following chapters protect input and output across
+recovery.
+
+#### Name the state that must survive
+
+```mermaid
+flowchart LR
+    Input["Retained input"] --> Query["Query state and input checkpoint"]
+    Query --> Output["Live results and query outbox"]
+    Output --> Journal["Outgoing journal"]
+    Journal --> Consumer["Consumer state and completion"]
+    Config["Saved application definition"] -. reconstructs owners .-> Query
+```
+
+These stores answer different questions. Query indexes describe the graph and
+evaluation state. A checkpoint says which input an owner committed. Live
+results support current reads; an outbox retains output. A consumer completion
+record says what that consumer finished. Saved configuration describes which
+owners to reconstruct.
+
+Saving one does not save the others. In particular, a persistent checkpoint
+beside a volatile result view is not a recoverable consumer: after restart it
+can skip work whose materialized state disappeared.
+
+#### Select a computation index provider
+
+The first example uses `InMemoryComputationProvider`. For native RocksDB
+storage, add this dependency:
+
+```toml
+drasi-index-rocksdb = { path = "../drasi-core/components/indexes/rocksdb", features = ["computation"] }
+```
+
+With an application-owned storage directory, construct:
 
 ```rust
-fn report_failure(error: &drasi_lib::DrasiError) {
-    tracing::error!(
-        category = ?error.classification(), error = %error,
-        "Drasi operation failed"
+use drasi_core::computation::ComputationIndexProvider;
+use drasi_index_rocksdb::{
+    computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
+};
+
+let budget = RocksDbMemoryBudget::from_total_budget_bytes(128 * 1024 * 1024)?;
+let provider: Arc<dyn ComputationIndexProvider> = Arc::new(
+    RocksDbComputationProvider::new(
+        "./stockroom-state",
+        RocksIndexOptions::new(false, false, budget),
+    ),
+);
+```
+
+The options select archive support, direct I/O, and the actual shared memory
+budget. Set archive support to `true` when the historical version functions
+from Chapter 3 require it. Cloning a budget shares its underlying cache and
+write-buffer resources; constructing independent budgets does not.
+
+Use this provider when constructing a query with recoverable input. The starter's
+file source keeps its comparison state and emission sequence in memory; replacing
+the query provider alone does not make that source replayable. Before reusing a
+persistent query across restarts, add the coordinated bootstrap or retained-input
+wiring from Chapters 10 and 11.
+
+For directly constructed queries, bind the stable enclosing scope before
+registration or activation:
+
+```rust
+let query = ContinuousQueryTransformer::new(definition, provider.clone())
+    .await?
+    .with_recovery_scope("stockroom")?;
+```
+
+Here `definition` is the `ContinuousQueryDefinition` from the first application.
+Keep the instance scope, graph ID, query ID, output stream, and storage directory
+stable across reconstruction. A different instance should use its own storage
+namespace. `with_id` alone does not partition every externally supplied
+provider's filesystem path.
+
+An index provider supplies `ComputationIndexes`: the index set, transaction
+owner, supported checkpoint/live-result/outbox writers, durability evidence,
+and asynchronous cleanup. Two writers using the same filename or a matching
+transaction label are not necessarily participants in one transaction.
+
+#### Know what an atomic query commit includes
+
+With a complete atomic provider, query state, the input checkpoint, result
+sequence, live rows, and retained output commit together. A failed processing
+transaction does not leave a committed input position that skips uncommitted
+state.
+
+`QueryOptions` defaults to Strict recovery and Atomic publication. Atomic
+publication needs actual participating writers. The weaker NonAtomic mode
+can commit core state before publishing output; incomplete publication then
+requires recovery. It is not a way to obtain atomic behavior from an
+incomplete provider.
+
+The direct query reader can restore maintained results, but **saved results
+are not automatic delivery confirmation**. To track and replay pending outgoing
+handoffs, use the registered `ContinuousQueryFactory`, or enable delivery
+tracking on a directly constructed query:
+
+```rust
+let query = query.with_delivery_tracking();
+```
+
+It remains one query component in the batch. The recoverable companion uses
+this direct construction. The factory form is introduced in Chapter 14.
+Both require the real retained connections and consumer contracts described
+in the next chapters; neither makes an arbitrary external action atomic.
+
+#### Choose recovery policy instead of hiding corruption
+
+Strict recovery rejects incompatible configuration, incomplete bootstrap,
+missing required history, or inconsistent saved state. That is useful
+information: the process cannot truthfully continue from the requested
+boundary.
+
+AutoReset permits rebuilding when the applicable contract allows it.
+Choose it only when the source can reconstruct the required state and a
+rebuild is an acceptable application action. Pending tracked output must not
+be discarded to make a reset succeed.
+
+Query text, language, source/pipeline configuration, joins, mutation semantics,
+and output identity can affect recovery identity. A query edit is not always
+an in-place update to saved data. Plan a migration or explicit rebuild instead
+of changing storage names until startup succeeds.
+
+#### State a failure boundary
+
+`StorageDurability` reports separate evidence for process restart, power loss,
+and storage loss. Each field is Guaranteed, NotGuaranteed, or Unknown.
+The native RocksDB provider declares local process-restart survival; that
+does not assert survival of power loss or losing its disk.
+
+`RecoveryScope::MemoryLifetime` asks about the current lifetime.
+`RecoveryScope::Failure(FailureMode::ProcessRestart)` asks about reconstruction
+after process failure. Select the failure mode you actually need and can
+support; a class name containing "persistent" is not evidence.
+
+After assembling the relevant owners, add an explicit requirement:
+
+```rust
+let requirement = RecoveryRequirement {
+    consumer: ComponentId::try_new("low-stock")?,
+    scope: RecoveryScope::Failure(
+        drasi_core::interface::FailureMode::ProcessRestart,
+    ),
+    guarantees: [
+        RecoveryGuarantee::Acceptance,
+        RecoveryGuarantee::Replay,
+        RecoveryGuarantee::CommittedProcessing,
+        RecoveryGuarantee::Publication,
+    ]
+    .into(),
+};
+```
+
+Pass it to the batch's `require_recovery`. The first in-memory Stockroom does
+not satisfy this requirement. The runtime checks actual constructed contracts
+and storage along the selected path; assertions do not install journals,
+checkpoint writers, or retry logic. Unknown evidence cannot satisfy a stronger
+requirement.
+
+#### Use other storage services for their actual purpose
+
+`StateStoreProvider` stores bytes under partition/key identities. It is useful
+for application preferences and explicitly designed progress stores. Its batch
+helpers are not a general multi-key transaction: some writes can succeed
+before a later one fails. Use idempotent retry or a real transaction owner when
+all-or-nothing state matters.
+
+`WalProvider` stores partitioned input history. Register a partition before
+appending, honor its capacity policy, and preserve the meaning of its allocated
+sequence. A head sequence can exceed the last persisted event after a failed
+write. `WalSourceResource` and `WalReplaySource` can expose an actual WAL and
+processing progress owner as a native replay source.
+
+A WAL, query outbox, consumer progress store, and configuration store are not
+interchangeable. Each proves completion only at its own boundary.
+
+**Summary.** Persistence starts with a complete transaction owner and stable
+identity. Strict recovery makes missing or incompatible state visible.
+Query durability is necessary but not sufficient: the next step is a correct
+initial snapshot and live-input handover.
+
+### 10. Join snapshots to live input
+
+Stockroom's file source begins with the current file. A source with separate
+snapshot and live-change interfaces needs a coordinated boundary when loading
+initial inventory: a database dump followed by a subscription can miss changes
+between the two.
+
+#### Establish the handover before consuming rows
+
+A `ComputationBootstrapProvider` belongs to the query's initialization lifecycle.
+Bind it before starting a directly constructed query:
+
+```rust
+let query = query.with_bootstrap(bootstrap_provider);
+```
+
+`bootstrap_provider` is an `Arc<dyn ComputationBootstrapProvider>` implemented
+for the source's snapshot and change-stream protocol. Factory construction
+instead binds it through a `QueryBootstrapResource`.
+
+The provider and query cooperate in this order:
+
+1. Prepare the source subscription and determine whether saved query state is
+   reusable, needs a volatile refresh, or requires an explicit reset.
+2. Establish whether this start has a real snapshot or only checkpoint-based
+   replay.
+3. Stream the snapshot while preserving the live-input boundary.
+4. Complete any boundaries known only after the snapshot closes.
+5. Commit the source watermarks, completed-bootstrap marker, and final
+   initialization state together.
+
+```mermaid
+sequenceDiagram
+    participant P as Bootstrap provider
+    participant S as Source system
+    participant Q as Query owner
+    Q->>P: prepare / prepare_with_state
+    P->>S: Establish subscription and snapshot boundary
+    Q->>P: snapshot / snapshot_with_state
+    P-->>Q: Snapshot changes and source watermarks
+    Q->>P: complete_snapshot
+    P-->>Q: Final watermarks and completion state
+    Q->>Q: Commit completed handover
+    S-->>Q: Live changes after covered progress
+```
+
+Ready, RefreshVolatile, and ResetRequired are different outcomes.
+A provider must not return an empty successful snapshot after a database
+failure. `has_pending_snapshot` distinguishes a new initial load from a
+replay-only start, which must not mark completed initialization incomplete.
+
+#### Make watermarks describe real coverage
+
+`ComputationBootstrapSnapshot` carries a stream of changes and
+`BootstrapWatermark` values. Each watermark names the stream, optional source ID,
+framework sequence, and optional opaque source position covered by the snapshot.
+
+Those values must describe the same source boundary. A sequence number invented
+from the number of rows in a dump is not necessarily a valid change-stream
+position. Sequence zero is valid only when it is the actual boundary, not a
+default for "position unavailable."
+
+A completed query-wide bootstrap marker is not a checkpoint for every source.
+One source can still need initialization when another already has valid saved
+progress. Native replay through intermediate components also needs the actual
+processing owner's progress, not an inferred match between component names.
+
+Connect live input through bounded paths during initialization. A provider
+that buffers changes outside the graph must bound and own that buffer too.
+Timeouts and capacity pressure are errors or explicit backpressure decisions,
+not reasons to drop the oldest unseen changes.
+
+#### Persist external initialization intent
+
+Some sources must create external state, such as a replication subscription.
+`prepare_with_state` and `snapshot_with_state` receive a borrowed
+`BootstrapState` service in the query's actual storage domain.
+
+Write initialization intent **before** the external action. On restart, read
+it to identify and verify the same subscription rather than creating another.
+Return final handover bytes from `completion_state`; the query commits them
+with the watermarks and completed marker.
+
+For Stockroom, the bytes might identify a database subscription and its
+snapshot boundary. Validate the recovered identity against the configured
+database before reusing it. The state is bounded initialization metadata,
+1 through 65,536 bytes, not an unrestricted application store.
+
+Initialization metadata survives an explicit query reset so the provider can
+reuse or release external state coherently. Deprovision removes it.
+The borrowed service cannot escape its callback or become an independent writer.
+
+#### Bind replay to the actual progress owner
+
+`QuerySourceProgress` publishes committed input progress. A source or bootstrap
+provider using `SourceProgressReader` must return the supplied reader from
+its recovery hook. Bind the real `QuerySourceProgressResource`; matching
+graph/query strings do not prove that two handles observe the same transaction.
+
+A read-only progress capability does not itself retain source history.
+The source must separately guarantee that input after that progress remains
+available for replay. State the retained-until-consumer boundary explicitly.
+
+#### Finish snapshot cleanup
+
+Dropping the snapshot stream must cancel its work. A provider with auxiliary
+workers must implement `stop` and await them before query storage is released.
+Retain incomplete cleanup after timeout or cancellation, and reject a second
+snapshot owner until cleanup succeeds.
+
+Verified retirement needs a stronger held lifecycle than a sampled successful
+stop. `freeze_for_retirement` prevents reuse while a configuration removal is
+being resolved. Chapter 16 explains why that exclusion matters.
+
+Snapshot rows are not automatically one upstream database transaction.
+If Stockroom needs transaction-preserving input, use the distinct protocol
+in Chapter 13.
+
+**Summary.** Bootstrap is a handover protocol, not just an initial file load.
+Prepare subscriptions before consuming rows, commit truthful watermarks, retain
+external initialization identity, and await cleanup. The query can now establish
+a recoverable starting point.
+
+### 11. Retain input and replay output
+
+Protect the intervals before a query accepts inventory and after it commits an
+alert. The goal is not merely to have data somewhere on disk, but to know which
+owner remains responsible for each unfinished handoff.
+
+#### Assemble a retained path
+
+The recoverable Stockroom uses:
+
+```mermaid
+flowchart LR
+    Client["Inventory client"] --> Admission["SourceAdmission"]
+    Admission --> Input["Persistent input QoS journal"]
+    Input --> Query["Query state and outbox"]
+    Query --> Output["Persistent output QoS journal"]
+    Output --> Alerts["Recoverable alert consumer"]
+```
+
+A QoS channel appends once and maintains independent progress for its named
+subscribers. It is not a collection of unrelated per-edge queues.
+
+Define a lossless channel:
+
+```rust
+fn channel_definition(
+    stream: &str,
+    subscriber: &str,
+) -> anyhow::Result<QosChannelDefinition> {
+    Ok(QosChannelDefinition {
+        stream: StreamId::try_new(stream)?,
+        capacity: NonZeroUsize::new(32).expect("positive capacity"),
+        durable: true,
+        retention: RetentionPolicy::Backpressure,
+        subscribers: [(subscriber.into(), SubscriptionStart::Earliest)].into(),
+    })
+}
+```
+
+Earliest, Latest, and After select a **new** subscriber's starting position.
+Reconnecting an existing subscriber preserves its saved cursor.
+Disconnecting does not retire it. Explicit retirement or a member-definition
+change releases its obligation; a full lossless journal backpressures while
+required subscribers still owe work.
+
+A `RetainedPipe` is useful for a lower-level single-consumer retained connection.
+Do not share its one progress cursor between independent consumers.
+
+#### Register a bounded codec
+
+Persistent transport needs an explicit set of executable schemas:
+
+```rust
+fn codec() -> anyhow::Result<EnvelopeCodec> {
+    let mut codec = EnvelopeCodec::new(
+        NonZeroUsize::new(1024 * 1024).expect("positive size"),
     );
-    if let Some(group) = error.downcast_ref::<drasi_lib::error::OperationFailures>() {
-        for cause in group.failures() {
-            tracing::error!(error = ?cause, "retained operation or cleanup failure");
-        }
+    codec.register_schema(GraphChangeCodec::schema())?;
+    codec.register_schema(QueryChangeCodec::schema())?;
+    Ok(codec)
+}
+```
+
+`EnvelopeCodec` is the bounded JSON envelope codec; `BinaryEnvelopeCodec` is
+the binary alternative. Record payload encoding remains schema-specific.
+Unknown schemas must not pass merely because the outer bytes deserialize.
+Include every schema the path actually carries, and no executable validator
+from an untrusted producer.
+
+#### Protect source admission
+
+Open the input channel with producer admission:
+
+```rust
+use drasi_core::interface::FailureMode;
+
+let incoming = QosChannel::persistent_with_recovery(
+    channel_definition("inventory/out", "low-stock")?,
+    provider.create_indexes(GRAPH, "input-journal").await?,
+    codec()?,
+    "inventory",
+    QosRecoveryOptions::Admission(AdmissionOptions {
+        construction_scope: "stockroom".into(),
+        graph_id: GRAPH.into(),
+        component_id: ComponentId::try_new("inventory")?,
+        failure_scope: FailureMode::ProcessRestart,
+        max_producers: NonZeroUsize::new(1).expect("positive capacity"),
+        receipts_per_producer: NonZeroUsize::new(32).expect("positive capacity"),
+    }),
+)
+.await?;
+let admission = SourceAdmission::new(
+    incoming.clone(),
+    PortId::try_new("out")?,
+)
+.await?;
+```
+
+The instance scope must match the actual application's stable identity.
+The persistent companion uses its own constant for that scope.
+
+A source exposing this service returns it from `EnvelopeSource::admission`.
+The graph services its bounded mailbox; it does not also call `next` to publish
+the same data. All source outputs must use the actual configured QoS channel.
+Scope, schema, identity, and sequence validation precede its single admission
+commit.
+
+Register a producer, then submit consecutive client sequences:
+
+```rust
+let producer = admission
+    .register_producer(ComponentId::try_new("stockroom-app")?)
+    .await?;
+let first = admission.admit(&producer, 1, &input).await?;
+let retry = admission.admit(&producer, 1, &input).await?;
+ensure!(first == retry, "identical retry must return the original receipt");
+```
+
+Here `input` is the same encoded inventory envelope in both calls. The receipt
+proves storage-backed acceptance at the configured failure scope, not query
+completion or a business effect.
+
+Retain the producer session, client sequence, and original content when a
+response is lost. Resolve uncertainty with `producer_status`,
+`admission_receipt`, or the identical retry. Changed or expired retries must
+not become new input. Starting a new session to avoid an uncertain result can
+duplicate business work.
+
+Receipt history and producer counts are bounded. Plan capacity for the retry
+window the client needs; do not promise unlimited idempotency. Producer
+retirement is explicit, not a consequence of disconnecting a client.
+
+#### Protect query output handoff
+
+Open the output journal with replay receipts:
+
+```rust
+let outgoing = QosChannel::persistent_with_recovery(
+    channel_definition("low-stock/out", "alerts")?,
+    provider.create_indexes(GRAPH, "output-journal").await?,
+    codec()?,
+    "low-stock",
+    QosRecoveryOptions::Replay(ReplayOptions {
+        failure_scope: FailureMode::ProcessRestart,
+        receipt_capacity: NonZeroUsize::new(32).expect("positive capacity"),
+    }),
+)
+.await?;
+```
+
+Admission identifies client submissions. Replay receipts identify output from
+the immediate persistent producer. They are different modes and cannot coexist
+on one channel. Disabled is the default; reopening must preserve the explicitly
+selected recovery contract.
+
+Give the graph the actual resource and use it on the edge:
+
+```rust
+let output_journal = ResourceId::try_new("output-journal")?;
+let handle = outgoing.resource();
+batch = batch
+    .declare_resource(ResourceSpecification {
+        id: output_journal.clone(),
+        role: handle.role(),
+        ownership: ResourceOwnership::Graph,
+        binding: "output-journal".into(),
+    })?
+    .provide_resource(output_journal.clone(), handle)?
+    .connect(
+        EdgeDefinition::new(
+            endpoint("low-stock", "out")?,
+            endpoint("alerts", "in")?,
+        ),
+        Box::new(outgoing.definition().pipe(output_journal, "alerts")),
+    );
+```
+
+This **replaces** the corresponding bounded edge from the first application.
+Declare and bind the input channel similarly. Constructing a persistent channel
+without using its pipe does not make a different edge durable.
+
+The tracked query retains committed output until every required outgoing
+destination accepts it. If the process stops after journal acceptance but
+before confirmation, replay receipts recognize the same logical output.
+Its fresh transport sequence is not a new business emission.
+
+Tracked destination membership includes component, port, subscriber, and
+journal identity. While output is pending, do not change those identities,
+disable tracking, or reset the query to discard its obligations. A replacement
+destination implementation under the same allowed identity does not erase
+unfinished work.
+
+#### Recover a keyed view from a query outbox
+
+An alternative for a restorable view is:
+
+```text
+query -> QueryReplayTransformer -> CheckpointedSink -> saved view
+```
+
+The replay transformer uses query state and retained output rather than
+requiring a separate output journal. Replay and checkpointing must share the
+same progress store:
+
+```rust
+fn recoverable_consumer(
+    inner: Box<dyn EnvelopeSink>,
+    results: QueryResults,
+    store: Arc<dyn drasi_lib::StateStoreProvider>,
+) -> anyhow::Result<(QueryReplayTransformer, CheckpointedSink)> {
+    ensure!(
+        inner.descriptor().id().as_str() == "alerts",
+        "consumer identity must match its progress scope"
+    );
+    let progress: Arc<dyn ConsumerProgressStore> = Arc::new(
+        StateStoreConsumerProgress::new("stockroom", "alerts", store)?,
+    );
+    let replay = QueryReplayTransformer::new(
+        ComponentId::try_new("alert-replay")?,
+        "low-stock".into(),
+        StreamId::try_new("alert-replay/out")?,
+        results,
+        progress.clone(),
+        ConsumerRecoveryPolicy::Strict,
+    );
+    Ok((replay, CheckpointedSink::new(inner, progress)?))
+}
+```
+
+Connect query output to replay, connect replay to the sink, and bind
+`alert-replay/out`. `inner` must actually complete its promised work before
+returning Handled. Stockroom's first `Alerts` handles a volatile view; adding
+a persistent checkpoint would not make its rows durable. A snapshot-restorable
+view must implement `supports_snapshot` and `replace_snapshot`.
+
+Persist the view itself as well as its checkpoint. For a key/value-backed view,
+use stable record keys, idempotent upserts/deletes, and a dedicated data
+partition. If snapshot replacement clears and rewrites that partition, an
+interruption must retry the replacement before advancing progress. Do not put
+checkpoint records in the partition being cleared.
+
+Strict rejects a gap or incompatible identity. AutoReset replaces a supported
+view from a snapshot. AutoSkipGap explicitly skips unavailable history and
+requires the sink to allow that decision. Neither a progress marker nor an
+empty change set independently authorizes skipped work.
+
+Snapshots carry generation and recovery identity as well as sequence. A
+checkpoint from an unrelated replacement must not masquerade as continuation.
+This is useful for reconstructible views; it is not a way to undo emails or
+other irreversible actions.
+
+#### Acknowledge only the promised boundary
+
+Transport acceptance and consumer acknowledgement are separate.
+`EnqueueReceipt` reports acceptance; on send failure, NotAccepted and Unknown
+must be distinguished. A cancelled waiter can also leave acceptance unknown.
+`send_batch` is not atomic; failure can retain receipts for an accepted prefix
+and envelopes that were never attempted.
+
+A received `Delivery` may carry an `Acknowledgement`. Complete it with the
+actual handling outcome. Dropping it does not acknowledge work. Acknowledged
+subscribers have one outstanding delivery each; larger journal capacity does
+not change that processing contract.
+
+**Summary.** Durable handoff requires retained responsibility, stable identity,
+and truthful receipts at every boundary. Input admission, query output replay,
+and consumer recovery solve different failure windows. Stockroom can now retain
+an alert; the next chapter makes "handled" mean something durable.
+
+### 12. Complete business work
+
+An alert is not finished merely because it left a queue. Stockroom may update
+application state or request replenishment from another system. Those two
+destinations need different completion contracts.
+
+#### Resume at the first unfinished operation
+
+`DeliveryRunner` owns bounded per-operation completion state for a native sink.
+It records exact input identity and content before destination work, then
+advances only the completed prefix. If operation two fails, operation three
+must not be treated as complete.
+
+Keep the upstream envelope until the whole batch finishes. After interrupted
+handling, stop and clean up the owner before reuse or reconstruction.
+Await the runner's `shutdown` before releasing its storage.
+
+Operation keys include stable consumer scope and logical producer identity.
+They do not depend on a retry's transport sequence or a replacement's
+configuration. Retaining only a last-seen message number before handling is
+not an equivalent implementation.
+
+#### Complete an external action
+
+For an external destination, use `DeliveryRunner::new` with a
+`DeliveryHandler`. Define the application boundary explicitly:
+
+```rust
+#[async_trait]
+trait ConfirmedOrders: Send + Sync {
+    async fn complete(
+        &self,
+        operation_id: &str,
+        operation: &ChangeOperation,
+    ) -> anyhow::Result<()>;
+}
+
+struct ReorderHandler(Arc<dyn ConfirmedOrders>);
+
+#[async_trait]
+impl DeliveryHandler for ReorderHandler {
+    async fn handle(&mut self, item: DeliveryItem<'_>) -> anyhow::Result<()> {
+        self.0.complete(&item.id.to_string(), item.operation).await
     }
 }
 ```
 
-`OperationFailures` retains every failure, while the ordinary error source
-chain follows only the primary one. The same caution applies to
-`LifecycleReportError` and GraphError cleanup aggregates. Do not lose a failed
-shutdown behind an earlier processing failure or replace typed causes with
-their formatted strings.
+`ConfirmedOrders` is an application-supplied destination contract. Its
+implementation must perform or verify the action and use the stable operation
+ID for deduplication. Returning after enqueueing work in an untracked local
+worker violates the contract. An HTTP 202 response generally proves queue
+acceptance, not completed replenishment.
 
-Graph failures identify phase (validation, creation, binding, activation,
-processing, stop, removal or control) and disposition (retryable or terminal).
-An unavailable network may be retryable; a rejected schema is not repaired by
-retry. Neither a timeout nor dropping a future proves a storage write or remote
-request did not complete.
+A remote action can succeed just before the process loses its acknowledgement.
+The local completion ledger cannot atomically commit that remote action.
+The destination needs idempotency or a confirmation lookup keyed by the same
+operation identity. Do not describe this as automatic exactly-once HTTP delivery.
 
-Protected native operation unwinds carry `ComponentPanic` and bounded identity
-information. The affected generation remains quarantined; successful cleanup
-does not authorize restarting the same damaged instance. The native SDK also
-retains panic damage across operation/control/getter and future-destruction
-boundaries and wakes pending calls. Reconstruct a fresh generation after the
-required cleanup/recovery checks.
+Choose `DeliveryOptions` with an explicit failure scope, stream/receipt bounds,
+and retry policy. The default makes one attempt with no delay. Implement
+`retryable` only for known transient failures; invalid data and unknown commit
+outcomes are not repaired by blind repetition.
 
-These boundaries do not establish preemption of a synchronous hook that never
-yields, containment of native abort/unsafe memory faults, or protection against
-a double-panic abort. Use a separately hosted normal DrasiLib for those process
-failure boundaries.
+For whole-envelope remote transport, `DeliveryBatch` and `DeliveryBatchIdentity`
+avoid serializing the envelope once per operation. The receiver must derive
+identity from the decoded content and its configured consumer scope, compare
+it with the request, and only then perform effects. A caller-supplied digest
+is not proof. Network admission and shutdown still need their own bounded
+ownership.
 
-`GraphControl::force_cancel_components(revision, selection)` is explicit
-escalation when graceful work cannot finish. It rejects incomplete registered
-resource domains and unproven pending ownership before effects. Its report keeps
-interruption and cleanup separate: cleanup does not prove rollback or completed
-business effects. The interrupted generation cannot restart; explicit
-changed-specification reconstruction remains subject to cleanup/recovery
-requirements. Unreported opaque sharing is not proven safe by this API.
+#### Commit local business state with completion
 
-### Ownership survives unsuccessful operations
+For state entirely within one actual transaction owner, use
+`DeliveryRunner::new_transactional` and `deliver_transactional`.
+A `TransactionalDeliveryHandler` receives a borrowed `TransactionContext`.
+Its business writes and one operation's completion commit together.
 
-A `ComputationCleanupError` can retain a failed construction/registration owner.
-Keep the error alive and retry its `cleanup().await`; returning only its string
-would discard the owner needed to finish cleanup. `RejectedAddition::take().await`
-can recover rejected supplied instances/resources. If not taken, the graph's
-disposal path retains responsibility rather than silently detaching them.
+Stockroom's persistent handler saves the current alert quantity under a stable
+record key, or removes that key on a deletion. It also increments a handled
+count inside the same context:
 
-Always attempt cleanup even when the work fails. The Stockroom companions keep
-the work result, await `shutdown`, report cleanup failure separately, and only
-then return the primary failure. A service that cannot finish cleanup should
-retain the owner and surface that condition rather than immediately reopen the
-same resource.
+```rust
+async fn count_handled(state: &TransactionContext<'_>) -> anyhow::Result<()> {
+    use drasi_core::models::ElementValue;
 
-Graph-owned construction, processing and cleanup tasks retain their joins when
-a caller drops a waiter. A repeated cleanup request joins the existing operation
-rather than starting a competing shutdown. Graceful stop finishes admitted work,
-continuations and required forwarding before stop hooks; a timeout reports the
-unfinished boundary without treating the write/effect as rolled back.
-
-Configuration-store leases follow the same rule. Cancelling a builder
-restoration or storage-call waiter does not release ownership while actual
-reconciliation, I/O or cleanup continues. Await completed cleanup before opening
-a replacement instance; a timeout or failed shutdown is not proof the lease or
-listener has been released.
-
-For a standalone graph, keep its run future alive, call `GraphControl::cancel`
-and **continue awaiting the run**. Dropping `run` early marks CleanupRequired;
-later await `graph.shutdown`/`dispose` to release its owners.
-Shutdown does not make a cancelled or failed standalone graph restartable.
-Only natural successful completion permits restarting a retained standalone
-graph. These rules differ from a supported `DrasiLib` stop/start cycle.
-
-Rust `Drop` cannot await storage flush, a blocked worker or remote-effect
-completion. An abort request is not a joined worker. Code that “solves” a
-shutdown timeout by overwriting the handle has hidden the ownership problem,
-not completed the shutdown.
-
-## Choosing a production boundary
-
-For a disposable dashboard, ordinary components and bounded memory queues can
-be enough. Maintain rows by signature, observe lag and rebuild the view when
-necessary. For restartable queries, add source replay, suitable query storage
-and coordinated bootstrap. For reliable native delivery, also preserve producer
-sessions, output identity, retained transport and completed consumer progress.
-For remote business effects, make the destination's confirmation/deduplication
-contract explicit.
-
-Saved applications additionally need reconstructible factories, resource
-recipes and a protected configuration store. Live replacement requires the old
-owner's cleanup and recovery obligations to be resolved, not merely a new
-configuration file.
-
-The library does not supply a general graph-wide transaction, automatic
-exactly-once HTTP effects, unlimited replay retention, automatic schema/state
-migration, a distributed active-active runtime, or unrestricted plugin hot
-replacement. Choose requirements against the actual source, processing,
-transport and destination boundaries—not simply whether every component
-reported Running.
-
-### Qualification evidence and application-specific checks
-
-The [current capability snapshot](../componentgraph-vs-computationgraph.md) and
-[qualification ledger](../../tests/runtime_parity/requirements.tsv) distinguish
-implemented behavior from its demonstrated operating range. The core evidence
-below includes historical baseline measurements; its throughput/allocation and
-stop-latency numbers are not a fresh qualification of owned-task execution.
-The current execution/hosting checkpoint and remaining gates are recorded in the
-[implementation plan](../computation-graph-execution-isolation-plan.md#current-checkpoint---13-october-2026).
-
-| Area | Checked behavior |
-|---|---|
-| Managed recovery | Real socket acquisition timeouts, port contention, listener-replacement process crashes, missing dependencies/versions, damaged configuration records, cancelled restoration, snapshot/commit ordering and stale-owner isolation. |
-| Retained delivery | 131,072 seeded ledger-checked QoS actions; 16 subscribers with 2,048 exact deliveries and 2,048 cancelled admissions per runtime; membership reconstruction and rejected capacity shrink preserve obligations. |
-| Query recovery | Failures after real schedule push/remove/pop mutations roll back across native/legacy RocksDB and direct/transaction-body query entrypoints. Live transaction replacement distinguishes rolled-back retries from committed-output replay. Mixed-source joined aggregates survive repeated reconstruction. |
-| Responsiveness | Eight ready producers and a 4,096-entry timer burst both make progress on each runtime. Every producer appears in actual query output; measured debug stop times are about 2.1-22.0 ms against a two-second regression guard, not a production SLO. |
-| Resource retention | Replacement soaks on both runtimes exercise 16 services and 64 replacements per graph over 1,024 measured graphs plus 64 warmups. Each runtime closes all 87,040 real file/socket owner pairs with flat descriptors, Tokio tasks and live Rust bytes. This does not bound process RSS or native allocations. |
-| Compatibility and performance | The local 28-profile gate records 7,393 successful test executions, including separately built plugins and container-backed database checks. Release workload oracles verify another 1,830,000 results; fast-path throughput is within 1.3% of the preserved control and allocation counts are effectively unchanged. |
-
-The 7,393 executions include repeated tests across feature profiles. Another
-29 entries are explicitly permitted ignored workers, diagnostics or quarantines;
-crash workers require their real driver to pass. Containers ran through the
-existing Podman engine's Docker-compatible API with the Docker CLI.
-The broader ledger remains **20 covered, 23 partial and five unqualified**.
-A passing matrix does not establish complete replacement qualification,
-many-day production behavior, every provider/failure combination or every plugin.
-
-From the repository root, the checked-in runners reproduce the core and broader
-compatibility checks:
-
-```sh
-bash lib/tests/run-computation-foundations.sh
-make build-native-network-plugin build-test-plugins
-bash lib/tests/run-runtime-parity.sh
+    let count = match state.get("handled").await? {
+        None => 0,
+        Some(ElementValue::Integer(value)) => value,
+        value => anyhow::bail!("invalid handled count: {value:?}"),
+    };
+    state
+        .put("handled", ElementValue::Integer(count + 1))
+        .await?;
+    Ok(())
+}
 ```
 
-These are repository-maintenance commands, not prerequisites for running
-Stockroom. The broader checks require the documented native build tools and a
-working Docker-compatible container service; tests invoking `docker` also need
-the CLI. The foundation runner includes default/no-default builds, persistent
-query/journal and managed-resource cases, redb configuration tests and both
-resource-soak modes. Consult the
-[measurement and qualification notes](../computation-graph-backlog.md#current-compatibility-gate)
-for exact evidence and remaining scope.
+Call this from the handler after applying the operation, as the complete
+[`SaveAlert` implementation](../../examples/stockroom_native_persistent.rs)
+does. If the transaction fails, both the business mutation and completion
+remain uncommitted.
 
-For your application, exercise loss of the actual source, storage and
-destination with pending work; retry the same logical identities after uncertain
-completion; verify results and unfinished obligations, not just process
-readiness. Measure representative payloads, fan-out, disconnection duration,
-disk headroom and shutdown latency on both intended runtime and storage
-configurations. Capacity limits and passing fixtures do not replace a workload
-budget or an operational recovery procedure.
+The context supports named `get`/`put`/`remove` state and graph-element
+operations. It is borrowed for one callback, not a provider the handler can
+retain. Do not start nested transactions, write through an independent store,
+or keep commit-sensitive counters in mutable handler fields.
+
+External calls cannot join this transaction. A handler that both saves a local
+quantity and sends an email still needs a separate external-effect protocol.
+Similarly, per-operation atomicity does not mean that every observer sees a
+whole source transaction's effects simultaneously.
+
+The runner persists its handling mode. Reopening external completion state as
+transactional state, or the reverse, is not a supported reinterpretation.
+Retry after confirmed rollback is different from retry after an uncertain
+commit; uncertainty fences the owner until cleanup and recovery resolve it.
+
+#### Expose an honest component contract
+
+The sink reports Handled only after its runner completes the batch.
+`ComponentRecovery::transactional_consumer(&indexes)` describes actual
+transactional state/completion ownership. A sink using an unrelated state store
+cannot acquire that guarantee by returning the same enum value.
+
+For external work, retain destination-specific confirmation evidence rather
+than advertising a stronger recovery contract than the destination provides.
+Recovery assertions verify declared and bound capabilities; they cannot prove
+an opaque external system's behavior.
+
+**Summary.** Completion is durable business progress, not receipt into another
+queue. Transactional handlers can commit local state with operation completion;
+external handlers require destination confirmation and idempotency. Both retain
+unfinished work rather than acknowledging past it.
+
+### 13. Preserve transactions
+
+Suppose a warehouse transfer decrements one bin and increments another in one
+database commit. Stockroom should not publish a misleading intermediate total.
+This chapter distinguishes a source transaction, a processing transaction, and
+a shared producer/journal commit.
+
+#### Keep a source commit together
+
+`SourceTransactionBuilder` assembles a complete committed group:
+
+```rust
+fn committed_group(
+    changes: Vec<drasi_core::models::SourceChange>,
+    transaction_id: bytes::Bytes,
+    position: bytes::Bytes,
+) -> anyhow::Result<SourceTransaction> {
+    use std::num::NonZeroU64;
+
+    let limits = SourceTransactionLimits {
+        max_changes: NonZeroUsize::new(100).expect("positive limit"),
+        max_bytes: NonZeroUsize::new(1024 * 1024).expect("positive limit"),
+        max_duration_ms: NonZeroU64::new(5_000).expect("positive limit"),
+    };
+    let mut group = SourceTransactionBuilder::new("inventory", limits)?;
+    for change in changes {
+        group.push(change)?;
+    }
+    Ok(group.commit(transaction_id, position)?)
+}
+```
+
+Add `bytes = "1"` for this example. Call `commit` only when the source commit
+is already known. `into_envelope` publishes the resulting group; replay uses
+`into_replay_envelope`. The complete transaction is one typed record, not
+independently acknowledged row envelopes.
+
+If the source owns the database transaction, use `prepare` instead. The
+`PreparedSourceTransaction` is inert: store its encoded bytes in the **same
+source transaction** as the business changes, commit that transaction, and
+only then call `confirm_committed`. A prepared value deliberately has no
+publication API. On recovery, `SourceTransactionCodec::decode_committed`
+validates a stored committed frame.
+
+Bound count, complete encoded size, and assembly duration. Enforce the deadline
+while waiting for source rows; a check on the next `push` cannot notice a
+source that stalls forever. A rejected change poisons the assembly. Do not
+publish the previously accepted prefix.
+
+Transaction IDs contain 1 through 256 bytes; opaque source positions contain
+1 through 65,536 bytes. The byte limit includes framing, identity, and position,
+not just row payloads.
+
+#### Configure the receiving query
+
+Set `QueryExecutionSettings.source_transactions` to the accepted limits.
+The definition's input descriptor then uses `SourceTransactionCodec`, not
+`GraphChangeCodec`. Source and query ports must agree on that schema.
+The receiving query requires atomic publication.
+
+All changes in a source group update query state and results in one processing
+transaction. Input progress cannot advance through half of the group.
+Changing admission limits to accommodate a larger group is different from
+changing the grouped processing semantics.
+
+A plain envelope batch, ordinary middleware expansion, or row-wise bootstrap
+does not acquire this contract automatically.
+
+#### Run several processing steps in one transaction
+
+For a linear sequence of opt-in transformations, use `TransactionTransformer`:
+
+```text
+input -> [ decode -> normalize -> update application state ] -> output
+          one transaction owner; no internal pipes
+```
+
+A `TransactionTransformerDefinition` gives the graph/component/output identity,
+outbox capacity, and ordered `TransactionStepDefinition` values. Each step has
+a stable ID, implementation identity, configuration version, and configuration.
+
+For example, the decoder and parser from Chapter 5 can be registered through
+`TransactionalTransformerRegistry::standard` and configured as two
+`drasi/middleware-transformer` steps. Construction takes:
+
+```rust
+let transformer = TransactionTransformer::new(
+    definition,
+    registry,
+    provider,
+)
+.await?;
+```
+
+Here `definition` is the linear-step definition, `registry` is an
+`Arc<TransactionalTransformerRegistry>`, and `provider` is a complete persistent
+computation provider. The
+[transaction configuration example](../computation-graph-transactions.md#configure-a-sequence)
+contains the full two-step definition.
+
+Custom participants implement `TransactionalTransformer` through a
+`TransactionalTransformerFactory`. Their `transform_in_transaction` method
+receives a borrowed `TransactionContext` and returns one envelope. Filtering
+returns an empty change set; expansion adds operations within that envelope.
+Adjacent schemas must match exactly.
+
+The context gives each step isolated state. Two steps using the key `"count"`
+do not share one counter; they communicate through emitted records.
+`derive` gives intermediate output the appropriate scoped identity and lineage.
+The context exposes no independent begin/commit/rollback authority.
+
+The container does not invoke each step's ordinary lifecycle, timer, or worker
+hooks. A participant must be configuration-only, with no external effects,
+background writes, or commit-sensitive private fields. Arbitrary transformers
+do not become transactional merely by appearing in the list.
+
+The linear container requires persistent atomic storage and durable acknowledged
+outputs. It is not an in-memory replacement for ordinary graph composition.
+Query processing uses a complete query body with its full index bundle, not
+a query squeezed into the restricted step-state interface. Containers cannot
+be nested, and branches are not a linear transaction.
+
+#### Commit a producer and its journals together
+
+Separate-store output journals use the handoff and replay receipts from
+Chapter 11. `SharedStorageGroup` is an opt-in alternative for one built-in
+producer and its outgoing QoS journals sharing a proven Core transaction:
+
+```mermaid
+flowchart LR
+    Input --> Group
+    subgraph Group["One actual storage transaction"]
+        Producer["Query, durable middleware, or linear transformer"]
+        Journal["Participating QoS journals"]
+        Producer --> Journal
+    end
+    Journal --> Consumers["Independent consumer completion"]
+```
+
+Create the group from a dedicated `ComputationIndexes` owner. Its resource
+is the producer's IndexBackend dependency. Create channels through the group
+and declare them as resources with a dependency on that same group.
+Each participating edge names both the channel and shared owner:
+
+```rust
+let pipe = channel.definition()
+    .pipe(journal_resource_id, "alerts")
+    .with_shared_storage(group_resource_id);
+```
+
+Capacity is reserved before processing, without holding the storage transaction
+while waiting. Producer state, input progress, retained output, and participating
+journal appends then commit together. Subsequent forwarding uses those committed
+receipts instead of appending again.
+
+A group has one processor and at most 256 active journals. Separate-store
+branches may coexist, but they do not join this commit. Matching paths or names
+on independent providers cannot establish a shared transaction.
+
+Quiescing a healthy producer allows its journals to keep draining. Interrupting
+active storage or losing a commit result can fence the whole group until cleanup
+and reconstruction. Subscriber acknowledgement and retirement leases prevent
+rebind from exposing half-finished progress changes.
+
+Shared commits do not provide cross-instance transactions, atomic external
+effects, or simultaneous visibility at all consumers. They also do not migrate
+existing standalone storage automatically.
+
+**Summary.** Preserve the boundary that matters: one known source commit, one
+linear processing transaction, or one producer/journal transaction. None implies
+a graph-wide transaction. Stockroom now has the contracts needed to preserve
+both input consistency and unfinished output.
+
+## Part IV - Build a deployable application
+
+### 14. Turn components into reusable factories
+
+The first Stockroom constructs Rust objects directly. Deployment requires a
+reproducible recipe: which implementation, which configuration, and which
+resources should create each object. Refactor those choices without changing
+the application's data contracts.
+
+#### Replace a constructor with a specification
+
+Use the standard query factory for `low-stock`:
+
+```rust
+let factories = FactoryRegistry::standard();
+let factory = factories
+    .get_by_name("drasi/continuous-query", Some("1"))?
+    .clone();
+let indexes = ResourceId::try_new("query-indexes")?;
+let mut specification = factory.specification_from_config(
+    ComponentId::try_new("low-stock")?,
+    serde_json::json!({
+        "query": LOW_STOCK,
+        "language": "cypher",
+        "stream": "low-stock/out",
+        "outbox_capacity": 128,
+        "recovery": "strict",
+        "publication": "atomic"
+    }),
+)?;
+specification
+    .dependencies
+    .insert("indexes".into(), vec![indexes.clone()]);
+```
+
+The factory produces the query's exact descriptor and configuration schema.
+The application supplies the real provider from Chapter 9:
+
+```rust
+let handle = ResourceHandle::new(
+    ResourceRole::IndexBackend,
+    Arc::new(QueryIndexProviderResource(provider.clone())),
+);
+batch = batch
+    .declare_resource(ResourceSpecification {
+        id: indexes.clone(),
+        role: ResourceRole::IndexBackend,
+        ownership: ResourceOwnership::Graph,
+        binding: "query-indexes".into(),
+    })?
+    .provide_resource(indexes, handle)?
+    .component(specification, factory);
+```
+
+This replaces the directly constructed query, rather than adding another
+`low-stock` component. Retain its existing stream and connections.
+The factory creates the graph-owned query with delivery tracking and the
+enclosing instance scope. For result reads, use the instance query API or bind
+a query catalog when the host needs that capability.
+
+Register factories with `with_component_factories` on the builder when preparing
+a managed host. Reuse the same registered factory `Arc` for bindings in a live
+graph; another object with an identical implementation name is not automatically
+the same factory owner.
+
+The implementation version identifies code. The configuration version identifies
+the recipe shape. Neither is a record-schema version, component generation,
+or logical output sequence.
+
+#### Implement an application factory
+
+A custom `ComponentFactory` follows the same separation:
+
+| Stage | Responsibility |
+|---|---|
+| Descriptor and schema discovery | Describe role, ports, implementation, configuration fields, and dependencies without I/O |
+| Validation | Reject invalid configuration, scope, resource roles/types, and cardinality before acquisition |
+| Construction | Use the supplied configuration and actual resources to create a component, without starting processing |
+| Activation | Perform the component's start/readiness work under graph lifecycle ownership |
+
+`ConstructionContext` contains the component specification, enclosing identity,
+resolved configuration, and declared resources. A factory asks for resources
+by dependency name and concrete type; it does not search the host for an
+arbitrarily named global object.
+
+`ComponentCreationError` distinguishes retryable acquisition failures from
+terminal invalid definitions. An unavailable service can be repaired and
+retried; a bad descriptor needs correction.
+
+Implement `configuration()` on components that can describe their settings.
+The graph captures it at construction and reconfiguration boundaries.
+Configuration must not change during data processing, and a missing getter
+must remain explicitly unavailable rather than invent an empty recipe.
+
+In-place reconfiguration requires the factory to opt into
+`supports_reconfiguration` and the component to implement `reconfigure`.
+The descriptor must remain unchanged. Replacing the component is a different
+operation and creates a new generation.
+
+Stockroom's source factory can construct an admission-backed `Inventory` from
+a declared QoS resource; its sink factory can construct an `Alerts` owner with
+a declared completion provider. In both cases, keep the channel or storage
+handle out of serialized configuration. Save the recipe that reconstructs it.
+
+#### Declare resource ownership and dependencies
+
+A `ResourceSpecification` is a declaration. A `ResourceHandle` is an actual
+typed service. Declaring an IndexBackend does not open a database; declaring
+an Identity resource does not acquire credentials.
+
+Graph ownership makes cleanup part of graph lifecycle through the resource's
+cleanup contract. Borrowed ownership means an outer application owns that
+lifetime. A borrowed user must not retain a graph-owned prerequisite that can
+be removed underneath it.
+
+Use `ResourceRequirement::exactly_one::<T>` when a factory needs one typed
+resource. Other cardinalities must be explicit. Dependencies can represent
+storage, middleware, bootstrap, secrets, query catalogs, source progress,
+retained pipes, or application-defined services.
+
+For dependent resources, declare `resource_dependency` with the required role.
+A journal depending on `SharedStorageGroup` is one example. Constructors receive
+only the actual declared prerequisite handles; construction follows dependency
+order, and cleanup runs in reverse.
+
+Replacing a prerequisite reconstructs its transitive users when required.
+Failed dependent cleanup retains the prerequisite owner. Do not replace that
+lifecycle with a host cache, or infer shared ownership from equal strings.
+`with_shared_identity` is for wrappers around the same actual service, not a
+way to claim that independent services share a transaction.
+
+`ResourceConstructor::construct_with_dependencies` serves direct graph
+construction. `ManagementResourceResolver::resolve_with_dependencies` serves
+saved recipes. Acquisition has a bounded deadline, so partially acquired
+sockets, files, and workers must remain cancellation-safe. A timeout does not
+authorize leaking the partial owner and constructing a second one.
+
+#### Resolve credentials and secrets explicitly
+
+Credentials are contextual authentication material; secrets are named values.
+`IdentityProvider` receives a `CredentialContext`, which can identify the
+destination host, port, or database. A provider must not return a credential
+for an unintended destination.
+
+For application-controlled asynchronous credentials:
+
+```rust
+use drasi_lib::identity::{ApplicationIdentityProvider, Credentials, IdentityProvider};
+
+fn warehouse_identity(
+    secrets: Arc<dyn drasi_lib::SecretStoreProvider>,
+) -> Arc<dyn IdentityProvider> {
+    Arc::new(ApplicationIdentityProvider::new(move |context| {
+        let host = context.get("hostname").map(str::to_owned);
+        let secrets = secrets.clone();
+        async move {
+            ensure!(
+                host.as_deref() == Some("warehouse.internal"),
+                "unexpected credential destination"
+            );
+            Ok(Credentials::Token {
+                username: "stockroom".into(),
+                token: secrets.get_secret("warehouse-api-token").await?,
+            })
+        }
+    }))
+}
+```
+
+`PasswordIdentityProvider` handles a fixed username/password.
+Fallible credential conversions distinguish password/token pairs from
+certificate/key material. Native factories should declare and use the actual
+identity resource they need; an instance default does not automatically wire
+every custom factory.
+
+For configuration, keep secrets as unresolved references:
+
+```rust
+let token = ConfigurationValue::Reference {
+    resource: ResourceId::try_new("warehouse-secrets")?,
+    key: "warehouse-api-token".into(),
+    secret: true,
+};
+```
+
+A secret configuration field requires a secret reference to a SecretStore
+resource, not a plaintext literal. Resolution also requires the correctly typed
+`ConfigurationResolverResource`, not merely a resource with a plausible name:
+
+```rust
+struct SecretReferences(Arc<dyn drasi_lib::SecretStoreProvider>);
+
+#[async_trait]
+impl ConfigurationResolver for SecretReferences {
+    fn validate_reference(&self, key: &str) -> anyhow::Result<()> {
+        ensure!(!key.is_empty(), "empty secret key");
+        Ok(())
+    }
+
+    async fn resolve(&self, key: &str) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::Value::String(self.0.get_secret(key).await?))
+    }
+}
+```
+
+Wrap that resolver in `ConfigurationResolverResource` inside a SecretStore
+`ResourceHandle`. `validate_reference` is pure; `resolve` performs the lookup
+during construction. Resolved values are runtime configuration, not values to
+copy back into saved recipes or logs.
+
+Changing a secret does not automatically refresh existing network connections.
+Define reconnect or refresh behavior in the component's lifecycle.
+Use a test memory secret store only when its volatility is acceptable.
+
+**Summary.** Factories describe how to construct components; resource recipes
+describe how to obtain their real dependencies. Keep configuration, identity,
+and ownership separate. The application can now be represented as reconstructible
+definitions rather than a collection of opaque Rust objects.
+
+### 15. Save and restore an application
+
+Processing state lets Stockroom recover its data. Saved desired configuration
+lets the host reconstruct the application that owns that data, including
+definitions that were accepted but failed to start.
+
+#### Build a complete desired definition
+
+`DesiredInstance` contains a native `DesiredTopology`. The topology describes
+component factory specifications, streams, relationships, lifecycle policies,
+resource declarations and recipes, and required recovery contracts.
+
+After assembling a factory-backed batch, its public definition can be used:
+
+```rust
+let desired = drasi_lib::management::DesiredInstance::from(
+    batch.definition.clone(),
+)
+.normalized()?;
+```
+
+This requires a **reconstructible** batch. The first chapter's file source and
+in-memory sink are supplied instances, not saved factories; copying that original
+batch does not turn them into recipes. Convert all managed components and
+their resources, preserve every connection, and register the implementations
+needed to rebuild them.
+
+Normalization validates the representation without opening external services.
+A serialized object name cannot recreate an `Arc`, a worker, or a live database
+transaction. Keep actual bindings outside the persisted document.
+
+`ManagementResourceResolver` translates saved resource configurations into
+actual handles. It owns application-specific policy such as allowed paths,
+provider selection, credentials, and recovery-domain validation. Wrapping
+another resolver must preserve those checks.
+
+#### Enable management at the host boundary
+
+`ManagementOptions` groups factories, the resource resolver, and an optional
+configuration store. Without a store, desired configuration exists only in
+memory. There is no separate `management` Cargo feature.
+
+The builder also exposes the services separately:
+
+```rust
+let core = DrasiLib::builder()
+    .with_id("stockroom-managed")
+    .with_component_factories(factories)
+    .with_management_resources(resources)
+    .with_configuration_store(store)
+    .build()
+    .await?;
+```
+
+Here `factories` is the registered `FactoryRegistry`, `resources` is an
+`Arc<dyn ManagementResourceResolver>`, and `store` is an
+`Arc<dyn ConfigurationStore>`. Use the same enclosing identity in all
+processing and provider recipes.
+
+The separate `drasi-state-store-redb` crate provides encrypted configuration
+persistence. Add:
+
+```toml
+drasi-state-store-redb = { path = "../drasi-core/components/state_stores/redb", features = ["configuration"] }
+```
+
+Open `RedbConfigurationStore::new(path, key)` with an externally supplied
+32-byte key and pass it to the builder. Retain the key outside the database and
+preserve it across restart. Configuration encryption does not encrypt query
+indexes, journals, backups, or every other file in the state directory.
+
+The [managed Host example](../../../components/host-sdk/examples/managed_instance.rs)
+shows concrete store opening, key-file ownership, and factory registration.
+The storage implementation remains outside drasi-lib; the library depends
+on the configuration-store contract.
+
+#### Accept a revision, then reconcile it
+
+Configuration acceptance and runtime convergence are two separate outcomes.
+The store commits the definition and an idempotency receipt **before**
+construction and lifecycle effects.
+
+This helper waits for a reconciliation pass:
+
+```rust
+async fn apply_configuration(
+    core: &DrasiLib,
+    expected_revision: u64,
+    request_id: &str,
+    desired: drasi_lib::management::DesiredInstance,
+) -> anyhow::Result<()> {
+    core.apply_desired_state(expected_revision, request_id, desired)
+        .await?;
+    let status = core.reconcile_desired_state().await?;
+    ensure!(
+        status.converged(),
+        "accepted definition has not converged: {status:?}"
+    );
+    Ok(())
+}
+```
+
+The caller should obtain a new request ID with
+`new_configuration_request_id`, persist that ID with the intended request,
+and use the current `desired_configuration().revision` as the expected
+revision. Retry an uncertain submission with the same ID and identical content.
+Use `configuration_receipt` to resolve the recorded outcome.
+
+A missing factory, busy socket, or unavailable database can leave a durable
+accepted definition that has not converged. Repair the dependency and reconcile;
+do not replace the definition with an empty graph. A new factory can be
+registered to satisfy a previously unavailable implementation.
+
+Reusing an ID with different content is an error. A revision mismatch protects
+against overwriting a concurrent change. Generating a new request ID after a
+lost response is not a substitute for resolving the first operation.
+
+`receipt.durable` and `configuration_is_persistent` describe configuration
+acceptance, not processing durability. `management_status` and
+`status.converged()` describe reconciliation. Component readiness still has
+its own boundary.
+
+#### Restore without resubmitting a startup seed
+
+On reconstruction, register the same required factories, supply the resource
+resolver and store, and build with the same instance identity. The accepted
+definition is authoritative, including an intentionally empty definition.
+An old startup seed must not overwrite it.
+
+Failed definitions remain available for inspection and repair. Unsupported
+configuration versions, unavailable secrets, and damaged encrypted records
+fail explicitly; none should be interpreted as "no saved application."
+
+Managed configuration mutations go through `apply_desired_state`.
+Imperative configuration changes to managed members are rejected.
+Unmanaged components and instance-provided services are preserved by managed
+reconciliation, but they are not thereby serialized for reconstruction.
+
+Await instance shutdown before releasing the store or opening a replacement
+owner. A cancelled storage waiter does not release an exclusive configuration
+lease while its real operation is still running.
+
+#### Keep configuration history intentional
+
+Named snapshots support saving, loading, and restoring desired definitions.
+Restoration submits a new configuration revision; it does **not** roll query
+state or external effects back to the snapshot's date.
+
+`list_configuration_snapshots(after, limit)` returns bounded pages.
+`delete_configuration_snapshot(name, expected_revision)` protects against
+deleting a different saved revision. Deleting a snapshot changes neither the
+current application nor its processing state. There is no automatic age policy.
+
+The redb store's default retains request receipts indefinitely. For bounded
+history, `ConfigurationStoreOptions::receipt_batch_capacity` enables receipt
+expiry by batch. Use store-generated request IDs, retain each one for retries,
+and understand the boundary: generating an ID for a new batch can expire the
+entire previous full batch, including unused IDs from it.
+
+An expired receipt means the outcome is no longer retained, not that the
+operation failed. A full batch rejects additional unused requests; an expired
+or foreign ID cannot be reinterpreted as new work. Enabling this policy on an
+existing store expires its older receipts and changes reopen requirements.
+Choose it deliberately rather than treating it as harmless garbage collection.
+
+#### Rotate configuration keys safely
+
+`RedbConfigurationStore::rotate_key` rewrites live definitions, snapshots,
+receipts, and policy metadata atomically. Provision and retain the replacement
+key externally before starting. Close every configuration session first,
+normally by awaiting all owning instances' shutdown.
+
+If a commit is uncertain, the provider fences writes. Keep both keys and reopen
+to determine which one is active before proceeding. Cancelling the caller
+does not detach the underlying storage operation.
+
+Rotation can require substantial temporary disk space. It does not erase old
+free pages, backups, or filesystem snapshots. Protect those copies separately;
+key rotation is not secure erasure.
+
+**Summary.** Saved configuration is accepted intent, not a claim that the runtime
+is ready. Revision checks and request receipts protect changes; factories and
+resource resolvers make reconstruction possible. Configuration history and key
+lifecycle remain explicit application responsibilities.
+
+### 16. Change a running application
+
+Stockroom needs a new alert destination while inventory continues to arrive.
+Plan the change around component generations, dependency ownership, and retained
+work rather than simply replacing an object in a map.
+
+#### Preview changes to unmanaged topology
+
+For unmanaged native components, obtain graph control and preview against the
+current desired revision:
+
+```rust
+let control = core.computation_control()?;
+let preview = control.preview(
+    control.desired_snapshot().revision,
+    vec![DesiredMutation::Restart(GraphSelection::Exact(vec![
+        ComponentId::try_new("alerts")?,
+    ]))],
+)
+.await?;
+let report = control
+    .reconcile(preview, TopologyBindings::default())
+    .await?;
+ensure!(
+    report.summary == OperationSummary::Completed,
+    "graph change failed: {:?}",
+    report.failures
+);
+```
+
+This requests a restart, not replacement or deprovision. Another accepted
+change can invalidate the preview's revision. New implementations and resources
+belong in `TopologyBindings` as actual factories, instances, constructors,
+and pipe providers, not just serialized names.
+
+For managed members, submit the corresponding desired definition through the
+configuration API from Chapter 15. Do not use imperative reconciliation to
+bypass accepted managed ownership.
+
+Selections can name exact members, dependencies, dependents, or the whole graph.
+Updates require supported in-place reconfiguration. Replacement reconstructs
+an owner even when its visible description is unchanged. Retry concerns a
+retained failed operation, not permission to start a second owner of resources
+whose cleanup is unfinished.
+
+`ComponentAddition` supports incremental construction with resources, stream
+bindings, readiness, and auto-start policy. Deferred activation lets a host
+finish valid wiring before starting. A returned handle is generation-bound;
+an old handle cannot silently control its replacement.
+
+#### State dependency policy
+
+A relationship can require a prerequisite for creation, binding, or activation,
+and can control failure propagation. For example:
+
+```rust
+let policy = RelationshipPolicy {
+    required_for_creation: true,
+    activation: ActivationCoupling::RequiresRunning,
+    propagate_failure: true,
+    ..RelationshipPolicy::default()
+};
+```
+
+Apply the policy to the intended edge; do not assume that all relationships
+have these semantics. Defaults use independent activation and no failure
+propagation. Binding is required, but creation need not wait on the edge.
+Consumer replacement does not automatically opt into rebind, and survival
+without the relationship must be explicitly permitted.
+
+`fence_producer_on_failure` is useful when continuing production after a
+required consumer fails would violate the application boundary. These policies
+affect lifecycle and ownership; they do not repair a failed business action.
+
+Disjoint lifecycle work can progress while another component waits for cleanup.
+Conflicting component/resource reservations still reject or wait according to
+the operation's contract. Independent tasks are not permission for concurrent
+mutable lifecycle calls on the same instance.
+
+#### Choose removal semantics
+
+| Policy | Intended result |
+|---|---|
+| Reject | Refuse a removal that breaks required relationships |
+| Cascade | Include dependent components |
+| Orphan | Keep only survivors whose policies permit the missing relationship |
+| Drain | Require the supported outstanding work to reach its handling boundary |
+
+No policy overrides unresolved persistent recovery obligations. A local empty
+queue is insufficient drain evidence when a provider still retains replayable
+or in-flight work.
+
+Changing query text can invalidate processing identity. Replacing a database
+resource can invalidate more than the component directly named in the request.
+Preserve transitive resource dependencies and plan a migration or explicit
+rebuild for semantic changes.
+
+#### Preserve recovery domains
+
+A recovery domain is the actual set of owners whose saved progress, state,
+and output must remain consistent. Source admission receipts, query outboxes,
+subscriber cursors, scheduled work, and consumer completion can all constrain
+retirement.
+
+Normal retirement needs completed cleanup, proof that obligations are resolved,
+and held exclusion against restarting or reusing the old owners while acceptance
+is decided. A missing live handle is not evidence that disk state is empty.
+Equal provider paths are not evidence that two handles represent the same
+domain.
+
+Query/bootstrap and consumer owners expose their own retirement boundaries.
+A successfully stopped bootstrap provider must remain frozen; a consumer
+retirement proof must come from its actual delivery ledger and completed
+storage cleanup. Do not construct another runner merely to manufacture
+replacement evidence.
+
+For intentional abandonment, `RecoveryRetirementAuthorization` is a persisted,
+revision-bound authorization naming exact complete resource/component domains
+with `allow_data_loss`. It permits abandoning their obligations; it does not
+reset, acknowledge, or delete stored processing data.
+
+This authorization cannot excuse failed cleanup, missing actual owners, or
+unhealthy transaction gates. It must not be generated automatically after
+a startup error. Uncertain configuration acceptance retains retirement
+ownership; only confirmed rejection permits resuming the old owners.
+
+#### Escalate interruption without calling it recovery
+
+`GraphControl::force_cancel_components` is explicit escalation for selected
+components. It requires a complete registered actual resource domain and
+separates interruption from cleanup in its report.
+
+Successful cleanup does not prove rollback, delivery completion, or repair of
+the interrupted generation. Reconstruct a fresh owner and resolve its stored
+progress before retiring pending work or changing bindings. Unreported opaque
+resource sharing cannot be made safe by selecting matching component names.
+
+A process boundary can contain failures a task boundary cannot; it still does
+not turn forced termination into successful drain.
+
+#### Export useful definitions
+
+`snapshot_configuration` and `snapshot_computation_configuration` expose
+application reconstruction information. `GraphSnapshot::select` exports a
+whole graph or subset, retaining explicit boundary relationships and resource
+dependencies. Do not turn missing neighbors into invented external components.
+
+Available component configuration and provider recipes should be preserved.
+Opaque external bindings remain explicitly unavailable; snapshots must not
+guess their construction. Treat these exports as privileged data.
+
+**Summary.** Live changes operate on revisions, generations, and real resource
+owners. Preview before mutation, inspect every outcome, and preserve retained
+obligations through replacement. Stop, force, reset, and permanent retirement
+are different decisions.
+
+### 17. Package and isolate extensions
+
+Stockroom's components can remain ordinary Rust code linked into the application,
+be packaged as native dynamic libraries, or run in independently hosted
+instances. Choose the boundary for deployment and failure isolation, not merely
+for code organization.
+
+#### Author native dynamic components
+
+Use these libraries for distinct purposes:
+
+| Library | Responsibility |
+|---|---|
+| `drasi-lib` | Own the in-process graph, resources, and runtime lifecycle |
+| `drasi-computation-contracts` | Share envelope, schema, codec, and service messages |
+| `drasi-core-types` | Share graph and result values without the evaluator |
+| `drasi-computation-plugin-sdk` | Implement native dynamic components and export factories |
+| `drasi-host-sdk` | Verify/load native libraries and connect their operations to graph-owned interfaces |
+
+A plugin implements `NativeComponent` and the appropriate `NativeSource`,
+`NativeTransformer`, `NativeSink`, or `NativeService` contract.
+Its factory publishes configuration-only metadata and returns the corresponding
+created component. It does not depend on drasi-lib merely to obtain data types,
+and it does not own another query executor.
+
+Keep metadata discovery and constructors free of I/O and processing tasks.
+Declare ports, schemas, completion, configuration version, and capabilities
+truthfully. Implement the component's actual `configuration()` hook rather
+than relying on a second mutable copy of its settings.
+
+Register factories and executable schemas in a `PluginDefinition` and export
+with `export_computation_plugin!` behind the crate's `dynamic-plugin` feature.
+The package needs `lib`/`cdylib` crate types and explicit computation-family
+metadata. Match the SDK's ABI version rather than substituting the package
+version.
+
+`ConfigDefinition` can supply both a typed configuration schema and field
+descriptions, defaults, bounds, and allowed values. Reuse actual typed defaults;
+descriptions must not contain secret defaults. Cross-field and resource
+constraints still need constructor validation.
+
+The [native SDK guide](../../../components/computation-plugin-sdk/README.md)
+contains export and factory examples. Exact ABI layouts and signatures belong
+to that reference, not to the application data model.
+
+#### Validate custom records
+
+Graph changes and query rows use the standard codecs. A custom binary
+transformer can instead define a `SchemaDescriptor` and executable
+`RecordValidator`. Validate both identity and payload; image-less deletions
+still need identity validation.
+
+For a one-byte quantity record, the core checks can be expressed as:
+
+```rust
+struct QuantityValidator;
+
+impl RecordValidator for QuantityValidator {
+    fn validate_identity(
+        &self,
+        _schema: &SchemaDescriptor,
+        id: &RecordId,
+    ) -> std::result::Result<(), RecordValidationError> {
+        if id.namespace() != "sku"
+            || id.value().is_empty()
+            || std::str::from_utf8(id.value()).is_err()
+        {
+            return Err(RecordValidationError::new("identity", "expected a UTF-8 sku"));
+        }
+        Ok(())
+    }
+
+    fn validate(
+        &self,
+        schema: &SchemaDescriptor,
+        id: &RecordId,
+        image: RecordImage,
+        payload: &[u8],
+    ) -> std::result::Result<(), RecordValidationError> {
+        self.validate_identity(schema, id)?;
+        if image != RecordImage::Full || payload.len() != 1 {
+            return Err(RecordValidationError::new("image", "expected one full quantity byte"));
+        }
+        Ok(())
+    }
+}
+```
+
+Associate this validator with one exact descriptor through `Schema::new`;
+construct records and references with their validating constructors. If one
+validator is reused across descriptors, check the descriptor-specific contract
+too. A schema name alone does not establish compatibility.
+
+The [finite computation example](../../examples/computation_graph.rs) shows a
+complete custom-binary source, transformations, and collecting sink.
+Custom records do not become query graph elements without an explicit codec
+or conversion step.
+
+#### Implement honest recovery and transport extensions
+
+`ComponentRecovery` defaults to unknown. `stateless()` is valid only for
+a deterministic transformation preserving replay identity without hidden state,
+workers, timers, or external effects. Stateful processing must identify its
+actual transaction and progress owner.
+
+Durable producers implement output-destination binding and delivery completion.
+Confirmation follows acceptance by every outgoing branch, not downstream
+business handling. Retain unfinished output after failure or cancellation.
+
+A custom `PipeProvider` supplies an owned sender, receiver, and lifecycle control,
+along with side-effect-free capability descriptions. Bind actual provider state
+through declared resource dependencies and validate it before creating the pipe.
+Multicast must identify its shared journal and independent subscribers rather
+than append once per edge.
+
+Wake blocked senders/receivers on closure. `close` ends new admission while
+permitting supported drain; `cancel` requests interruption.
+`is_idle` must account for buffered, replayable, and provider-in-flight work
+after the producer is parked. If the provider cannot prove that boundary,
+return an error rather than infer drain from an empty local queue.
+
+For explicit query scheduling, `QuerySchedulingResource` and
+`QueryScheduledSource` connect the actual query's due-work view to typed
+notifications. They do not invent source changes or destructively remove
+scheduled work outside the query transaction.
+
+#### Negotiate optional plugin services
+
+Native plugins can opt into host-owned services without acquiring graph or
+storage ownership:
+
+| Service | Plugin capability and boundary |
+|---|---|
+| Transaction participation | A borrowed `NativeTransactionContext` for isolated step state; no independent commit or external effects |
+| Consumer completion | External or transactional mode backed by the host's `DeliveryRunner` |
+| Source admission | A revocable `NativeAdmission` capability backed by the actual outgoing QoS channel |
+| Source progress | A read-only view of the actual processing owner's committed progress |
+| Query bootstrap | A query-owned provider with bounded snapshot/state operations and awaited cleanup |
+
+Admission mode has no alternate `next` publication path. A progress reader
+does not itself guarantee source retention. A transaction participant may not
+start its own workers. A consumer's local completion ledger cannot make a
+remote effect atomic.
+
+These services are negotiated and validated; a capability flag does not upgrade
+an implementation. Unsupported requested services fail rather than silently
+falling back to a weaker boundary.
+
+#### Load trusted code at the host
+
+After verifying and authorizing a specific library path, a host can register it:
+
+```rust
+let plugin = drasi_host_sdk::computation::load(path)?;
+plugin.register_factories(&mut factories)?;
+```
+
+This excerpt requires the Host SDK dependency and an existing factory registry.
+Use its native factory specifications to retain plugin provenance and exact
+configuration. Loading a saved path must not authorize downloading or executing
+arbitrary code.
+
+The host polls asynchronous plugin operations and owns cancellation.
+Buffers and handles are released by their producing side; Rust futures,
+trait objects, `Arc` values, and runtime internals do not cross the C boundary.
+Use the SDK rather than designing ad hoc cross-library ownership.
+
+Libraries are pinned for process lifetime. There is no general hot-unload
+contract, arbitrary dynamic query-role hosting, unrestricted resource injection,
+or in-place dynamic reconfiguration. A native plugin is trusted in-process code,
+not a sandbox. A contained panic still requires a fresh component generation;
+native aborts and memory faults can terminate the process.
+
+#### Host independent instances
+
+`drasi-instance-host` supplies a hosting library and executable. Each parent,
+child, or grandchild embeds a normal `DrasiLib`. A portless supervisor service
+owns a child process; separate bridge sources and sinks carry data.
+
+```mermaid
+flowchart LR
+    subgraph Parent["Stockroom instance"]
+        Inventory --> Send["Bridge sink"]
+        Supervisor["Child supervisor service"]
+    end
+    subgraph Child["Analysis instance"]
+        Receive["Bridge source"] --> Query["Warehouse query"]
+    end
+    Send --> Receive
+    Supervisor -. owns process .-> Child
+```
+
+The data graph and supervision tree are different relationships.
+This is not a remote `transform` call or a cross-process Rust resource handle.
+Each instance owns its graph, storage namespace, and cleanup.
+
+An instance-host manifest identifies the instance, private state directory,
+explicit native-plugin allowlist, optional accepted-configuration store, index
+providers, and desired topology. The state directory is owner-only and
+process-exclusively locked. Its stable identity survives process generations.
+The host verifies child identity, generation, and readiness; a PID or open
+listener is not readiness.
+
+Use distinct instance IDs and storage namespaces even when several instances
+run in one process. A multi-threaded runtime shares execution resources;
+a separate process supplies a different failure boundary. Neither choice
+creates cross-instance transactions.
+
+#### Select a bridge boundary
+
+Native bridge endpoints support bounded local IPC and authenticated network
+transport. Register source and sink factories only where needed. Bridge
+endpoints are independently selectable static native factories; supervision
+does not implicitly register or connect them.
+
+| Profile | Successful delivery proves |
+|---|---|
+| Volatile | Acceptance into the bounded receiving queue |
+| Durable | Receiver journal admission and its retry receipt committed at the selected failure scope |
+
+Durable bridge handling is complete **at receiver admission**, not at completion
+of the receiving query, subgraph, or external effect. The sender retains its
+mapping and upstream obligation until that receipt is resolved and saved.
+Timeout, disconnect, and a lost response leave uncertainty rather than proving
+rejection.
+
+Both peers must agree on link/endpoint identities, streams, schemas, limits,
+and namespace policy. Standard graph changes, supported query rows, and complete
+source transactions can cross. Arbitrary plugin schemas, scheduled signals,
+and query snapshot/progress control frames are not portable bridge input.
+
+Namespace prefixes allocate authority; the bridge does not automatically rename
+colliding source IDs. Mutual TLS authenticates the configured peer, but does
+not establish global transaction ownership or a completed business action.
+
+Keep transaction containers and shared-storage groups inside one instance.
+Never open another process's RocksDB directory to imitate a shared transaction.
+
+#### Stop a composition at explicit cuts
+
+For bidirectional data, stop order matters. Quiesce the complete upstream path
+and outgoing bridge, seal its receiver admission boundary, stop the owned child,
+and keep return ingress alive until the child finishes returning data.
+Then drain the sealed receiving boundary and quiesce its consumers.
+
+The instance host's `stop_stages` expresses those cuts. It retains unresolved
+operations and child handles until exit/cleanup is established. A local
+`DrasiLib::stop` alone is not proof that the entire composition drained.
+An unresponsive remote peer cannot be assumed stopped.
+
+Owned-local hosting supports Linux and macOS. It is not a Windows host or
+a remote-machine provisioner. Process supervision and watchdogs are not
+hard kernel resource isolation or a security sandbox. Force is explicit
+whole-owned-instance termination; it may complete process cleanup while
+leaving prior commit/effect outcomes unknown.
+
+The [instance-host guide](../../../components/instance-host/README.md) and
+[bridge guide](../../../components/computation-plugins/common/bridge/README.md)
+provide manifest fields, resource recipes, and exact cut protocols.
+
+**Summary.** Native SDKs preserve contracts across a library boundary; normal
+DrasiLib instances and bridges preserve them across a process boundary.
+Neither packaging nor isolation creates stronger delivery guarantees on its
+own. The final application must still identify who owns every unfinished action.
+
+### 18. Capstone: a recoverable Stockroom
+
+Complete the application by recovering an alert that was committed and delivered
+to retained storage but never handled. This is the critical interval a simple
+"save query rows and restart" design misses.
+
+#### Run the complete retained application
+
+The executable is
+[`stockroom_native_persistent.rs`](../../examples/stockroom_native_persistent.rs).
+It contains the admission-backed source, two persistent QoS journals, query
+body, and transactional `SaveAlert` consumer developed in Part III.
+
+From `drasi-core`, run the following pair once, using a fresh state directory:
+
+```sh
+cargo run --locked -p drasi-lib --example stockroom_native_persistent -- ./native-stockroom-state stage
+cargo run --locked -p drasi-lib --example stockroom_native_persistent -- ./native-stockroom-state resume
+```
+
+This companion needs the RocksDB native build prerequisites from Chapter 1.
+Keep the same directory between the two commands. Do not substitute a new
+directory for `resume`; that would test a new application rather than recovery.
+
+The first run prints:
+
+```text
+retained one alert without handling it
+```
+
+It submits one product through a producer session, retries the identical
+submission, and checks that the receipt is unchanged. The query maintains the
+low-stock row, and its output reaches the retained journal. The sink deliberately
+does not complete handling before the instance shuts down.
+
+The second run submits no inventory and prints:
+
+```text
+restored and handled the retained alert without resubmitting inventory
+```
+
+The query restores its maintained answer. The retained alert reaches
+`DeliveryRunner`, and `SaveAlert` commits its business state and operation
+completion. The companion checks that one operation completed.
+
+This is a controlled interrupted-handling and reconstruction exercise, not
+a simulation of disk loss, every crash instruction, or every network failure.
+It performs no remote replenishment request. An external destination still
+needs the confirmation protocol from Chapter 12.
+
+#### Explain every successful return
+
+The application has several independently meaningful successes:
+
+| Return or observation | Meaning |
+|---|---|
+| Producer admission receipt | The input and retry receipt were accepted by the configured journal |
+| Query checkpoint and result position | Query processing committed through that input |
+| Outgoing journal acceptance | Query output is retained for its required subscriber |
+| Transactional handler completion | Business state and that operation's completion committed together |
+| Consumer batch completion | Every operation in that delivered batch completed |
+| Configuration receipt, when management is enabled | A desired definition was accepted, not necessarily started |
+| Awaited shutdown | The reported owners completed cleanup; it is not retroactive proof of every business effect |
+
+This table is also the basis of the application's external API. An endpoint
+that returns after admission should promise admission. If it promises completed
+replenishment, it must wait for or expose a way to establish that later boundary.
+
+#### Test the failure windows that matter
+
+The native starter's focused tests run with:
+
+```sh
+cargo test --locked -p drasi-lib --example stockroom_native
+cargo test --locked -p drasi-lib --example stockroom_native_persistent
+```
+
+Application qualification goes beyond those examples. Exercise each boundary
+with the actual provider and destination:
+
+| Failure window | Required result |
+|---|---|
+| Admission response is lost after commit | The same session, sequence, and content resolve to the original receipt |
+| Query fails before commit | Input progress does not skip uncommitted state |
+| Query commits before output confirmation | Retained output replays without recomputing its business change |
+| A later operation in a batch fails | Completion remains the successfully handled prefix |
+| External effect succeeds but response is lost | Destination idempotency/lookup resolves the original operation |
+| Snapshot loading is interrupted | Incomplete initialization is not declared complete |
+| A required subscriber stalls | Lossless capacity backpressures instead of discarding its work |
+| Shutdown or replacement times out | Old ownership remains tracked; a competing owner is not opened |
+| Configuration acceptance is uncertain | The same request identity resolves the accepted revision |
+| Recovery sees incompatible or damaged state | Startup fails explicitly rather than resetting silently |
+
+Test meaningful input semantics too: duplicate full upserts, patch updates,
+identity-only deletes, equal-valued rows with different identities, stale
+source times, grouped totals, and temporal retractions.
+Exercise both current-thread and multi-threaded Tokio runtimes when supporting
+both hosts.
+
+Measure boundedness under the intended workload. Include full envelope sizes,
+retained membership, outbox growth, component-local expansion, backend memory,
+and cleanup latency. A queue capacity is not an RSS bound; a fast demonstration
+is not a production throughput or availability guarantee.
+
+#### Operate a failed deployment without destroying evidence
+
+When Stockroom cannot resume, first capture the desired revision, observed
+component generations, retained error causes, and the relevant source/query/
+consumer progress. Determine which owner still owes work.
+
+Repair missing factories, credentials, or unavailable resources before changing
+the saved definition. Resolve uncertain admissions and effects using their
+original identities. Retry reconciliation only after the required ownership
+and cleanup boundary permits it.
+
+If a semantic change needs a rebuild, establish that the source can supply the
+necessary data and that pending output is preserved or explicitly retired.
+Do not delete a state directory, choose a fresh namespace, or enable AutoReset
+merely to suppress a startup failure.
+
+Back up configuration, keys, processing stores, and any required upstream
+history as a coordinated recovery plan. A saved topology alone does not
+contain products, pending alerts, or remote orders. Restoring one store to
+an older position while leaving related completion state ahead can invalidate
+the recovery boundary.
+
+#### Choose the simplest sufficient deployment
+
+A disposable live view can use the first program's bounded in-memory path.
+A restartable calculation also needs source replay, suitable query storage,
+and coordinated bootstrap. Reliable handling adds retained output and actual
+consumer completion. Saved deployments add reconstructible factories, resource
+recipes, and protected configuration persistence.
+
+Use separate processes when their failure boundary is required, not as a
+substitute for those contracts. There is no general graph-wide transaction,
+automatic exactly-once external effect, unlimited replay window, automatic
+state migration, or distributed active-active runtime.
+
+**Summary.** Stockroom is recoverable when every accepted input and committed
+output remains owned until its promised boundary completes. That principle
+connects the first source, the query, the journals, the consumer, and the host.
+It is the basis for extending the application without weakening its guarantees.
+
+## Appendix A: Vocabulary
+
+| Term | Meaning |
+|---|---|
+| Instance | One `DrasiLib` owner with its own application identity and runtime |
+| ComputationGraph | The authoritative owner of components, connections, resources, and lifecycle |
+| Component | A source, transformer, query, sink, or service in that graph |
+| Generation | One incarnation of a component; replacement invalidates old handles |
+| Element | A source-qualified graph node or relationship |
+| Record | Immutable schema-defined identity and image bytes |
+| Envelope | One identified change set with system metadata, context, and lineage |
+| Stream | An ordered sequence emitted by one producer output |
+| Port / edge / pipe | A component boundary / a declared connection / its transport implementation |
+| Row signature | A query result's identity within its query namespace, not its JSON value |
+| Bootstrap | Coordinated initial loading and handover to live/replayed input |
+| Checkpoint | A saved position proving only the owning processor's completion boundary |
+| Outbox | Retained committed output available for replay |
+| Journal | Retained transport entries and the progress of their consumers |
+| Admission | Acceptance of responsibility for input, possibly at a durable storage boundary |
+| Handling | Completion of the work the consumer actually promises |
+| Recovery domain | Actual owners whose state and progress must remain consistent |
+| Desired / observed | Accepted intent / the realized and running state |
+| Factory / resource | A reconstructible constructor / an actual supplied service |
+| Quiesce / deprovision | Park processing with ownership retained / permanently remove owned state |
+
+## Appendix B: API and example navigation
+
+Use the generated API reference for signatures and exhaustive options:
+
+```sh
+cargo doc --locked -p drasi-lib --no-deps --open
+```
+
+The book supplies the application path; the reference supplies the catalog.
+
+| Task | Public interface or focused companion |
+|---|---|
+| Embed and own an application | `DrasiLib`, `DrasiLibBuilder`; [Stockroom starter](stockroom) and [source](stockroom/src/main.rs) |
+| Compose components and connections | `drasi_lib::computation::v1`; [schemas, ports, and pipes](../computation-graph-schemas-ports-pipes.md) |
+| Configure and read a native query | `ContinuousQueryDefinition`, `QueryExecutionSettings`, `QueryOptions`, `QueryResults` |
+| Normalize data | `MiddlewareTransformer`; [middleware guide](../computation-graph-middleware.md) |
+| Reorder source time | `SourceTimeMergeTransformer`; [time-merge guide](../computation-graph-time-merge.md) |
+| Retain transport and retry identity | `QosChannel`, `SourceAdmission`, `RetainedPipe`; [QoS guide](../computation-graph-qos.md) |
+| Recover a result view | `QueryReplayTransformer`, `CheckpointedSink`, `ConsumerProgressStore` |
+| Complete consumer work | `DeliveryRunner`; [recoverable Stockroom](../../examples/stockroom_native_persistent.rs) |
+| Preserve transactions | `SourceTransactionBuilder`, `TransactionTransformer`, `SharedStorageGroup`; [transaction guide](../computation-graph-transactions.md) |
+| Supply state and credentials | `state_store`, `identity`, `secret_store`, `wal`; `ComputationIndexProvider` in `drasi-core` |
+| Save desired configuration | `management`; [managed configuration](../managed-configuration.md) |
+| Inspect and observe | `ComputationInspector`, `ComponentGraphView`, `observability`, `metrics`, `profiling` |
+| Handle public failures | `DrasiError`, `error::OperationFailures`, `GraphError`, lifecycle reports |
+| Package native code | [Native plugin SDK](../../../components/computation-plugin-sdk/README.md) and [Host SDK](../../../components/host-sdk/README.md) |
+| Host independent processes | [Instance host](../../../components/instance-host/README.md) and [bridges](../../../components/computation-plugins/common/bridge/README.md) |
+| Change the library implementation | [Maintainer's guide](../computation-graph-maintainers-guide.md) |
