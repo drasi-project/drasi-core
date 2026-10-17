@@ -1,0 +1,257 @@
+{
+  "scope": "Optimized in-memory evaluator/resource-boundary proof; not production throughput qualification",
+  "runs": [
+    {
+      "events": 2000,
+      "p50_ns": 15250,
+      "p95_ns": 31583,
+      "remote": false,
+      "repetition": 0,
+      "resource_calls": 0,
+      "total_ns": 35072739,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 124625,
+      "p95_ns": 151750,
+      "remote": true,
+      "repetition": 0,
+      "resource_calls": 14000,
+      "total_ns": 253895994,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 123167,
+      "p95_ns": 148500,
+      "remote": true,
+      "repetition": 1,
+      "resource_calls": 14000,
+      "total_ns": 249329851,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11333,
+      "p95_ns": 24459,
+      "remote": false,
+      "repetition": 1,
+      "resource_calls": 0,
+      "total_ns": 26229791,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11250,
+      "p95_ns": 26709,
+      "remote": false,
+      "repetition": 2,
+      "resource_calls": 0,
+      "total_ns": 27033657,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 128375,
+      "p95_ns": 154125,
+      "remote": true,
+      "repetition": 2,
+      "resource_calls": 14000,
+      "total_ns": 258363142,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 127250,
+      "p95_ns": 152583,
+      "remote": true,
+      "repetition": 3,
+      "resource_calls": 14000,
+      "total_ns": 256896183,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11167,
+      "p95_ns": 25958,
+      "remote": false,
+      "repetition": 3,
+      "resource_calls": 0,
+      "total_ns": 26391380,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11125,
+      "p95_ns": 25958,
+      "remote": false,
+      "repetition": 4,
+      "resource_calls": 0,
+      "total_ns": 26417763,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 128375,
+      "p95_ns": 152459,
+      "remote": true,
+      "repetition": 4,
+      "resource_calls": 14000,
+      "total_ns": 258092414,
+      "verified_rows": 64,
+      "workload": "projection"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11959,
+      "p95_ns": 27333,
+      "remote": false,
+      "repetition": 0,
+      "resource_calls": 0,
+      "total_ns": 30102508,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 253958,
+      "p95_ns": 291000,
+      "remote": true,
+      "repetition": 0,
+      "resource_calls": 30000,
+      "total_ns": 510027932,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 251791,
+      "p95_ns": 288500,
+      "remote": true,
+      "repetition": 1,
+      "resource_calls": 30000,
+      "total_ns": 508299914,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11959,
+      "p95_ns": 24959,
+      "remote": false,
+      "repetition": 1,
+      "resource_calls": 0,
+      "total_ns": 28865760,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11958,
+      "p95_ns": 27500,
+      "remote": false,
+      "repetition": 2,
+      "resource_calls": 0,
+      "total_ns": 30298365,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 251542,
+      "p95_ns": 288792,
+      "remote": true,
+      "repetition": 2,
+      "resource_calls": 30000,
+      "total_ns": 508087848,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 257417,
+      "p95_ns": 306042,
+      "remote": true,
+      "repetition": 3,
+      "resource_calls": 30000,
+      "total_ns": 524938119,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11875,
+      "p95_ns": 27083,
+      "remote": false,
+      "repetition": 3,
+      "resource_calls": 0,
+      "total_ns": 29757776,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 11833,
+      "p95_ns": 27250,
+      "remote": false,
+      "repetition": 4,
+      "resource_calls": 0,
+      "total_ns": 30031804,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    },
+    {
+      "events": 2000,
+      "p50_ns": 250583,
+      "p95_ns": 290291,
+      "remote": true,
+      "repetition": 4,
+      "resource_calls": 30000,
+      "total_ns": 505593424,
+      "verified_rows": 1,
+      "workload": "aggregate"
+    }
+  ],
+  "workloads": {
+    "projection": {
+      "direct": {
+        "mean_input_us_median": 13.2088815,
+        "mean_input_us_min": 13.114895500000001,
+        "mean_input_us_max": 17.5363695
+      },
+      "dynamic": {
+        "mean_input_us_median": 128.4480915,
+        "mean_input_us_min": 124.6649255,
+        "mean_input_us_max": 129.181571
+      },
+      "time_ratio_of_medians": 9.724373066712726
+    },
+    "aggregate": {
+      "direct": {
+        "mean_input_us_median": 15.015902,
+        "mean_input_us_min": 14.432879999999999,
+        "mean_input_us_max": 15.1491825
+      },
+      "dynamic": {
+        "mean_input_us_median": 254.149957,
+        "mean_input_us_min": 252.796712,
+        "mean_input_us_max": 262.46905949999996
+      },
+      "time_ratio_of_medians": 16.925387299410986
+    }
+  },
+  "binary_sha256": {
+    "drasi-server/target/release/examples/libnative_query_proof.dylib": "eecbe8fa89a38d29be2bd62c16782c16935ac758664a3b88d8a65586174ca98f",
+    "drasi-server/target/release/deps/drasi_host_sdk-c06e875bbc1ad747": "4ab8d5d70633f0920fad8652d052c944d0cea1cbd2ea14f44302c197101d2ffc"
+  }
+}

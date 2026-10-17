@@ -123,7 +123,10 @@ impl ComputationTransaction {
         Ok(Self::for_query(resources))
     }
 
-    pub(crate) fn for_query(resources: ComputationIndexes) -> Self {
+    /// Retain the existing query transaction policy without constructing an evaluator.
+    /// Atomicity is determined by the actual bundle; this does not upgrade a
+    /// non-atomic provider. Other stateful components should use [`Self::try_new`].
+    pub fn for_query(resources: ComputationIndexes) -> Self {
         Self {
             atomic: resources.atomic_result_transaction().is_ok(),
             resources,

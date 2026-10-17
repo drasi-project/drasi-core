@@ -45,4 +45,6 @@ pub struct NativeConsumerFactoryMetadata {
 }
 
 #[cfg(test)]
+mod query_proof;
+#[cfg(test)]
 mod tests;

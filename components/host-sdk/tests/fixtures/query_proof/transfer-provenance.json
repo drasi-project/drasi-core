@@ -1,0 +1,37 @@
+{
+  "base": "30c5df88a8047f904dd2f2abe2991465074a843a",
+  "branch": "agentofreality-parallel-computation-graph",
+  "tracked": [
+    "Makefile",
+    "components/computation-contracts/src/query_codec.rs",
+    "components/host-sdk/Cargo.toml",
+    "components/host-sdk/src/computation/mod.rs",
+    "core/src/computation/operation.rs",
+    "lib/docs/computation-graph-remaining-work.md"
+  ],
+  "new": [
+    "components/host-sdk/src/computation/query_proof.rs",
+    "components/host-sdk/tests/fixtures/native_query_proof.rs",
+    "components/host-sdk/tests/fixtures/query_proof/client.rs",
+    "components/host-sdk/tests/fixtures/query_proof/engine.rs",
+    "components/host-sdk/tests/fixtures/query_proof/wire.rs",
+    "lib/docs/computation-graph-query-plugin-plan.md"
+  ],
+  "sha256": {
+    "Makefile": "c8af32d0d51c010f7baec3f28528f3f76874ed7e383a20382376322b7cffb3ea",
+    "components/computation-contracts/src/query_codec.rs": "ecb45b6d4632169ef5f7ee8d6f54ff187b4df1ba4447d8f52f476dd12bd7f626",
+    "components/host-sdk/Cargo.toml": "32403829dbb5644934e5db2631c67fcb60064777d8ee6a3a09f4b1a9af75d2c0",
+    "components/host-sdk/src/computation/mod.rs": "416b889f9eb5ce5471fbe8d3198def3c34c7e4062beb5993e15e17325edcf363",
+    "core/src/computation/operation.rs": "b26d2ba6b916d89945deab781fd0092ba4ab34d8e791287f2d3192994273e361",
+    "lib/docs/computation-graph-remaining-work.md": "2d314d87966a74a13a3c20a867de21e01470bd464999720e443708e57390821e",
+    "components/host-sdk/src/computation/query_proof.rs": "9942a91334a8b2703149da93a8943b4a8ff70f14deadceaff0368414662d6828",
+    "components/host-sdk/tests/fixtures/native_query_proof.rs": "6ec4008909e06ee23e6aed4f2f216249fedcb2afa929a7450c0e6dff0098a474",
+    "components/host-sdk/tests/fixtures/query_proof/client.rs": "7c92eef97c063008cede4dcb1fa23e1c40b6a31baaba7642923169f3aee1a123",
+    "components/host-sdk/tests/fixtures/query_proof/engine.rs": "9ec44b8acd8dbb3d651a790072b6c5e3b4fd448366fd077306228647d4ca3828",
+    "components/host-sdk/tests/fixtures/query_proof/wire.rs": "021344136a0ab9939a41cb67e68a5fea195d37d0efcf46110141d965872c249c",
+    "lib/docs/computation-graph-query-plugin-plan.md": "56d63917257998136eabd42654afb7aa1bc98f42c074da68507c746c9d956385"
+  },
+  "cargo_lock_sha256": "af1bfd58ea00f355b88317f1211a09e23ff02e6bd3fa56ab38eed29478813f5d",
+  "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: aarch64-apple-darwin\nrelease: 1.95.0\nLLVM version: 22.1.2\n",
+  "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)"
+}

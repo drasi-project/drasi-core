@@ -1566,6 +1566,13 @@ The proposed ordinary-to-native bridge is retired, not a remaining deliverable.
 **Priority: P1 for native migration. Implementation: not implemented.
 Selected: 14 October 2026.**
 
+The [16 October design and staged plan](computation-graph-query-plugin-plan.md)
+records the required dynamic query interfaces, compatibility decisions and
+early feasibility gates. Implementation has been authorized and is beginning
+with the boundary proof. The initial in-memory dynamic-library proof produced
+correct results but material overhead, so implementation is paused at the
+agreed performance gate. The optional plugin is not implemented or qualified yet.
+
 Here **optional** means a deployment can choose whether to load the query
 component. This is selected migration work, not an unselected future feature.
 

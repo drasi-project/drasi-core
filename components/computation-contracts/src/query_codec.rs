@@ -21,6 +21,7 @@ use bincode::Options;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use drasi_core_types::evaluation::context::{QueryPartEvaluationContext, QueryVariables};
+use drasi_core_types::evaluation::variable_value::VariableValue;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -96,6 +97,30 @@ pub struct DecodedQueryRow {
 }
 
 pub struct QueryChangeCodec;
+
+/// Versioned query values for resource calls, preserving grouping types and float bits.
+/// This uses the existing lossless value representation, not presentation JSON.
+pub struct QueryValueCodec;
+
+impl QueryValueCodec {
+    pub fn encode(value: &VariableValue, limit: usize) -> anyhow::Result<Bytes> {
+        let value = value_codec::Value::encode(value)?;
+        Ok(Bytes::from(crate::encode_bounded_messagepack(
+            &(1u32, value),
+            limit,
+        )?))
+    }
+
+    pub fn decode(bytes: &[u8], limit: usize) -> anyhow::Result<VariableValue> {
+        let (version, value): (u32, value_codec::Value) =
+            crate::decode_bounded_messagepack(bytes, limit)?;
+        anyhow::ensure!(
+            version == 1,
+            "unsupported query value wire version {version}"
+        );
+        value.decode()
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -865,6 +890,60 @@ mod recovery_envelope_tests {
         assert!(!QueryChangeCodec::is_progress_only(&snapshot));
         assert_eq!(QueryChangeCodec::query_sequence(&snapshot).unwrap(), 42);
         assert_eq!(QueryChangeCodec::query_generation(&snapshot).unwrap(), 9);
+    }
+}
+
+#[cfg(test)]
+mod value_wire_tests {
+    use super::*;
+    use drasi_core_types::evaluation::variable_value::{
+        duration::Duration, float::Float, integer::Integer, ListRange, RangeBound,
+    };
+
+    #[test]
+    fn resource_values_preserve_grouping_types_and_float_bits() {
+        let values = [
+            VariableValue::Null,
+            VariableValue::Integer(Integer::from(u64::MAX)),
+            VariableValue::Float(Float::from(-0.0)),
+            VariableValue::Float(Float::from(f64::from_bits(0x7ff8_0000_0000_0042))),
+            VariableValue::Date(chrono::NaiveDate::from_ymd_opt(2026, 10, 16).unwrap()),
+            VariableValue::Duration(Duration::new(chrono::Duration::seconds(3), 2, 1)),
+            VariableValue::ListRange(ListRange {
+                start: RangeBound::Index(-3),
+                end: RangeBound::Unbounded,
+            }),
+            VariableValue::Object(BTreeMap::from([(
+                "nested".into(),
+                VariableValue::List(vec![VariableValue::from(3), VariableValue::from("x")]),
+            )])),
+        ];
+        for value in values {
+            let encoded = QueryValueCodec::encode(&value, 4096).unwrap();
+            let decoded = QueryValueCodec::decode(&encoded, 4096).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&decoded),
+                std::mem::discriminant(&value)
+            );
+            assert_eq!(QueryValueCodec::encode(&decoded, 4096).unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn resource_values_reject_invalid_versions_frames_and_size_limits() {
+        let encoded = QueryValueCodec::encode(&VariableValue::from("value"), 4096).unwrap();
+        assert!(QueryValueCodec::encode(&VariableValue::from("value"), 1).is_err());
+        assert!(QueryValueCodec::decode(&encoded, encoded.len() - 1).is_err());
+        assert!(QueryValueCodec::decode(&encoded[..encoded.len() - 1], 4096).is_err());
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(QueryValueCodec::decode(&trailing, 4096).is_err());
+        let unsupported =
+            crate::encode_bounded_messagepack(&(2u32, value_codec::Value::Null), 4096).unwrap();
+        assert!(QueryValueCodec::decode(&unsupported, 4096)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported query value wire version"));
     }
 }
 

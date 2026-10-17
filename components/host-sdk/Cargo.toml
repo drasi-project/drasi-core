@@ -55,6 +55,10 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+drasi-functions-cypher = { workspace = true }
+drasi-query-cypher = { workspace = true }
+ordered-float = "3.7.0"
+serde_bytes = "0.11"
 drasi-computation-network-common = { workspace = true, features = ["http-source", "grpc-source", "http-sink", "grpc-sink"] }
 drasi-computation-source-grpc = { workspace = true }
 drasi-computation-source-http = { workspace = true }
@@ -87,5 +91,11 @@ tonic = "0.14"
 [[example]]
 name = "native_recovery"
 path = "tests/fixtures/native_recovery.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "native_query_proof"
+path = "tests/fixtures/native_query_proof.rs"
 crate-type = ["cdylib"]
 test = false
