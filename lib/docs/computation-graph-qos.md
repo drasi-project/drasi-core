@@ -539,6 +539,30 @@ progress. Clients retry with the same session, sequence and unchanged input.
 Only one graph admission owner can bind a channel, even through different handles.
 No admission worker is spawned.
 
+After successful host/graph startup, await
+`SourceAdmission::wait_active(&self) -> Result<(), PipeError>` before the first
+producer registration or submission. `DrasiLib::start`, a startup report and
+`ComponentHandle::wait_started` cover component startup, not the first poll of
+the separate processing task that binds the admission mailbox.
+
+`wait_active` observes the actual mailbox using retained activation state and
+notifications, not polling. An already active mailbox satisfies late waiters.
+Each processing activation has its own generation: a pending wait cannot succeed
+on a later restart after the original activation was revoked. Stop/cancellation,
+channel closure and an obsolete activation return `Closed`; reported worker or
+graph failures remain errors, with typed graph causes retained under `Backend`.
+Calling before processing has been scheduled returns `Closed`, not a wait for an
+unspecified future startup. A stopped/replaced handle cannot provide readiness
+for another mailbox.
+
+The caller owns the timeout/cancellation policy, for example
+`tokio::time::timeout(deadline, admission.wait_active()).await??`. Dropping the
+wait does not cancel activation or alter admission state. Success is only a
+mailbox-availability observation: it does not reserve capacity, prevent a
+concurrent stop, drain replay, advance a checkpoint, or establish downstream
+completion. Handle subsequent operation failures normally; do not retry arbitrary
+`Closed` errors or treat uncertain acceptance as rejection.
+
 Before activation and after stop, requests return `Closed`. Cancelling a request
 before the graph takes it prevents that request from executing. Stop/cancellation
 closes queued requests. An interrupted executing write returns an uncertain

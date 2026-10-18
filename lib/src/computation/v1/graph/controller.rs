@@ -1502,6 +1502,8 @@ impl Operation {
 }
 
 struct Active {
+    // Publish a pre-bind failure before revoking its pending activation.
+    _admission_activation: Option<crate::computation::v1::qos_pipe::AdmissionActivation>,
     epoch: OperationEpoch,
     operation: Operation,
     abort: AbortHandle,
@@ -3013,6 +3015,22 @@ impl Operations {
             component_type = crate::observability::ComponentLogType::for_component(
                 node.role, node.descriptor.semantic_kind()).as_str(),
             generation = generation.0);
+        let admission_activation = if operation == Operation::Process
+            && matches!(&lease.component, Component::Source(_))
+        {
+            lease
+                .slot
+                .recovery_contract()?
+                .source_admission
+                .map(|admission| {
+                    admission
+                        .begin_activation()
+                        .map_err(|error| component_error(&node, "activate admission", error.into()))
+                })
+                .transpose()?
+        } else {
+            None
+        };
         update(graph, |state| {
             let observed = state.components.get_mut(&slot.id).expect("component");
             observed.operation = epoch;
@@ -3344,6 +3362,7 @@ impl Operations {
         self.active.insert(
             index,
             Active {
+                _admission_activation: admission_activation,
                 epoch,
                 operation,
                 abort,
@@ -4325,6 +4344,9 @@ impl Operations {
         let slot = &graph.components[index];
         let id = &slot.id;
         let failure = failure(slot.preserve_failure(error), operation.phase());
+        if let Some(admission) = slot.recovery_contract()?.source_admission {
+            admission.activation_failed(failure.cause.clone());
+        }
         if failure.cause.damages_generation() {
             if let Some(abort) = self.control_aborts.get(&index) {
                 abort.abort();

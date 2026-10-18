@@ -1290,16 +1290,23 @@ Admission bounds are at most 1,024 producers, 1,024 receipts per producer and
 The source returns that service from `admission`; the graph drives its bounded
 mailbox rather than calling `next` to publish the same input again.
 
-Register a `ComponentId` to obtain a `ProducerSession`, then submit consecutive
+After successful host/graph startup, await actual admission activation before
+registering a `ComponentId` to obtain a `ProducerSession`, then submit consecutive
 client sequences beginning with the next expected sequence:
 
 ```rust
+admission.wait_active().await?;
 let session = admission
     .register_producer(ComponentId::try_new("stockroom-app")?).await?;
 let receipt = admission.admit(&session, 1, &input).await?;
 let retry = admission.admit(&session, 1, &input).await?;
 anyhow::ensure!(receipt == retry);
 ```
+
+`wait_active` is event-driven and does not follow a revoked activation into a
+later restart. Callers own the deadline. Host startup or `Running` alone does not
+prove mailbox binding, and this fence neither prevents concurrent stop nor
+proves downstream completion. See the [activation contract](../computation-graph-qos.md#graph-owned-source-binding).
 
 Persist the session/sequence on the client as needed. After a lost response,
 use `producer_status` and `admission_receipt` to resolve uncertainty. Retry with

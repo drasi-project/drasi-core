@@ -334,6 +334,7 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
             core.computation_component("inventory")?.wait_started(),
         )
         .await??;
+        tokio::time::timeout(Duration::from_secs(10), admission.wait_active()).await??;
         if stage {
             ensure!(
                 core.get_query_results("low-stock").await?.is_empty(),
