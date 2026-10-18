@@ -1,10 +1,10 @@
 # The drasi-lib developer guide
 
 **drasi-lib is an embedded data-processing runtime for Rust applications.**
-You connect components into a computation graph to ingest data, transform it,
-maintain state, and perform actions. A graph can use custom processing logic,
-continuous queries that maintain answers as data changes, or both. An extensible
-library of plugin components connects the graph to external systems, handling
+You connect **components** into a **computation graph** to ingest data, transform it,
+maintain **state**, and perform actions. A graph can use custom processing logic,
+**continuous queries** that maintain answers as data changes, or both. An extensible
+library of **native plugins** connects the graph to external systems, handling
 change detection or ingestion and notification delivery for supported
 integrations. Your application controls the graph's configuration, resources,
 and lifecycle.
@@ -51,16 +51,18 @@ of Drasi, graph databases, or stream-processing frameworks is assumed.
 12. [Complete business work](#12-complete-business-work)
 13. [Preserve transactions](#13-preserve-transactions)
 
+14. [Capstone: a recoverable Stockroom](#14-capstone-a-recoverable-stockroom)
+
 **Part IV - Build a deployable application**
 
-14. [Turn components into reusable factories](#14-turn-components-into-reusable-factories)
-15. [Save and restore an application](#15-save-and-restore-an-application)
-16. [Change a running application](#16-change-a-running-application)
-17. [Package and isolate extensions](#17-package-and-isolate-extensions)
-18. [Capstone: a recoverable Stockroom](#18-capstone-a-recoverable-stockroom)
+15. [Turn components into reusable factories](#15-turn-components-into-reusable-factories)
+16. [Save and restore an application](#16-save-and-restore-an-application)
+17. [Change a running application](#17-change-a-running-application)
+18. [Package and isolate extensions](#18-package-and-isolate-extensions)
 
 [Appendix A: Vocabulary](#appendix-a-vocabulary) |
-[Appendix B: API and example navigation](#appendix-b-api-and-example-navigation)
+[Appendix B: API and example navigation](#appendix-b-api-and-example-navigation) |
+[Appendix C: Query-language essentials](#appendix-c-query-language-essentials)
 
 ## Part I - Build a working application
 
@@ -91,24 +93,38 @@ the alert disappear. You control the input by editing and saving that file.
 
 #### Copy and run the starter
 
-Install Rust through rustup and obtain a `drasi-core` checkout containing this
-book. The [starter project](stockroom) includes its Cargo manifest, lockfile,
-toolchain selection, source code, and initial inventory. Its path dependencies
-are already configured for a project beside that checkout.
+Install Rust through rustup. This book targets the native APIs on the
+`agentofreality-parallel-computation-graph` branch; the examples use that source
+checkout, not an arbitrary crates.io release. If you do not already have it:
 
-From the root of `drasi-core`, copy the whole project to a fresh sibling
-directory:
+```sh
+git clone --branch agentofreality-parallel-computation-graph https://github.com/drasi-project/drasi-core.git drasi-core
+cd drasi-core
+```
+
+The final directory name **`drasi-core`** is significant: the supplied Cargo
+paths expect it beside your application. The [starter project](stockroom)
+includes its manifest, lockfile, pinned toolchain, source, and data files.
+From the root of that checkout, copy it to a fresh sibling directory:
 
 ```sh
 cp -R lib/docs/developer-guide/stockroom ../stockroom
 cd ../stockroom
-RUST_LOG=warn cargo run --locked
+cargo run --locked
+```
+
+In Windows PowerShell, use the same clone command, then:
+
+```powershell
+Copy-Item -Recurse lib/docs/developer-guide/stockroom ../stockroom
+Set-Location ../stockroom
+cargo run --locked
 ```
 
 Use a destination that does not already exist. Keep `stockroom` and `drasi-core`
 beside each other so the supplied dependency paths remain valid.
 
-Your copy contains:
+The main files in your copy are:
 
 ```text
 stockroom/
@@ -117,17 +133,62 @@ stockroom/
   rust-toolchain.toml
   rustfmt.toml
   inventory.json
+  catalog.json
+  encoded-inventory.json
   src/main.rs
 ```
+
+The native-integration and recovery lessons add code in `src/network.rs`,
+`src/persistence.rs`, and `src/managed.rs`. Cargo features keep their dependencies
+out of the initial build.
+
+#### Build prerequisites
+
+The included `rust-toolchain.toml` selects the compiler. The first lesson needs
+Rust and the platform's linker; later native-storage builds need additional tools:
+
+| Platform | Initial build | SQLite/RocksDB lessons |
+|---|---|---|
+| macOS | Xcode Command Line Tools | CMake and LLVM/libclang; use their library paths if your package manager does not expose them |
+| Linux | C/C++ build tools, such as `build-essential` | CMake, Clang and libclang development libraries |
+| Windows | Visual Studio C++ Build Tools and a Windows SDK | CMake and LLVM/libclang, available to the same terminal |
+
+For example, Debian/Ubuntu's later native-build packages are
+`build-essential cmake clang libclang-dev`. If bindgen cannot locate libclang,
+set `LIBCLANG_PATH` to the directory containing its shared library.
+The starter and its selected normalization middleware do not require libjq.
+libjq is needed only when you explicitly choose the jq middleware build.
+
+The starter commits its own lockfile, so its commands use `--locked`.
+The repository-root lockfile is not distributed; workspace build/reference
+commands in this book allow Cargo to create it.
 
 The first build can take a little time. Once the application is ready, it prints:
 
 ```text
-Watching inventory.json for low-stock. Save the file to change inventory; press Ctrl-C to stop.
+Starting Stockroom for low-stock. Press Ctrl-C to stop.
+Ready. Watching inventory.json for saved changes.
 ```
 
-Leave this terminal running. `RUST_LOG=warn` suppresses routine runtime logs
-while leaving warnings and application output visible.
+Leave this terminal running. The first line always precedes result output;
+an initial aggregate can appear before the final readiness line.
+
+#### Own the application's logging
+
+Stockroom installs its tracing subscriber **before constructing `DrasiLib`**.
+Its `init_tracing` function defaults to warning-level diagnostic logs on stderr,
+and includes `ComponentLogLayer` for Drasi's component log capture. The result
+lines on stdout are application output, not INFO logs.
+
+Use `RUST_LOG=info cargo run --locked` for diagnostics, or in PowerShell set
+`$env:RUST_LOG = "info"` before running. At INFO level you can see
+`__component_graph__`, an internal inspection source the runtime supplies.
+
+In another host application, configure tracing once before creating the runtime.
+Otherwise Drasi attempts to install its default global subscriber; subsequently
+calling an infallible `.init()` on another subscriber can panic. Integrate the
+log layer into the host's existing subscriber instead. Chapter 8 explains capture
+and subscriptions in more detail.
 
 #### Make your first change
 
@@ -200,8 +261,9 @@ are input; membership and value changes in this answer are output.
 ```mermaid
 flowchart LR
     File["Your saved inventory.json"] --> Inventory["Inventory source"]
-    Inventory --> Query["low-stock query"]
-    Query --> Alerts["Alerts sink: keyed result view"]
+    Inventory -->|out port / inventory stream| Pipe["edge backed by a bounded pipe"]
+    Pipe -->|in port| Query["low-stock query"]
+    Query -->|out port / query-result stream| Alerts["Alerts sink: keyed result view"]
     Alerts --> Terminal["Terminal notification"]
 ```
 
@@ -209,6 +271,18 @@ The runtime owns `Inventory`, the query, and `Alerts`. `Inventory` compares
 valid file snapshots and turns product changes into graph messages. The query
 updates its answer, and `Alerts` maintains and prints the resulting view.
 Bounded graph pipes connect the components.
+
+A **source** produces changes; a **query** or **transformer** processes them;
+a **sink** consumes them. **Ports** name a component's inputs and outputs,
+**edges** connect ports, and **pipes** implement transport and buffering.
+A **stream** identifies one output's ordered emissions.
+The sink is where the application reacts to changes. In the native API its
+role is Sink; "reacting" describes what it does, not a separate plugin interface.
+
+Use an existing native component when it supports your integration. The small
+file source makes the first exercise self-contained; Chapter 5 replaces it
+with a packaged HTTP source and adds an SSE notification sink without writing
+network handlers.
 
 The [complete source](stockroom/src/main.rs) is the running companion for
 the first two parts of the book. The following excerpts explain pieces of that
@@ -235,10 +309,10 @@ let query = ContinuousQueryTransformer::new(
 let results = query.results();
 ```
 
-The imports, `LOW_STOCK`, and `GRAPH` are at the top of the companion.
-`GRAPH` is `"__drasi_lib_runtime__"`, the graph identity used by a
-`ComponentBatch` inside `DrasiLib`. It is not the application's instance ID.
-The memory provider supplies the state needed to evaluate the query.
+The imports, query text, and `GRAPH` are at the top of the companion.
+`GRAPH` is `ComponentBatch::GRAPH_ID`, the public identity for the graph inside
+`DrasiLib`. The application's instance ID is a separate scope. The memory
+provider supplies the state needed to evaluate the query.
 
 `ComponentBatch` groups components and their connections. After constructing
 the source and sink, the program adds them with the query:
@@ -319,6 +393,9 @@ await runtime cleanup in `Drop`.
 data connections, bounded queues, and awaited startup and shutdown. Next, make
 the meaning of its input precise; query correctness begins with data identity.
 
+**Try it.** Add a second product with a different SKU and quantity below its
+minimum. Restock only the first product and predict which row remains.
+
 ### 2. Model changing data
 
 Stockroom needs to distinguish a product changing from a different product
@@ -334,8 +411,9 @@ The source describes these facts. It should not pre-filter products using the
 low-stock condition: a restock must still reach the query so it can remove the
 old result.
 
-The file source parses each entry as a `Product`. Its `element` method maps
-that product to the graph:
+The file source parses each entry as a `Product`. The core of its `element`
+method maps those product fields to the graph as follows. The complete method
+also carries the optional payload used by the normalization lesson.
 
 ```rust
 impl Product {
@@ -357,6 +435,7 @@ When a SKU first appears, the source emits `SourceChange::Insert`; when the
 same SKU's properties change, it emits `SourceChange::Update`. Removing a SKU
 from the file produces `SourceChange::Delete`. Its metadata helper is:
 
+<!-- excerpt: stockroom/src/main.rs#element-metadata -->
 ```rust
 fn metadata(sku: &str, time: u64) -> ElementMetadata {
     ElementMetadata {
@@ -469,35 +548,6 @@ and loads the file. A later stop/start preserves any changes still awaiting
 emission. The graph owns the polling work, so the source has no independently
 spawned watcher to stop or join.
 
-#### Keep the layers of identity separate
-
-An envelope carries a change set, stream metadata, and context:
-
-| Identity | What it identifies |
-|---|---|
-| `ElementReference` | A node or relationship in a source namespace |
-| `RecordId` | A schema-defined record; its namespace and bytes are both significant |
-| `ChangeSetId` and operation ordinal | One identified group of changes and each operation's place in that group |
-| Stream and sequence | A producer's ordered emissions from one output |
-| Source position | An opaque upstream resume position, if the source supplies one |
-
-One output owns one stream. Its new emissions must have increasing sequences;
-gaps can be valid, but regression is not. A reconnect must not silently reuse
-an old logical identity for different content.
-
-A `ChangeOperation` is Added, Updated, or Deleted. Records describe their
-image as Full, Patch, or Partial, and updates explicitly distinguish Patch
-from Replace. Consumers must support the image they receive. A delete may
-contain only a validated `RecordReference`, with no before image.
-
-`SystemMetadata` belongs to the framework boundary; business attributes belong
-in records. Append context for attribution, and derive a new envelope when
-creating new output. Do not mutate an input shared with another branch.
-
-Putting several changes in a collection does not prove that their source
-committed them atomically. Whole source transactions have a separate contract
-in Chapter 13.
-
 **Summary.** Stable source-qualified identity makes updates and deletions
 meaningful. Explicit images and timestamps prevent accidental replacement,
 stale resurrection, and invented ordering. The source now supplies facts the
@@ -539,7 +589,7 @@ Ctrl-C, restore the original one-product file with quantity 8, and restart your
 copied project in aggregation mode:
 
 ```sh
-RUST_LOG=warn cargo run --locked -- totals
+cargo run --locked -- totals
 ```
 
 This mode uses a query named `stock-by-warehouse`:
@@ -568,7 +618,21 @@ default zero for the emptied group. Deleting the last product therefore does
 not have the same output shape as deleting a low-stock match.
 
 For grouped applications, include keys that identify the business group in
-the projection. Handle group creation and disappearance as well as updates.
+the projection. A terminal `sum` can keep a default-valued row after its last
+contribution disappears, as this example does. To remove zero-total groups,
+filter **after aggregation**:
+
+```cypher
+MATCH (p:Product)
+WITH p.warehouse AS warehouse, sum(p.quantity) AS total
+WHERE total > 0
+RETURN warehouse, total
+```
+
+Run `cargo run --locked -- totals-filtered`, add a product, then remove it.
+The final view is `[]`, rather than a row with total 0.0. Disappearance is a
+property of the final answer, not an automatic consequence of removing one
+source element.
 Optional matches can retain a result when a related record is absent; decide
 how the application should represent those null values.
 
@@ -578,7 +642,25 @@ results to a user.
 
 #### Join another source
 
-Suppose `inventory` supplies products with `warehouse_code`, and `catalog`
+Run the join lesson in your Stockroom directory:
+
+```sh
+cargo run --locked -- join
+```
+
+Set the product quantity to 3 and save `inventory.json`. The second source
+reads the supplied `catalog.json`, which starts with
+`{"code":"west","name":"West warehouse"}` inside an array. The result is:
+
+```text
+warehouse-alerts: [{"quantity":3,"sku":"bolts","warehouse":"West warehouse"}]
+```
+
+Change the warehouse name to `"West depot"` in `catalog.json` and save it.
+The result changes even though you did not touch inventory. Remove the catalog
+entry and the inner join retracts the row. Restore both files afterward.
+
+Here `inventory` supplies products with `warehouse`, and `catalog`
 supplies warehouses with `code` and `name`. Connect both sources to the
 query's `in` port. They contribute elements to one query graph; they are not
 two previously computed result sets.
@@ -594,7 +676,7 @@ let execution = QueryExecutionSettings {
         keys: vec![
             QueryJoinKeyConfig {
                 label: "Product".into(),
-                property: "warehouse_code".into(),
+                property: "warehouse".into(),
             },
             QueryJoinKeyConfig {
                 label: "Warehouse".into(),
@@ -632,6 +714,15 @@ edges.
 #### Ask questions about time
 
 Stockroom can wait until a product has remained below minimum for five seconds:
+
+```sh
+cargo run --locked -- sustained
+```
+
+Begin with quantity 8, lower it to 3, and save. Leave the file alone: after
+five seconds the application emits a low-stock result. Restocking retracts
+it. Try restocking before five seconds elapse; that short-lived shortage
+does not become a sustained alert.
 
 ```cypher
 MATCH (p:Product)
@@ -676,10 +767,10 @@ database's earlier history, and an in-memory archive does not survive process
 loss. Saving historical versions and saving future scheduled work are separate
 requirements.
 
-For additional language constructs, consult the
-[query examples](../../../shared-tests/src/use_cases) and the
-[Cypher](../../../functions-cypher/src/lib.rs) and
-[GQL](../../../functions-gql/src/lib.rs) function registrations. Keep parser
+For supported clauses, value types, and function families, use
+[Appendix C](#appendix-c-query-language-essentials). The
+[query examples](../../../shared-tests/src/use_cases) provide executable
+cases for more involved expressions. Keep parser
 choice, query text, joins, and middleware together when versioning an
 application: all can change the meaning of saved query state.
 
@@ -694,6 +785,29 @@ The application must distinguish two equal-looking rows, retract results that
 stop matching, and avoid confusing a current snapshot with a live subscription.
 Stockroom's in-memory result view is enough for a disposable display, provided
 those rules are explicit.
+
+#### Act on each change
+
+Run `cargo run --locked -- reorders` and repeat the quantity changes.
+This mode maintains a local set of pending reorders as well as printing the
+view. Entering low stock creates a reorder, a changed quantity revises it,
+and leaving low stock cancels it:
+
+```text
+reorder created: {"quantity":3,"sku":"bolts"}
+reorder revised: {"quantity":3,"sku":"bolts"} -> {"quantity":2,"sku":"bolts"}
+reorder cancelled: {"quantity":2,"sku":"bolts"}
+```
+
+`reorder_messages` handles `ChangeOperation::Added`, `Updated`, and `Deleted`.
+For an update, it decodes both `before` and `after`; for a deletion, it uses
+the before image or the row retained under the same identity. That is how
+the application can cancel an order even when the deleted input carries no
+properties.
+
+These are **local, volatile reorders**, not purchases sent to a supplier.
+Chapter 12 adds durable completion and explains the additional destination
+contract needed for remote effects.
 
 #### Receive native query output
 
@@ -821,44 +935,59 @@ sequence while preserving the logical query sequence. Use
 `QueryChangeCodec::query_sequence`, `query_generation`, and `metadata` instead
 of inferring those identities from unrelated fields.
 
-#### Bring a new consumer up to date
+#### Consume live output asynchronously
 
-Reading a snapshot and then subscribing leaves a gap in which changes can
-be missed. Applying both a snapshot and overlapping output can apply the same
-change twice. A correct handover must coordinate the live connection, snapshot
-boundary, retained history, and consumer progress.
+Run `cargo run --locked -- stream`. Save a low-stock edit and see a logical
+query sequence and operation count. The application is reading query envelopes
+asynchronously rather than polling snapshots.
 
-```mermaid
-sequenceDiagram
-    participant C as Consumer
-    participant Q as Query output owner
-    C->>Q: Establish live input before fetching recovery state
-    Q-->>C: Keyed snapshot through S and retained output
-    C->>C: Replace the view and complete its recovery boundary
-    Q-->>C: Buffered and live output
-    C->>C: Discard covered output; handle later sequences in order
+Construction registers the existing query with a catalog and connects an
+actual outlet:
+
+```rust
+let catalog = QueryResultsCatalog::new(GRAPH)?;
+let mut events = catalog.subscribe();
+let query = query.with_result_catalog(&catalog)?;
+let outlet = QueryResultsOutlet::new(
+    ComponentId::try_new("live-results")?,
+    catalog,
+);
 ```
 
-The library supplies this machinery through `QueryReplayTransformer` and
-`CheckpointedSink`; Chapter 11 connects them. `QueryResultsCatalog` with a
-connected `QueryResultsOutlet` supports live query-result subscriptions.
-A `QueryResults` reader alone is not such an outlet.
+Add `outlet` as a sink and connect the query's output to `live-results/in`.
+Subscribe before starting the graph, then await `events.recv()` in the
+application's event loop. Each returned `ChangeEnvelope` supports the same
+before/after decoding used for reorders. A reader handle alone does not publish
+these events; the connected outlet does.
 
-`results.replay(after)` reads bounded retained output after a logical sequence.
-`recovery_view` reads a coherent recovery identity, snapshot, and optional
-retained history. If the required range is unavailable, increasing a timeout
-cannot recreate it. The application needs an explicit rebuild or gap policy.
+The catalog's broadcast subscription is a volatile live stream. On lag, report
+the gap and rebuild through a coordinated snapshot/replay path. Chapter 11
+teaches that handover; a broadcast receiver is not durable consumer progress.
 
-A snapshot envelope means **replace the view**. A progress-only envelope
-means a recovery decision without business rows; it is not permission to
-silently skip work. Stockroom's simple live-only view rejects both rather than
-pretending to implement recovery. Add a recovery-aware owner before accepting
-them.
+#### Test your application
+
+Run tests from **your copied Stockroom project**:
+
+```sh
+cargo test --locked
+cargo test --locked joined_view_changes
+cargo test --locked native_outlet_stream
+```
+
+The tests write to temporary inventory/catalog files and use `watch::wait_for`
+with a deadline to await the actual answer. They test additions, updates,
+retractions, equal-valued rows with different identities, malformed input,
+and both current-thread and multi-threaded executors.
+The sustained-condition test waits for a real scheduled result without another
+input edit. A fixed sleep followed by an unchecked read is not an equivalent test.
+
+**Try it.** Add a regression test for two low-stock products, then restock one.
+Assert both the remaining view and the cancellation identity.
 
 **Summary.** A result view is keyed state, not a list of notifications.
-Use native row identity, apply all operation kinds, and distinguish query
-position from transport position. A late-joining or restartable consumer needs
-coordinated recovery, not merely another call to read current rows.
+Use native row identity, apply additions, before/after updates and deletions,
+and test both your current view and per-change actions. The native outlet
+provides an asynchronous live stream; recovery adds a coordinated starting point.
 
 ## Part II - Compose and operate
 
@@ -868,13 +997,103 @@ Add a processing step before Stockroom's query without changing its answer.
 Then use the same connection model to normalize real input, expand records,
 and perform work that is not itself a query.
 
+#### Connect existing native plugins
+
+First replace the file source with a packaged native HTTP source and add a
+packaged SSE sink. An external producer submits inventory changes, and an
+external consumer receives result differences. Stockroom supplies configuration
+and connections, not an HTTP server implementation.
+
+From your `drasi-core` checkout, build just those two native libraries:
+
+```sh
+cargo build -p drasi-computation-source-http -p drasi-computation-sink-sse --features dynamic-plugin
+```
+
+Return to your copied Stockroom project and run:
+
+```sh
+cargo run --locked --features plugins -- plugins ../drasi-core/target/debug
+```
+
+The first `plugins` selects Stockroom's lesson; the final argument is the
+directory of libraries you just built and trust. The code selects the platform's
+`.dylib`, `.so`, or `.dll` filenames. It loads only those two explicit packages.
+If Cargo uses a custom target directory, pass that directory's `debug` folder.
+
+Wait for:
+
+```text
+Ready: HTTP input at 127.0.0.1:9080; SSE output at 127.0.0.1:9081/events.
+```
+
+In a second terminal, start the consumer before sending data:
+
+```sh
+curl -N http://127.0.0.1:9081/events
+```
+
+In a third terminal, from your copied Stockroom directory:
+
+```sh
+curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-insert.json http://127.0.0.1:9080/sources/inventory/events
+curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-restock.json http://127.0.0.1:9080/sources/inventory/events
+```
+
+Use `curl.exe` in Windows PowerShell. The supplied JSON requests insert the
+product at quantity 3 and update it to 8. The SSE terminal receives an addition
+and a deletion for the low-stock answer, including row identity and before/after
+data. Heartbeat frames are transport liveness messages, not inventory changes.
+
+The HTTP response confirms volatile ingress acceptance. The SSE sink is also
+volatile and **Accepted**: a disconnected browser receives no retained history,
+and its receipt is not a supplier's completed action. Keep the endpoints local
+for the exercise; deploy authentication/TLS before exposing private data.
+Stop both curl and Stockroom with Ctrl-C when finished.
+
+The implementation in [network.rs](stockroom/src/network.rs) follows one
+native path:
+
+```text
+trusted library -> native factory -> validated specification -> ComponentBatch
+```
+
+`drasi_host_sdk::computation::load` supplies the native factory. Its
+`specification` method validates configuration and supplies the component's
+ports and schemas. Stockroom connects the source's graph-change output to the
+query, then fans the query's output out to its local view and the SSE sink.
+
+Native plugins and in-process components use the same graph-owned processing
+contracts. Dynamic packaging is optional; a statically linked native factory
+also works. Choose the actual native implementation for an integration rather
+than assuming every connector package exposes every execution mode.
+For databases, the native SQLite source used in Part III captures writes
+through its own handle; PostgreSQL's native transaction source uses a replication
+protocol. Those are different capture boundaries, not interchangeable APIs.
+
+For another source, start with its **native** contract and bootstrap requirements:
+
+| Integration | Native interface | What the host must supply |
+|---|---|---|
+| [SQLite](../../../components/sources/sqlite/README.md#native-computationgraph-component) | `drasi_source_sqlite::native::SqliteSource` | Its owned SQL handle; for recovery, coordinated bootstrap and the actual query progress owner |
+| [PostgreSQL](../../../components/sources/postgres/README.md#native-complete-transaction-source) | `PostgresTransactionSource` / its native factory | Logical-replication configuration, stable slot/publication ownership, transaction limits, and persistent query progress |
+| [MySQL](../../../components/sources/mysql/README.md#native-computationgraph-source) | Native binlog transaction source | The source's documented binlog/identity configuration and coordinated persistent consumer boundary |
+
+The HTTP lesson receives changes another application supplies. A database CDC
+plugin instead detects committed changes through its database protocol. Choosing
+the source changes how input is obtained; query and sink composition stay native.
+
+**Try it.** Inspect `http-insert.json`, change its ID and SKU to a second
+product, and submit it. Verify that restocking one product retracts only
+that product's result.
+
 #### Add the audit step
 
 Stop Stockroom with Ctrl-C, restore the original inventory with quantity 8,
 and restart your copied project in audit mode:
 
 ```sh
-RUST_LOG=warn cargo run --locked -- audit
+cargo run --locked -- audit
 ```
 
 Change quantity to 3 and save. The answer is unchanged, but the sink also
@@ -966,20 +1185,20 @@ Suppose inventory arrives with a JSON string in `payload`, such as
 `"{\"quantity\":3}"`. Keep the low-stock calculation unchanged by normalizing
 that property before evaluation.
 
-For the file-based application, first extend `Product` and `Product::element`
-to carry that property. The starter's input model accepts only its declared
-product fields; adding an unknown JSON field alone is not enough.
+The starter's optional `payload` field and supplied `encoded-inventory.json`
+make this exercise runnable:
 
-Add the required features to the application's existing `drasi-lib` dependency:
-
-```toml
-drasi-lib = { path = "../drasi-core/lib", features = [
-    "middleware-parse-json",
-    "middleware-promote"
-] }
+```sh
+cargo run --locked --features normalize -- normalize
 ```
 
-Construct a normalization component:
+The initial raw quantity is 8, but the payload contains quantity 3. The result
+is low stock because normalization overwrites quantity with the parsed value.
+Edit the string to `"{\"quantity\":8}"`, save, and watch the result retract.
+Keep the surrounding JSON and its escaped string valid.
+
+The `normalize` feature enables `middleware-parse-json` and
+`middleware-promote`. A normalization component has this construction:
 
 ```rust
 let normalize = MiddlewareTransformer::new(
@@ -1121,6 +1340,22 @@ choose how connected components share capacity and ordering.
 Stockroom works while every component is fast. Now consider a burst of inventory
 updates, a quiet catalog, or an alert consumer that slows down. Queue and ordering
 choices determine what the application does under those conditions.
+
+#### Size one concrete path
+
+Use the `totals` lesson and add several products in one saved file. Each changed
+product creates input work; a saved file is not necessarily one atomic source
+transaction. In `build_application`, change the bounded pipe capacity from 8
+to 1 and rerun. The answer is unchanged, but the source and query must wait
+more frequently for the next component.
+
+Choose capacity from the burst you need to absorb and the slowest required
+consumer's service rate. If input averages 500 envelopes/second and a consumer
+can pause for two seconds, at least 1,000 envelopes can accumulate before
+considering existing backlog. Multiply by representative **complete envelope**
+size and include component/backend overhead before deciding whether that
+buffer fits. A sustained producer rate above consumer capacity needs more
+processing capacity or a different policy, not an ever-growing queue.
 
 #### Follow backpressure upstream
 
@@ -1320,12 +1555,37 @@ An embedded runtime is part of the application's lifetime. Stockroom needs to
 know when it is usable, stop without abandoning ownership, and distinguish an
 idle source from a damaged component.
 
+#### Exercise startup and shutdown
+
+Run the file lesson, save an invalid JSON fragment, and observe the warning.
+Restore valid JSON and observe recovery without restarting. Then use Ctrl-C
+and restart Stockroom. The file provides a new initial snapshot; the in-memory
+query is rebuilt.
+
+Now temporarily give two products the same SKU and start the application.
+Startup fails with `duplicate record key` instead of reporting readiness.
+This distinguishes an invalid initial definition/data set from a recoverable
+bad save while a previously valid source is running.
+
+An object's **generation** identifies one constructed incarnation. The graph's
+**revision** identifies an accepted topology version. These are ownership
+coordinates, not query row numbers. You will use them for replacement in
+Part IV; routine application code can begin with `start`, readiness waits,
+and awaited `shutdown`.
+
 #### Separate acceptance, construction, and readiness
 
 A successful addition accepts a component definition. It does not prove that
 a database connection opened or that processing is ready.
 `ComponentHandle::wait_created` waits for construction; `wait_started` waits
 for the running boundary. Bound waits with an application deadline.
+
+A missing source, query, resource, factory or port connection is a dependency
+wait, not a terminal failure. Inspect `observed().waiting_for` or
+`observed().waiting_reason()` for the missing prerequisite. The graph resumes
+eligible work when it arrives; you do not need to re-add the node. Auto-start
+settings and explicit stops remain in force, including a stop requested while
+the node is waiting.
 
 A failed definition remains inspectable. Retryable acquisition failures can be
 retried after their cause is repaired; unchanged terminal validation failures
@@ -1381,49 +1641,7 @@ of the same resource.
 
 Deprovision is not a pause button. Similarly, a configuration change that
 removes a component is not an ordinary stop; its recovery obligations need
-separate consideration in Chapter 16.
-
-#### Keep background work owned
-
-The graph already owns component processing tasks. Add auxiliary workers only
-when a component genuinely needs them, such as a listener or blocking I/O
-operation with a separate lifetime.
-
-The helpers in `drasi_lib::context::workers` acquire a vacant owner slot
-before spawning work:
-
-```rust
-async fn start_owned(
-    slot: &tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
-    stop: tokio::sync::oneshot::Receiver<()>,
-) -> anyhow::Result<()> {
-    drasi_lib::context::workers::spawn_owned_worker(slot, async move {
-        if stop.await.is_err() {
-            tracing::warn!("worker stop owner was dropped");
-        }
-    })
-    .await?;
-    Ok(())
-}
-```
-
-This example requires a `tracing` dependency. Its owner must subsequently signal
-the worker and await a join. `spawn_owned_blocking_worker` applies the same
-ownership-before-spawn rule to blocking work.
-
-`join_owned_worker` requests abort on timeout but retains the handle until
-actual exit. `join_owned_worker_gracefully` retains it without aborting, which
-is appropriate when the worker owns submitted effects or connections that
-must drain. Neither permits replacing an unfinished handle.
-
-Do not take or drain handles out of their slots before an awaited join. If that
-wait is cancelled, ownership must still be available for cleanup. Serialize
-restart with cleanup, including after a timeout or cancellation.
-
-For services, quiescence can drop the `run` future. Pause any independently
-owned workers in `quiesce` and resume them when processing resumes.
-A clean no-worker service can use the default hook; a listener cannot treat
-dropping its controller future as proof that its connections stopped.
+separate consideration in Chapter 17.
 
 #### Preserve errors across cleanup
 
@@ -1446,7 +1664,7 @@ remains graph-owned.
 A protected component panic quarantines that generation. Successful cleanup
 does not repair it; reconstruct a fresh instance. A task boundary does not
 contain a process abort, unsafe native memory fault, or synchronous code that
-never yields. Chapter 17 provides a process boundary for those concerns.
+never yields. Chapter 18 provides a process boundary for those concerns.
 
 #### Own a standalone graph when appropriate
 
@@ -1475,6 +1693,25 @@ replacement possible.
 When Stockroom stops producing expected alerts, first establish where progress
 stopped. Observation should expose the actual running owners and their
 boundaries, not maintain another copy of the graph.
+
+#### Diagnose a real failure
+
+Use the message together with the component and phase that produced it:
+
+| Symptom or message | Likely boundary | Next action |
+|---|---|---|
+| `invalid inventory JSON` / `duplicate record key` | File parsing | Correct the file; startup errors need a new start, while later bad saves retain the last valid state |
+| `normalize mode requires --features normalize` | Build configuration | Rerun with the lesson's feature enabled |
+| `load trusted native library ...` | Plugin loading | Build the named native package and pass its actual target directory |
+| Address already in use during plugin startup | Resource acquisition | Release or reconfigure the conflicting listener; inspect the failed component rather than assuming the query failed |
+| `deadline has elapsed` around a readiness wait | Incomplete startup | Inspect the nested component error, bootstrap progress, and required dependencies |
+| `query configuration changed; explicit reset/rebootstrap is required` | Persistent query identity | Preserve state and choose an explicit migration/rebuild plan |
+| `live result stream closed or lagged; rebuild the view` | Volatile consumer | Reestablish a coordinated view rather than applying a missing tail |
+
+Run `RUST_LOG=info cargo run --locked` to see lifecycle details. Avoid interpreting
+an empty result as failure: a valid product above minimum produces no low-stock
+row. Tests in Chapter 4 wait for the expected business state and report a bounded
+failure when that state never arrives.
 
 #### Start with state, then inspect history
 
@@ -1511,27 +1748,32 @@ For a small host that lets Drasi initialize tracing, use
 owns the subscriber, integrate `ComponentLogLayer` into that setup instead.
 An existing global subscriber cannot be retrofitted by installing another one.
 
-Add `tracing = "0.1"` and `tracing-subscriber = "0.3"` to use this host setup:
+Stockroom already includes `tracing-subscriber` with its `env-filter` feature.
+Its setup is:
 
+<!-- excerpt: stockroom/src/main.rs#host-tracing -->
 ```rust
-fn init_host_tracing() -> anyhow::Result<()> {
-    use drasi_lib::observability::{
-        get_or_init_global_registry, ComponentLogLayer,
-    };
-    use tracing_subscriber::prelude::*;
+fn init_tracing() -> anyhow::Result<()> {
+    use drasi_lib::observability::{get_or_init_global_registry, ComponentLogLayer};
+    use tracing_subscriber::{prelude::*, EnvFilter};
 
-    let (layer, reload) =
-        tracing_subscriber::reload::Layer::new(None::<ComponentLogLayer>);
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) => EnvFilter::try_new(value)?,
+        Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
+        Err(error) => return Err(error.into()),
+    };
+    let (layer, reload) = tracing_subscriber::reload::Layer::new(None::<ComponentLogLayer>);
     tracing_subscriber::registry()
+        .with(filter)
         .with(layer)
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .try_init()?;
     reload.reload(Some(ComponentLogLayer::new(get_or_init_global_registry())))?;
     Ok(())
 }
 ```
 
-Call it before constructing components. The reload slot lets the host install
+Call it once, before constructing components. The reload slot lets the host install
 its subscriber before initializing the shared Drasi log worker.
 
 Component spans carry `component_id`, `component_type`, and `instance_id`.
@@ -1600,12 +1842,73 @@ The next part makes that progress survive reconstruction.
 
 ## Part III - Make processing recoverable
 
+This part develops one complete restartable Stockroom. Run the full path first,
+then follow its storage, bootstrap, replay, and completion boundaries through
+the next chapters. The same `inventory.json` remains your input; the application
+adds native SQLite capture, persistent query storage, and retained alert output.
+
 ### 9. Make query state durable
 
 Stockroom can rebuild its current inventory from the file, but that does not
 restore query history, scheduled work, or unfinished alerts. This chapter adds
 persistent query state; the following chapters protect input and output across
 recovery.
+
+#### Run the complete restartable path
+
+Restore the original product at quantity 8. From your copied project, run:
+
+```sh
+cargo run --locked --features persistence -- --state ./state/stockroom
+```
+
+This feature builds SQLite and RocksDB and needs the native-build tools listed
+in Chapter 1. The first build is longer; later runs reuse it.
+Wait for readiness, change quantity to 3, and save. You will see:
+
+```text
+Saved reorder changes through query sequence 1.
+low-stock: [{"quantity":3,"sku":"bolts"}]
+```
+
+Use Ctrl-C, then run the **same command with the same directory** again.
+The application restores the low-stock answer before applying further file
+changes. If the outgoing journal has no outstanding deliveries, it reports
+`No pending alerts in the output journal.` It remains ready for edits rather
+than waiting for an event that may never arrive.
+
+Restock the product while the application is stopped, then restart it. The
+file synchronization step compares against the saved database rows, submits
+the changed quantity, and retracts the low-stock result.
+
+The implementation is [persistence.rs](stockroom/src/persistence.rs):
+
+```mermaid
+flowchart LR
+    File["inventory.json"] --> Sync["Apply changed products through SqliteHandle"]
+    Sync --> SQLite["Native SQLite source and transaction journal"]
+    SQLite --> Query["Query, checkpoints and outbox"]
+    Query --> Journal["Persistent QoS output"]
+    Journal --> Reorder["Transactional reorder state and completion"]
+```
+
+This is the whole pipeline, not a query backend substituted into an otherwise
+volatile source. Native SQLite captures committed changes made through its
+owned `SqliteHandle`. The file synchronization step performs one SQL transaction
+per changed snapshot; it does not implement change capture itself.
+Use that handle for writes while the source is running. Independent SQLite
+connections do not run this connection's capture hooks.
+
+The file remains a sampled current-state input. Saves missed between reads
+are not retained history. Once its changes commit in SQLite, the source journal
+retains them until the query's actual committed progress covers them.
+The downstream state and handling survive process restart; disk loss and
+remote supplier effects require separate designs.
+
+The `--state` lesson accepts the original product fields. Keep optional
+normalization payloads in `encoded-inventory.json`; this path deliberately
+stores plain product rows. Invalid input stops this transactional path with
+an explicit error; correct the file and reopen the same state directory.
 
 #### Name the state that must survive
 
@@ -1630,8 +1933,8 @@ can skip work whose materialized state disappeared.
 
 #### Select a computation index provider
 
-The first example uses `InMemoryComputationProvider`. For native RocksDB
-storage, add this dependency:
+The first example uses `InMemoryComputationProvider`. The starter's optional
+`persistence` feature already selects this native backend:
 
 ```toml
 drasi-index-rocksdb = { path = "../drasi-core/components/indexes/rocksdb", features = ["computation"] }
@@ -1659,11 +1962,10 @@ budget. Set archive support to `true` when the historical version functions
 from Chapter 3 require it. Cloning a budget shares its underlying cache and
 write-buffer resources; constructing independent budgets does not.
 
-Use this provider when constructing a query with recoverable input. The starter's
-file source keeps its comparison state and emission sequence in memory; replacing
-the query provider alone does not make that source replayable. Before reusing a
-persistent query across restarts, add the coordinated bootstrap or retained-input
-wiring from Chapters 10 and 11.
+The running lesson uses the provider together with SQLite's coordinated
+bootstrap and retained source transactions. Keep those owners together when
+adapting it. Replacing only the file lesson's query provider would leave its
+volatile source sequence and comparison state unrecoverable.
 
 For directly constructed queries, bind the stable enclosing scope before
 registration or activation:
@@ -1674,7 +1976,9 @@ let query = ContinuousQueryTransformer::new(definition, provider.clone())
     .with_recovery_scope("stockroom")?;
 ```
 
-Here `definition` is the `ContinuousQueryDefinition` from the first application.
+Here `definition` is a `ContinuousQueryDefinition` with the same low-stock
+calculation. The persistent lesson additionally configures its input for
+complete source transactions and binds the source progress/bootstrap services.
 Keep the instance scope, graph ID, query ID, output stream, and storage directory
 stable across reconstruction. A different instance should use its own storage
 namespace. `with_id` alone does not partition every externally supplied
@@ -1708,7 +2012,7 @@ let query = query.with_delivery_tracking();
 ```
 
 It remains one query component in the batch. The recoverable companion uses
-this direct construction. The factory form is introduced in Chapter 14.
+this direct construction. The factory form is introduced in Chapter 15.
 Both require the real retained connections and consumer contracts described
 in the next chapters; neither makes an arbitrary external action atomic.
 
@@ -1793,6 +2097,45 @@ Stockroom's file source begins with the current file. A source with separate
 snapshot and live-change interfaces needs a coordinated boundary when loading
 initial inventory: a database dump followed by a subscription can miss changes
 between the two.
+
+#### Follow Stockroom's native source
+
+The persistent lesson creates one `QuerySourceProgress` owner for `low-stock`.
+It passes that same owner to `SqliteSource::coordinated`, which returns both
+the native source and its paired bootstrap provider:
+
+```rust
+let progress = Arc::new(QuerySourceProgress::new(
+    GRAPH,
+    ComponentId::try_new("low-stock")?,
+)?);
+let (source, bootstrap) = SqliteSource::coordinated(
+    ComponentId::try_new("inventory")?,
+    StreamId::try_new("inventory/out")?,
+    sqlite_config,
+    progress.clone(),
+)?;
+let query = query
+    .with_source_progress(progress)?
+    .with_bootstrap(bootstrap)
+    .with_delivery_tracking();
+```
+
+`SqliteSource` here is imported from `drasi_source_sqlite::native`.
+`sqlite_config` is the bounded `SqliteConfig` in the companion: a file path,
+the Product table, complete-transaction output, source-journal limits, and
+operation/cleanup bounds. `query` was constructed with
+`QueryExecutionSettings.source_transactions` using the same transaction limits.
+
+On first use, the provider coordinates the initial database rows with a
+committed handover. On reopen it verifies that handover and the query's actual
+progress before permitting source writes. The application then uses
+`source.handle()` to apply file changes. This is source-specific bootstrap
+code supplied by the native component, not an application-owned snapshot race.
+
+**Try it.** Run `cargo test --locked --features persistence held_alert_recovers`.
+It closes and reconstructs the same native source, query, journal, and consumer,
+including a reopen that submits no new input.
 
 #### Establish the handover before consuming rows
 
@@ -1899,7 +2242,7 @@ snapshot owner until cleanup succeeds.
 
 Verified retirement needs a stronger held lifecycle than a sampled successful
 stop. `freeze_for_retirement` prevents reuse while a configuration removal is
-being resolved. Chapter 16 explains why that exclusion matters.
+being resolved. Chapter 17 explains why that exclusion matters.
 
 Snapshot rows are not automatically one upstream database transaction.
 If Stockroom needs transaction-preserving input, use the distinct protocol
@@ -1916,9 +2259,15 @@ Protect the intervals before a query accepts inventory and after it commits an
 alert. The goal is not merely to have data somewhere on disk, but to know which
 owner remains responsible for each unfinished handoff.
 
+Stockroom's running persistent path retains input in the native SQLite source
+and output in a QoS journal. This chapter explains its outgoing connection,
+then shows two alternatives: admission for externally submitted input and
+snapshot/outbox recovery for a materialized view.
+
 #### Assemble a retained path
 
-The recoverable Stockroom uses:
+For an ingress protocol without its own durable change log, use graph-owned
+admission instead of inventing another source WAL:
 
 ```mermaid
 flowchart LR
@@ -2017,6 +2366,21 @@ the same data. All source outputs must use the actual configured QoS channel.
 Scope, schema, identity, and sequence validation precede its single admission
 commit.
 
+Its recovery hook describes the **actual bound channel**, not an intended
+guarantee:
+
+```rust
+fn recovery_contract(&self) -> ComponentRecovery {
+    ComponentRecovery::admitted(self.admission.channel().durability())
+        .replay_to_durable_delivery()
+}
+```
+
+This is an alternative admission-backed source, not the SQLite source used by
+`--state`. The native HTTP source supports binding that same service through
+its `admission` resource; its durable routes use sessions and receipts rather
+than the volatile events route from Chapter 5.
+
 Register a producer, then submit consecutive client sequences:
 
 ```rust
@@ -2102,6 +2466,40 @@ disable tracking, or reset the query to discard its obligations. A replacement
 destination implementation under the same allowed identity does not erase
 unfinished work.
 
+#### Bring a new consumer up to date
+
+Reading a snapshot and then subscribing leaves a gap in which changes can
+be missed. Applying both a snapshot and overlapping output can apply the same
+change twice. A correct handover must coordinate the live connection, snapshot
+boundary, retained history, and consumer progress.
+
+```mermaid
+sequenceDiagram
+    participant C as Consumer
+    participant Q as Query output owner
+    C->>Q: Establish live input before fetching recovery state
+    Q-->>C: Keyed snapshot through S and retained output
+    C->>C: Replace the view and complete its recovery boundary
+    Q-->>C: Buffered and live output
+    C->>C: Discard covered output; handle later sequences in order
+```
+
+The library supplies this machinery through `QueryReplayTransformer` and
+`CheckpointedSink`; Chapter 11 connects them. `QueryResultsCatalog` with a
+connected `QueryResultsOutlet` supports live query-result subscriptions.
+A `QueryResults` reader alone is not such an outlet.
+
+`results.replay(after)` reads bounded retained output after a logical sequence.
+`recovery_view` reads a coherent recovery identity, snapshot, and optional
+retained history. If the required range is unavailable, increasing a timeout
+cannot recreate it. The application needs an explicit rebuild or gap policy.
+
+A snapshot envelope means **replace the view**. A progress-only envelope
+means a recovery decision without business rows; it is not permission to
+silently skip work. Stockroom's simple live-only view rejects both rather than
+pretending to implement recovery. Add a recovery-aware owner before accepting
+them.
+
 #### Recover a keyed view from a query outbox
 
 An alternative for a restorable view is:
@@ -2184,6 +2582,42 @@ an alert; the next chapter makes "handled" mean something durable.
 An alert is not finished merely because it left a queue. Stockroom may update
 application state or request replenishment from another system. Those two
 destinations need different completion contracts.
+
+#### Construct the running consumer
+
+Stockroom's `--state` mode uses a transactional reorder consumer. Its complete
+runner construction is:
+
+```rust
+let indexes = provider.create_indexes(GRAPH, "reorder-completion").await?;
+let contract = ComponentRecovery::transactional_consumer(&indexes)?;
+let runner = DeliveryRunner::new_transactional(
+    DeliveryScope::new(
+        "stockroom-persistent".into(),
+        GRAPH.into(),
+        ComponentId::try_new("alerts")?,
+    )?,
+    indexes,
+    codec()?,
+    DeliveryOptions {
+        scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
+        max_streams: NonZeroUsize::new(1).expect("positive capacity"),
+        receipts_per_stream: NonZeroUsize::new(128).expect("positive capacity"),
+        retry: DeliveryRetryPolicy::default(),
+    },
+)?;
+```
+
+The provider is the native RocksDB provider from Chapter 9. `codec` registers
+the permitted query-row schema and a message-size limit. `DeliveryScope` names
+the stable instance, graph, and consumer. `DeliveryRetryPolicy::default` makes
+one attempt; a retry policy is not implied by persistence.
+
+The sink owns this runner, returns `contract` from `recovery_contract`, awaits
+`deliver_transactional`, and shuts the runner down in its stop hook.
+`SaveReorder` stores or removes the row's reorder quantity and advances a handled
+counter through the borrowed `TransactionContext`. The order and the operation's
+completion share the same actual storage transaction.
 
 #### Resume at the first unfinished operation
 
@@ -2277,7 +2711,7 @@ async fn count_handled(state: &TransactionContext<'_>) -> anyhow::Result<()> {
 ```
 
 Call this from the handler after applying the operation, as the complete
-[`SaveAlert` implementation](../../examples/stockroom_native_persistent.rs)
+[`SaveReorder` implementation](stockroom/src/persistence.rs)
 does. If the transaction fails, both the business mutation and completion
 remain uncommitted.
 
@@ -2319,6 +2753,21 @@ Suppose a warehouse transfer decrements one bin and increments another in one
 database commit. Stockroom should not publish a misleading intermediate total.
 This chapter distinguishes a source transaction, a processing transaction, and
 a shared producer/journal commit.
+
+#### Observe the source transaction in Stockroom
+
+Run the persistent lesson and put two different products into one saved
+`inventory.json`. The file synchronization step uses one
+`SqliteHandle::transaction` for that snapshot's changes. Native capture emits
+one complete source transaction, and the query publishes the resulting batch
+after applying both product mutations.
+
+The `Saved reorder changes through query sequence ...` line identifies one
+query emission, even when its batch contains two reorder operations.
+`DeliveryRunner` completes those operations individually. A whole source
+transaction and a whole consumer batch therefore remain distinct boundaries.
+Use the transaction limits in `persistence.rs` when adapting the file to a
+larger inventory.
 
 #### Keep a source commit together
 
@@ -2486,14 +2935,169 @@ linear processing transaction, or one producer/journal transaction. None implies
 a graph-wide transaction. Stockroom now has the contracts needed to preserve
 both input consistency and unfinished output.
 
+### 14. Capstone: a recoverable Stockroom
+
+Complete the application by recovering an alert that was committed and delivered
+to retained storage but never handled. This is the critical interval a simple
+"save query rows and restart" design misses.
+
+#### Run the complete retained application
+
+Use the same Stockroom project, `inventory.json`, and persistent implementation
+you ran in Chapter 9. Start with the product at quantity 8 and a fresh directory:
+
+```sh
+cargo run --locked --features persistence -- --state ./state/held --hold-alerts
+```
+
+Lower quantity to 3 and save. The query processes your change, but the consumer
+deliberately stops before handling the retained output:
+
+```text
+Alert retained but not handled. Restart without --hold-alerts to complete it.
+```
+
+Use Ctrl-C and restart without the hold option:
+
+```sh
+cargo run --locked --features persistence -- --state ./state/held
+```
+
+Keep the same directory and leave the file unchanged. The query restores the
+low-stock row, and the retained output reaches `DeliveryRunner`.
+`SaveReorder` commits its state and completion and prints
+`Saved reorder changes through query sequence 1.` The file synchronization
+step finds no new product changes to submit.
+
+Stop and reopen once more. With the journal already handled, the application
+reports that no alerts are pending in that journal and waits for new edits.
+No ten-second "expected another event" timeout is part of normal idle operation.
+Now restock the product and confirm that its persisted reorder is removed.
+
+This is a controlled interrupted-handling and reconstruction exercise, not
+a simulation of disk loss, every crash instruction, or every network failure.
+It performs no remote replenishment request. An external destination still
+needs the confirmation protocol from Chapter 12.
+
+#### Explain every successful return
+
+The application has several independently meaningful successes:
+
+| Return or observation | Meaning |
+|---|---|
+| Native SQLite transaction completion | The product changes and source-journal entry committed together |
+| Query checkpoint and result position | Query processing committed through that input |
+| Outgoing journal acceptance | Query output is retained for its required subscriber |
+| Transactional handler completion | Business state and that operation's completion committed together |
+| Consumer batch completion | Every operation in that delivered batch completed |
+| Configuration receipt, when management is enabled | A desired definition was accepted, not necessarily started |
+| Awaited shutdown | The reported owners completed cleanup; it is not retroactive proof of every business effect |
+
+This table is also the basis of the application's external API. An endpoint
+that returns after admission should promise admission. If it promises completed
+replenishment, it must wait for or expose a way to establish that later boundary.
+
+#### Test the failure windows that matter
+
+Run the capstone's tests in your copied project:
+
+```sh
+cargo test --locked --features persistence held_alert_recovers
+cargo test --locked
+```
+
+Application qualification goes beyond those examples. Exercise each boundary
+with the actual provider and destination:
+
+| Failure window | Required result |
+|---|---|
+| Admission response is lost after commit | The same session, sequence, and content resolve to the original receipt |
+| Query fails before commit | Input progress does not skip uncommitted state |
+| Query commits before output confirmation | Retained output replays without recomputing its business change |
+| A later operation in a batch fails | Completion remains the successfully handled prefix |
+| External effect succeeds but response is lost | Destination idempotency/lookup resolves the original operation |
+| Snapshot loading is interrupted | Incomplete initialization is not declared complete |
+| A required subscriber stalls | Lossless capacity backpressures instead of discarding its work |
+| Shutdown or replacement times out | Old ownership remains tracked; a competing owner is not opened |
+| Configuration acceptance is uncertain | The same request identity resolves the accepted revision |
+| Recovery sees incompatible or damaged state | Startup fails explicitly rather than resetting silently |
+
+Test meaningful input semantics too: duplicate full upserts, patch updates,
+identity-only deletes, equal-valued rows with different identities, stale
+source times, grouped totals, and temporal retractions.
+Exercise both current-thread and multi-threaded Tokio runtimes when supporting
+both hosts.
+
+Measure boundedness under the intended workload. Include full envelope sizes,
+retained membership, outbox growth, component-local expansion, backend memory,
+and cleanup latency. A queue capacity is not an RSS bound; a fast demonstration
+is not a production throughput or availability guarantee.
+
+#### Operate a failed deployment without destroying evidence
+
+When Stockroom cannot resume, first capture the desired revision, observed
+component generations, retained error causes, and the relevant source/query/
+consumer progress. Determine which owner still owes work.
+
+Repair missing factories, credentials, or unavailable resources before changing
+the saved definition. Resolve uncertain admissions and effects using their
+original identities. Retry reconciliation only after the required ownership
+and cleanup boundary permits it.
+
+If a semantic change needs a rebuild, establish that the source can supply the
+necessary data and that pending output is preserved or explicitly retired.
+Do not delete a state directory, choose a fresh namespace, or enable AutoReset
+merely to suppress a startup failure.
+
+Back up configuration, keys, processing stores, and any required upstream
+history as a coordinated recovery plan. A saved topology alone does not
+contain products, pending alerts, or remote orders. Restoring one store to
+an older position while leaving related completion state ahead can invalidate
+the recovery boundary.
+
+#### Choose the simplest sufficient deployment
+
+A disposable live view can use the first program's bounded in-memory path.
+A restartable calculation also needs source replay, suitable query storage,
+and coordinated bootstrap. Reliable handling adds retained output and actual
+consumer completion. Saved deployments add reconstructible factories, resource
+recipes, and protected configuration persistence.
+
+Use separate processes when their failure boundary is required, not as a
+substitute for those contracts. There is no general graph-wide transaction,
+automatic exactly-once external effect, unlimited replay window, automatic
+state migration, or distributed active-active runtime.
+
+**Summary.** Stockroom is recoverable when every accepted input and committed
+output remains owned until its promised boundary completes. That principle
+connects the first source, the query, the journals, the consumer, and the host.
+It is the basis for extending the application without weakening its guarantees.
+
 ## Part IV - Build a deployable application
 
-### 14. Turn components into reusable factories
+### 15. Turn components into reusable factories
 
 The first Stockroom constructs Rust objects directly. Deployment requires a
 reproducible recipe: which implementation, which configuration, and which
 resources should create each object. Refactor those choices without changing
 the application's data contracts.
+
+#### Follow the factory-backed Stockroom
+
+The [managed lesson](stockroom/src/managed.rs) reconstructs the same file source,
+query, and alert sink from specifications. It adds two small native factories:
+`FileFactory` validates the source descriptor and path setting, and `AlertFactory`
+creates the handled in-memory result view. The query uses the standard
+`drasi/continuous-query` factory.
+
+Run `cargo test --locked --features management configuration_reopens` to build
+and exercise this path before changing it. The test saves a definition, closes
+its owner, opens it without resubmitting the seed, and applies a revisioned
+query change. Chapter 16 runs it interactively.
+
+This lesson persists **configuration**, while rebuilding its query state from
+the file. The `--state` lesson persists **processing and completion**. They
+teach separate ownership choices; enabling one does not silently enable the other.
 
 #### Replace a constructor with a specification
 
@@ -2585,10 +3189,11 @@ In-place reconfiguration requires the factory to opt into
 The descriptor must remain unchanged. Replacing the component is a different
 operation and creates a new generation.
 
-Stockroom's source factory can construct an admission-backed `Inventory` from
-a declared QoS resource; its sink factory can construct an `Alerts` owner with
-a declared completion provider. In both cases, keep the channel or storage
-handle out of serialized configuration. Save the recipe that reconstructs it.
+The managed lesson's `FileFactory` reads a saved path setting and constructs
+the file source; `AlertFactory` constructs the in-memory view sink.
+An admission-backed source or transactional sink follows the same pattern with
+declared QoS or completion resources. Keep live handles out of serialized
+configuration and save the recipes that reconstruct them.
 
 #### Declare resource ownership and dependencies
 
@@ -2705,11 +3310,51 @@ describe how to obtain their real dependencies. Keep configuration, identity,
 and ownership separate. The application can now be represented as reconstructible
 definitions rather than a collection of opaque Rust objects.
 
-### 15. Save and restore an application
+### 16. Save and restore an application
 
 Processing state lets Stockroom recover its data. Saved desired configuration
 lets the host reconstruct the application that owns that data, including
 definitions that were accepted but failed to start.
+
+#### Run a saved configuration
+
+Create a private 32-byte configuration key once. The following Python 3 command
+uses exclusive creation so rerunning it cannot overwrite an existing key:
+
+```sh
+python3 -c "import os,secrets; f=os.fdopen(os.open('stockroom.key',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'wb'); f.write(secrets.token_bytes(32)); f.close()"
+```
+
+On Windows, use `py -3` in place of `python3` and keep the key in a directory
+whose access is restricted to your account. The key file is ignored by the
+starter's Git rules; preserve it outside version control and with your backups.
+
+With the original product at quantity 8:
+
+```sh
+cargo run --locked --features management -- managed ./state/managed stockroom.key 10
+```
+
+The final argument sets a query threshold of 10. Quantity 8 now appears in
+the low-stock view. Stop with Ctrl-C, then omit the threshold:
+
+```sh
+cargo run --locked --features management -- managed ./state/managed stockroom.key
+```
+
+The threshold is still 10: the accepted definition, not a newly generated
+startup default, was restored. The printed configuration revision is unchanged.
+To submit a different definition, stop and run with an explicit threshold 5.
+That accepts a new revision; omitting the argument on subsequent starts
+preserves it.
+
+The running process continues to watch `inventory.json`. The saved definition
+contains its absolute path; keep that file available at the same path when
+reopening, or deliberately update the source recipe.
+
+This exercise's memory query provider rebuilds rows from the file. It does
+not restore historical results or effects; those belong to the processing
+recovery path in Part III.
 
 #### Build a complete desired definition
 
@@ -2717,9 +3362,11 @@ definitions that were accepted but failed to start.
 component factory specifications, streams, relationships, lifecycle policies,
 resource declarations and recipes, and required recovery contracts.
 
-After assembling a factory-backed batch, its public definition can be used:
+After assembling a factory-backed batch builder, build it before reading the
+resulting definition:
 
 ```rust
+let batch = batch.build()?;
 let desired = drasi_lib::management::DesiredInstance::from(
     batch.definition.clone(),
 )
@@ -2745,7 +3392,7 @@ another resolver must preserve those checks.
 
 `ManagementOptions` groups factories, the resource resolver, and an optional
 configuration store. Without a store, desired configuration exists only in
-memory. There is no separate `management` Cargo feature.
+memory.
 
 The builder also exposes the services separately:
 
@@ -2890,11 +3537,27 @@ is ready. Revision checks and request receipts protect changes; factories and
 resource resolvers make reconstruction possible. Configuration history and key
 lifecycle remain explicit application responsibilities.
 
-### 16. Change a running application
+### 17. Change a running application
 
 Stockroom needs a new alert destination while inventory continues to arrive.
 Plan the change around component generations, dependency ownership, and retained
 work rather than simply replacing an object in a map.
+
+#### Exercise revisioned changes
+
+Run `cargo test --locked --features management configuration_reopens`.
+The test first verifies that an imperative graph mutation is rejected for
+managed members. It then changes the saved query specification through
+`apply_desired_state`, waits for convergence, and checks that the revision
+advanced. Read this test in [managed.rs](stockroom/src/managed.rs) as the
+working counterpart to the unmanaged control example below.
+
+For a persistent query, a changed query definition can require a migration
+instead of ordinary replacement. Choose one of three explicit strategies:
+rebuild from a source that can provide a consistent snapshot, run a new query
+identity alongside the old one and cut consumers over after reconciliation,
+or supply a storage migration you can validate. Preserve the old query's
+pending output until its consumers finish or it is explicitly retired.
 
 #### Preview changes to unmanaged topology
 
@@ -2926,7 +3589,7 @@ belong in `TopologyBindings` as actual factories, instances, constructors,
 and pipe providers, not just serialized names.
 
 For managed members, submit the corresponding desired definition through the
-configuration API from Chapter 15. Do not use imperative reconciliation to
+configuration API from Chapter 16. Do not use imperative reconciliation to
 bypass accepted managed ownership.
 
 Selections can name exact members, dependencies, dependents, or the whole graph.
@@ -3046,7 +3709,7 @@ owners. Preview before mutation, inspect every outcome, and preserve retained
 obligations through replacement. Stop, force, reset, and permanent retirement
 are different decisions.
 
-### 17. Package and isolate extensions
+### 18. Package and isolate extensions
 
 Stockroom's components can remain ordinary Rust code linked into the application,
 be packaged as native dynamic libraries, or run in independently hosted
@@ -3090,6 +3753,77 @@ constraints still need constructor validation.
 The [native SDK guide](../../../components/computation-plugin-sdk/README.md)
 contains export and factory examples. Exact ABI layouts and signatures belong
 to that reference, not to the application data model.
+
+#### Keep the layers of identity separate
+
+An envelope carries a change set, stream metadata, and context:
+
+| Identity | What it identifies |
+|---|---|
+| `ElementReference` | A node or relationship in a source namespace |
+| `RecordId` | A schema-defined record; its namespace and bytes are both significant |
+| `ChangeSetId` and operation ordinal | One identified group of changes and each operation's place in that group |
+| Stream and sequence | A producer's ordered emissions from one output |
+| Source position | An opaque upstream resume position, if the source supplies one |
+
+One output owns one stream. Its new emissions must have increasing sequences;
+gaps can be valid, but regression is not. A reconnect must not silently reuse
+an old logical identity for different content.
+
+A `ChangeOperation` is Added, Updated, or Deleted. Records describe their
+image as Full, Patch, or Partial, and updates explicitly distinguish Patch
+from Replace. Consumers must support the image they receive. A delete may
+contain only a validated `RecordReference`, with no before image.
+
+`SystemMetadata` belongs to the framework boundary; business attributes belong
+in records. Append context for attribution, and derive a new envelope when
+creating new output. Do not mutate an input shared with another branch.
+
+Putting several changes in a collection does not prove that their source
+committed them atomically. Whole source transactions have a separate contract
+in Chapter 13.
+
+#### Keep background work owned
+
+The graph already owns component processing tasks. Add auxiliary workers only
+when a component genuinely needs them, such as a listener or blocking I/O
+operation with a separate lifetime.
+
+The helpers in `drasi_lib::context::workers` acquire a vacant owner slot
+before spawning work:
+
+```rust
+async fn start_owned(
+    slot: &tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
+    stop: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<()> {
+    drasi_lib::context::workers::spawn_owned_worker(slot, async move {
+        if stop.await.is_err() {
+            tracing::warn!("worker stop owner was dropped");
+        }
+    })
+    .await?;
+    Ok(())
+}
+```
+
+This example requires a `tracing` dependency. Its owner must subsequently signal
+the worker and await a join. `spawn_owned_blocking_worker` applies the same
+ownership-before-spawn rule to blocking work.
+
+`join_owned_worker` requests abort on timeout but retains the handle until
+actual exit. `join_owned_worker_gracefully` retains it without aborting, which
+is appropriate when the worker owns submitted effects or connections that
+must drain. Neither permits replacing an unfinished handle.
+
+Do not take or drain handles out of their slots before an awaited join. If that
+wait is cancelled, ownership must still be available for cleanup. Serialize
+restart with cleanup, including after a timeout or cancellation.
+
+For services, quiescence can drop the `run` future. Pause any independently
+owned workers in `quiesce` and resume them when processing resumes.
+A clean no-worker service can use the default hook; a listener cannot treat
+dropping its controller future as proof that its connections stopped.
 
 #### Validate custom records
 
@@ -3311,150 +4045,6 @@ DrasiLib instances and bridges preserve them across a process boundary.
 Neither packaging nor isolation creates stronger delivery guarantees on its
 own. The final application must still identify who owns every unfinished action.
 
-### 18. Capstone: a recoverable Stockroom
-
-Complete the application by recovering an alert that was committed and delivered
-to retained storage but never handled. This is the critical interval a simple
-"save query rows and restart" design misses.
-
-#### Run the complete retained application
-
-The executable is
-[`stockroom_native_persistent.rs`](../../examples/stockroom_native_persistent.rs).
-It contains the admission-backed source, two persistent QoS journals, query
-body, and transactional `SaveAlert` consumer developed in Part III.
-
-From `drasi-core`, run the following pair once, using a fresh state directory:
-
-```sh
-cargo run --locked -p drasi-lib --example stockroom_native_persistent -- ./native-stockroom-state stage
-cargo run --locked -p drasi-lib --example stockroom_native_persistent -- ./native-stockroom-state resume
-```
-
-This companion needs the RocksDB native build prerequisites from Chapter 1.
-Keep the same directory between the two commands. Do not substitute a new
-directory for `resume`; that would test a new application rather than recovery.
-
-The first run prints:
-
-```text
-retained one alert without handling it
-```
-
-It submits one product through a producer session, retries the identical
-submission, and checks that the receipt is unchanged. The query maintains the
-low-stock row, and its output reaches the retained journal. The sink deliberately
-does not complete handling before the instance shuts down.
-
-The second run submits no inventory and prints:
-
-```text
-restored and handled the retained alert without resubmitting inventory
-```
-
-The query restores its maintained answer. The retained alert reaches
-`DeliveryRunner`, and `SaveAlert` commits its business state and operation
-completion. The companion checks that one operation completed.
-
-This is a controlled interrupted-handling and reconstruction exercise, not
-a simulation of disk loss, every crash instruction, or every network failure.
-It performs no remote replenishment request. An external destination still
-needs the confirmation protocol from Chapter 12.
-
-#### Explain every successful return
-
-The application has several independently meaningful successes:
-
-| Return or observation | Meaning |
-|---|---|
-| Producer admission receipt | The input and retry receipt were accepted by the configured journal |
-| Query checkpoint and result position | Query processing committed through that input |
-| Outgoing journal acceptance | Query output is retained for its required subscriber |
-| Transactional handler completion | Business state and that operation's completion committed together |
-| Consumer batch completion | Every operation in that delivered batch completed |
-| Configuration receipt, when management is enabled | A desired definition was accepted, not necessarily started |
-| Awaited shutdown | The reported owners completed cleanup; it is not retroactive proof of every business effect |
-
-This table is also the basis of the application's external API. An endpoint
-that returns after admission should promise admission. If it promises completed
-replenishment, it must wait for or expose a way to establish that later boundary.
-
-#### Test the failure windows that matter
-
-The native starter's focused tests run with:
-
-```sh
-cargo test --locked -p drasi-lib --example stockroom_native
-cargo test --locked -p drasi-lib --example stockroom_native_persistent
-```
-
-Application qualification goes beyond those examples. Exercise each boundary
-with the actual provider and destination:
-
-| Failure window | Required result |
-|---|---|
-| Admission response is lost after commit | The same session, sequence, and content resolve to the original receipt |
-| Query fails before commit | Input progress does not skip uncommitted state |
-| Query commits before output confirmation | Retained output replays without recomputing its business change |
-| A later operation in a batch fails | Completion remains the successfully handled prefix |
-| External effect succeeds but response is lost | Destination idempotency/lookup resolves the original operation |
-| Snapshot loading is interrupted | Incomplete initialization is not declared complete |
-| A required subscriber stalls | Lossless capacity backpressures instead of discarding its work |
-| Shutdown or replacement times out | Old ownership remains tracked; a competing owner is not opened |
-| Configuration acceptance is uncertain | The same request identity resolves the accepted revision |
-| Recovery sees incompatible or damaged state | Startup fails explicitly rather than resetting silently |
-
-Test meaningful input semantics too: duplicate full upserts, patch updates,
-identity-only deletes, equal-valued rows with different identities, stale
-source times, grouped totals, and temporal retractions.
-Exercise both current-thread and multi-threaded Tokio runtimes when supporting
-both hosts.
-
-Measure boundedness under the intended workload. Include full envelope sizes,
-retained membership, outbox growth, component-local expansion, backend memory,
-and cleanup latency. A queue capacity is not an RSS bound; a fast demonstration
-is not a production throughput or availability guarantee.
-
-#### Operate a failed deployment without destroying evidence
-
-When Stockroom cannot resume, first capture the desired revision, observed
-component generations, retained error causes, and the relevant source/query/
-consumer progress. Determine which owner still owes work.
-
-Repair missing factories, credentials, or unavailable resources before changing
-the saved definition. Resolve uncertain admissions and effects using their
-original identities. Retry reconciliation only after the required ownership
-and cleanup boundary permits it.
-
-If a semantic change needs a rebuild, establish that the source can supply the
-necessary data and that pending output is preserved or explicitly retired.
-Do not delete a state directory, choose a fresh namespace, or enable AutoReset
-merely to suppress a startup failure.
-
-Back up configuration, keys, processing stores, and any required upstream
-history as a coordinated recovery plan. A saved topology alone does not
-contain products, pending alerts, or remote orders. Restoring one store to
-an older position while leaving related completion state ahead can invalidate
-the recovery boundary.
-
-#### Choose the simplest sufficient deployment
-
-A disposable live view can use the first program's bounded in-memory path.
-A restartable calculation also needs source replay, suitable query storage,
-and coordinated bootstrap. Reliable handling adds retained output and actual
-consumer completion. Saved deployments add reconstructible factories, resource
-recipes, and protected configuration persistence.
-
-Use separate processes when their failure boundary is required, not as a
-substitute for those contracts. There is no general graph-wide transaction,
-automatic exactly-once external effect, unlimited replay window, automatic
-state migration, or distributed active-active runtime.
-
-**Summary.** Stockroom is recoverable when every accepted input and committed
-output remains owned until its promised boundary completes. That principle
-connects the first source, the query, the journals, the consumer, and the host.
-It is the basis for extending the application without weakening its guarantees.
-
 ## Appendix A: Vocabulary
 
 | Term | Meaning |
@@ -3479,13 +4069,21 @@ It is the basis for extending the application without weakening its guarantees.
 | Desired / observed | Accepted intent / the realized and running state |
 | Factory / resource | A reconstructible constructor / an actual supplied service |
 | Quiesce / deprovision | Park processing with ownership retained / permanently remove owned state |
+| Fence | Prevent further use of an owner whose state or operation outcome cannot yet be trusted |
+| Frontier | An accepted progress boundary, such as an element's latest effective time or a merger's emitted time |
+| Watermark | A source boundary known to be covered by a coordinated snapshot |
+| Receipt | A record of a particular accepted or completed operation at a named boundary |
+| Lease | Held ownership/exclusion that prevents competing users until the operation is resolved |
+| QoS channel | One retained channel with named subscribers, independent cursors, and explicit delivery/retention policy |
+| Native plugin | A packaged component using the native processing contracts, statically linked or hosted through the native SDK |
+| Reconciliation | Work that brings actual components/resources toward an accepted desired definition |
 
 ## Appendix B: API and example navigation
 
 Use the generated API reference for signatures and exhaustive options:
 
 ```sh
-cargo doc --locked -p drasi-lib --no-deps --open
+cargo doc -p drasi-lib --no-deps --open
 ```
 
 The book supplies the application path; the reference supplies the catalog.
@@ -3499,7 +4097,7 @@ The book supplies the application path; the reference supplies the catalog.
 | Reorder source time | `SourceTimeMergeTransformer`; [time-merge guide](../computation-graph-time-merge.md) |
 | Retain transport and retry identity | `QosChannel`, `SourceAdmission`, `RetainedPipe`; [QoS guide](../computation-graph-qos.md) |
 | Recover a result view | `QueryReplayTransformer`, `CheckpointedSink`, `ConsumerProgressStore` |
-| Complete consumer work | `DeliveryRunner`; [recoverable Stockroom](../../examples/stockroom_native_persistent.rs) |
+| Complete consumer work | `DeliveryRunner`; [persistent Stockroom](stockroom/src/persistence.rs) |
 | Preserve transactions | `SourceTransactionBuilder`, `TransactionTransformer`, `SharedStorageGroup`; [transaction guide](../computation-graph-transactions.md) |
 | Supply state and credentials | `state_store`, `identity`, `secret_store`, `wal`; `ComputationIndexProvider` in `drasi-core` |
 | Save desired configuration | `management`; [managed configuration](../managed-configuration.md) |
@@ -3508,3 +4106,89 @@ The book supplies the application path; the reference supplies the catalog.
 | Package native code | [Native plugin SDK](../../../components/computation-plugin-sdk/README.md) and [Host SDK](../../../components/host-sdk/README.md) |
 | Host independent processes | [Instance host](../../../components/instance-host/README.md) and [bridges](../../../components/computation-plugins/common/bridge/README.md) |
 | Change the library implementation | [Maintainer's guide](../computation-graph-maintainers-guide.md) |
+
+For book maintenance, `python3 lib/docs/developer-guide/check_book.py --test`
+checks local links and source-linked excerpts, compiles every Rust fence with
+explicit surrounding types, then runs the starter's default and extended
+lesson tests in a fresh copy. It is also part of the repository test workflow.
+The marked excerpts are compared with their compiled source; contextual
+fragments receive the values named by their surrounding lesson. Compile-only
+fragments are not executed as additional applications.
+
+## Appendix C: Query-language essentials
+
+Drasi's Cypher and GQL parsers target continuous graph calculations. Choose
+`ComputationQueryLanguage::Cypher` or `ComputationQueryLanguage::Gql` when
+constructing the query. GQL means Graph Query Language, not GraphQL.
+The language choice and supported functions are part of the query's
+configuration identity.
+
+### Clauses and patterns
+
+| Construct | Use |
+|---|---|
+| `MATCH (p:Product)` | Select nodes by label and bind a variable |
+| `MATCH (p)-[:STORED_IN]->(w)` | Follow a relationship, including a declared synthetic join |
+| `OPTIONAL MATCH` | Preserve a row when the optional part is absent; missing values are null |
+| `WHERE` | Filter input bindings or rows after a `WITH` |
+| `WITH` | Project intermediate values and group aggregates for later clauses |
+| `RETURN` | Define the maintained result fields and aliases |
+| Aggregates such as `sum`, `count`, `min`, `max`, `avg`, `collect` | Maintain values over the implicit group formed by non-aggregate expressions |
+
+A continuous result is a changing set of rows. Sort and page a local view;
+`ORDER BY`, `LIMIT`, and `SKIP` are not supported by this query model.
+Query clauses read and calculate; mutations enter through source changes rather
+than query-language writes to an external database.
+
+The parsers share an evaluator but are not promises of the entire Neo4j or
+ISO GQL product surface. Validate the actual query at construction and keep
+a regression test for expressions your application relies on.
+
+### Values and comparisons
+
+Graph properties include null, booleans, signed integers, floating-point numbers,
+strings, lists, objects, and supported date/time/duration values. Query results
+can also contain elements and element references. Native `VariableValue`
+preserves these distinctions; JSON is a presentation boundary, not the full
+type system.
+
+Use explicit conversion when input is textual. `"3"` is a string, not an
+integer quantity. Temporal strings likewise need parsing or typed construction.
+Use `IS NULL` and deliberate fallback expressions such as `coalesce` for
+optional data; missing related data is not an empty string or numeric zero.
+The starter's `sum(p.quantity)` returns a floating-point total, so its JSON
+result is `3.0` even when the input was integer `3`.
+
+### Function families
+
+| Need | Starting points |
+|---|---|
+| Numeric calculation | Arithmetic operators, `abs`, `ceil`, `floor`, `round` |
+| Conversion and missing values | `toInteger`, `toFloat`, `toString`, `coalesce` in Cypher |
+| Strings and collections | `size`, supported string functions, list expressions and aggregate `collect` |
+| Time values | `date`, `datetime`, `duration` and the supported temporal constructors for the chosen language |
+| Delayed/expiring conditions | `drasi.trueFor`, `drasi.trueLater`, `drasi.trueNowOrLater`, `drasi.trueUntil` |
+| Previous/rolling values | `drasi.previousValue`, `drasi.previousDistinctValue`, `drasi.slidingWindow` |
+| Historical element versions | `drasi.getVersionByTimestamp`, `drasi.getVersionsByTimeRange`, with an archive-enabled provider |
+
+Function spellings and argument rules can differ between Cypher and GQL.
+The [language function registrations](../../../functions-cypher/src/lib.rs)
+and [GQL registrations](../../../functions-gql/src/lib.rs) are the exact
+implementation inventory for this checkout. Use them with the
+[executable language examples](../../../shared-tests/src) when choosing an
+expression beyond the book's tested queries.
+
+### More than one query
+
+Fan one source output into several query components, each with a distinct
+component ID and output stream. Each query owns its own indexes and result
+identity. The application's slowest required downstream path can still apply
+backpressure; independent queries are not a promise of isolated resources.
+
+Chaining is an explicit conversion: query output uses `QueryChangeCodec`,
+while a query normally consumes graph changes. A transformer between them
+maps result-row identities to stable element references, converts values,
+and emits deletions when upstream rows retract. Feeding only additions would
+leave stale elements in the second query. Use a single query with `WITH`
+when the calculation fits one query; chain when the maintained intermediate
+state is itself a useful application boundary.

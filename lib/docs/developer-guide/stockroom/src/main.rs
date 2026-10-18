@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Stockroom: save changes to inventory.json to update a continuous query.
-//! Run `cargo run --locked`, optionally adding `-- totals` or `-- audit`.
+//! Run `cargo run --locked -- help` for the book's runnable lessons.
 
 #![allow(clippy::print_stdout)]
 
@@ -13,7 +13,7 @@ use drasi_core::{
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
 use drasi_lib::{computation::v1::*, DrasiLib};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     num::NonZeroUsize,
@@ -21,9 +21,19 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{io::AsyncWriteExt, sync::watch};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{broadcast, watch},
+};
 
-const GRAPH: &str = "__drasi_lib_runtime__";
+#[cfg(feature = "management")]
+mod managed;
+#[cfg(feature = "plugins")]
+mod network;
+#[cfg(feature = "persistence")]
+mod persistence;
+
+const GRAPH: &str = ComponentBatch::GRAPH_ID;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOW_STOCK: &str = "
 MATCH (p:Product)
@@ -31,19 +41,36 @@ WHERE p.quantity < p.minimum
 RETURN p.sku AS sku, p.quantity AS quantity";
 const WAREHOUSE_TOTALS: &str =
     "MATCH (p:Product) RETURN p.warehouse AS warehouse, sum(p.quantity) AS total";
+const NONEMPTY_TOTALS: &str =
+    "MATCH (p:Product) WITH p.warehouse AS warehouse, sum(p.quantity) AS total WHERE total > 0 RETURN warehouse, total";
+const WAREHOUSE_ALERTS: &str =
+    "MATCH (p:Product)-[:STORED_IN]->(w:Warehouse) WHERE p.quantity < p.minimum RETURN p.sku AS sku, p.quantity AS quantity, w.name AS warehouse";
+const SUSTAINED: &str =
+    "MATCH (p:Product) WHERE drasi.trueFor(p.quantity < p.minimum, duration({seconds:5})) RETURN p.sku AS sku, p.quantity AS quantity";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
     LowStock,
     Totals,
     Audit,
+    Join,
+    Sustained,
+    Normalize,
+    Reorders,
+    Stream,
+    NonemptyTotals,
 }
 
 impl Scenario {
     fn query(self) -> (&'static str, &'static str) {
         match self {
             Self::Totals => ("stock-by-warehouse", WAREHOUSE_TOTALS),
-            Self::LowStock | Self::Audit => ("low-stock", LOW_STOCK),
+            Self::NonemptyTotals => ("stock-by-warehouse", NONEMPTY_TOTALS),
+            Self::Join => ("warehouse-alerts", WAREHOUSE_ALERTS),
+            Self::Sustained => ("sustained-low-stock", SUSTAINED),
+            Self::LowStock | Self::Audit | Self::Normalize | Self::Reorders | Self::Stream => {
+                ("low-stock", LOW_STOCK)
+            }
         }
     }
 }
@@ -75,15 +102,18 @@ fn descriptor(
     )?)
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Product {
     sku: String,
     quantity: i64,
     minimum: i64,
     warehouse: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload: Option<String>,
 }
 
+// ANCHOR: element-metadata
 fn metadata(sku: &str, time: u64) -> ElementMetadata {
     ElementMetadata {
         reference: ElementReference::new("inventory", sku),
@@ -91,41 +121,98 @@ fn metadata(sku: &str, time: u64) -> ElementMetadata {
         effective_from: time,
     }
 }
+// ANCHOR_END: element-metadata
 
 impl Product {
     fn element(&self, time: u64) -> Element {
+        let mut properties = serde_json::json!({
+            "sku": self.sku,
+            "quantity": self.quantity,
+            "minimum": self.minimum,
+            "warehouse": self.warehouse,
+        });
+        if let Some(payload) = &self.payload {
+            properties["payload"] = serde_json::json!(payload);
+        }
         Element::Node {
             metadata: metadata(&self.sku, time),
-            properties: ElementPropertyMap::from(serde_json::json!({
-                "sku": self.sku,
-                "quantity": self.quantity,
-                "minimum": self.minimum,
-                "warehouse": self.warehouse,
-            })),
+            properties: ElementPropertyMap::from(properties),
         }
     }
 }
 
+#[cfg(any(test, feature = "persistence"))]
 fn parse_inventory(text: &str) -> anyhow::Result<BTreeMap<String, Product>> {
-    let products: Vec<Product> = serde_json::from_str(text).context("invalid inventory JSON")?;
-    let mut inventory = BTreeMap::new();
-    for product in products {
-        ensure!(
-            !product.sku.trim().is_empty(),
-            "product sku must not be empty"
-        );
-        let sku = product.sku.clone();
-        ensure!(
-            inventory.insert(sku.clone(), product).is_none(),
-            "duplicate product sku: {sku}"
-        );
-    }
-    Ok(inventory)
+    parse_rows(text)
 }
 
-fn inventory_changes(
-    previous: &BTreeMap<String, Product>,
-    current: &BTreeMap<String, Product>,
+trait FileRow: Clone + PartialEq + serde::de::DeserializeOwned + Send + Sync + 'static {
+    const SOURCE: &'static str;
+    const LABEL: &'static str;
+    fn key(&self) -> &str;
+    fn element(&self, time: u64) -> Element;
+}
+
+impl FileRow for Product {
+    const SOURCE: &'static str = "inventory";
+    const LABEL: &'static str = "Product";
+    fn key(&self) -> &str {
+        &self.sku
+    }
+    fn element(&self, time: u64) -> Element {
+        self.element(time)
+    }
+}
+
+#[derive(Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Warehouse {
+    code: String,
+    name: String,
+}
+
+impl FileRow for Warehouse {
+    const SOURCE: &'static str = "catalog";
+    const LABEL: &'static str = "Warehouse";
+    fn key(&self) -> &str {
+        &self.code
+    }
+    fn element(&self, time: u64) -> Element {
+        Element::Node {
+            metadata: row_metadata::<Self>(&self.code, time),
+            properties: ElementPropertyMap::from(
+                serde_json::json!({"code": self.code, "name": self.name}),
+            ),
+        }
+    }
+}
+
+fn row_metadata<T: FileRow>(key: &str, time: u64) -> ElementMetadata {
+    ElementMetadata {
+        reference: ElementReference::new(T::SOURCE, key),
+        labels: vec![T::LABEL.into()].into(),
+        effective_from: time,
+    }
+}
+
+fn parse_rows<T: FileRow>(text: &str) -> anyhow::Result<BTreeMap<String, T>> {
+    let rows: Vec<T> =
+        serde_json::from_str(text).with_context(|| format!("invalid {} JSON", T::SOURCE))?;
+    let mut result = BTreeMap::new();
+    for row in rows {
+        let key = row.key().to_owned();
+        ensure!(!key.trim().is_empty(), "record key must not be empty");
+        ensure!(
+            result.insert(key.clone(), row).is_none(),
+            "duplicate record key: {key}"
+        );
+    }
+    Ok(result)
+}
+
+fn inventory_changes<T: FileRow>(
+    previous: &BTreeMap<String, T>,
+    current: &BTreeMap<String, T>,
     time: u64,
 ) -> VecDeque<SourceChange> {
     let mut changes = VecDeque::new();
@@ -142,16 +229,16 @@ fn inventory_changes(
     }
     for sku in previous.keys().filter(|sku| !current.contains_key(*sku)) {
         changes.push_back(SourceChange::Delete {
-            metadata: metadata(sku, time),
+            metadata: row_metadata::<T>(sku, time),
         });
     }
     changes
 }
 
-struct Inventory {
+struct FileSource<T: FileRow> {
     descriptor: ComponentDescriptor,
     path: PathBuf,
-    current: BTreeMap<String, Product>,
+    current: BTreeMap<String, T>,
     pending: VecDeque<SourceChange>,
     poll: tokio::time::Interval,
     sequence: u64,
@@ -159,13 +246,15 @@ struct Inventory {
     last_error: Option<String>,
 }
 
-impl Inventory {
+type Inventory = FileSource<Product>;
+
+impl<T: FileRow> FileSource<T> {
     fn new(path: &Path) -> anyhow::Result<Self> {
         let mut poll = tokio::time::interval(POLL_INTERVAL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Ok(Self {
             descriptor: descriptor(
-                "inventory",
+                T::SOURCE,
                 &[(
                     "out",
                     PortDirection::Output,
@@ -186,7 +275,7 @@ impl Inventory {
         let text = tokio::fs::read_to_string(&self.path)
             .await
             .with_context(|| format!("cannot read {}", self.path.display()))?;
-        let current = parse_inventory(&text)?;
+        let current = parse_rows::<T>(&text)?;
         let time = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
         self.pending = inventory_changes(&self.current, &current, time);
         self.current = current;
@@ -195,9 +284,13 @@ impl Inventory {
 }
 
 #[async_trait]
-impl ComputationComponent for Inventory {
+impl<T: FileRow> ComputationComponent for FileSource<T> {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({"path": self.path}))
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
@@ -214,7 +307,7 @@ impl ComputationComponent for Inventory {
 }
 
 #[async_trait]
-impl EnvelopeSource for Inventory {
+impl<T: FileRow> EnvelopeSource for FileSource<T> {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         loop {
             if let Some(change) = self.pending.pop_front() {
@@ -223,7 +316,7 @@ impl EnvelopeSource for Inventory {
                     port: PortId::try_new("out")?,
                     envelope: GraphChangeCodec::encode_change(
                         change,
-                        StreamId::try_new("inventory/out")?,
+                        StreamId::try_new(format!("{}/out", T::SOURCE))?,
                         self.sequence,
                         None,
                     )?,
@@ -233,14 +326,18 @@ impl EnvelopeSource for Inventory {
             match self.reload().await {
                 Ok(()) => {
                     if self.last_error.take().is_some() {
-                        eprintln!("Inventory file is valid again; watching for changes.");
+                        eprintln!(
+                            "{} is valid again; watching for changes.",
+                            self.path.display()
+                        );
                     }
                 }
                 Err(error) => {
                     let message = format!("{error:#}");
                     if self.last_error.as_ref() != Some(&message) {
                         eprintln!(
-                            "Inventory file: {message}. Keeping the last valid inventory; retrying."
+                            "{}: {message}. Keeping the last valid state; retrying.",
+                            self.path.display()
                         );
                         self.last_error = Some(message);
                     }
@@ -336,12 +433,58 @@ struct Alerts {
     view: watch::Sender<ResultView>,
     output: tokio::io::Stdout,
     audit: bool,
+    reorders: bool,
+    display: bool,
+}
+
+fn reorder_messages(envelope: &ChangeEnvelope, previous: &ResultView) -> anyhow::Result<String> {
+    let values = |record: &Record| -> anyhow::Result<_> {
+        Ok(QueryChangeCodec::row_values_to_json(
+            &QueryChangeCodec::decode_row(record)?.values,
+        ))
+    };
+    let mut message = String::new();
+    for operation in envelope.changes().operations() {
+        match operation {
+            ChangeOperation::Added { after, .. } => {
+                message.push_str(&format!("reorder created: {}\n", values(after)?));
+            }
+            ChangeOperation::Updated { before, after, .. } => {
+                let before = before
+                    .as_ref()
+                    .map(values)
+                    .transpose()?
+                    .or_else(|| previous.0.get(after.identity()).cloned())
+                    .context("reorder update has no previous row")?;
+                message.push_str(&format!(
+                    "reorder revised: {before} -> {}\n",
+                    values(after)?
+                ));
+            }
+            ChangeOperation::Deleted {
+                identity, before, ..
+            } => {
+                let before = before
+                    .as_ref()
+                    .map(values)
+                    .transpose()?
+                    .or_else(|| previous.0.get(identity.identity()).cloned())
+                    .context("reorder cancellation has no previous row")?;
+                message.push_str(&format!("reorder cancelled: {before}\n"));
+            }
+        }
+    }
+    Ok(message)
 }
 
 #[async_trait]
 impl ComputationComponent for Alerts {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
@@ -362,8 +505,11 @@ impl EnvelopeSink for Alerts {
 
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         let mut view = self.view.borrow().clone();
-        view.apply(&input.envelope)?;
         let mut message = String::new();
+        if self.reorders {
+            message.push_str(&reorder_messages(&input.envelope, &view)?);
+        }
+        view.apply(&input.envelope)?;
         if self.audit {
             ensure!(
                 input
@@ -377,13 +523,15 @@ impl EnvelopeSink for Alerts {
             );
             message.push_str("audit: checked-by=stockroom\n");
         }
-        message.push_str(&format!(
-            "{}: {}\n",
-            self.query_id,
-            serde_json::to_string(&view.rows())?
-        ));
-        self.output.write_all(message.as_bytes()).await?;
-        self.output.flush().await?;
+        if self.display {
+            message.push_str(&format!(
+                "{}: {}\n",
+                self.query_id,
+                serde_json::to_string(&view.rows())?
+            ));
+            self.output.write_all(message.as_bytes()).await?;
+            self.output.flush().await?;
+        }
         self.view.send_replace(view);
         Ok(())
     }
@@ -399,13 +547,17 @@ async fn finish(core: &DrasiLib, work: anyhow::Result<()>) -> anyhow::Result<()>
     Ok(())
 }
 
-async fn start(
+async fn build_application(
     path: &Path,
     scenario: Scenario,
-) -> anyhow::Result<(DrasiLib, watch::Receiver<ResultView>)> {
+    plugins: Option<&Path>,
+) -> anyhow::Result<(
+    DrasiLib,
+    watch::Receiver<ResultView>,
+    Option<broadcast::Receiver<ChangeEnvelope>>,
+)> {
     let audit = matches!(scenario, Scenario::Audit);
     let (query_id, query_text) = scenario.query();
-    let inventory = Inventory::new(path)?;
     let (view, reader) = watch::channel(ResultView::default());
     let alerts = Alerts {
         descriptor: descriptor(
@@ -420,8 +572,31 @@ async fn start(
         view,
         output: tokio::io::stdout(),
         audit,
+        reorders: scenario == Scenario::Reorders,
+        display: scenario != Scenario::Stream,
     };
-    let query = ContinuousQueryTransformer::new(
+    let execution = if scenario == Scenario::Join {
+        use drasi_lib::config::{QueryJoinConfig, QueryJoinKeyConfig};
+        QueryExecutionSettings {
+            joins: vec![QueryJoinConfig {
+                id: "STORED_IN".into(),
+                keys: vec![
+                    QueryJoinKeyConfig {
+                        label: "Product".into(),
+                        property: "warehouse".into(),
+                    },
+                    QueryJoinKeyConfig {
+                        label: "Warehouse".into(),
+                        property: "code".into(),
+                    },
+                ],
+            }],
+            ..Default::default()
+        }
+    } else {
+        QueryExecutionSettings::default()
+    };
+    let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: GRAPH.into(),
             id: ComponentId::try_new(query_id)?,
@@ -431,15 +606,37 @@ async fn start(
             outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
         },
         Arc::new(InMemoryComputationProvider),
+        QueryOptions::default(),
+        execution,
+        None,
     )
     .await?;
     let results = query.results();
+    let catalog = (scenario == Scenario::Stream)
+        .then(|| QueryResultsCatalog::new(GRAPH))
+        .transpose()?;
+    let events = catalog.as_ref().map(QueryResultsCatalog::subscribe);
+    if let Some(catalog) = &catalog {
+        query = query.with_result_catalog(catalog)?;
+    }
     let mut batch = ComponentBatch::builder()
-        .source(Box::new(inventory))
         .query(Box::new(query))
         .sink(Box::new(alerts));
+    if let Some(directory) = plugins {
+        #[cfg(feature = "plugins")]
+        {
+            batch = network::connect(batch, directory, query_id)?;
+        }
+        #[cfg(not(feature = "plugins"))]
+        anyhow::bail!(
+            "plugins at {} require --features plugins",
+            directory.display()
+        );
+    } else {
+        batch = batch.source(Box::new(Inventory::new(path)?));
+    }
     let mut producers = vec!["inventory", query_id];
-    let edges = if audit {
+    let mut edges = if audit {
         let schema = GraphChangeCodec::schema().descriptor().clone();
         batch = batch.transformer(Box::new(Audit {
             descriptor: descriptor(
@@ -453,9 +650,49 @@ async fn start(
         }));
         producers.push("audit");
         vec![("inventory", "audit"), ("audit", query_id), (query_id, "alerts")]
+    } else if scenario == Scenario::Normalize {
+        #[cfg(feature = "normalize")]
+        {
+            let normalize = MiddlewareTransformer::new(
+                MiddlewareTransformerDefinition {
+                    id: ComponentId::try_new("normalize")?,
+                    output_stream: StreamId::try_new("normalize/out")?,
+                    middleware: serde_json::from_value(serde_json::json!([
+                        {"kind":"parse_json","name":"parse","config":{
+                            "target_property":"payload","output_property":"parsed","on_error":"fail"
+                        }},
+                        {"kind":"promote","name":"quantity","config":{
+                            "mappings":[{"path":"$.parsed.quantity","target_name":"quantity"}],
+                            "on_conflict":"overwrite","on_error":"fail"
+                        }}
+                    ]))?,
+                    pipeline: vec!["parse".into(), "quantity".into()],
+                },
+                DrasiLib::default_middleware_registry(),
+            )?;
+            batch = batch.transformer(Box::new(normalize));
+            producers.push("normalize");
+            vec![("inventory", "normalize"), ("normalize", query_id), (query_id, "alerts")]
+        }
+        #[cfg(not(feature = "normalize"))]
+        anyhow::bail!("normalize mode requires --features normalize");
     } else {
         vec![("inventory", query_id), (query_id, "alerts")]
     };
+    if scenario == Scenario::Join {
+        batch = batch.source(Box::new(FileSource::<Warehouse>::new(
+            &path.with_file_name("catalog.json"),
+        )?));
+        producers.push("catalog");
+        edges.push(("catalog", query_id));
+    }
+    if let Some(catalog) = catalog {
+        batch = batch.sink(Box::new(QueryResultsOutlet::new(
+            ComponentId::try_new("live-results")?,
+            catalog,
+        )));
+        edges.push((query_id, "live-results"));
+    }
     for producer in producers {
         batch = batch.bind_stream(
             endpoint(producer, "out")?,
@@ -475,7 +712,17 @@ async fn start(
         .await?;
     let setup = async {
         core.start().await?;
-        for component in ["inventory", query_id, "alerts"] {
+        let mut required = vec!["inventory", query_id, "alerts"];
+        if plugins.is_some() {
+            required.push("notifications");
+        }
+        if scenario == Scenario::Join {
+            required.push("catalog");
+        }
+        if scenario == Scenario::Stream {
+            required.push("live-results");
+        }
+        for component in required {
             tokio::time::timeout(
                 Duration::from_secs(5),
                 core.computation_component(component)?.wait_started(),
@@ -489,27 +736,133 @@ async fn start(
     if let Err(error) = setup {
         finish(&core, Err(error)).await?;
     }
-    Ok((core, reader))
+    Ok((core, reader, events))
 }
+
+#[cfg(test)]
+async fn start(
+    path: &Path,
+    scenario: Scenario,
+) -> anyhow::Result<(DrasiLib, watch::Receiver<ResultView>)> {
+    let (core, view, _) = build_application(path, scenario, None).await?;
+    Ok((core, view))
+}
+
+// ANCHOR: host-tracing
+fn init_tracing() -> anyhow::Result<()> {
+    use drasi_lib::observability::{get_or_init_global_registry, ComponentLogLayer};
+    use tracing_subscriber::{prelude::*, EnvFilter};
+
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) => EnvFilter::try_new(value)?,
+        Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
+        Err(error) => return Err(error.into()),
+    };
+    let (layer, reload) = tracing_subscriber::reload::Layer::new(None::<ComponentLogLayer>);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(layer)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .try_init()?;
+    reload.reload(Some(ComponentLogLayer::new(get_or_init_global_registry())))?;
+    Ok(())
+}
+// ANCHOR_END: host-tracing
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let scenario = match std::env::args().nth(1).as_deref() {
+    init_tracing()?;
+    let mut args = std::env::args().skip(1);
+    let mode = args.next();
+    let scenario = match mode.as_deref() {
         None => Scenario::LowStock,
         Some("totals") => Scenario::Totals,
+        Some("totals-filtered") => Scenario::NonemptyTotals,
         Some("audit") => Scenario::Audit,
-        Some(value) => anyhow::bail!("unknown mode {value:?}; use no argument, totals, or audit"),
+        Some("join") => Scenario::Join,
+        Some("sustained") => Scenario::Sustained,
+        Some("normalize") => Scenario::Normalize,
+        Some("reorders") => Scenario::Reorders,
+        Some("stream") => Scenario::Stream,
+        Some("plugins") | Some("--state") | Some("managed") => Scenario::LowStock,
+        Some("help") => {
+            println!(
+                "stockroom [totals|totals-filtered|audit|join|sustained|normalize|reorders|stream]"
+            );
+            println!("stockroom plugins <native-library-directory>  (requires --features plugins)");
+            println!(
+                "stockroom --state <directory> [--hold-alerts] (requires --features persistence)"
+            );
+            println!("stockroom managed <directory> <key-file> [minimum] (requires --features management)");
+            return Ok(());
+        }
+        Some(value) => anyhow::bail!("unknown mode {value:?}; run stockroom help"),
     };
-    let path = Path::new("inventory.json");
-    let (core, _view) = start(path, scenario).await?;
+    if mode.as_deref() == Some("managed") {
+        let directory = args.next().context("managed requires a directory")?;
+        let key = args.next().context("managed requires a 32-byte key file")?;
+        let minimum = args.next().map(|value| value.parse::<i64>()).transpose()?;
+        ensure!(args.next().is_none(), "unexpected additional arguments");
+        #[cfg(feature = "management")]
+        return managed::run(Path::new(&directory), Path::new(&key), minimum).await;
+        #[cfg(not(feature = "management"))]
+        anyhow::bail!("managed {directory} {key} {minimum:?} requires --features management");
+    }
+    if mode.as_deref() == Some("--state") {
+        let directory = args.next().context("--state requires a directory")?;
+        let hold = match args.next().as_deref() {
+            None => false,
+            Some("--hold-alerts") => true,
+            Some(value) => anyhow::bail!("unsupported state option {value:?}"),
+        };
+        ensure!(args.next().is_none(), "unexpected additional arguments");
+        #[cfg(feature = "persistence")]
+        return persistence::run(Path::new(&directory), hold).await;
+        #[cfg(not(feature = "persistence"))]
+        anyhow::bail!("--state {directory} (hold={hold}) requires --features persistence");
+    }
+    let plugins = if mode.as_deref() == Some("plugins") {
+        Some(PathBuf::from(
+            args.next()
+                .context("plugins requires a library directory")?,
+        ))
+    } else {
+        None
+    };
+    ensure!(args.next().is_none(), "unexpected additional arguments");
+    let path = Path::new(if scenario == Scenario::Normalize {
+        "encoded-inventory.json"
+    } else {
+        "inventory.json"
+    });
     println!(
-        "Watching {} for {}. Save the file to change inventory; press Ctrl-C to stop.",
-        path.display(),
-        scenario.query().0
+        "Starting Stockroom for {}. Press Ctrl-C to stop.",
+        scenario.query().0,
     );
-    let work = tokio::signal::ctrl_c()
-        .await
-        .context("cannot listen for Ctrl-C");
+    let (core, _view, mut events) = build_application(path, scenario, plugins.as_deref()).await?;
+    if plugins.is_some() {
+        println!("Ready: HTTP input at 127.0.0.1:9080; SSE output at 127.0.0.1:9081/events.");
+    } else {
+        println!("Ready. Watching {} for saved changes.", path.display());
+    }
+    let work = async {
+        if let Some(events) = &mut events {
+            loop {
+                tokio::select! {
+                    signal = tokio::signal::ctrl_c() => { signal?; break; }
+                    event = events.recv() => {
+                        let event = event.context("live result stream closed or lagged; rebuild the view")?;
+                        println!("stream sequence {}: {} operations",
+                            QueryChangeCodec::query_sequence(&event)?,
+                            event.changes().operations().len());
+                    }
+                }
+            }
+        } else {
+            tokio::signal::ctrl_c().await.context("cannot listen for Ctrl-C")?;
+        }
+        Ok(())
+    }.await;
     finish(&core, work).await
 }
 
@@ -593,6 +946,151 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn warehouse_totals_follow_saved_file_changes() -> anyhow::Result<()> {
         file_changes(Scenario::Totals).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn joined_view_changes_when_either_file_changes() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("inventory.json");
+        let catalog = directory.path().join("catalog.json");
+        save(&path, &inventory(3)).await?;
+        save(
+            &catalog,
+            &serde_json::json!([{"code":"west","name":"West warehouse"}]),
+        )
+        .await?;
+        let (core, mut view) = start(&path, Scenario::Join).await?;
+        let work = async {
+            expect_view(
+                &mut view,
+                vec![serde_json::json!({
+                    "sku":"bolts","quantity":3,"warehouse":"West warehouse"
+                })],
+            )
+            .await?;
+            save(
+                &catalog,
+                &serde_json::json!([{"code":"west","name":"West depot"}]),
+            )
+            .await?;
+            expect_view(
+                &mut view,
+                vec![serde_json::json!({
+                    "sku":"bolts","quantity":3,"warehouse":"West depot"
+                })],
+            )
+            .await?;
+            save(&path, &inventory(8)).await?;
+            expect_view(&mut view, vec![]).await
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sustained_condition_fires_without_another_edit() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("inventory.json");
+        save(&path, &inventory(3)).await?;
+        let (core, mut view) = start(&path, Scenario::Sustained).await?;
+        let work = async {
+            ensure!(
+                tokio::time::timeout(
+                    Duration::from_millis(500),
+                    view.wait_for(|view| !view.0.is_empty())
+                )
+                .await
+                .is_err(),
+                "sustained condition fired early"
+            );
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                view.wait_for(|view| !view.0.is_empty()),
+            )
+            .await??;
+            save(&path, &inventory(8)).await?;
+            expect_view(&mut view, vec![]).await
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    #[cfg(feature = "normalize")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn normalization_uses_the_payload_quantity() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("encoded-inventory.json");
+        let mut data = inventory(8);
+        data[0]["payload"] = serde_json::json!(r#"{"quantity":3}"#);
+        save(&path, &data).await?;
+        let (core, mut view) = start(&path, Scenario::Normalize).await?;
+        let work = async {
+            expect_view(
+                &mut view,
+                vec![serde_json::json!({"sku":"bolts","quantity":3})],
+            )
+            .await?;
+            data[0]["payload"] = serde_json::json!(r#"{"quantity":8}"#);
+            save(&path, &data).await?;
+            expect_view(&mut view, vec![]).await
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn filtered_total_retracts_its_empty_group() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("inventory.json");
+        save(&path, &inventory(3)).await?;
+        let (core, mut view) = start(&path, Scenario::NonemptyTotals).await?;
+        let work = async {
+            expect_view(
+                &mut view,
+                vec![serde_json::json!({"warehouse":"west","total":3.0})],
+            )
+            .await?;
+            save(&path, &serde_json::json!([])).await?;
+            expect_view(&mut view, vec![]).await
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_outlet_stream_preserves_before_and_after() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("inventory.json");
+        save(&path, &inventory(8)).await?;
+        let (core, mut view, events) = build_application(&path, Scenario::Stream, None).await?;
+        let mut events = events.context("stream mode did not create an outlet")?;
+        let work = async {
+            save(&path, &inventory(3)).await?;
+            let added = tokio::time::timeout(Duration::from_secs(5), events.recv()).await??;
+            ensure!(reorder_messages(&added, &ResultView::default())?.contains("reorder created"));
+            expect_view(
+                &mut view,
+                vec![serde_json::json!({"sku":"bolts","quantity":3})],
+            )
+            .await?;
+            let previous = view.borrow().clone();
+            save(&path, &inventory(2)).await?;
+            let updated = tokio::time::timeout(Duration::from_secs(5), events.recv()).await??;
+            let message = reorder_messages(&updated, &previous)?;
+            ensure!(message.contains(r#""quantity":3"#) && message.contains(r#""quantity":2"#));
+            save(&path, &inventory(8)).await?;
+            let deleted = tokio::time::timeout(Duration::from_secs(5), events.recv()).await??;
+            ensure!(reorder_messages(&deleted, &view.borrow())?.contains("reorder cancelled"));
+            Ok(())
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    #[test]
+    fn batch_graph_identity_is_the_public_constant() -> anyhow::Result<()> {
+        ensure!(ComponentBatch::builder().build()?.definition.graph_id == ComponentBatch::GRAPH_ID);
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]

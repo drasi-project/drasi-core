@@ -94,8 +94,11 @@ The main behaviour to understand before using it:
 
 - Adding a component accepts its node; it does not prove successful
   initialization or startup. Use a component handle to wait for readiness.
-- Queued query inputs are ordered by source event time, source order in that
-  query's definition, then source sequence. Unseen events are not held back.
+- Native components default to arrival-order input merging. Explicit
+  `EventTimeAcrossStreams` compares available stream heads while preserving
+  each stream's order. Ordinary source subscriptions use a shared ranked
+  queue with event time and source-declaration rank; neither waits for unseen
+  events from a quiet source.
 - Persistent recovery depends on the source, query storage and reaction
   capabilities. Disk indexes alone do not make all output durable.
 - Preserve stable storage identities when restarting. Always await shutdown.

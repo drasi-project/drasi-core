@@ -1,2 +1,4 @@
 /target/
+/state/
+/stockroom.key
 !/Cargo.lock

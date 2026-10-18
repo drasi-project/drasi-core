@@ -41,7 +41,10 @@ impl WakeupSource for QueryDeliveryWakeup {
 }
 
 impl ContinuousQueryTransformer {
-    pub(crate) fn track_delivery(mut self) -> Self {
+    /// Retain committed output until the graph confirms delivery to its bound
+    /// destinations. Query factories enable this automatically; direct component
+    /// construction must opt in when it needs durable output replay.
+    pub fn with_delivery_tracking(mut self) -> Self {
         self.delivery_tracking = true;
         self.configure_output_binding_state();
         self

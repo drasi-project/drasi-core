@@ -776,7 +776,7 @@ impl TransactionTransformer {
 
     pub fn from_query(query: ContinuousQueryTransformer) -> Self {
         Self {
-            body: TransactionBody::Query(Box::new(query.track_delivery())),
+            body: TransactionBody::Query(Box::new(query.with_delivery_tracking())),
         }
     }
 

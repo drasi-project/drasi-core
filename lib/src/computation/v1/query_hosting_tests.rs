@@ -46,7 +46,9 @@ async fn open(
         true,
     )
     .await?;
-    query = query.with_recovery_scope("instance")?.track_delivery();
+    query = query
+        .with_recovery_scope("instance")?
+        .with_delivery_tracking();
     query.start().await?;
     Ok((query, provider))
 }

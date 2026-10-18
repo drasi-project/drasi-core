@@ -4,6 +4,7 @@
 //! Retained native input, query output and transactional consumer completion.
 //! Run `-- <new-directory> stage`, then `-- <directory> resume`.
 //! Stage deliberately stops before handling an already retained query output.
+//! The developer book's file-driven application lives in docs/developer-guide/stockroom.
 
 #![allow(clippy::print_stdout)]
 
@@ -250,7 +251,7 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
         },
         provider.clone(),
     ).await?.with_recovery_scope(INSTANCE)?;
-    let query = TransactionTransformer::from_query(query);
+    let query = query.with_delivery_tracking();
     let indexes = provider.create_indexes(GRAPH, "alert-completion").await?;
     let contract = ComponentRecovery::transactional_consumer(&indexes)?;
     let runner = Arc::new(Mutex::new(DeliveryRunner::new_transactional(
@@ -365,6 +366,21 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
                 first == retry,
                 "same submission must return the same receipt"
             );
+        } else {
+            let handled = runner.lock().await.progress().await?;
+            let delivery = outgoing.progress().await?;
+            if handled.len() == 1
+                && handled[0].completed_operations == 1
+                && delivery.processed.get("alerts").copied() == Some(delivery.accepted)
+            {
+                ensure!(
+                    core.get_query_results("low-stock").await?
+                        == vec![serde_json::json!({"sku":"bolts","quantity":3})],
+                    "completed alert has inconsistent query state"
+                );
+                println!("nothing pending; the retained alert was already handled");
+                return Ok(());
+            }
         }
         tokio::time::timeout(Duration::from_secs(10), completion.recv())
             .await?
@@ -419,6 +435,7 @@ mod tests {
     async fn retained_output_survives_reconstruction() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         super::run(directory.path(), true).await?;
+        super::run(directory.path(), false).await?;
         super::run(directory.path(), false).await
     }
 }

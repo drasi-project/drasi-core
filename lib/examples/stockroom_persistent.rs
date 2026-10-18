@@ -1,7 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Query-state and source-WAL companion to docs/developer-guide/README.md.
+//! Source/reaction API example with saved query state and a source WAL.
+//! The native-only developer book uses docs/developer-guide/stockroom instead.
 //! Run with `-- <directory> write`, then `-- <directory> read`.
 //! Use a new directory for the write step. Read never submits an input event.
 

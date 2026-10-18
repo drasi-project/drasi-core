@@ -1,0 +1,9 @@
+[
+  {
+    "sku": "bolts",
+    "quantity": 8,
+    "minimum": 5,
+    "warehouse": "west",
+    "payload": "{\"quantity\":3}"
+  }
+]

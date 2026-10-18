@@ -1,7 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Executable companion to docs/developer-guide/README.md.
+//! Source/reaction API and direct-graph comparison example.
+//! The native-only developer book uses docs/developer-guide/stockroom instead.
 //! Run with `cargo run -p drasi-lib --example stockroom -- basic`
 //! or `-- graph`. Both modes check the same inventory changes.
 
@@ -23,7 +24,6 @@ use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, Prope
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
-// guide:result-view
 #[derive(Default)]
 struct ResultView(std::collections::BTreeMap<u64, serde_json::Value>);
 
@@ -57,14 +57,11 @@ impl ResultView {
         }
     }
 }
-// guide:end
 
-// guide:query
 const LOW_STOCK: &str = "
 MATCH (p:Product)
 WHERE p.quantity < p.minimum
 RETURN p.sku AS sku, p.quantity AS quantity";
-// guide:end
 
 fn properties(quantity: i64) -> drasi_core::models::ElementPropertyMap {
     PropertyMapBuilder::new()
@@ -101,7 +98,6 @@ async fn finish(core: &DrasiLib, work: anyhow::Result<()>) -> anyhow::Result<()>
 }
 
 async fn basic() -> anyhow::Result<()> {
-    // guide:basic-build
     let (source, input) = ApplicationSource::new(
         "inventory",
         ApplicationSourceConfig {
@@ -127,7 +123,6 @@ async fn basic() -> anyhow::Result<()> {
         .with_reaction(reaction)
         .build()
         .await?;
-    // guide:end
 
     let work = async {
         let mut view = ResultView::default();
@@ -137,7 +132,6 @@ async fn basic() -> anyhow::Result<()> {
             core.computation_component("alerts")?.wait_started(),
         )
         .await??;
-        // guide:basic-input
         input
             .send_node_insert("bolts", vec!["Product"], properties(3))
             .await?;
@@ -162,7 +156,6 @@ async fn basic() -> anyhow::Result<()> {
         check_rows(&view.0.values().cloned().collect::<Vec<_>>(), None)?;
         println!("basic: deleted {:?}", deleted.results);
         check_rows(&core.get_query_results("low-stock").await?, None)?;
-        // guide:end
         Ok(())
     }
     .await;
@@ -215,7 +208,6 @@ impl ComputationComponent for Inventory {
     }
 }
 
-// guide:native-source
 #[async_trait]
 impl EnvelopeSource for Inventory {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
@@ -234,7 +226,6 @@ impl EnvelopeSource for Inventory {
         }))
     }
 }
-// guide:end
 
 struct Audit {
     descriptor: ComponentDescriptor,
@@ -254,7 +245,6 @@ impl ComputationComponent for Audit {
     }
 }
 
-// guide:transform
 #[async_trait]
 impl Transformer for Audit {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -277,7 +267,6 @@ impl Transformer for Audit {
         }])
     }
 }
-// guide:end
 
 struct Alerts {
     descriptor: ComponentDescriptor,
@@ -297,7 +286,6 @@ impl ComputationComponent for Alerts {
     }
 }
 
-// guide:sink
 #[async_trait]
 impl EnvelopeSink for Alerts {
     fn completion(&self) -> SinkCompletion {
@@ -310,7 +298,6 @@ impl EnvelopeSink for Alerts {
             .context("application stopped receiving alerts")
     }
 }
-// guide:end
 
 async fn graph() -> anyhow::Result<()> {
     let (input, changes) = mpsc::channel(8);
@@ -345,7 +332,6 @@ async fn graph() -> anyhow::Result<()> {
         )?,
         sender,
     };
-    // guide:native-query
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "__drasi_lib_runtime__".into(),
@@ -358,8 +344,6 @@ async fn graph() -> anyhow::Result<()> {
         Arc::new(InMemoryComputationProvider),
     )
     .await?;
-    // guide:end
-    // guide:batch
     let mut batch = ComponentBatch::builder()
         .source(Box::new(inventory))
         .transformer(Box::new(audit))
@@ -382,7 +366,6 @@ async fn graph() -> anyhow::Result<()> {
         .with_components(batch.build()?)
         .build()
         .await?;
-    // guide:end
     let work = async {
         core.start().await?;
         let metadata = ElementMetadata {

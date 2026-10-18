@@ -14,9 +14,15 @@ pub struct ComponentBatch {
 }
 
 impl ComponentBatch {
+    /// Graph identity used by components embedded in a `DrasiLib` instance.
+    ///
+    /// Use this for directly constructed query and resource definitions. The
+    /// enclosing instance ID is a separate application and storage scope.
+    pub const GRAPH_ID: &'static str = INSTANCE_GRAPH_ID;
+
     pub fn builder() -> ComponentBatchBuilder {
         ComponentBatchBuilder {
-            inner: ComputationGraph::builder(INSTANCE_GRAPH_ID).for_additions(),
+            inner: ComputationGraph::builder(Self::GRAPH_ID).for_additions(),
         }
     }
 

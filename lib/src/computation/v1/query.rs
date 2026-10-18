@@ -2505,7 +2505,7 @@ impl ComponentFactory for ContinuousQueryFactory {
             }
         }
         Ok(ConstructedComponent::query(Box::new(
-            query.track_delivery(),
+            query.with_delivery_tracking(),
         )))
     }
 }
