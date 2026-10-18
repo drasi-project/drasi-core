@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -366,35 +367,66 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual("${{ inputs.allow_branch_test == true }}",
                          publish["with"]["allow_branch_test"])
 
-    def test_nightly_selection_accepts_inherited_dispatch_inputs(self):
-        nightly = repair_tests.workflow(ROOT / ".github/workflows/nightly.yml")
+    def test_supported_callers_select_publication_with_inherited_inputs(self):
         publication = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
-        dispatch_defaults = {
-            name: definition["default"]
-            for name, definition in nightly["on"]["workflow_dispatch"]["inputs"].items()
+        definitions = publication["on"]["workflow_call"]["inputs"]
+        defaults = {name: definition["default"] for name, definition in definitions.items()}
+        callers = {
+            filename: repair_tests.workflow(ROOT / ".github/workflows" / filename)
+            for filename in ("nightly.yml", "release-plz.yml")
         }
         selection = publication["jobs"]["select-mode"]["steps"][1]["run"]
-        for branch, branch_test in (("main", False), ("ruokun-niu-core-release-safeguards", True)):
-            with self.subTest(branch=branch), tempfile.TemporaryDirectory() as directory:
+        for filename, event, branch, overrides in (
+            ("nightly.yml", "schedule", "main", {}),
+            ("nightly.yml", "workflow_dispatch", "main", {}),
+            ("nightly.yml", "workflow_dispatch", "ruokun-niu-core-release-safeguards",
+             {"allow_branch_test": True}),
+            ("release-plz.yml", "push", "main", {}),
+            ("release-plz.yml", "workflow_dispatch", "main", {}),
+            ("release-plz.yml", "workflow_dispatch", "main", {"force_publish": True}),
+        ):
+            with self.subTest(caller=filename, event=event, branch=branch, overrides=overrides), \
+                    tempfile.TemporaryDirectory() as directory:
+                caller = callers[filename]
+                dispatch_inputs = {
+                    name: definition["default"]
+                    for name, definition in caller["on"]["workflow_dispatch"]["inputs"].items()
+                } if event == "workflow_dispatch" else {}
+                dispatch_inputs.update(overrides)
+                context = {
+                    "inputs": dispatch_inputs,
+                    "github": {"run_id": "38933476222", "run_attempt": "1"},
+                    "needs": {
+                        job: {"outputs": {"candidate_sha256": "a" * 64}}
+                        for job in ("prepare", "release-plz")
+                    },
+                }
+
+                def substitute(match):
+                    value = context
+                    for key in match[1].strip().split("."):
+                        value = value[key]
+                    return str(value)
+
+                # GitHub can include caller-only dispatch inputs in toJSON(inputs).
+                inputs = defaults | dispatch_inputs
+                for name, value in caller["jobs"]["publish-plugins"]["with"].items():
+                    if isinstance(value, str):
+                        value = (repair_tests.expression(value, context)
+                                 if definitions[name]["type"] == "boolean"
+                                 else re.sub(r"\$\{\{(.*?)\}\}", substitute, value))
+                    inputs[name] = value
                 ref = f"refs/heads/{branch}"
                 outputs = Path(directory) / "outputs"
-                # Include caller inputs, as observed in run 38933476222.
-                inputs = repair_tests.repair.PUBLISH_DEFAULTS | dispatch_defaults | {
-                    "allow_branch_test": branch_test,
-                    "candidate_artifact": "nightly-candidate-38933476222-1",
-                    "candidate_sha256": "d18f9f5f11d2232d29bb8bbf1ac708a9cbb626efbeaa20e0b8427fcc0ae2ff07",
-                    "registry": candidate.TEST_REGISTRY,
-                    "tag": "nightly-38933476222-1",
-                }
                 result = subprocess.run(
                     ["bash", "-e", "-c", selection], cwd=ROOT, capture_output=True, text=True,
                     env=os.environ | {
                         "WORKFLOW_INPUTS": json.dumps(inputs),
                         "GITHUB_REPOSITORY": "drasi-project/drasi-core",
                         "GITHUB_REF": ref,
-                        "GITHUB_EVENT_NAME": "workflow_dispatch",
+                        "GITHUB_EVENT_NAME": event,
                         "GITHUB_WORKFLOW_REF":
-                            f"drasi-project/drasi-core/.github/workflows/nightly.yml@{ref}",
+                            f"drasi-project/drasi-core/.github/workflows/{filename}@{ref}",
                         "GITHUB_RUN_ID": "38933476222", "GITHUB_RUN_ATTEMPT": "1",
                         "GITHUB_OUTPUT": str(outputs),
                     })
@@ -403,6 +435,96 @@ class WorkflowTests(unittest.TestCase):
                     "certificate_identity": candidate.IDENTITY.replace("refs/heads/main", ref),
                     "mode": "publish",
                 }, dict(line.split("=", 1) for line in outputs.read_text().splitlines()))
+
+    def test_release_and_nightly_share_candidate_and_publication_safeguards(self):
+        publication = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
+        defaults = {
+            name: definition["default"]
+            for name, definition in publication["on"]["workflow_call"]["inputs"].items()
+        }
+        for filename, prepare_name, prefix, registry in (
+            ("nightly.yml", "prepare", "nightly", candidate.TEST_REGISTRY),
+            ("release-plz.yml", "release-plz", "release", "ghcr.io/drasi-project"),
+        ):
+            with self.subTest(caller=filename):
+                jobs = repair_tests.workflow(ROOT / ".github/workflows" / filename)["jobs"]
+                prepare = jobs[prepare_name]
+                steps = prepare["steps"]
+                self.assertIn("./.github/actions/install-release-tools",
+                              [step.get("uses") for step in steps])
+                freeze = next(step for step in steps if step.get("id") == "freeze")
+                self.assertIn("python3 .github/scripts/release-candidate.py freeze", freeze["run"])
+                self.assertEqual("${{ steps.freeze.outputs.candidate_sha256 }}",
+                                 prepare["outputs"]["candidate_sha256"])
+                self.assertNotIn("cargo update", "\n".join(step.get("run", "") for step in steps))
+
+                publish = jobs["publish-plugins"]
+                self.assertEqual("./.github/workflows/publish-plugins.yml", publish["uses"])
+                effective = defaults | publish["with"]
+                self.assertIs(effective["sign"], True)
+                self.assertIs(effective["dry_run"], False)
+                self.assertIs(effective["skip_visibility"], False)
+                self.assertEqual(registry, effective["registry"])
+                self.assertEqual("", effective["ref"])
+                self.assertEqual("", effective["pre_release"])
+                tag = "nightly-${{ github.run_id }}-${{ github.run_attempt }}" if prefix == "nightly" else ""
+                self.assertEqual(tag, effective["tag"])
+                artifact = f"{prefix}-candidate-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
+                self.assertEqual(artifact, effective["candidate_artifact"])
+                self.assertTrue(any(
+                    step.get("uses", "").startswith("actions/upload-artifact@")
+                    and step["with"]["name"] == artifact for step in steps))
+                self.assertEqual(f"${{{{ needs.{prepare_name}.outputs.candidate_sha256 }}}}",
+                                 effective["candidate_sha256"])
+                self.assertEqual({"contents": "read", "packages": "write", "id-token": "write"},
+                                 publish["permissions"])
+                self.assertEqual({"PACKAGES_ADMIN_TOKEN": "${{ secrets.PACKAGES_ADMIN_TOKEN }}"},
+                                 publish["secrets"])
+
+    def test_release_preparation_and_dry_run_gates_remain_distinct_from_nightly(self):
+        jobs = repair_tests.workflow(ROOT / ".github/workflows/release-plz.yml")["jobs"]
+        steps = jobs["release-plz"]["steps"]
+        release_pr = next(step for step in steps if "release-plz release-pr " in step.get("run", ""))
+        freeze = next(step for step in steps if step.get("id") == "freeze")
+        publish_crates = next(step for step in steps if step.get("name") == "Publish crates")
+        published = next(step for step in steps if step.get("id") == "publish_result")
+        self.assertIn("release-plz release ", publish_crates["run"])
+        self.assertIn("release-candidate.py check", published["run"])
+        self.assertLess(steps.index(freeze), steps.index(publish_crates))
+        self.assertLess(steps.index(publish_crates), steps.index(published))
+        for release_commit, force, dry_run in (
+            (False, False, False), (True, False, False), (False, True, False),
+            (True, True, False), (True, False, True), (False, True, True),
+        ):
+            with self.subTest(release_commit=release_commit, force=force, dry_run=dry_run):
+                context = {
+                    "inputs": {"force_publish": force, "dry_run": dry_run},
+                    "steps": {"check_release": {"outputs": {
+                        "is_release": str(release_commit).lower(),
+                    }}},
+                }
+                self.assertEqual(not (release_commit or force or dry_run),
+                                 repair_tests.expression(release_pr["if"], context))
+                for step in (freeze, publish_crates, published):
+                    self.assertEqual((release_commit or force) and not dry_run,
+                                     repair_tests.expression(step["if"], context))
+        self.assertEqual("release-plz", jobs["publish-plugins"]["needs"])
+        for result in ("true", "false", ""):
+            self.assertEqual(result == "true", repair_tests.expression(
+                jobs["publish-plugins"]["if"],
+                {"needs": {"release-plz": {"outputs": {"published": result}}}}))
+
+        nightly = repair_tests.workflow(ROOT / ".github/workflows/nightly.yml")["jobs"]
+        prepare_steps = nightly["prepare"]["steps"]
+        update = next(step for step in prepare_steps if step.get("run") == "release-plz update")
+        freeze = next(step for step in prepare_steps if step.get("id") == "freeze")
+        self.assertLess(prepare_steps.index(update), prepare_steps.index(freeze))
+        self.assertEqual("prepare", nightly["package"]["needs"])
+        self.assertTrue(any("release-candidate.py package " in step.get("run", "")
+                            for step in nightly["package"]["steps"]))
+        self.assertNotIn("release-plz release", json.dumps(nightly))
+        self.assertEqual({"prepare", "package"}, set(nightly["publish-plugins"]["needs"]))
+        self.assertEqual({"prepare", "package", "publish-plugins"}, set(nightly["handoff"]["needs"]))
 
     def test_all_targets_consume_same_candidate_and_keep_native_checks(self):
         document = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")

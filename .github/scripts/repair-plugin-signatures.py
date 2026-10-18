@@ -172,6 +172,18 @@ def selection():
     inputs = parse_json(os.environ.get("WORKFLOW_INPUTS", ""), "workflow inputs")
     require(isinstance(inputs, dict), "Workflow inputs must be an object")
     repair_keys = {"repair_batch", "repair_action"}
+    # Reusable workflows can inherit caller-only workflow_dispatch inputs.
+    if "force_publish" in inputs:
+        require(type(inputs["force_publish"]) is bool
+                and not (set(inputs) & repair_keys)
+                and os.environ.get("GITHUB_REPOSITORY") == REPOSITORY
+                and os.environ.get("GITHUB_REF") == "refs/heads/main"
+                and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and os.environ.get("GITHUB_WORKFLOW_REF") ==
+                f"{REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/main",
+                "force_publish must be boolean caller metadata from the official main "
+                "release-plz workflow_dispatch, without a repair selection")
+        inputs.pop("force_publish")
     require(not (set(inputs) - set(PUBLISH_DEFAULTS) - repair_keys),
             "Unsupported workflow input")
     if not (set(inputs) & repair_keys):

@@ -166,6 +166,59 @@ Expired/missing artifacts require a new explicit preparation, not a silent
 fallback. The reusable workflow's `candidate_artifact` and `candidate_sha256`
 inputs are an internal same-run contract, not arbitrary cross-run download inputs.
 
+#### Release-nightly parity contract
+
+Changes to release preparation, caller inputs, publishing, or safeguards must
+review **both** [release-plz.yml](release-plz.yml) and [nightly.yml](nightly.yml)
+in the same PR. Keep common behavior in
+[publish-plugins.yml](publish-plugins.yml),
+[install-release-tools](../actions/install-release-tools/action.yml),
+[release-candidate.py](../scripts/release-candidate.py),
+[release-plz.toml](../../release-plz.toml), and [xtask](../../xtask/src/main.rs),
+rather than duplicating it between callers.
+
+| Area | Production release | Nightly rehearsal |
+|------|--------------------|-------------------|
+| Version preparation | `release-plz release-pr` prepares reviewed changes; publishing uses the merged release revision | `release-plz update` prepares changes locally, without a PR or commit |
+| Dependencies | Committed lockfile baseline; release preparation reconciles workspace versions without a broad refresh | Same configuration and baseline policy; no fresh-dependency mode |
+| Prepared candidate | Shared freeze helper runs before crate publication; its artifact and hash feed every plugin target | Same helper runs after version preparation; its artifact and hash feed packaging and every plugin target |
+| Crates | `release-plz release` publishes crates and creates official release records; `publish_no_verify = true` skips the isolated verification build | `cargo package --locked` verifies extracted package sources and retains archives; no crates.io writes or official release records |
+| Plugins and catalog | Shared eight-target publisher, native/glibc checks, signing, verification, and public visibility checks | Same implementation and required checks, but plugins, catalog, and signatures use the isolated nightly namespace and unique run/attempt plugin tags |
+| Completion | Successful crate publication gates plugins; required plugin/catalog failures fail the workflow | Packaging and all publication/visibility checks gate the complete-inventory handoff; downstream runtime E2E remains separate |
+
+For each changed release step, either rehearse it through the same implementation
+or document why it is production-only and how it is validated separately. Do not
+weaken nightly signing, visibility, locked-build, or complete-inventory checks to
+make it match a failing production path. Reviewers should check the job dependency
+gates and caller inputs, not just whether one nightly run is green.
+
+GitHub's reusable-workflow `inputs` context can contain caller-only dispatch
+fields. The publication selector accepts the boolean `force_publish` field only
+from an official `main` manual release call, without any repair selection.
+It is caller metadata, not a plugin-publication or signature-repair override.
+Unknown fields, invalid types, and unexpected caller contexts must still fail.
+New caller inputs must extend the relevant contract tests instead of disabling
+strict validation or silently ignoring arbitrary fields.
+
+The [candidate tests](../scripts/release-candidate.test.py) parse the workflow
+YAML and exercise scheduled/manual nightly, temporary branch rehearsal, automatic
+release, manual release, and force-publish recovery selection. They also check
+shared candidate/tooling/publication safeguards and intentional preparation and
+dry-run differences. The [repair tests](../scripts/repair-plugin-signatures.test.py)
+cover strict input validation and repair isolation. Both suites already run in
+[test.yml](test.yml). Run them when changing these contracts:
+
+```bash
+python3 .github/scripts/release-candidate.test.py
+python3 .github/scripts/repair-plugin-signatures.test.py
+actionlint .github/workflows/nightly.yml .github/workflows/release-plz.yml .github/workflows/publish-plugins.yml
+```
+
+These focused checks do not execute production publication or downstream runtime
+E2E, and cannot automatically establish parity for an arbitrary new release step.
+Update the table and behavioral tests with deliberate changes; do not merely
+change assertions to hide an unintended difference.
+
 #### Release Flow
 
 1. **Merge feature/fix PRs to main** → Workflow creates a "Release PR" with:

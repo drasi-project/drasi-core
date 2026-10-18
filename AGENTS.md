@@ -22,6 +22,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 - PRs are squash-merged and the PR title is parsed as a conventional commit by release-plz/git-cliff for version bumps and changelogs - pre-1.0, `fix:`/`feat:` bump the patch version and `feat!:` the minor
 - Never hand-edit CHANGELOG.md files or crate version numbers - release-plz generates both
 - Root Cargo.lock is committed: normal release/nightly preparation preserves external dependency versions; update dependencies explicitly and commit the lock diff. Plugin metadata and builds require --locked; all eight jobs consume one hashed prepared candidate.
+- When changing release preparation, workflow inputs, publishing, or safeguards, review release/nightly parity in the same PR: keep common behavior shared, document intentional differences, and update the caller/contract regressions. Follow the [release/nightly parity contract](.github/workflows/readme.md#release-nightly-parity-contract); a green nightly alone does not validate every production caller.
 - Never add a dependency that installs a `#[global_allocator]` (jemalloc, mimalloc, ...) - cargo-deny CI fails the PR; host and plugin cdylibs must share the System allocator
 - External contributors: the PR must link an issue the author is assigned to, or a bot flags it
 - Merging the auto-generated release PR publishes to crates.io and pushes cosign-signed plugin OCI images to ghcr.io; released linux-gnu plugins are held to a CI-enforced glibc 2.28 floor, so a dependency bump alone can break the release

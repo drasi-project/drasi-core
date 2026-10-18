@@ -64,6 +64,8 @@ def expression(source, context):
     for token in tokens:
         if token in ("&&", "||", "!"):
             translated.append({"&&": "and", "||": "or", "!": "not"}[token])
+        elif token in ("true", "false"):
+            translated.append(repr(token == "true"))
         elif token in ("==", "!=", "(", ")") or token.startswith("'"):
             translated.append(token)
         else:
@@ -496,6 +498,62 @@ class RepairTests(unittest.TestCase):
                 self.assertEqual(0, code, logs)
                 self.assertEqual("publish", outputs["mode"])
                 self.assertEqual([], self.fixture.calls)
+
+    def test_force_publish_is_only_caller_metadata_for_manual_release_publication(self):
+        self.fixture.env["GITHUB_WORKFLOW_REF"] = (
+            f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/main")
+        for value in (False, True):
+            with self.subTest(force_publish=value):
+                self.fixture.inputs = repair.PUBLISH_DEFAULTS | {"force_publish": value}
+                code, _, logs, outputs, _ = self.fixture.invoke("select")
+                self.assertEqual(0, code, logs)
+                self.assertEqual("publish", outputs["mode"])
+                self.assertEqual([], self.fixture.calls)
+
+    def test_force_publish_rejects_wrong_types_contexts_and_unknown_inputs(self):
+        self.fixture.env["GITHUB_WORKFLOW_REF"] = (
+            f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/main")
+        self.fixture.inputs = repair.PUBLISH_DEFAULTS | {"force_publish": False}
+        for value in ("true", "false", "", None, 0, 1, [], {}):
+            with self.subTest(value=value), patch.dict(self.fixture.inputs, {"force_publish": value}):
+                self.assert_failure("select", "force_publish")
+                self.assertEqual([], self.fixture.calls)
+        for key, value in (
+            ("GITHUB_REPOSITORY", "someone/drasi-core"),
+            ("GITHUB_REF", "refs/heads/topic"),
+            ("GITHUB_REF", "refs/tags/v1"),
+            ("GITHUB_EVENT_NAME", "push"),
+            ("GITHUB_EVENT_NAME", "pull_request"),
+            ("GITHUB_EVENT_NAME", "workflow_call"),
+            ("GITHUB_WORKFLOW_REF", repair.WORKFLOW_REF),
+            ("GITHUB_WORKFLOW_REF",
+             f"{repair.REPOSITORY}/.github/workflows/nightly.yml@refs/heads/main"),
+            ("GITHUB_WORKFLOW_REF",
+             f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/topic"),
+        ):
+            with self.subTest(context=key, value=value), patch.dict(self.fixture.env, {key: value}):
+                self.assert_failure("select", "force_publish")
+                self.assertEqual([], self.fixture.calls)
+        with patch.dict(self.fixture.inputs, {"unknown_input": True}):
+            self.assert_failure("select", "Unsupported workflow input")
+            self.assertEqual([], self.fixture.calls)
+
+    def test_force_publish_never_relaxes_repair_selection(self):
+        self.fixture.env["GITHUB_WORKFLOW_REF"] = (
+            f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/main")
+        for value in (False, True):
+            for selection in (
+                {"repair_batch": "none", "repair_action": "plan"},
+                {"repair_batch": BATCH, "repair_action": "plan"},
+                {"repair_batch": BATCH, "repair_action": "execute"},
+                {"repair_batch": BATCH}, {"repair_action": "execute"},
+            ):
+                with self.subTest(force_publish=value, selection=selection):
+                    self.fixture.inputs = repair.PUBLISH_DEFAULTS | {
+                        "force_publish": value,
+                    } | selection
+                    self.assert_failure("select", "force_publish")
+                    self.assertEqual([], self.fixture.calls)
 
     def test_bad_inventory_is_rejected_before_any_network_request(self):
         for field, value in (
