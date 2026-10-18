@@ -14,11 +14,46 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unicodedata
 
 
 BOOK = Path(__file__).resolve().parent
 REPOSITORY = BOOK.parents[2]
+RUST_BLOCK = re.compile(
+    r"<!-- (excerpt|illustration): ([^\n]+) -->\s*```rust\n(.*?)\n```", re.S
+)
+
+
+def rust_blocks(text):
+    blocks = list(RUST_BLOCK.finditer(text))
+    if len(blocks) != len(re.findall(r"^```rust$", text, re.M)):
+        raise SystemExit("Every Rust fence needs an excerpt or illustration marker.")
+    return blocks
+
+
+def source_excerpt(reference):
+    filename, anchor = reference.split("#", 1)
+    path = (BOOK / filename).resolve()
+    if not path.is_relative_to(BOOK / "stockroom"):
+        raise SystemExit(f"Excerpt must come from the compiled starter: {reference}")
+    source = path.read_text()
+    start = f"// ANCHOR: {anchor}\n"
+    end = f"// ANCHOR_END: {anchor}"
+    if source.count(start) != 1 or source.count(end) != 1:
+        raise SystemExit(f"Missing or duplicate source anchor: {reference}")
+    return textwrap.dedent(source.split(start, 1)[1].split(end, 1)[0]).strip()
+
+
+def sync_excerpts():
+    path = BOOK / "README.md"
+    text = path.read_text()
+    rust_blocks(text)
+    def replace(match):
+        if match[1] == "illustration":
+            return match[0]
+        return f"<!-- excerpt: {match[2]} -->\n```rust\n{source_excerpt(match[2])}\n```"
+    path.write_text(RUST_BLOCK.sub(replace, text))
 
 
 def anchors(path):
@@ -69,149 +104,98 @@ def check_book():
         failures.append("each numbered chapter must have one summary")
     if re.search(r"cargo (?:run|test|doc|build) --locked -p ", text):
         failures.append("workspace commands must permit first-run lockfile creation")
-    excerpts = re.findall(
-        r"<!-- excerpt: ([^#\s]+)#([^\s]+) -->\s*```rust\n(.*?)\n```",
-        text,
-        re.S,
-    )
-    for filename, anchor, excerpt in excerpts:
-        source = (BOOK / filename).read_text()
-        start = f"// ANCHOR: {anchor}\n"
-        end = f"// ANCHOR_END: {anchor}"
-        if source.count(start) != 1 or source.count(end) != 1:
-            failures.append(f"missing or duplicate source excerpt {filename}#{anchor}")
-            continue
-        actual = source.split(start, 1)[1].split(end, 1)[0]
-        if re.sub(r"\s+", " ", actual).strip() != re.sub(r"\s+", " ", excerpt).strip():
-            failures.append(f"excerpt drift: {filename}#{anchor}")
+    excerpts = [block for block in rust_blocks(text) if block[1] == "excerpt"]
+    for block in excerpts:
+        if source_excerpt(block[2]) != textwrap.dedent(block[3]).strip():
+            failures.append(f"excerpt drift: {block[2]}; run with --sync-excerpts")
     if failures:
         raise SystemExit("\n".join(failures))
     print(f"Checked {links} local links, 18 chapters, and {len(excerpts)} source-linked excerpts.", flush=True)
 
 
 def compile_contexts(project):
-    """Give contextual excerpts their surrounding types without executing them.
-
-    Each entry corresponds to one Rust fence, in book order. The code inside
-    the fence always comes from the book, never from a second maintained copy.
-    Adding/removing a fence requires updating its explicit context here.
-    """
-    blocks = re.findall(r"^```rust\n(.*?)^```", (BOOK / "README.md").read_text(), re.M | re.S)
+    """Compile named illustrations; exact excerpts compile in the real starter."""
+    blocks = rust_blocks((BOOK / "README.md").read_text())
+    illustrations = {block[2]: block[3] for block in blocks if block[1] == "illustration"}
+    if len(illustrations) != sum(block[1] == "illustration" for block in blocks):
+        raise SystemExit("Illustration IDs must be unique.")
     provider = "provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>"
     query = "query: ContinuousQueryTransformer"
     batch = "mut batch: ComponentBatchBuilder"
-    contexts = [
-        "",  # query construction
-        "inventory: Inventory, query: ContinuousQueryTransformer, alerts: Alerts",
-        batch,
-        batch,
-        "core: &DrasiLib, results: QueryResults",
-        "product",
-        "items",
-        "items",
-        "source-method",
-        "",
-        "sink-impl",
-        "items",
-        "view-impl",
-        "results: QueryResults",
-        query,
-        "audit-method",
-        "",
-        "expression",
-        "items",
-        "expression",
-        "",
-        "items",
-        "",
-        f"definition: ContinuousQueryDefinition, {provider}",
-        query,
-        "",
-        f"sqlite_config: drasi_source_sqlite::native::SqliteConfig, {query}",
-        f"{query}, bootstrap_provider: Arc<dyn ComputationBootstrapProvider>",
-        "items",
-        "items",
-        provider,
-        "admission-method",
-        "admission: Arc<SourceAdmission>, input: ChangeEnvelope",
-        provider,
-        f"outgoing: Arc<QosChannel>, {batch}",
-        "items",
-        provider,
-        "items",
-        "items",
-        "items",
-        f"definition: TransactionTransformerDefinition, registry: Arc<TransactionalTransformerRegistry>, {provider}",
-        "channel: Arc<QosChannel>, journal_resource_id: ResourceId, group_resource_id: ResourceId",
-        "",
-        f"{provider}, {batch}, indexes: ResourceId, specification: ComponentSpecification, factory: Arc<dyn ComponentFactory>",
-        "items",
-        "",
-        "items",
-        batch,
-        "factories: FactoryRegistry, resources: Arc<dyn drasi_lib::management::ManagementResourceResolver>, store: Arc<dyn drasi_lib::management::ConfigurationStore>",
-        "items",
-        "core: &DrasiLib",
-        "",
-        "items",
-        "items",
-        "path: &Path, mut factories: FactoryRegistry",
-    ]
-    if len(blocks) != len(contexts):
-        raise SystemExit(f"{len(blocks)} Rust fences need explicit contexts; configured {len(contexts)}")
+    contexts = {
+        "component-members": "inventory: Inventory, query: ContinuousQueryTransformer, alerts: Alerts",
+        "input-edge": batch,
+        "readiness": "core: &DrasiLib, results: QueryResults",
+        "quantity-patch": "items",
+        "synthetic-join": "",
+        "query-snapshot": "results: QueryResults",
+        "live-catalog": query,
+        "source-pipeline": "expression",
+        "continuation-chunk": "items",
+        "byte-pipe": "expression",
+        "time-merge": "",
+        "native-index-provider": "",
+        "query-scope": f"definition: ContinuousQueryDefinition, {provider}",
+        "delivery-tracking": query,
+        "recovery-requirement": "",
+        "sqlite-bootstrap": f"sqlite_config: drasi_source_sqlite::native::SqliteConfig, {query}",
+        "bootstrap-binding": f"{query}, bootstrap_provider: Arc<dyn ComputationBootstrapProvider>",
+        "channel-definition": "items",
+        "envelope-codec": "items",
+        "source-admission": provider,
+        "admission-contract": "admission-method",
+        "admission-retry": "admission: Arc<SourceAdmission>, input: ChangeEnvelope",
+        "journal-binding": f"journal: Arc<QosChannel>, {batch}",
+        "checkpointed-view": "items",
+        "external-handler": "items",
+        "handled-counter": "items",
+        "source-transaction": "items",
+        "transaction-container": f"definition: TransactionTransformerDefinition, registry: Arc<TransactionalTransformerRegistry>, {provider}",
+        "shared-pipe": "channel: Arc<QosChannel>, journal_resource_id: ResourceId, group_resource_id: ResourceId",
+        "query-factory": "",
+        "provider-resource": f"{provider}, {batch}, indexes: ResourceId, specification: ComponentSpecification, factory: Arc<dyn ComponentFactory>",
+        "identity-provider": "items",
+        "secret-reference": "",
+        "secret-resolver": "items",
+        "apply-configuration": "items",
+        "restart-preview": "core: &DrasiLib",
+        "relationship-policy": "",
+        "owned-worker": "items",
+        "quantity-validator": "items",
+        "application-channel": "",
+    }
+    missing = illustrations.keys() - contexts.keys()
+    if missing:
+        raise SystemExit(f"Missing illustration contexts: {sorted(missing)}")
     common = """#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments)]
 use crate::*;
+use crate::persistence::INSTANCE;
 use drasi_core::interface::FailureMode;
 use drasi_source_sqlite::native::SqliteSource;
 """
     # These shared helper functions are also taken directly from their fences.
-    common += blocks[28] + "\n" + blocks[29] + "\n"
+    common += illustrations["channel-definition"] + "\n" + illustrations["envelope-codec"] + "\n"
     modules = [common]
-    for number, (code, context) in enumerate(zip(blocks, contexts), 1):
+    for name, code in illustrations.items():
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+            raise SystemExit(f"Invalid illustration ID: {name}")
+        context = contexts[name]
         if context == "items":
             body = code
-        elif context == "product":
-            body = "struct Product { sku: String, quantity: i64, minimum: i64, warehouse: String }\n" + code
-        elif context == "view-impl":
-            body = "struct ResultView(HashMap<RecordId, serde_json::Value>);\n" + code
-        elif context == "source-method":
-            body = (
-                "impl Inventory { fn excerpt(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {\n"
-                + code + "\nOk(None)\n} }"
-            )
-        elif context == "audit-method":
-            body = (
-                "impl Audit { async fn excerpt(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {\n"
-                + code + "\n} }"
-            )
         elif context == "admission-method":
             body = "struct Admitted { admission: Arc<SourceAdmission> }\nimpl Admitted {\n" + code + "\n}"
-        elif context == "sink-impl":
-            body = """struct Alerts {
-    descriptor: ComponentDescriptor,
-    query_id: &'static str,
-    view: watch::Sender<ResultView>,
-    output: tokio::io::Stdout,
-}
-#[async_trait]
-impl ComputationComponent for Alerts {
-    fn descriptor(&self) -> &ComponentDescriptor { &self.descriptor }
-    async fn start(&mut self) -> anyhow::Result<()> { Ok(()) }
-    async fn stop(&mut self) -> anyhow::Result<()> { Ok(()) }
-}
-""" + code
         elif context == "expression":
             body = "fn excerpt() -> anyhow::Result<()> { let _value = " + code + ";\nOk(())\n}"
         else:
             body = f"async fn excerpt({context}) -> anyhow::Result<()> {{\n{code}\nOk(())\n}}"
-        modules.append(f"mod fence_{number:02} {{\nuse super::*;\n{body}\n}}\n")
+        modules.append(f"mod {name.replace('-', '_')} {{\nuse super::*;\n{body}\n}}\n")
     (project / "src/book_fragments.rs").write_text("\n".join(modules))
     with (project / "src/main.rs").open("a") as source:
         source.write(
             '\n#[cfg(all(test, feature = "normalize", feature = "persistence", '
-            'feature = "plugins", feature = "management"))]\nmod book_fragments;\n'
+            'feature = "plugins", feature = "management", feature = "callbacks"))]\nmod book_fragments;\n'
         )
-    print(f"Compiling all {len(blocks)} Rust fences in explicit lesson contexts.", flush=True)
+    print(f"Compiling {len(illustrations)} illustrations and the source for {len(blocks)-len(illustrations)} exact excerpts.", flush=True)
 
 
 def test_starter():
@@ -227,7 +211,7 @@ def test_starter():
         compile_contexts(project)
         for arguments in [
             ["test", "--locked", "--quiet"],
-            ["test", "--locked", "--quiet", "--features", "normalize,persistence,plugins,management"],
+            ["test", "--locked", "--quiet", "--features", "normalize,persistence,plugins,management,callbacks"],
         ]:
             subprocess.run(["cargo", *arguments], cwd=project, env=environment, check=True)
 
@@ -235,7 +219,10 @@ def test_starter():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test", action="store_true", help="also compile and test the complete starter")
+    parser.add_argument("--sync-excerpts", action="store_true", help="refresh marked excerpts from source")
     options = parser.parse_args()
+    if options.sync_excerpts:
+        sync_excerpts()
     check_book()
     if options.test:
         test_starter()

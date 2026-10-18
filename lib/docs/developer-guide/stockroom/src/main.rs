@@ -26,6 +26,7 @@ use tokio::{
     sync::{broadcast, watch},
 };
 
+mod cli;
 #[cfg(feature = "management")]
 mod managed;
 #[cfg(feature = "plugins")]
@@ -59,6 +60,7 @@ enum Scenario {
     Reorders,
     Stream,
     NonemptyTotals,
+    Callback,
 }
 
 impl Scenario {
@@ -68,9 +70,12 @@ impl Scenario {
             Self::NonemptyTotals => ("stock-by-warehouse", NONEMPTY_TOTALS),
             Self::Join => ("warehouse-alerts", WAREHOUSE_ALERTS),
             Self::Sustained => ("sustained-low-stock", SUSTAINED),
-            Self::LowStock | Self::Audit | Self::Normalize | Self::Reorders | Self::Stream => {
-                ("low-stock", LOW_STOCK)
-            }
+            Self::LowStock
+            | Self::Audit
+            | Self::Normalize
+            | Self::Reorders
+            | Self::Stream
+            | Self::Callback => ("low-stock", LOW_STOCK),
         }
     }
 }
@@ -123,6 +128,7 @@ fn metadata(sku: &str, time: u64) -> ElementMetadata {
 }
 // ANCHOR_END: element-metadata
 
+// ANCHOR: product-element
 impl Product {
     fn element(&self, time: u64) -> Element {
         let mut properties = serde_json::json!({
@@ -140,6 +146,8 @@ impl Product {
         }
     }
 }
+
+// ANCHOR_END: product-element
 
 #[cfg(any(test, feature = "persistence"))]
 fn parse_inventory(text: &str) -> anyhow::Result<BTreeMap<String, Product>> {
@@ -310,6 +318,7 @@ impl<T: FileRow> ComputationComponent for FileSource<T> {
 impl<T: FileRow> EnvelopeSource for FileSource<T> {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         loop {
+            // ANCHOR: source-publication
             if let Some(change) = self.pending.pop_front() {
                 self.sequence = self.sequence.checked_add(1).context("sequence exhausted")?;
                 return Ok(Some(OutputEnvelope {
@@ -322,6 +331,7 @@ impl<T: FileRow> EnvelopeSource for FileSource<T> {
                     )?,
                 }));
             }
+            // ANCHOR_END: source-publication
             self.poll.tick().await;
             match self.reload().await {
                 Ok(()) => {
@@ -367,6 +377,7 @@ impl ComputationComponent for Audit {
     }
 }
 
+// ANCHOR: audit-transform
 #[async_trait]
 impl Transformer for Audit {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -390,9 +401,14 @@ impl Transformer for Audit {
     }
 }
 
+// ANCHOR_END: audit-transform
+
+// ANCHOR: view-shape
 #[derive(Clone, Default)]
 struct ResultView(HashMap<RecordId, serde_json::Value>);
+// ANCHOR_END: view-shape
 
+// ANCHOR: view-methods
 impl ResultView {
     fn apply(&mut self, envelope: &ChangeEnvelope) -> anyhow::Result<()> {
         ensure!(
@@ -426,6 +442,8 @@ impl ResultView {
         rows
     }
 }
+
+// ANCHOR_END: view-methods
 
 struct Alerts {
     descriptor: ComponentDescriptor,
@@ -497,6 +515,7 @@ impl ComputationComponent for Alerts {
     }
 }
 
+// ANCHOR: alert-sink
 #[async_trait]
 impl EnvelopeSink for Alerts {
     fn completion(&self) -> SinkCompletion {
@@ -537,15 +556,69 @@ impl EnvelopeSink for Alerts {
     }
 }
 
+// ANCHOR_END: alert-sink
+
 async fn finish(core: &DrasiLib, work: anyhow::Result<()>) -> anyhow::Result<()> {
-    let cleanup = core.shutdown().await;
-    if let Err(error) = &cleanup {
-        eprintln!("Stockroom shutdown failed: {error:#}");
+    let cleanup = core.shutdown().await.map_err(anyhow::Error::from);
+    match (work, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => Err(drasi_lib::error::OperationFailures::new(
+            "Stockroom work and cleanup failed",
+            vec![error, cleanup],
+        )
+        .into()),
     }
-    work?;
-    cleanup?;
-    Ok(())
 }
+
+#[cfg(feature = "callbacks")]
+// ANCHOR: application-callback
+fn application_callback(view: watch::Sender<ResultView>) -> anyhow::Result<Box<dyn EnvelopeSink>> {
+    use drasi_reaction_application::NativeApplicationReaction;
+    let sink = NativeApplicationReaction::callback(
+        "alerts",
+        QueryChangeCodec::schema().descriptor().clone(),
+        move |input: InputEnvelope| {
+            let view = view.clone();
+            async move {
+                let mut next = view.borrow().clone();
+                next.apply(&input.envelope)?;
+                let message = format!("callback: {}\n", serde_json::to_string(&next.rows())?);
+                let mut output = tokio::io::stdout();
+                output.write_all(message.as_bytes()).await?;
+                output.flush().await?;
+                view.send_replace(next);
+                Ok(())
+            }
+        },
+    )?;
+    Ok(Box::new(sink))
+}
+// ANCHOR_END: application-callback
+
+#[cfg(feature = "normalize")]
+// ANCHOR: normalization
+fn normalization() -> anyhow::Result<MiddlewareTransformer> {
+    MiddlewareTransformer::new(
+        MiddlewareTransformerDefinition {
+            id: ComponentId::try_new("normalize")?,
+            output_stream: StreamId::try_new("normalize/out")?,
+            middleware: serde_json::from_value(serde_json::json!([
+                {"kind":"parse_json","name":"read-payload","config":{
+                    "target_property":"payload","output_property":"parsed","on_error":"fail",
+                    "max_json_size":65536,"max_nesting_depth":8
+                }},
+                {"kind":"promote","name":"quantity-at-root","config":{
+                    "mappings":[{"path":"$.parsed.quantity","target_name":"quantity"}],
+                    "on_conflict":"overwrite","on_error":"fail"
+                }}
+            ]))?,
+            pipeline: vec!["read-payload".into(), "quantity-at-root".into()],
+        },
+        DrasiLib::default_middleware_registry(),
+    )
+}
+// ANCHOR_END: normalization
 
 async fn build_application(
     path: &Path,
@@ -559,21 +632,30 @@ async fn build_application(
     let audit = matches!(scenario, Scenario::Audit);
     let (query_id, query_text) = scenario.query();
     let (view, reader) = watch::channel(ResultView::default());
-    let alerts = Alerts {
-        descriptor: descriptor(
-            "alerts",
-            &[(
-                "in",
-                PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
-            )],
-        )?,
-        query_id,
-        view,
-        output: tokio::io::stdout(),
-        audit,
-        reorders: scenario == Scenario::Reorders,
-        display: scenario != Scenario::Stream,
+    let alerts: Box<dyn EnvelopeSink> = if scenario == Scenario::Callback {
+        #[cfg(feature = "callbacks")]
+        {
+            application_callback(view)?
+        }
+        #[cfg(not(feature = "callbacks"))]
+        anyhow::bail!("callback mode requires --features callbacks");
+    } else {
+        Box::new(Alerts {
+            descriptor: descriptor(
+                "alerts",
+                &[(
+                    "in",
+                    PortDirection::Input,
+                    QueryChangeCodec::schema().descriptor().clone(),
+                )],
+            )?,
+            query_id,
+            view,
+            output: tokio::io::stdout(),
+            audit,
+            reorders: scenario == Scenario::Reorders,
+            display: scenario != Scenario::Stream,
+        })
     };
     let execution = if scenario == Scenario::Join {
         use drasi_lib::config::{QueryJoinConfig, QueryJoinKeyConfig};
@@ -596,6 +678,7 @@ async fn build_application(
     } else {
         QueryExecutionSettings::default()
     };
+    // ANCHOR: query-construction
     let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: GRAPH.into(),
@@ -611,6 +694,7 @@ async fn build_application(
         None,
     )
     .await?;
+    // ANCHOR_END: query-construction
     let results = query.results();
     let catalog = (scenario == Scenario::Stream)
         .then(|| QueryResultsCatalog::new(GRAPH))
@@ -621,7 +705,7 @@ async fn build_application(
     }
     let mut batch = ComponentBatch::builder()
         .query(Box::new(query))
-        .sink(Box::new(alerts));
+        .sink(alerts);
     if let Some(directory) = plugins {
         #[cfg(feature = "plugins")]
         {
@@ -653,23 +737,7 @@ async fn build_application(
     } else if scenario == Scenario::Normalize {
         #[cfg(feature = "normalize")]
         {
-            let normalize = MiddlewareTransformer::new(
-                MiddlewareTransformerDefinition {
-                    id: ComponentId::try_new("normalize")?,
-                    output_stream: StreamId::try_new("normalize/out")?,
-                    middleware: serde_json::from_value(serde_json::json!([
-                        {"kind":"parse_json","name":"parse","config":{
-                            "target_property":"payload","output_property":"parsed","on_error":"fail"
-                        }},
-                        {"kind":"promote","name":"quantity","config":{
-                            "mappings":[{"path":"$.parsed.quantity","target_name":"quantity"}],
-                            "on_conflict":"overwrite","on_error":"fail"
-                        }}
-                    ]))?,
-                    pipeline: vec!["parse".into(), "quantity".into()],
-                },
-                DrasiLib::default_middleware_registry(),
-            )?;
+            let normalize = normalization()?;
             batch = batch.transformer(Box::new(normalize));
             producers.push("normalize");
             vec![("inventory", "normalize"), ("normalize", query_id), (query_id, "alerts")]
@@ -705,11 +773,13 @@ async fn build_application(
             Box::new(BoundedPipeConfig { capacity: 8 }),
         );
     }
+    // ANCHOR: instance-build
     let core = DrasiLib::builder()
         .with_id("stockroom")
         .with_components(batch.build()?)
         .build()
         .await?;
+    // ANCHOR_END: instance-build
     let setup = async {
         core.start().await?;
         let mut required = vec!["inventory", query_id, "alerts"];
@@ -770,10 +840,27 @@ fn init_tracing() -> anyhow::Result<()> {
 // ANCHOR_END: host-tracing
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run_cli().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            for message in cli::error_messages(&error) {
+                eprintln!("Stockroom: {message}");
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_cli() -> anyhow::Result<()> {
     init_tracing()?;
     let mut args = std::env::args().skip(1);
     let mode = args.next();
+    if mode.as_deref() == Some("keygen") {
+        let path = args.next().unwrap_or_else(|| "stockroom.key".into());
+        ensure!(args.next().is_none(), "keygen accepts one output path");
+        return cli::keygen(Path::new(&path)).await;
+    }
     let scenario = match mode.as_deref() {
         None => Scenario::LowStock,
         Some("totals") => Scenario::Totals,
@@ -784,29 +871,44 @@ async fn main() -> anyhow::Result<()> {
         Some("normalize") => Scenario::Normalize,
         Some("reorders") => Scenario::Reorders,
         Some("stream") => Scenario::Stream,
-        Some("plugins") | Some("--state") | Some("managed") => Scenario::LowStock,
+        Some("callback") => Scenario::Callback,
+        Some("plugins") | Some("webhook") | Some("live") | Some("--state") | Some("managed") => {
+            Scenario::LowStock
+        }
         Some("help") => {
             println!(
-                "stockroom [totals|totals-filtered|audit|join|sustained|normalize|reorders|stream]"
+                "stockroom [totals|totals-filtered|audit|join|sustained|normalize|reorders|stream|callback]"
             );
             println!("stockroom plugins <native-library-directory>  (requires --features plugins)");
             println!(
+                "stockroom webhook <native-library-directory> <url> (requires --features plugins)"
+            );
+            println!("stockroom live <native-library-directory> (requires --features plugins)");
+            println!(
                 "stockroom --state <directory> [--hold-alerts] (requires --features persistence)"
             );
-            println!("stockroom managed <directory> <key-file> [minimum] (requires --features management)");
+            println!("stockroom managed <directory> <key-file> [threshold] (requires --features management)");
+            println!("stockroom keygen [key-file]");
             return Ok(());
         }
         Some(value) => anyhow::bail!("unknown mode {value:?}; run stockroom help"),
     };
+    let mut shutdown = cli::Shutdown::new()?;
     if mode.as_deref() == Some("managed") {
         let directory = args.next().context("managed requires a directory")?;
         let key = args.next().context("managed requires a 32-byte key file")?;
-        let minimum = args.next().map(|value| value.parse::<i64>()).transpose()?;
+        let threshold = args.next().map(|value| value.parse::<i64>()).transpose()?;
         ensure!(args.next().is_none(), "unexpected additional arguments");
         #[cfg(feature = "management")]
-        return managed::run(Path::new(&directory), Path::new(&key), minimum).await;
+        return managed::run(
+            Path::new(&directory),
+            Path::new(&key),
+            threshold,
+            &mut shutdown,
+        )
+        .await;
         #[cfg(not(feature = "management"))]
-        anyhow::bail!("managed {directory} {key} {minimum:?} requires --features management");
+        anyhow::bail!("managed {directory} {key} {threshold:?} requires --features management");
     }
     if mode.as_deref() == Some("--state") {
         let directory = args.next().context("--state requires a directory")?;
@@ -817,15 +919,20 @@ async fn main() -> anyhow::Result<()> {
         };
         ensure!(args.next().is_none(), "unexpected additional arguments");
         #[cfg(feature = "persistence")]
-        return persistence::run(Path::new(&directory), hold).await;
+        return persistence::run(Path::new(&directory), hold, &mut shutdown).await;
         #[cfg(not(feature = "persistence"))]
         anyhow::bail!("--state {directory} (hold={hold}) requires --features persistence");
     }
-    let plugins = if mode.as_deref() == Some("plugins") {
+    let native_directory = if matches!(mode.as_deref(), Some("plugins" | "webhook" | "live")) {
         Some(PathBuf::from(
             args.next()
-                .context("plugins requires a library directory")?,
+                .context("this mode requires a native library directory")?,
         ))
+    } else {
+        None
+    };
+    let webhook_url = if mode.as_deref() == Some("webhook") {
+        Some(args.next().context("webhook requires a destination URL")?)
     } else {
         None
     };
@@ -839,17 +946,34 @@ async fn main() -> anyhow::Result<()> {
         "Starting Stockroom for {}. Press Ctrl-C to stop.",
         scenario.query().0,
     );
-    let (core, _view, mut events) = build_application(path, scenario, plugins.as_deref()).await?;
-    if plugins.is_some() {
-        println!("Ready: HTTP input at 127.0.0.1:9080; SSE output at 127.0.0.1:9081/events.");
-    } else {
-        println!("Ready. Watching {} for saved changes.", path.display());
-    }
+    let plugins = native_directory
+        .as_deref()
+        .filter(|_| mode.as_deref() == Some("plugins"));
+    let (core, _view, mut events) = build_application(path, scenario, plugins).await?;
     let work = async {
+        if mode.as_deref() == Some("live") {
+            let directory = native_directory.as_deref().context("missing native library directory")?;
+            #[cfg(feature = "plugins")]
+            return network::watch_destination(&core, directory, &mut shutdown).await;
+            #[cfg(not(feature = "plugins"))]
+            anyhow::bail!("live {} requires --features plugins", directory.display());
+        }
+        if let Some(url) = webhook_url {
+            let directory = native_directory.as_deref().context("missing native library directory")?;
+            #[cfg(feature = "plugins")]
+            network::add_webhook(&core, directory, &url).await?;
+            #[cfg(not(feature = "plugins"))]
+            anyhow::bail!("webhook {} {url} requires --features plugins", directory.display());
+        }
+        if plugins.is_some() {
+            println!("Ready: HTTP input at 127.0.0.1:9080; SSE output at 127.0.0.1:9081/events.");
+        } else {
+            println!("Ready. Watching {} for saved changes.", path.display());
+        }
         if let Some(events) = &mut events {
             loop {
                 tokio::select! {
-                    signal = tokio::signal::ctrl_c() => { signal?; break; }
+                    signal = shutdown.requested() => { signal?; break; }
                     event = events.recv() => {
                         let event = event.context("live result stream closed or lagged; rebuild the view")?;
                         println!("stream sequence {}: {} operations",
@@ -859,7 +983,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         } else {
-            tokio::signal::ctrl_c().await.context("cannot listen for Ctrl-C")?;
+            shutdown.requested().await?;
         }
         Ok(())
     }.await;
@@ -1038,6 +1162,47 @@ mod tests {
         finish(&core, work).await
     }
 
+    #[cfg(feature = "normalize")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn normalization_enforces_the_documented_size_and_depth_limits() -> anyhow::Result<()> {
+        let oversized = serde_json::json!({"quantity":3,"padding":"x".repeat(65_536)}).to_string();
+        let mut deep = serde_json::json!(0);
+        for _ in 0..12 {
+            deep = serde_json::json!({"nested":deep});
+        }
+        let too_deep = serde_json::json!({"quantity":3,"deep":deep}).to_string();
+        for (payload, expected) in
+            [(oversized, "maximum allowed size"), (too_deep, "JSON nesting depth")]
+        {
+            let product = Product {
+                sku: "bolts".into(),
+                quantity: 8,
+                minimum: 5,
+                warehouse: "west".into(),
+                payload: Some(payload),
+            };
+            let mut transformer = normalization()?;
+            transformer.start().await?;
+            let error = transformer
+                .transform(InputEnvelope {
+                    port: PortId::try_new("in")?,
+                    envelope: GraphChangeCodec::encode_change(
+                        SourceChange::Insert {
+                            element: product.element(1),
+                        },
+                        StreamId::try_new("inventory/out")?,
+                        1,
+                        None,
+                    )?,
+                })
+                .await
+                .expect_err("the configured limit must reject this input");
+            transformer.stop().await?;
+            ensure!(format!("{error:#}").contains(expected), "{error:#}");
+        }
+        Ok(())
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn filtered_total_retracts_its_empty_group() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -1055,6 +1220,42 @@ mod tests {
         }
         .await;
         finish(&core, work).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn east_group_contrast_preserves_the_west_group() -> anyhow::Result<()> {
+        for scenario in [Scenario::Totals, Scenario::NonemptyTotals] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("inventory.json");
+            let west = serde_json::json!({"warehouse":"west","total":8.0});
+            save(&path, &inventory(8)).await?;
+            let (core, mut view) = start(&path, scenario).await?;
+            let work = async {
+                expect_view(&mut view, vec![west.clone()]).await?;
+                let mut both = inventory(8);
+                both.as_array_mut()
+                    .expect("inventory array")
+                    .push(serde_json::json!({
+                        "sku":"washers","quantity":3,"minimum":5,"warehouse":"east"
+                    }));
+                save(&path, &both).await?;
+                expect_view(
+                    &mut view,
+                    vec![serde_json::json!({"warehouse":"east","total":3.0}), west.clone()],
+                )
+                .await?;
+                save(&path, &inventory(8)).await?;
+                let expected = if scenario == Scenario::Totals {
+                    vec![serde_json::json!({"warehouse":"east","total":0.0}), west.clone()]
+                } else {
+                    vec![west.clone()]
+                };
+                expect_view(&mut view, expected).await
+            }
+            .await;
+            finish(&core, work).await?;
+        }
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1096,6 +1297,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn audit_preserves_results_and_context() -> anyhow::Result<()> {
         file_changes(Scenario::Audit).await
+    }
+
+    #[cfg(feature = "callbacks")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_application_callback_updates_the_view() -> anyhow::Result<()> {
+        file_changes(Scenario::Callback).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -150,7 +150,7 @@ impl ManagementResourceResolver for MemoryResources {
 
 fn desired(
     path: &Path,
-    minimum: Option<i64>,
+    threshold: Option<i64>,
     factories: &FactoryRegistry,
 ) -> anyhow::Result<DesiredInstance> {
     let source = factories.get_by_name("stockroom/file", Some("1"))?.clone();
@@ -182,11 +182,11 @@ fn desired(
         configuration: Default::default(),
         dependencies: Default::default(),
     };
-    let text = minimum.map_or_else(
+    let text = threshold.map_or_else(
         || LOW_STOCK.to_owned(),
-        |minimum| {
+        |threshold| {
             format!(
-        "MATCH (p:Product) WHERE p.quantity < {minimum} RETURN p.sku AS sku, p.quantity AS quantity"
+        "MATCH (p:Product) WHERE p.quantity < {threshold} RETURN p.sku AS sku, p.quantity AS quantity"
     )
         },
     );
@@ -221,18 +221,21 @@ fn desired(
             Box::new(BoundedPipeConfig { capacity: 8 }),
         );
     }
+    // ANCHOR: desired-from-batch
     let batch = batch.build()?;
     DesiredInstance::from(batch.definition).normalized()
+    // ANCHOR_END: desired-from-batch
 }
 
 async fn open(
     path: &Path,
     store: Arc<dyn ConfigurationStore>,
-    minimum: Option<i64>,
+    threshold: Option<i64>,
 ) -> anyhow::Result<DrasiLib> {
     let mut factories = FactoryRegistry::standard();
     factories.register(file_factory()?)?;
     factories.register(alert_factory()?)?;
+    // ANCHOR: managed-builder
     let core = DrasiLib::builder()
         .with_id("stockroom-managed")
         .with_component_factories(factories.clone())
@@ -240,14 +243,15 @@ async fn open(
         .with_configuration_store(store)
         .build()
         .await?;
+    // ANCHOR_END: managed-builder
     let setup = async {
         let current = core.desired_configuration()?;
-        if current.revision == 0 || minimum.is_some() {
+        if current.revision == 0 || threshold.is_some() {
             let request = core.new_configuration_request_id().await?;
             core.apply_desired_state(
                 current.revision,
                 request,
-                desired(path, minimum, &factories)?,
+                desired(path, threshold, &factories)?,
             )
             .await?;
         }
@@ -275,7 +279,8 @@ async fn open(
 pub(super) async fn run(
     directory: &Path,
     key_file: &Path,
-    minimum: Option<i64>,
+    threshold: Option<i64>,
+    shutdown: &mut cli::Shutdown,
 ) -> anyhow::Result<()> {
     let key: [u8; 32] = tokio::fs::read(key_file)
         .await?
@@ -288,13 +293,13 @@ pub(super) async fn run(
         key,
     )?);
     println!("Starting managed Stockroom.");
-    let core = open(&path, store, minimum).await?;
+    let core = open(&path, store, threshold).await?;
     let work = async {
         println!(
             "Ready at saved configuration revision {}. Edit inventory.json; Ctrl-C stops.",
             core.desired_configuration()?.revision
         );
-        tokio::signal::ctrl_c().await?;
+        shutdown.requested().await?;
         Ok(())
     }
     .await;

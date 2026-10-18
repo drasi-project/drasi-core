@@ -95,6 +95,41 @@ async fn state(delivery: &DeliveryRunner) -> anyhow::Result<Option<ElementValue>
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn committed_state_reader_uses_the_consumer_owner_and_reopens() -> anyhow::Result<()> {
+    let path = tempfile::tempdir()?;
+    let mut delivery = state_runner(path.path()).await?;
+    assert_eq!(delivery.read_state("count").await?, None);
+    delivery
+        .deliver_transactional(&input(&producer("out"), 1, 2), &Stateful::default())
+        .await?;
+    assert_eq!(delivery.read_state("count").await?, state(&delivery).await?);
+    assert_eq!(
+        delivery.read_state("count").await?,
+        Some(ElementValue::Integer(2))
+    );
+    assert!(delivery.read_state("").await.is_err());
+    assert_eq!(delivery.read_state("missing").await?, None);
+    delivery.shutdown().await?;
+    assert!(delivery.read_state("count").await.is_err());
+    drop(delivery);
+    let mut delivery = state_runner(path.path()).await?;
+    assert_eq!(
+        delivery.read_state("count").await?,
+        Some(ElementValue::Integer(2))
+    );
+    delivery.shutdown().await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn committed_state_reader_rejects_external_handling() -> anyhow::Result<()> {
+    let path = tempfile::tempdir()?;
+    let mut delivery =
+        DeliveryRunner::new(scope(), indexes(path.path()).await, codec(), options())?;
+    assert!(delivery.read_state("count").await.is_err());
+    delivery.shutdown().await
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn state_and_operation_progress_share_the_same_commit_and_rollback() -> anyhow::Result<()> {
     let path = tempfile::tempdir()?;
     let mut delivery = state_runner(path.path()).await?;

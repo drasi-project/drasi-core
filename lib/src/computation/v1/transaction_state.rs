@@ -35,6 +35,39 @@ fn encode(value: &str) -> String {
     value.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn value_reference(prefix: &str, key: &str) -> anyhow::Result<ElementReference> {
+    anyhow::ensure!(!key.is_empty(), "transaction state keys must not be empty");
+    Ok(ElementReference::new(&format!("{prefix}values"), key))
+}
+
+pub(super) async fn read_value(
+    index: &dyn ElementIndex,
+    step: &ComponentId,
+    key: &str,
+) -> anyhow::Result<Option<ElementValue>> {
+    let prefix = format!("transaction-step/{}/", encode(step.as_str()));
+    read_scoped_value(index, &prefix, key).await
+}
+
+async fn read_scoped_value(
+    index: &dyn ElementIndex,
+    prefix: &str,
+    key: &str,
+) -> anyhow::Result<Option<ElementValue>> {
+    let reference = value_reference(prefix, key)?;
+    let Some(element) = index.get_element(&reference).await? else {
+        return Ok(None);
+    };
+    match element.as_ref() {
+        Element::Node { properties, .. } => properties
+            .get("value")
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("transaction step value is corrupt")),
+        _ => anyhow::bail!("transaction step value is not a node"),
+    }
+}
+
 /// Storage borrowed for one step of one active transaction. It cannot be cloned,
 /// moved to a background task, used to access another step, or used to commit.
 ///
@@ -107,18 +140,7 @@ impl<'a> TransactionContext<'a> {
     }
 
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<ElementValue>> {
-        let reference = self.value_reference(key)?;
-        let Some(element) = self.elements.index.get_element(&reference).await? else {
-            return Ok(None);
-        };
-        match element.as_ref() {
-            Element::Node { properties, .. } => properties
-                .get("value")
-                .cloned()
-                .map(Some)
-                .ok_or_else(|| anyhow::anyhow!("transaction step value is corrupt")),
-            _ => anyhow::bail!("transaction step value is not a node"),
-        }
+        read_scoped_value(self.elements.index, &self.elements.prefix, key).await
     }
 
     pub async fn put(&self, key: &str, value: ElementValue) -> anyhow::Result<()> {
@@ -150,11 +172,7 @@ impl<'a> TransactionContext<'a> {
     }
 
     fn value_reference(&self, key: &str) -> anyhow::Result<ElementReference> {
-        anyhow::ensure!(!key.is_empty(), "transaction state keys must not be empty");
-        Ok(ElementReference::new(
-            &format!("{}values", self.elements.prefix),
-            key,
-        ))
+        value_reference(&self.elements.prefix, key)
     }
 
     pub async fn get_element(

@@ -384,6 +384,38 @@ impl DeliveryRunner {
         self.mode == DeliveryMode::Transactional
     }
 
+    /// Read one committed business-state value in this transactional consumer's
+    /// namespace. Uses the runner's actual storage owner and transaction gate;
+    /// no independent writer or commit capability escapes to the caller.
+    ///
+    /// Calls must remain serialized with delivery and shutdown. Interrupted reads
+    /// follow the owner's normal cleanup/reconstruction contract.
+    pub async fn read_state(
+        &mut self,
+        key: &str,
+    ) -> anyhow::Result<Option<drasi_core::models::ElementValue>> {
+        anyhow::ensure!(
+            self.mode == DeliveryMode::Transactional,
+            "business-state reads require transactional delivery"
+        );
+        self.load().await?;
+        let index = self
+            .transaction
+            .resources()
+            .indexes()
+            .element_index
+            .as_ref();
+        let consumer = self.scope.consumer();
+        Ok(self
+            .transaction
+            .run(async {
+                Ok(super::transaction_state::read_value(index, consumer, key)
+                    .await
+                    .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?)
+            })
+            .await?)
+    }
+
     async fn load(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.transaction.recovery_required(),
