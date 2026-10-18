@@ -78,6 +78,7 @@ Start with the guide for your task:
 | [Consolidated outstanding-work inventory](docs/computation-graph-remaining-work.md) | Single current list: pre-review work, all review findings, post-merge status, priorities, completion criteria and tracking crosswalks |
 | [Historical CG backlog](docs/computation-graph-backlog.md) | Original CG-01 through CG-28 detail, design rationale and dated measurement evidence |
 | [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
+| [Managed-query test controls](docs/query-test-control.md) | Opt-in independent physical clocks and actual due-work/output frontiers; no production clock or downstream completion substitution |
 
 From the drasi-core repository root, run a complete in-process example:
 

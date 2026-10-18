@@ -35,6 +35,9 @@ computation = []
 # Explicit integration-test wiring; does not enable a backend in the default runtime.
 computation-rocksdb-tests = ["computation", "drasi-index-rocksdb/computation"]
 
+# Per-query clocks and awaited processing frontiers for managed-query tests.
+test-support = []
+
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
 middleware-bundled-jq = ["drasi-middleware/bundled-jq"]

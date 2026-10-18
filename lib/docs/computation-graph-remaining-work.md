@@ -1344,9 +1344,11 @@ required behavior set.
 **What works:** many newer tests use explicit gates and saved processing
 positions. Selected scheduling tests control clock changes.
 
-**Testing:** those cases have scoped evidence. The separately inspected query
-test-clock branch is not included in the current Core commit. It must not be
-described as an available integrated feature.
+**Testing:** ordinary builder-owned queries now support opt-in `test-support`
+clocks through `QueryTestControl` and `with_query_test_control`. Drains fence
+actual due-work transactions and immediate output handoff, not downstream
+effects. See [the API guide](query-test-control.md). Directly assembled native
+query controls from the separate proposal are not part of this feature.
 
 **Remaining work:** use actual query completion, due-work completion and
 destination completion as separate checks. Add only the native controls needed
