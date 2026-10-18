@@ -5,16 +5,10 @@ name: Nightly Build
 
 on:
   schedule:
-    # 14:00 UTC daily = 06:00 PST. GitHub cron is UTC and does not observe DST,
-    # so during PDT (summer) this fires at 07:00 local. Runs against main.
-    - cron: '0 14 * * *'
+    # 12:00 UTC daily = 05:00 PDT / 04:00 PST. GitHub cron does not observe DST.
+    # Runs against main.
+    - cron: '0 12 * * *'
   workflow_dispatch:
-    inputs:
-      allow_branch_test:
-        description: 'TEMPORARY: allow an official-repository branch rehearsal in the isolated nightly namespace'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   # Least privilege by default; elevated scopes are granted per-job below.
@@ -23,7 +17,7 @@ permissions:
 jobs:
   prepare:
     name: Prepare locked release candidate
-    if: ${{ github.repository == 'drasi-project/drasi-core' && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.allow_branch_test == true && startsWith(github.ref, 'refs/heads/'))) }}
+    if: ${{ github.repository == 'drasi-project/drasi-core' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     outputs:
       candidate_sha256: ${{ steps.freeze.outputs.candidate_sha256 }}
@@ -48,8 +42,6 @@ jobs:
 
       - name: Freeze prepared source and lockfile
         id: freeze
-        env:
-          ALLOW_BRANCH_TEST: ${{ inputs.allow_branch_test == true }}
         run: python3 .github/scripts/release-candidate.py freeze --output "$RUNNER_TEMP/candidate"
 
       - name: Retain exact prepared candidate
@@ -104,7 +96,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/publish-plugins.yml
     with:
-      allow_branch_test: ${{ inputs.allow_branch_test == true }}
       candidate_artifact: nightly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
       candidate_sha256: ${{ needs.prepare.outputs.candidate_sha256 }}
       registry: ghcr.io/drasi-project/drasi-core-nightly

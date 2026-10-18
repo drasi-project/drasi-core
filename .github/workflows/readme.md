@@ -148,8 +148,8 @@ prepared lock hashes, toolchain, mode, versions, and expected eight-target plugi
 inventory. Nightly snapshots the tree **after** release-plz prepares versions and
 changelogs. Production snapshots the release tree before crate publication.
 Standalone plugin dispatch snapshots once and accepts only refs from trusted
-main history. Production publication and repair must run from the official
-repository's main; the temporary isolated nightly branch exception is documented below.
+main history. Nightly, production publication, and repair must run from the
+official repository's main; there is no branch-testing exception.
 
 Each target restores the same bundle and validates its hashes before building.
 Metadata, outer xtask invocations, nested Cargo/cross builds, and manylinux builds
@@ -201,8 +201,8 @@ New caller inputs must extend the relevant contract tests instead of disabling
 strict validation or silently ignoring arbitrary fields.
 
 The [candidate tests](../scripts/release-candidate.test.py) parse the workflow
-YAML and exercise scheduled/manual nightly, temporary branch rehearsal, automatic
-release, manual release, and force-publish recovery selection. They also check
+YAML and exercise scheduled/manual nightly, automatic release, manual release,
+and force-publish recovery selection, and reject non-main publication. They also check
 shared candidate/tooling/publication safeguards and intentional preparation and
 dry-run differences. The [repair tests](../scripts/repair-plugin-signatures.test.py)
 cover strict input validation and repair isolation. Both suites already run in
@@ -315,6 +315,9 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
 
 ### [nightly.yml](nightly.yml)
 
+Runs daily at **12:00 UTC (05:00 PDT / 04:00 PST)** on `main`. GitHub's UTC
+schedule does not shift with daylight saving time.
+
 Scheduled and manually dispatched nightlies use the committed lockfile baseline
 and the same release-plz configuration as release preparation. There is no
 dependency-refresh mode; intentional dependency updates must be reviewed and
@@ -323,31 +326,25 @@ and reconciles workspace lock entries as described above. The candidate and hand
 always record `mode: locked`; nightly does not commit the prepared changes.
 There are no skip/reuse-tag inputs that can produce a ready incomplete candidate.
 
-#### Temporary pre-merge branch rehearsal
+#### Manual rehearsal on main
 
-Manual dispatch accepts a default-off `allow_branch_test` flag. After committing
-and pushing the candidate branch to **drasi-project/drasi-core** (not a fork), run:
+After merging workflow changes into `main`, start a new rehearsal with:
 
 ```bash
 gh workflow run nightly.yml --repo drasi-project/drasi-core \
-  --ref ruokun-niu-core-release-safeguards \
-  -f allow_branch_test=true
+  --ref main
 ```
 
-This dispatches the workflow revision on the named branch; no merge is needed.
-The workflow must already be registered for manual dispatch on the default branch.
-The Actions UI may show only main's inputs until merged, so use the CLI above.
-This is a real, full eight-platform signed publication to the isolated nightly
-namespace, not a dry run. The package provisioning requirements below still apply.
-Forks, tags, scheduled branch runs, production namespace overrides, unsigned
-publication, visibility bypasses, and signature repair are not enabled by this
-flag. Production publishing and repair remain main-only. Remove this temporary
-flag and its guarded exception after pre-merge rehearsal is complete.
+Manual dispatch has no inputs. Only the official repository's `main` can run the
+rehearsal; forks, other branches, and tags cannot publish. This is a real, full
+eight-platform signed publication to the isolated nightly namespace, not a dry
+run. The package provisioning requirements below still apply.
 
-Branch candidates record `source_ref` and `branch_test: true`; signatures are
-verified against the exact `publish-plugins.yml@refs/heads/<branch>` identity,
-not main's identity. Their ready artifacts are diagnostic rehearsal outputs and
-must not be treated as trusted-main release candidates by downstream consumers.
+Signatures use the exact `publish-plugins.yml@refs/heads/main` identity. The
+schema-version-1 candidate and handoff retain `source_ref: refs/heads/main` and
+`branch_test: false`; the latter is no longer configurable. Earlier branch-test
+artifacts remain diagnostic outputs, and the handoff rejects them rather than
+treating them as trusted-main candidates.
 
 The sequence is preparation, verified local packaging, eight-target signed plugin
 publication plus public visibility checks, then complete-inventory validation.

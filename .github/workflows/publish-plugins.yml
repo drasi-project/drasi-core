@@ -56,11 +56,6 @@ on:
           - execute
   workflow_call:
     inputs:
-      allow_branch_test:
-        description: 'Internal temporary opt-in for isolated manual nightly branch rehearsals'
-        required: false
-        type: boolean
-        default: false
       candidate_artifact:
         description: 'Prepared candidate artifact from this workflow run'
         required: false

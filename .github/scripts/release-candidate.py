@@ -53,43 +53,19 @@ def output(name, value):
             stream.write(f"{name}={value}\n")
 
 
-def publication_context(inputs, env):
+def publication_context(env):
     repository = "drasi-project/drasi-core"
-    ref = env.get("GITHUB_REF", "")
     require(env.get("GITHUB_REPOSITORY") == repository,
             "Publication and repair require the official repository")
-    if inputs.get("allow_branch_test", False) is True:
-        require(env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-                and ref.startswith("refs/heads/")
-                and env.get("GITHUB_WORKFLOW_REF") ==
-                f"{repository}/.github/workflows/nightly.yml@{ref}",
-                "Branch testing requires a manually dispatched nightly branch")
-        require(inputs.get("registry") == TEST_REGISTRY
-                and inputs.get("tag") ==
-                f"nightly-{env['GITHUB_RUN_ID']}-{env['GITHUB_RUN_ATTEMPT']}"
-                and inputs.get("candidate_artifact") ==
-                f"nightly-candidate-{env['GITHUB_RUN_ID']}-{env['GITHUB_RUN_ATTEMPT']}"
-                and re.fullmatch(r"[0-9a-f]{64}", inputs.get("candidate_sha256", ""))
-                and inputs.get("sign") is True
-                and inputs.get("dry_run") is False
-                and inputs.get("skip_visibility") is False
-                and not inputs.get("ref")
-                and not inputs.get("pre_release")
-                and inputs.get("repair_batch", "none") == "none"
-                and inputs.get("repair_action", "plan") == "plan",
-                "Branch testing requires the complete signed, isolated nightly candidate")
-    else:
-        require(ref == "refs/heads/main",
-                "Publication and repair must use the trusted main workflow")
-    return f"https://github.com/{repository}/.github/workflows/publish-plugins.yml@{ref}"
+    require(env.get("GITHUB_REF") == "refs/heads/main",
+            "Publication and repair must use the trusted main workflow")
+    return IDENTITY
 
 
 def candidate_identity(candidate):
-    ref = candidate["source_ref"]
-    require(ref.startswith("refs/heads/"), "Candidate must come from a branch")
-    require(ref == "refs/heads/main" or candidate["branch_test"] is True,
-            "Non-main candidate requires explicit branch-test opt-in")
-    return IDENTITY.removesuffix("refs/heads/main") + ref
+    require(candidate["source_ref"] == "refs/heads/main" and candidate["branch_test"] is False,
+            "Candidate must use trusted main without a branch rehearsal")
+    return IDENTITY
 
 
 def metadata(root):
@@ -153,7 +129,7 @@ def freeze(root, destination):
         "schema_version": 1,
         "source_commit": run("git", "rev-parse", "HEAD", cwd=root),
         "source_ref": os.environ.get("GITHUB_REF", "refs/heads/main"),
-        "branch_test": os.environ.get("ALLOW_BRANCH_TEST") == "true",
+        "branch_test": False,
         "source_sha256": sha(archive),
         "lock_sha256": lock_hash,
         "baseline_lock_sha256": hashlib.sha256(baseline).hexdigest(),
@@ -330,8 +306,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "publication-context":
-            output("certificate_identity",
-                   publication_context(json.loads(os.environ["WORKFLOW_INPUTS"]), os.environ))
+            output("certificate_identity", publication_context(os.environ))
         elif args.command == "freeze":
             freeze(args.root.resolve(), args.output.resolve())
         elif args.command == "restore":
