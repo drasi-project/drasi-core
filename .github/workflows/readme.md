@@ -156,7 +156,7 @@ checked out (detached) and frozen. This avoids branch/tag names shadowing the
 trusted-main reference, mutable-ref races, and untrusted source checkout before
 validation. An empty `ref` keeps the triggering commit; older main-history
 revisions remain supported. Nightly, production publication, and repair must run from the
-official repository's main, except for the temporary isolated nightly rehearsal below.
+official repository's main; there is no branch-testing exception.
 
 Each target restores the same bundle and validates its hashes before building.
 Restore exports the candidate's recorded `source_commit` as a step output.
@@ -340,25 +340,6 @@ and reconciles workspace lock entries as described above. The candidate and hand
 always record `mode: locked`; nightly does not commit the prepared changes.
 There are no skip/reuse-tag inputs that can produce a ready incomplete candidate.
 
-#### Temporary final branch rehearsal
-
-The default-off `allow_branch_test` input temporarily permits manual nightly
-dispatch only on `ruokun-niu-core-release-safeguards` in the official repository:
-
-```bash
-gh workflow run nightly.yml --repo drasi-project/drasi-core \
-  --ref ruokun-niu-core-release-safeguards -f allow_branch_test=true
-```
-
-This exception requires the same-run candidate, isolated nightly namespace,
-unique run/attempt tags, signing, verification, and public visibility checks.
-Standalone ref validation and production publication remain unchanged and
-main-only. No other branch or fork is permitted.
-
-Revert this temporary change after the rehearsal and before merging. The test
-candidate records `branch_test: true`, its actual source commit, and the exact
-branch workflow signing identity; it is not a trusted-main release candidate.
-
 #### Manual rehearsal on main
 
 After merging workflow changes into `main`, start a new rehearsal with:
@@ -368,15 +349,16 @@ gh workflow run nightly.yml --repo drasi-project/drasi-core \
   --ref main
 ```
 
-With the temporary opt-in unset, only the official repository's `main` can run
-the rehearsal; forks, other branches, and tags cannot publish. This is a real, full
+Manual dispatch has no inputs. Only the official repository's `main` can run the
+rehearsal; forks, other branches, and tags cannot publish. This is a real, full
 eight-platform signed publication to the isolated nightly namespace, not a dry
 run. The package provisioning requirements below still apply.
 
 Signatures use the exact `publish-plugins.yml@refs/heads/main` identity. The
 schema-version-1 candidate and handoff retain `source_ref: refs/heads/main` and
-`branch_test: false` for main runs. Temporary branch-test artifacts remain
-diagnostic outputs and must not be treated as trusted-main candidates.
+`branch_test: false`; the latter is no longer configurable. Earlier branch-test
+artifacts remain diagnostic outputs, and the handoff rejects them rather than
+treating them as trusted-main candidates.
 
 The sequence is preparation, verified local packaging, eight-target signed plugin
 publication plus public visibility checks, then complete-inventory validation.
