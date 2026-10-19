@@ -24,6 +24,7 @@ TARGETS = {
     "aarch64-apple-darwin": "darwin-arm64",
 }
 TEST_REGISTRY = "ghcr.io/drasi-project/drasi-core-nightly"
+BRANCH_TEST_REF = "refs/heads/ruokun-niu-core-release-safeguards"
 IDENTITY = ("https://github.com/drasi-project/drasi-core/"
             ".github/workflows/publish-plugins.yml@refs/heads/main")
 ISSUER = "https://token.actions.githubusercontent.com"
@@ -53,16 +54,47 @@ def output(name, value):
             stream.write(f"{name}={value}\n")
 
 
-def publication_context(env):
+def require_branch_test_context(env):
+    require(env.get("GITHUB_REPOSITORY") == "drasi-project/drasi-core"
+            and env.get("GITHUB_REF") == BRANCH_TEST_REF
+            and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+            and env.get("GITHUB_WORKFLOW_REF") ==
+            f"drasi-project/drasi-core/.github/workflows/nightly.yml@{BRANCH_TEST_REF}",
+            "Temporary rehearsal requires the official nightly dispatch on the designated branch")
+
+
+def publication_context(env, inputs=None):
     repository = "drasi-project/drasi-core"
     require(env.get("GITHUB_REPOSITORY") == repository,
             "Publication and repair require the official repository")
+    inputs = {} if inputs is None else inputs
+    require(isinstance(inputs, dict), "Workflow inputs must be an object")
+    require(type(inputs.get("allow_branch_test", False)) is bool,
+            "allow_branch_test must be a boolean")
+    if inputs.get("allow_branch_test", False):
+        require_branch_test_context(env)
+        require(inputs.get("registry") == TEST_REGISTRY
+                and inputs.get("tag") == f"nightly-{env['GITHUB_RUN_ID']}-{env['GITHUB_RUN_ATTEMPT']}"
+                and inputs.get("candidate_artifact") ==
+                f"nightly-candidate-{env['GITHUB_RUN_ID']}-{env['GITHUB_RUN_ATTEMPT']}"
+                and isinstance(inputs.get("candidate_sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", inputs["candidate_sha256"])
+                and inputs.get("sign") is True
+                and inputs.get("dry_run") is False
+                and inputs.get("skip_visibility") is False
+                and not inputs.get("ref")
+                and not inputs.get("pre_release")
+                and not ({"repair_batch", "repair_action", "force_publish"} & inputs.keys()),
+                "Temporary rehearsal requires a complete signed, isolated same-run candidate")
+        return IDENTITY.removesuffix("refs/heads/main") + BRANCH_TEST_REF
     require(env.get("GITHUB_REF") == "refs/heads/main",
             "Publication and repair must use the trusted main workflow")
     return IDENTITY
 
 
 def candidate_identity(candidate):
+    if candidate["source_ref"] == BRANCH_TEST_REF and candidate["branch_test"] is True:
+        return IDENTITY.removesuffix("refs/heads/main") + BRANCH_TEST_REF
     require(candidate["source_ref"] == "refs/heads/main" and candidate["branch_test"] is False,
             "Candidate must use trusted main without a branch rehearsal")
     return IDENTITY
@@ -152,6 +184,9 @@ def inventory(data, config):
 
 def freeze(root, destination):
     root = root.resolve()
+    branch_test = os.environ.get("ALLOW_BRANCH_TEST") == "true"
+    if branch_test:
+        require_branch_test_context(os.environ)
     require(not destination.exists(), f"Candidate output already exists: {destination}")
     data = metadata(root)
     config = tomllib.loads((root / "release-plz.toml").read_text(encoding="utf-8"))
@@ -179,7 +214,7 @@ def freeze(root, destination):
         "schema_version": 1,
         "source_commit": run("git", "rev-parse", "HEAD", cwd=root),
         "source_ref": os.environ.get("GITHUB_REF", "refs/heads/main"),
-        "branch_test": False,
+        "branch_test": branch_test,
         "source_sha256": sha(archive),
         "lock_sha256": lock_hash,
         "baseline_lock_sha256": hashlib.sha256(baseline).hexdigest(),
@@ -362,7 +397,8 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "publication-context":
-            output("certificate_identity", publication_context(os.environ))
+            output("certificate_identity",
+                   publication_context(os.environ, json.loads(os.environ["WORKFLOW_INPUTS"])))
         elif args.command == "select-source":
             print(f"Selected trusted main-history commit {select_source(args.root, args.ref)}")
         elif args.command == "freeze":

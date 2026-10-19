@@ -510,11 +510,11 @@ class RepairTests(unittest.TestCase):
                 self.assertEqual("publish", outputs["mode"])
                 self.assertEqual([], self.fixture.calls)
 
-    def test_removed_branch_test_input_is_rejected(self):
-        for value in (False, True):
+    def test_branch_test_input_cannot_enable_signature_repair(self):
+        for value in (True, "true"):
             with self.subTest(allow_branch_test=value):
-                self.fixture.inputs = repair.PUBLISH_DEFAULTS | {"allow_branch_test": value}
-                self.assert_failure("select", "Unsupported workflow input")
+                self.fixture.inputs["allow_branch_test"] = value
+                self.assert_failure("select", "Repair does not accept")
                 self.assertEqual([], self.fixture.calls)
 
     def test_force_publish_rejects_wrong_types_contexts_and_unknown_inputs(self):
@@ -900,11 +900,11 @@ class WorkflowTests(unittest.TestCase):
         call = self.document["on"]["workflow_call"]["inputs"]
         dispatch = self.document["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(set(repair.PUBLISH_DEFAULTS), set(call))
-        internal = {"candidate_artifact", "candidate_sha256"}
+        internal = {"candidate_artifact", "candidate_sha256", "allow_branch_test"}
         self.assertEqual({key: value for key, value in call.items() if key not in internal},
                          {key: dispatch[key] for key in call if key not in internal})
         self.assertTrue(internal.isdisjoint(dispatch))
-        self.assertNotIn("allow_branch_test", call)
+        self.assertIs(call["allow_branch_test"]["default"], False)
         self.assertNotIn("allow_branch_test", dispatch)
         self.assertEqual("none", dispatch["repair_batch"]["default"])
         self.assertEqual("plan", dispatch["repair_action"]["default"])
