@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
-use drasi_lib::managers::log_component_start;
+use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 

@@ -22,7 +22,7 @@ impl ComponentBatch {
 
     pub fn builder() -> ComponentBatchBuilder {
         ComponentBatchBuilder {
-            inner: ComputationGraph::builder(Self::GRAPH_ID).for_additions(),
+            inner: ComputationGraph::builder(Self::GRAPH_ID),
         }
     }
 

@@ -358,6 +358,10 @@ pub(super) enum Command {
         management_access: bool,
         reply: oneshot::Sender<GraphResult<()>>,
     },
+    RegisterFactory {
+        factory: Arc<dyn crate::computation::v1::ComponentFactory>,
+        reply: oneshot::Sender<GraphResult<()>>,
+    },
     HandleStart {
         component: ComponentId,
         generation: ComponentGeneration,
@@ -528,6 +532,7 @@ impl Command {
             Self::ProtectComponents { reply, .. }
             | Self::ControlConnections { reply, .. }
             | Self::ControlHandler { reply, .. }
+            | Self::RegisterFactory { reply, .. }
             | Self::ReadinessPolicy { reply, .. }
             | Self::BindStream { reply, .. }
             | Self::Health { reply, .. } => {
@@ -871,6 +876,20 @@ impl GraphControl {
         self.observed.borrow().clone()
     }
 
+    /// Make a construction implementation available to waiting declarations.
+    /// An existing identity may only be registered again with the same factory.
+    pub async fn register_factory(
+        &self,
+        factory: Arc<dyn crate::computation::v1::ComponentFactory>,
+    ) -> GraphResult<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::RegisterFactory { factory, reply })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
     pub fn subscribe_observed(&self) -> watch::Receiver<Arc<ObservedGraph>> {
         self.observed.clone()
     }
@@ -1014,6 +1033,7 @@ pub(super) fn initial_observations(snapshot: &GraphSnapshot) -> ObservedGraph {
                         lifecycle: ComponentLifecycle::Stopped,
                         health: ComponentHealth::Unknown,
                         failure: None,
+                        waiting_for: Vec::new(),
                         exhausted: false,
                         started: false,
                         lifecycle_requested: false,
@@ -1185,6 +1205,101 @@ fn binding_dependencies(graph: &ComputationGraph, id: &ComponentId) -> Vec<Compo
     missing.into_iter().collect()
 }
 
+fn creation_dependencies(
+    graph: &ComputationGraph,
+    index: usize,
+) -> Vec<super::super::DependencyWait> {
+    use super::super::DependencyWait;
+    let id = graph.nodes[index].descriptor.id();
+    let resources: BTreeSet<_> = graph
+        .snapshot
+        .specifications
+        .get(id)
+        .into_iter()
+        .flat_map(|specification| {
+            specification.dependencies.values().flatten().chain(
+                specification
+                    .configuration
+                    .values()
+                    .filter_map(|value| match value {
+                        super::ConfigurationValue::Reference { resource, .. } => Some(resource),
+                        _ => None,
+                    }),
+            )
+        })
+        .filter(|resource| !graph.resource_handles.contains_key(*resource))
+        .cloned()
+        .collect();
+    let observed = graph.observed();
+    let dependencies: BTreeSet<_> = graph
+        .snapshot
+        .edges
+        .iter()
+        .filter(|edge| edge.policy.required_for_creation && &edge.definition.to.component == id)
+        .map(|edge| &edge.definition.from.component)
+        .chain(
+            graph
+                .snapshot
+                .subscriptions
+                .iter()
+                .filter(|(_, to)| to == id)
+                .map(|(from, _)| from),
+        )
+        .filter(|dependency| {
+            !observed.components.get(*dependency).is_some_and(|node| {
+                node.realization == RealizationState::Created && node.failure.is_none()
+            })
+        })
+        .cloned()
+        .collect();
+    let factory = graph
+        .snapshot
+        .specifications
+        .get(id)
+        .filter(|specification| !graph.factories.contains_key(&specification.implementation));
+    dependencies
+        .into_iter()
+        .map(|id| DependencyWait::Component { id })
+        .chain(
+            resources
+                .into_iter()
+                .map(|id| DependencyWait::Resource { id }),
+        )
+        .chain(factory.map(|specification| DependencyWait::Factory {
+            implementation: specification.implementation.clone(),
+        }))
+        .collect()
+}
+
+fn binding_waits(graph: &ComputationGraph, id: &ComponentId) -> Vec<super::super::DependencyWait> {
+    use super::super::{DependencyWait, Endpoint, PortDirection};
+    let node = &graph.nodes[graph.ids[id]];
+    let observed = graph.observed();
+    let mut waiting = Vec::new();
+    for port in node.descriptor.ports() {
+        let endpoint = Endpoint::new(id.clone(), port.id().clone());
+        let connected = graph.snapshot.edges.iter().any(|edge| {
+            (edge.definition.from == endpoint || edge.definition.to == endpoint)
+                && observed.relationships[&edge.definition].binding == BindingState::Bound
+        });
+        let optional_input =
+            port.direction() == PortDirection::Input
+                && graph.snapshot.unbound_relationships.iter().any(|edge| {
+                    edge.definition.to == endpoint && !edge.policy.required_for_binding
+                });
+        if !connected && !optional_input {
+            waiting.push(DependencyWait::Connection {
+                endpoint: endpoint.clone(),
+            });
+        }
+        if port.direction() == PortDirection::Output && !node.output_streams.contains_key(port.id())
+        {
+            waiting.push(DependencyWait::Stream { endpoint });
+        }
+    }
+    waiting
+}
+
 async fn deploy(
     graph: &mut ComputationGraph,
     cancel: &mut watch::Receiver<bool>,
@@ -1202,7 +1317,7 @@ async fn deploy(
     });
     let mut unavailable = BTreeSet::new();
     let mut creation_failures = BTreeMap::new();
-    let mut resource_blocks = BTreeMap::new();
+    let mut creation_blocks = BTreeMap::new();
     let mut pending: BTreeSet<_> = graph.order.iter().copied().collect();
     let empty_controls = PipeGuard(BTreeMap::new());
     while !pending.is_empty() || !operations.active.is_empty() {
@@ -1231,6 +1346,9 @@ async fn deploy(
                 .any(|dependency| unavailable.contains(dependency))
             {
                 unavailable.insert(index);
+                let waiting = creation_dependencies(graph, index);
+                let blocked = operations.defer_creation(graph, index, Operation::Create, waiting);
+                creation_blocks.insert(index, blocked);
                 continue;
             }
             if let Some(cause) = slot.damage() {
@@ -1255,28 +1373,12 @@ async fn deploy(
                 creation_failures.insert(index, failure.clone());
                 continue;
             }
-            if let Some(specification) = graph.snapshot.specifications.get(&slot.id) {
-                let missing: BTreeSet<_> =
-                    specification
-                        .dependencies
-                        .values()
-                        .flatten()
-                        .chain(specification.configuration.values().filter_map(
-                            |value| match value {
-                                super::ConfigurationValue::Reference { resource, .. } => {
-                                    Some(resource)
-                                }
-                                _ => None,
-                            },
-                        ))
-                        .filter(|id| !graph.resource_handles.contains_key(*id))
-                        .cloned()
-                        .collect();
-                if !missing.is_empty() {
-                    unavailable.insert(index);
-                    resource_blocks.insert(index, missing.into_iter().collect::<Vec<_>>());
-                    continue;
-                }
+            let waiting = creation_dependencies(graph, index);
+            if !waiting.is_empty() {
+                unavailable.insert(index);
+                let blocked = operations.defer_creation(graph, index, Operation::Create, waiting);
+                creation_blocks.insert(index, blocked);
+                continue;
             }
             if let Err(error) = operations.launch(graph, index, Operation::Create) {
                 unavailable.insert(index);
@@ -1311,7 +1413,13 @@ async fn deploy(
     for (&edge_index, edge) in &graph.edges {
         let from = graph.ids[&edge.definition.from.component];
         let to = graph.ids[&edge.definition.to.component];
-        if unconstructed.contains(&from) || unconstructed.contains(&to) {
+        if unconstructed.contains(&from)
+            || unconstructed.contains(&to)
+            || edge
+                .resources
+                .keys()
+                .any(|id| !graph.resource_handles.contains_key(id))
+        {
             update(graph, |state| {
                 let observed = state
                     .relationships
@@ -1391,7 +1499,8 @@ async fn deploy(
     for &index in &graph.order {
         let node = &graph.nodes[index];
         let id = node.descriptor.id();
-        let blocked = unavailable.contains(&index);
+        let waiting = binding_waits(graph, id);
+        let blocked = unavailable.contains(&index) || !waiting.is_empty();
         let creation_failure = creation_failures.get(&index);
         update(graph, |state| {
             let observed = state.components.get_mut(id).expect("component");
@@ -1405,6 +1514,9 @@ async fn deploy(
             observed.lifecycle = ComponentLifecycle::Stopped;
             observed.health = ComponentHealth::Unknown;
             observed.failure = creation_failure.cloned();
+            if !creation_blocks.contains_key(&index) {
+                observed.waiting_for = waiting;
+            }
             observed.exhausted = false;
             observed.transition_time = Utc::now();
         });
@@ -1412,11 +1524,8 @@ async fn deploy(
             id.clone(),
             if let Some(failure) = creation_failure {
                 CreationOutcome::CreationFailed(failure.clone())
-            } else if let Some(resources) = resource_blocks.get(&index) {
-                CreationOutcome::Blocked {
-                    dependencies: Vec::new(),
-                    resources: resources.clone(),
-                }
+            } else if let Some(blocked) = creation_blocks.get(&index) {
+                blocked.clone()
             } else if blocked {
                 CreationOutcome::Blocked {
                     dependencies: graph
@@ -1454,7 +1563,10 @@ async fn deploy(
     }
     let report = DeploymentReport {
         revision: graph.snapshot.revision,
-        summary: if unavailable.is_empty() {
+        summary: if outcomes
+            .values()
+            .all(|outcome| matches!(outcome, CreationOutcome::Created))
+        {
             OperationSummary::Completed
         } else {
             OperationSummary::CompletedWithFailures
@@ -1609,9 +1721,6 @@ enum HandleRequest {
     Stop {
         component: ComponentId,
         generation: ComponentGeneration,
-        /// Keeps a component stopped during construction from being activated
-        /// by the reconciliation that is creating it.
-        defer_restart: bool,
         reply: oneshot::Sender<GraphResult<StopReport>>,
     },
     StopMembers {
@@ -1714,18 +1823,14 @@ impl HandleRequest {
                 Ok(())
             }
             Self::Stop {
-                component,
-                defer_restart,
-                reply,
-                ..
+                component, reply, ..
             } => {
-                if defer_restart {
-                    graph.deferred_activation.insert(component);
-                }
+                graph.deferred_activation.insert(component);
                 operations.begin_drain(graph, selected, DrainReply::Stop(reply));
                 Ok(())
             }
-            Self::StopMembers { reply, .. } => {
+            Self::StopMembers { members, reply } => {
+                graph.deferred_activation.extend(members.into_keys());
                 operations.begin_drain(graph, selected, DrainReply::Stop(reply));
                 Ok(())
             }
@@ -2143,6 +2248,13 @@ struct Operations {
     control_aborts: BTreeMap<usize, AbortHandle>,
     control_quiescing: BTreeSet<usize>,
     parked_controls: BTreeMap<usize, PeerDriver>,
+    pending_creation: BTreeMap<usize, Operation>,
+    creation_revision: Option<GraphRevision>,
+    creation_dirty: bool,
+    resource_revision: Option<GraphRevision>,
+    resources_dirty: bool,
+    binding_revision: Option<GraphRevision>,
+    bindings_dirty: bool,
     pending_auto_start: BTreeMap<usize, bool>,
     connection_generations:
         BTreeMap<(ComponentId, ComponentId), BTreeMap<super::EdgeDefinition, u64>>,
@@ -2220,6 +2332,7 @@ impl ReconciliationReservation {
                         .resources
                         .iter()
                         .all(|resource| !self.resources.contains(&resource.id))
+                    && addition.bindings.resources.keys().all(|id| !reserved(id))
                     && dependencies_clear
                     && (!self
                         .resources
@@ -2244,6 +2357,12 @@ impl ReconciliationReservation {
 }
 
 impl Operations {
+    fn dependencies_changed(&mut self) {
+        self.creation_dirty = true;
+        self.resources_dirty = true;
+        self.bindings_dirty = true;
+    }
+
     fn complete_retirement(
         &mut self,
         graph: &ComputationGraph,
@@ -2759,6 +2878,7 @@ impl Operations {
         self.control_handlers.remove(&index);
         self.control_quiescing.remove(&index);
         self.parked_controls.remove(&index);
+        self.pending_creation.remove(&index);
         self.pending_auto_start.remove(&index);
     }
 
@@ -2804,6 +2924,49 @@ impl Operations {
         Ok(())
     }
 
+    fn defer_creation(
+        &mut self,
+        graph: &ComputationGraph,
+        index: usize,
+        operation: Operation,
+        waiting: Vec<super::super::DependencyWait>,
+    ) -> CreationOutcome {
+        self.pending_creation.insert(index, operation);
+        let id = graph.nodes[index].descriptor.id();
+        let current = graph.observed();
+        let unchanged = current.components[id].realization == RealizationState::Blocked
+            && current.components[id].waiting_for == waiting;
+        let outcome = CreationOutcome::Blocked {
+            dependencies: waiting
+                .iter()
+                .filter_map(|dependency| match dependency {
+                    super::super::DependencyWait::Component { id } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            resources: waiting
+                .iter()
+                .filter_map(|dependency| match dependency {
+                    super::super::DependencyWait::Resource { id } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+        };
+        if !unchanged {
+            update(graph, |state| {
+                let node = state.components.get_mut(id).expect("declared component");
+                node.realization = RealizationState::Blocked;
+                node.waiting_for = waiting;
+                node.transition_time = Utc::now();
+                if let Some(report) = &mut state.deployment {
+                    report.components.insert(id.clone(), outcome.clone());
+                    report.summary = OperationSummary::CompletedWithFailures;
+                }
+            });
+        }
+        outcome
+    }
+
     fn advance_additions(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
         for (index, driver) in std::mem::take(&mut self.parked_controls) {
             self.control_quiescing.remove(&index);
@@ -2816,6 +2979,48 @@ impl Operations {
         }
         if graph.retirement_active() {
             return Ok(());
+        }
+        let pending =
+            if self.creation_dirty || self.creation_revision != Some(graph.snapshot.revision) {
+                self.creation_dirty = false;
+                self.creation_revision = Some(graph.snapshot.revision);
+                std::mem::take(&mut self.pending_creation)
+            } else {
+                BTreeMap::new()
+            };
+        for (index, operation) in pending {
+            let id = graph.nodes[index].descriptor.id();
+            if graph.ids.get(id) != Some(&index)
+                || graph.observed().components[id].failure.is_some()
+            {
+                continue;
+            }
+            if self.active.contains_key(&index)
+                || self.conflicts(&BTreeSet::from([index]), true)
+                || self
+                    .reconciliation
+                    .as_ref()
+                    .is_some_and(|reservation| reservation.components.contains(id))
+            {
+                self.pending_creation.insert(index, operation);
+                continue;
+            }
+            let waiting = creation_dependencies(graph, index);
+            if !waiting.is_empty() {
+                self.defer_creation(graph, index, operation, waiting);
+                continue;
+            }
+            if let Err(error) = self
+                .attach_control(graph, index)
+                .and_then(|_| self.launch(graph, index, operation))
+            {
+                let failure = failure(error, FailurePhase::Creation);
+                update(graph, |state| {
+                    let node = state.components.get_mut(id).expect("declared component");
+                    node.realization = RealizationState::CreationFailed;
+                    node.failure = Some(failure);
+                });
+            }
         }
         let newly_ready: Vec<_> = graph
             .observed()
@@ -2854,10 +3059,19 @@ impl Operations {
         }
         let eligible = |index: &usize| {
             let id = graph.nodes[*index].descriptor.id();
+            let observed = graph.observed();
             graph.ids.get(id) == Some(index)
-                && graph.observed().components[id].realization == RealizationState::Created
+                && observed.components[id].realization == RealizationState::Created
+                && observed.components[id].failure.is_none()
                 && !graph.deferred_activation.contains(id)
                 && !self.conflicts(&BTreeSet::from([*index]), true)
+                && binding_dependencies(graph, id).is_empty()
+                && !graph.snapshot.edges.iter().any(|edge| {
+                    edge.definition.to.component == *id
+                        && edge.policy.activation == ActivationCoupling::RequiresRunning
+                        && observed.components[&edge.definition.from.component].lifecycle
+                            != ComponentLifecycle::Running
+                })
                 && self.readiness_satisfied(graph, id)
         };
         let force = self
@@ -2929,6 +3143,9 @@ impl Operations {
         index: usize,
         operation: Operation,
     ) -> GraphResult<()> {
+        if matches!(operation, Operation::Create | Operation::Reconfigure) {
+            self.pending_creation.remove(&index);
+        }
         self.launch_cleanup(graph, index, operation, false)
     }
 
@@ -2996,6 +3213,12 @@ impl Operations {
         } else {
             None
         };
+        let resolved_factory = graph
+            .snapshot
+            .specifications
+            .get(&slot.id)
+            .and_then(|specification| graph.factories.get(&specification.implementation))
+            .cloned();
         let downstream: Vec<_> = graph
             .snapshot
             .edges
@@ -3027,6 +3250,7 @@ impl Operations {
             observed.transition_time = Utc::now();
             if matches!(operation, Operation::Create | Operation::Reconfigure) {
                 observed.realization = RealizationState::Creating;
+                observed.waiting_for.clear();
             } else if operation != Operation::Process && !cleanup_only {
                 observed.lifecycle = if operation == Operation::Start {
                     ComponentLifecycle::Starting
@@ -3054,6 +3278,14 @@ impl Operations {
                     } = &lease.component
                     {
                         Some((specification.clone(), factory.clone()))
+                    } else if let Component::Unresolved(definition) = &lease.component {
+                        match &definition.construction {
+                            super::ComponentConstruction::Factory(specification) => {
+                                resolved_factory
+                                    .map(|factory| (Arc::new(specification.clone()), factory))
+                            }
+                            _ => None,
+                        }
                     } else {
                         None
                     };
@@ -3381,6 +3613,7 @@ impl Operations {
                 {
                     node.started = false;
                     node.failure = None;
+                    node.waiting_for.clear();
                     node.lifecycle_requested = true;
                 }
             }
@@ -3433,6 +3666,13 @@ impl Operations {
                     FailurePhase::Activation,
                 )))
             } else if current.realization != RealizationState::Created {
+                if current.failure.is_none()
+                    && !current.waiting_for.is_empty()
+                    && (group.force || graph.snapshot.lifecycle_policies[id].auto_start)
+                    && !graph.deferred_activation.contains(id)
+                {
+                    self.pending_auto_start.insert(index, group.force);
+                }
                 Some(StartOutcome::NotCreated)
             } else if !group.force
                 && (graph.deferred_activation.contains(id)
@@ -3440,6 +3680,7 @@ impl Operations {
             {
                 Some(StartOutcome::NotRequested)
             } else if !binding_dependencies(graph, id).is_empty() {
+                self.pending_auto_start.insert(index, group.force);
                 Some(StartOutcome::Blocked {
                     dependencies: binding_dependencies(graph, id),
                 })
@@ -3523,11 +3764,33 @@ impl Operations {
                 if dependencies.is_empty() {
                     None
                 } else {
+                    self.pending_auto_start.insert(index, group.force);
                     Some(StartOutcome::Blocked { dependencies })
                 }
             };
             group.pending.remove(&index);
             if let Some(outcome) = outcome {
+                if let StartOutcome::Blocked { dependencies } = &outcome {
+                    if current.failure.is_none() {
+                        let mut waiting = binding_waits(graph, id);
+                        if waiting.is_empty() {
+                            waiting.extend(
+                                dependencies
+                                    .iter()
+                                    .filter(|dependency| *dependency != id)
+                                    .map(|dependency| super::super::DependencyWait::Component {
+                                        id: dependency.clone(),
+                                    }),
+                            );
+                        }
+                        if current.waiting_for != waiting {
+                            update(graph, |state| {
+                                state.components.get_mut(id).expect("component").waiting_for =
+                                    waiting;
+                            });
+                        }
+                    }
+                }
                 group.outcomes.insert(id.clone(), outcome);
             } else if let Err(error) = self.launch(graph, index, Operation::Start) {
                 let failure = self.fail_operation(graph, index, Operation::Start, error)?;
@@ -4053,6 +4316,9 @@ impl Operations {
             return Ok(());
         }
         let mut result = completion.result.map_err(|_| GraphError::Cancelled)?;
+        if completion.operation != Operation::Process {
+            self.dependencies_changed();
+        }
         if completion.operation != Operation::Stop && result.is_ok() {
             if let Some(cause) = slot.damage() {
                 result = Err(GraphError::Reported { cause });
@@ -4107,6 +4373,11 @@ impl Operations {
                                             .contains_key(port.id())
                                 }
                             });
+                    let waiting = if connected {
+                        Vec::new()
+                    } else {
+                        binding_waits(graph, id)
+                    };
                     update(graph, |state| {
                         let node = state.components.get_mut(id).expect("added component");
                         node.realization = if connected {
@@ -4115,6 +4386,7 @@ impl Operations {
                             RealizationState::Blocked
                         };
                         node.failure = None;
+                        node.waiting_for = waiting;
                         node.transition_time = Utc::now();
                     });
                     if connected {
@@ -4329,6 +4601,7 @@ impl Operations {
         error: GraphError,
     ) -> GraphResult<ComponentFailure> {
         self.quiescing.remove(&index);
+        self.pending_auto_start.remove(&index);
         let slot = &graph.components[index];
         let id = &slot.id;
         let failure = failure(slot.preserve_failure(error), operation.phase());
@@ -4409,7 +4682,14 @@ fn accept_addition(
                     .expect("pending addition")
                     .resources
                     .iter()
-                    .any(|resource| graph.protected_resources.contains(&resource.id)))
+                    .any(|resource| graph.protected_resources.contains(&resource.id))
+                || pending
+                    .as_ref()
+                    .expect("pending addition")
+                    .bindings
+                    .resources
+                    .keys()
+                    .any(|id| graph.protected_resources.contains(id)))
         {
             Err(topology("component configuration is managed by DrasiLib"))
         } else {
@@ -4429,7 +4709,15 @@ fn accept_addition(
                 .and_then(|_| operations.refresh_connections(graph))
                 .and_then(|_| match validation_error {
                     Some(cause) => Err(GraphError::Reported { cause }),
-                    None => operations.launch(graph, index, Operation::Create),
+                    None => {
+                        let waiting = creation_dependencies(graph, index);
+                        if waiting.is_empty() {
+                            operations.launch(graph, index, Operation::Create)
+                        } else {
+                            operations.defer_creation(graph, index, Operation::Create, waiting);
+                            Ok(())
+                        }
+                    }
                 });
             if let Err(error) = setup {
                 let phase = super::addition::creation_phase(&error);
@@ -4557,6 +4845,116 @@ async fn drain_deadline(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+async fn bind_ready_dependencies(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    commands: &mut CommandReceiver,
+) -> GraphResult<()> {
+    if graph.retirement_active() || operations.reconciliation.is_some() {
+        return Ok(());
+    }
+    let observed = graph.observed();
+    let mut changes = Vec::new();
+    let mut bindings = super::TopologyBindings::default();
+    let mut selected_edges = Vec::new();
+    for (index, edge) in &graph.edges {
+        let state = &observed.relationships[&edge.definition];
+        if state.binding != BindingState::Declared
+            || state.failure.is_some()
+            || edge
+                .resources
+                .keys()
+                .any(|id| !graph.resource_handles.contains_key(id))
+        {
+            continue;
+        }
+        let endpoints = [
+            graph.ids[&edge.definition.from.component],
+            graph.ids[&edge.definition.to.component],
+        ];
+        if endpoints.iter().any(|index| {
+            observed.components[graph.nodes[*index].descriptor.id()]
+                .failure
+                .is_some()
+                || operations.pending_creation.contains_key(index)
+                || operations
+                    .active
+                    .get(index)
+                    .is_some_and(|active| active.operation != Operation::Process)
+        }) || operations.conflicts(&endpoints.into_iter().collect(), true)
+        {
+            continue;
+        }
+        let mut constructed = true;
+        for index in endpoints {
+            if !operations.active.contains_key(&index)
+                && !graph.components[index].is_constructed()?
+            {
+                constructed = false;
+            }
+        }
+        if !constructed {
+            continue;
+        }
+        if let super::DesiredPipe::External { binding, .. } = &edge.pipe {
+            bindings
+                .pipes
+                .insert(binding.clone(), Box::new(graph.providers[index].clone()));
+        }
+        selected_edges.push(edge.definition.clone());
+        changes.push(reconcile::DesiredMutation::Bind(
+            super::DesiredRelationship {
+                definition: edge.definition.clone(),
+                policy: edge.policy.clone(),
+                pipe: edge.pipe.clone(),
+            },
+        ));
+    }
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let outcome = match reconcile::preview(graph, changes) {
+        Ok(preview) => {
+            reconcile::execute(
+                graph, operations, controls, cancel, preview, bindings, commands,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    let outcome = outcome.and_then(|report| {
+        if report.committed {
+            Ok(())
+        } else {
+            Err(GraphError::Component {
+                component: selected_edges[0].from.component.clone(),
+                operation: "bind deferred connections",
+                source: super::super::LifecycleReportError::Reconciliation(report).into(),
+            })
+        }
+    });
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(GraphError::Cancelled) => Err(GraphError::Cancelled),
+        Err(error) => {
+            let failed = failure(error, FailurePhase::Binding);
+            log::error!("Deferred connection failed: {}", failed.cause);
+            update(graph, |state| {
+                for edge in selected_edges {
+                    if let Some(binding) = state.relationships.get_mut(&edge) {
+                        binding.binding = BindingState::Failed;
+                        binding.failure = Some(failed.clone());
+                        binding.availability = DataAvailability::Unavailable;
+                    }
+                }
+            });
+            Ok(())
+        }
+    }
+}
+
 fn member_indices(
     graph: &ComputationGraph,
     members: &BTreeMap<ComponentId, ComponentGeneration>,
@@ -4600,7 +4998,21 @@ pub(super) async fn run(
         if *cancel.borrow() {
             return Err(GraphError::Cancelled);
         }
+        if operations.resources_dirty
+            || operations.resource_revision != Some(graph.snapshot.revision)
+        {
+            operations.resources_dirty = false;
+            operations.resource_revision = Some(graph.snapshot.revision);
+            super::resource_tasks::advance_construction(graph)?;
+        }
         operations.advance_additions(graph)?;
+        if operations.bindings_dirty || operations.binding_revision != Some(graph.snapshot.revision)
+        {
+            operations.bindings_dirty = false;
+            operations.binding_revision = Some(graph.snapshot.revision);
+            bind_ready_dependencies(graph, &mut operations, &mut controls, cancel, &mut commands)
+                .await?;
+        }
         // Finished groups free the controller for queued requests, and a
         // request that begins may finish at once, so repeat until none begins.
         loop {
@@ -4618,6 +5030,8 @@ pub(super) async fn run(
             && operations.draining.is_empty()
             && operations.retirements.is_empty()
             && graph.tasks.resources.is_empty()
+            && operations.pending_creation.is_empty()
+            && operations.pending_auto_start.is_empty()
             && operations.propagated_stop.is_empty()
         {
             let observed = graph.observed();
@@ -4647,6 +5061,7 @@ pub(super) async fn run(
                 if let Err(error) = super::resource_tasks::complete(graph, &job) {
                     log::debug!("Resource callback completed with a retained failure: {error}");
                 }
+                operations.dependencies_changed();
             }
             _ = drain_deadline(deadline) => {},
             completion = operations.drain_futures.next(), if !operations.drain_futures.is_empty() => {
@@ -4878,11 +5293,14 @@ fn handle_command<'a>(
                             return Err(GraphError::OperationInProgress);
                         }
                         let current = graph.snapshot.select(GraphSelection::All)?;
-                        let target = crate::management::compose_definition(current.clone(), &previous, &desired)
+                        let target = crate::management::compose_definition(current.clone(), &previous, &desired, &graph.observation_resources)
                             .map_err(|error| topology(format!("{error:#}")))?;
                         let mut changes = Vec::new();
                         if !crate::management::equivalent(&current, &target).map_err(|error| topology(error.to_string()))?
                             || !bindings.resource_constructors.is_empty()
+                            || bindings.factories.factories.iter().any(|(id, factory)| {
+                                graph.factories.get(id).map_or(true, |current| !Arc::ptr_eq(current, factory))
+                            })
                         {
                             changes.push(reconcile::DesiredMutation::SetTopology(target));
                         }
@@ -4960,6 +5378,21 @@ fn handle_command<'a>(
                 }
                 Some(Command::Add { addition, management_access, reply }) => {
                     accept_addition(graph, operations, addition, management_access, reply);
+                }
+                Some(Command::RegisterFactory { factory, reply }) => {
+                    let identity = factory.descriptor().implementation.clone();
+                    let result = if let Some(current) = graph.factories.get(&identity) {
+                        if Arc::ptr_eq(current, &factory) {
+                            Ok(())
+                        } else {
+                            Err(topology("an implementation identity cannot be rebound to a different factory"))
+                        }
+                    } else {
+                        graph.factories.insert(identity, factory);
+                        operations.dependencies_changed();
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
                 }
                 Some(Command::ControlConnections { connections, subscriptions, management_access, reply }) => {
                     let protected = |connections: &[(ComponentId, ComponentId)]| {
@@ -5053,8 +5486,7 @@ fn handle_command<'a>(
                     submit_handle_request(graph, operations, controls, cancel, HandleRequest::StopMembers { members, reply }).await?;
                 }
                 Some(Command::HandleStop { component, generation, reply }) => {
-                    let defer_restart = operations.reconciliation.is_some();
-                    submit_handle_request(graph, operations, controls, cancel, HandleRequest::Stop { component, generation, defer_restart, reply }).await?;
+                    submit_handle_request(graph, operations, controls, cancel, HandleRequest::Stop { component, generation, reply }).await?;
                 }
                 Some(Command::MutateMembers { members, changes, bindings, deprovision, management_access, reply }) => {
                     let result = async {
@@ -5121,6 +5553,7 @@ fn handle_command<'a>(
                     });
                     match valid {
                         Ok(selected) => {
+                            graph.deferred_activation.extend(selected.iter().map(|index| graph.nodes[*index].descriptor.id().clone()));
                             operations.begin_drain(graph, selected, DrainReply::Stop(reply));
                         }
                         Err(error) => { let _ = reply.send(Err(error)); }
@@ -5650,7 +6083,6 @@ mod command_tests {
         let mut graph = ComputationGraph::builder("inspection-isolation")
             .source(source("selected"))
             .source(source("unrelated"))
-            .for_additions()
             .require_recovery(request(selected.clone()))
             .build()
             .unwrap();

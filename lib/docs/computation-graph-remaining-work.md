@@ -2,6 +2,35 @@
 
 # ComputationGraph: what is done and what remains
 
+<a id="breaking-release-policy"></a>
+
+**Release policy - user decision, 17 October 2026:** this release is an
+intentional **breaking change**. **Migration code/paths and backward
+compatibility are not required.** Every application, plugin, tool and example
+depending on the old DrasiLib will be updated to use the new interfaces and
+rebuilt as needed. Do not add old-API wrappers, old-format readers, configuration
+converters, dual-version plugin support or upgrade/rollback machinery merely to
+keep an old consumer working.
+
+This policy supersedes compatibility requirements in earlier plans and in
+historical entries below. Updating consumers to the new implementation is still
+work; it is not a requirement to ship a migration facility. Required query,
+connector and application functionality must continue to exist, but its API,
+configuration and stored representation may change.
+
+**Still required:** reject incompatible binaries and data clearly; protect
+current-version transactions, replay, reset, restart and cleanup; distinguish
+stale runtime handles from their replacements. The policy does not authorize
+silently deleting user data, interpreting an old format as current, or treating
+a failed read as an empty store. Normal bootstrap, explicit reset, same-version
+crash recovery and key rotation are not backward-compatibility features.
+
+The [breaking-release cleanup plan](computation-graph-cleanup-plan.md) orders
+the removal work and its prerequisites, with explicit checks and exit criteria
+at every stage. Its execution record now covers completed stage-1 removals and
+the stage-2 management-close/resource-ownership fixes. Automatic dependency
+waiting is the newly agreed target; its implementation and later stages remain open.
+
 **Inventory review and consolidation: 17 October 2026.**
 This is the current work list, not a completion announcement.
 
@@ -26,7 +55,7 @@ too strong. The 17 October follow-up corrected the original wording in the
 The plan now identifies the unfinished approved requirements explicitly;
 its dated test results remain useful historical evidence.
 
-The 61 **CW** numbers are stable tracking numbers, not 61 missing features.
+The 65 **CW** numbers are stable tracking numbers, not 65 missing features.
 Some entries are finished fixes, some combine working code with remaining work,
 some need more testing, and some are proposals or work explicitly no longer
 being pursued. Existing numbers have not been reassigned. A merged entry points
@@ -34,8 +63,10 @@ to its owner; it is not labelled fixed merely because it was consolidated.
 
 ## Contents
 
+- [Breaking-release policy](#breaking-release-policy)
 - [How to read the assessment](#reading-the-status-correctly)
 - [Code, evidence and the approved scope](#code-and-evidence-used)
+- [Work removed or reduced by the release policy](#compatibility-work-removed-or-reduced)
 - [Code-review recommendations and completion](#unfinished-code-review-recommendations)
 - [Suggested priorities](#suggested-priorities)
 - [Startup, changes and shutdown](#startup-changes-and-shutdown)
@@ -45,6 +76,7 @@ to its owner; it is not labelled fixed merely because it was consolidated.
 - [Native components, Server and examples](#native-components-server-and-examples)
 - [Tests and deployment evidence](#tests-and-deployment-evidence)
 - [Code organization and documentation](#code-organization-and-documentation)
+- [Concrete compatibility removal work](#breaking-release-removal-work)
 - [Optional features](#optional-features-and-decisions)
 - [Completed, retired and redirected entries](#completed-retired-and-redirected-entries)
 - [Earlier tracking numbers](#where-earlier-tracking-numbers-went)
@@ -84,14 +116,14 @@ engineering estimates, not promises of elapsed time. Where the defect itself
 is unverified, implementation effort is necessarily conditional.
 
 **P1** means required before relying on the affected behavior or completing the
-affected native migration. **P2** means an important improvement. **P3** means a
+affected native replacement. **P2** means an important improvement. **P3** means a
 capability to select when a use case needs it. Priority does not measure how
 much work is already done.
 
 ## Code and evidence used
 
-The current working checkouts are Core
-[`30c5df88`](https://github.com/drasi-project/drasi-core/commit/30c5df88a8047f904dd2f2abe2991465074a843a)
+The reviewed code baseline is Core
+[`66e71e3f`](https://github.com/drasi-project/drasi-core/commit/66e71e3f59eab1becb3df94e86cd7ed78b7e9bd4)
 and Server
 [`1906c43`](https://github.com/drasi-project/drasi-server/commit/1906c439feca8f16bc5c9eafb3658187e3104808).
 The unchanged reference checkouts are learning-drasi-server `7277082` and
@@ -113,6 +145,10 @@ feature-completion counts**. For example, an unqualified Server row can mean
 that the required complete workflow has no evidence attached to that row, even
 though Server code and other Server tests exist. The
 [protected test list][contracts] names many narrower checks.
+Those ledgers still include historical compatibility cases. As the code below
+is retired, update their matching requirements and protected test names:
+successful old-binary/alias/format support is no longer a gate. Keep the
+independent correctness, failure and ownership assertions on the new interfaces.
 
 The [comparison](componentgraph-vs-computationgraph.md) explains what changed
 from the older runtime. The [maintainer's guide][maintainer-guide] explains the
@@ -121,7 +157,9 @@ are historical sources, not additional active work lists.
 
 <a id="which-graph-does-an-item-concern"></a>
 
-### Runtime work versus migration work
+<a id="runtime-work-versus-migration-work"></a>
+
+### Runtime work versus replacing the old interfaces
 
 ComputationGraph is already the only execution engine. Older source, query and
 reaction interfaces still run through it. `ComponentGraphView` (also available
@@ -140,10 +178,12 @@ cannot affect its replacement. **Fencing** means refusing to reuse uncertain or
 damaged state until cleanup/recovery, not forcibly interrupting arbitrary code.
 A **merger** combines and orders input from several sources.
 
-The separately requested **native-only migration** replaces older component
-and plugin interfaces with native components. It must preserve existing
-deployment features. Do not confuse that larger migration with finishing the
-selected execution-and-isolation round.
+The separately requested **native-only replacement** moves required component
+and plugin functionality to the new interfaces. Consumers will be updated;
+old signatures, configuration layouts and binary formats do not need continued
+support. Do not confuse that larger replacement with finishing the selected
+execution-and-isolation round. Older uses of "migration" in tracking IDs refer
+to this replacement work, not a required old-to-new conversion facility.
 
 Do not expand work into repairing retiring interfaces, adding compatibility
 bridges or unselected features. The specific code-organization and documentation
@@ -198,7 +238,7 @@ than starting them again. For an investigation, reproduce the problem before
 planning a fix. For a testing-only gap, add the missing scenario rather than
 claiming the whole subsystem is unimplemented.
 
-Native connector and Server migration have their own missing features in
+Native connector and Server replacement have their own missing features in
 CW-43 through CW-47. Optional features remain optional. A hard limit, such as
 not being able to interrupt arbitrary native code inside a process, is not an
 implementable promise merely because it appears in a work list.
@@ -222,7 +262,40 @@ implementable promise merely because it appears in a work list.
   investigation under CW-32.
 - **Code cleanup:** CW-34 owns shared recovery helpers and controller structure.
   CW-57 through CW-61 own the newly recorded packaging, documentation and
-  compiler-warning recommendations.
+  compiler-warning recommendations. CW-62 through CW-65 own concrete
+  compatibility removals; retirement of the full old component/plugin stack
+  remains with CW-44/CW-45 rather than a duplicate removal project.
+
+<a id="compatibility-work-removed-or-reduced"></a>
+
+### Work removed or reduced by the release policy
+
+The following requirements are no longer release work:
+
+- **CW-12/18/28/53:** no previous-release data migration, old-format read/write
+  compatibility or mixed-version state tests. Current-format correctness,
+  explicit version rejection and same-version crash/replay checks remain.
+- **CW-25/41:** no requirement to preserve old plugin layouts or successfully
+  load older binaries. Define the selected new interface, rebuild dependents,
+  reject unsupported versions and retain current-library lifetime/error checks.
+- **CW-43:** no old query constructor signatures, legacy storage namespace or
+  persisted built-in-factory migration. The new query API/configuration can
+  change. Actual query functionality, one evaluator, safe resource ownership and
+  the performance decision remain required.
+- **CW-44/45/46/47:** no old endpoint/configuration-shape parity, dual old/new
+  plugin operation, automatic adoption of old definitions or rollback to old
+  binaries. Update the selected connectors, clients, UI and examples directly
+  and qualify them together against the new release.
+- **CW-61:** do not retain unused aliases/helpers only for source compatibility.
+  Platform-specific and test-only exceptions still need justification.
+- **CW-52:** automatic old-to-new state migration is outside this release's
+  scope, not an optional task waiting to be included in its completion count.
+
+No recovery requirement is dropped merely because it mentions an "old" receipt,
+handle or key. A retry from earlier in the same release, a replaced component
+generation, and a rotated encryption key still need correct handling.
+New removal work and exact source evidence appear in
+[CW-62](#cw-62), [CW-63](#cw-63), [CW-64](#cw-64) and [CW-65](#cw-65).
 
 <a id="already-complete-do-not-reopen-as-missing-features"></a>
 <a id="qualification-snapshot"></a>
@@ -277,11 +350,12 @@ runtime. Effort estimates concern the stated scope, not just lines of code.
 2. **[CW-08: reliable management cleanup](#cw-08).**
    Make cancelled-close retry safe. The original restore-error preservation
    subtask is now fixed; that does not close the ownership work.
-3. **[CW-18: compatible stored formats and retry identities](#cw-18).**
-   Protect saved data and correct replay when code or plugin versions change.
+3. **[CW-18: unambiguous current formats and retry identities](#cw-18).**
+   Protect current-release data and replay, and reject unsupported versions.
+   Previous-release migration and read compatibility are no longer required.
 4. **[CW-44: required native connector features](#cw-44).** Make the native
    replacement usable without losing existing payload, batching or recovery
-   behavior. CW-45's Server migration depends on this work.
+   behavior through the new interfaces. CW-45's Server replacement depends on this work.
 5. **[CW-31: graph-size publication cost](#cw-31).** Keep small status changes
    from becoming expensive as graphs grow. The repeated whole-graph work is
    confirmed; its unacceptable-cost threshold still needs measurement.
@@ -480,7 +554,7 @@ remains an investigation rather than a proven lost-start incident.
 
 ### CW-08: Make failed or cancelled cleanup retryable and keep every error
 
-**Priority: P1. Implementation: partly implemented.**
+**Priority: P1. Implementation: management-close and restore-error fixes implemented; broader cleanup qualification remains.**
 
 **What works:** selected graph cleanup, rejected-resource disposal and removal
 of replaced objects use tracked work. Independent owners are attempted, errors
@@ -488,24 +562,31 @@ remain available, and an unfinished task is not treated as released storage.
 Instance stop and shutdown have retry tests.
 Initial configuration load/validation failures now retain their original cause
 even when the acquired store session also fails to close.
+Management close now retains the accepted request, its reply and the driver
+join when a caller stops waiting. A retry observes that same operation.
+After a reported store-close failure, a later attempt can retry cleanup;
+a driver failure remains inspectable instead of becoming a false success.
 
 **Testing:** recorded cases cover failed builder cleanup, rejected registration,
 cancelled shutdown, retained resource operations and force cleanup. The
 17 October restore regressions cover load/validation failure with successful
-and failed close on both Tokio runtime flavors. They do not cover every
-management-store open/close failure.
+and failed close on both Tokio runtime flavors. New close regressions cover
+cancellation before admission, during storage close and after acknowledgement
+before join, concurrent callers, retained failures, and actual redb lease
+release/reopen. The accepted-close cancellation cases failed before the fix
+and pass afterward on both flavors.
 
-**Remaining work:** keep the management task handle until closing has actually
-finished. Today, cancellation after a close request can make the next attempt
-lose the task it needs to wait for. The original open/restore failure is now
-preserved when cleanup fails. The policy for limiting cleanup retries
-and total shutdown time belongs to CW-06, not a second deadline project here.
+**Remaining work:** extend combined cleanup qualification across the selected
+native providers and real plugin paths as they replace the old stack. Do not
+reimplement the now-owned management-close operation. The policy for limiting
+cleanup retries and total shutdown time belongs to CW-06, not a second deadline
+project here.
 
 These management-store cases were not all included in the previous execution
 round; its runner/resource cleanup must not be reopened as wholly absent.
 
-**Likely complexity:** implementation **Medium**; testing **High** for cancelled
-close, failed restore, store ownership and repeated cleanup attempts.
+**Likely complexity:** implementation depends on defects found by the remaining
+integration checks; testing **High** across provider and plugin combinations.
 
 **Evidence:** [management open/close][management-runtime], [instance tests][instance-tests],
 [resource tasks][resource-tasks]. Earlier tracking: GM-02, RT-07/14, LI-03/04/10.
@@ -530,22 +611,44 @@ close ownership or the overall shutdown-deadline policy.
 
 ### CW-09: Apply the same connection and ownership rules when building or changing a graph
 
-**Priority: P2. Implementation: partly implemented; some policy choices remain.**
+**Priority: P2. Implementation: completed for the selected dependency-waiting and ownership contract.**
 
 **What works:** graph construction validates components, ports, connections and
-declared resources. Explicitly incomplete graphs are supported.
+declared resources. Valid declarations can precede their dependencies without
+a completeness-mode switch.
 
-**Testing:** construction and live-change tests exist. The complete comparison
-of addition, replacement, export and reconstruction rules is not established.
+**Selected behavior:** users may add valid nodes before their dependencies
+exist. Each node should explain what it is waiting for and automatically begin
+working when those dependencies become available, respecting auto-start and
+explicit stop settings. Invalid definitions and incompatible supplied interfaces
+must still produce clear errors.
 
-**Remaining work:** resolve inconsistent handling of subscriptions whose source
-does not exist. Live additions can leave `allow_incomplete` enabled in exported
-definitions. Cleanup still recognizes some attached resources by the `attached/`
-name prefix, which needs a safe ownership rule rather than trusting a name.
-Readiness explanations should identify the actual missing prerequisite.
+**Completed:** missing sources, queries, resources, factories and port connections
+have typed, readable waiting observations. The existing graph retains deferred
+construction and starts eligible work when dependencies arrive, without a retry
+worker or another graph. Explicit stops and disabled auto-start remain effective;
+genuine construction and processing failures are not retried as missing
+dependencies. Waiting definitions round-trip and reopen.
 
-**Likely complexity:** implementation **Medium**; testing **Medium** for
-add-before-source, removal, user-chosen names and export/rebuild combinations.
+Observation-only resource lifetime is tracked explicitly,
+independently of names and cleanup ownership. A declared resource named
+`attached/...` is not discarded when its observer detaches, is removed or is
+replaced. Borrowed resources are not closed; graph-owned resources retain their
+real cleanup boundary. Explicit rebinding also updates the declaration origin.
+
+**Testing:** name-based cleanup regressions failed before the fix and now pass
+on both Tokio flavors. Resource observation/dependency, reconciliation,
+configuration-snapshot and metadata-retirement suites also pass. Both runtime
+flavors exercise out-of-order source/query/reaction declarations with exact
+insert/update/delete results, deferred resources/factories, explicit pending stop,
+waiting startup and reconstruction. Server inspection reports waiting reasons,
+and loading a rebuilt native library activates already-declared nodes.
+
+**Boundary:** readable Server shorthand still needs actual factory metadata;
+host resource declarations still need reconstructible recipes. These are
+current-contract checks, not compatibility switches. The full invalid-definition
+matrix, broader connector coverage and long-running qualification remain under
+their own work items; this does not close those broader requirements.
 
 **Evidence:** [addition][addition], [live changes][reconcile], [definitions][topology].
 Earlier tracking: GM-03/15, original GM-09, part of GC-14.
@@ -607,7 +710,9 @@ reproductions of every reported case or establish a completed fix for them.
 group must not disappear just because its count/value is zero; a genuinely
 empty group must disappear. Check initial Add, later Update/Delete and restored
 averages. Check that old group bookkeeping is removed during repeated creation
-and deletion. Any stored-representation change needs an upgrade decision.
+and deletion. A new stored representation is allowed for this breaking release;
+it needs correct current-format handling and explicit rejection of unsupported
+data, not an upgrade converter.
 
 **Likely complexity:** implementation **High** if contributor/group state must
 change; testing **High** across nested aggregates, nulls, restart and churn.
@@ -676,7 +781,9 @@ handover need real provider controls.
 <a id="cw-18"></a>
 <a id="cw-18-own-and-version-payload-retry-and-configuration-identity"></a>
 
-### CW-18: Make stored formats and retry identities safe to change between versions
+<a id="cw-18-make-stored-formats-and-retry-identities-safe-to-change-between-versions"></a>
+
+### CW-18: Define current stored formats and retry identities; reject incompatible data
 
 **Priority: P1. Implementation: partly implemented.**
 
@@ -685,18 +792,21 @@ versions are checked. Unsupported versions and conflicting retry identities
 can fail explicitly.
 
 **Testing:** version rejection, retry-content and selected bridge reconstruction
-tests exist. They are not a complete old-version compatibility suite.
+tests exist. Successful loading or conversion of previous-release formats is
+not required.
 
 **Remaining work:** some graph payloads still serialize evolving Core types
-under an unchanged schema description. Define which bytes and fields determine
-stored data, retry identity and configuration identity; use fixed reference
-bytes/digests. Read old formats explicitly or reject them with a documented
-rebuild path. Diagnostics must not accidentally change business identity.
-An ordinary configuration-hash change is a cutover concern, not an older-adapter
-improvement project.
+under an unchanged schema description. Define the new release's formats and
+which fields determine stored data, retry identity and configuration identity;
+use reference bytes/digests for those current contracts. Reject incompatible
+records clearly. Diagnostics must not change business identity, and a retry
+within the supported release must not become new input because it was re-encoded.
+Remove legacy query namespace/hash behavior under CW-64. Do not add old readers,
+dual writers, data converters or a release-upgrade/rollback path.
 
-**Likely complexity:** implementation **High** for format ownership and upgrade
-rules; testing **High** across old/new bytes, replay and partial upgrades.
+**Likely complexity:** implementation **Medium to High** for clear format/identity
+ownership; testing **High** for current bytes, replay, corruption and rejected
+versions. Cross-release migration and partial-upgrade qualification are removed.
 
 **Evidence:** [graph encoding][graph-codec], [query encoding][query-codec],
 [output identity][output-identity], [query configuration][query-configuration],
@@ -928,8 +1038,9 @@ input through processing and actual delivery, including supported control
 requests.
 A retry gets a new attempt without changing saved business identity. Define
 how one result can refer to several contributing inputs. Saved tracing context
-needs a versioned data format, not temporary in-memory tracing objects; plugin
-interface extensions must preserve compatibility. Measure durations with an
+needs a versioned data format, not temporary in-memory tracing objects. Plugin
+interfaces may change with the breaking release; update/rebuild the dependent
+plugins rather than preserve old tables. Measure durations with an
 elapsed-time clock that does not jump when the wall clock changes, and do not
 invent a duration across restart or mistake HTTP 202 for completed work.
 
@@ -1049,9 +1160,10 @@ has not finished or move related writes out of their required transaction.
 The historical Garnet count concern still needs reproduction before a fix is
 claimed. This consolidation does not turn unverified reports into known bugs.
 
-**Likely complexity:** implementation **High** if stored formats or write
-boundaries change; testing **High** for compatibility, failed writes, replay,
-throughput, slow cases and disk growth.
+**Likely complexity:** implementation **Medium to High** for write boundaries
+and storage behavior; testing **High** for current-format restart, failed writes,
+replay, throughput, slow cases and disk growth. No old-format conversion or
+backward-readable representation is required.
 
 **Evidence:** [source log][redb-wal], [RocksDB][rocksdb], [provider selection][index-factory].
 [Merger persistence][merge-recovery], [delivery][delivery],
@@ -1180,7 +1292,7 @@ compaction are different obligations.
 
 ### CW-40: Measure sustained performance, resource growth and large graphs
 
-**Priority: P1 for required execution/migration evidence; P2 for broader production characterization. Implementation: measurement tools and selected results present.**
+**Priority: P1 for required execution/replacement evidence; P2 for broader production characterization. Implementation: measurement tools and selected results present.**
 
 **What works:** workload runners, exact result checks, bounded replacement
 soaks and CPU measurements exist. CW-50's selected CPU-scaling target passed.
@@ -1213,14 +1325,16 @@ CG-21/22/27, G06/Q08/T07, [#681][i681].
 
 ## Native components, Server and examples
 
-Preserve supported user workflows while replacing the older component interfaces. ComputationGraph is already the only execution engine.
+Implement required user workflows through the new interfaces and update their
+consumers. Keeping the old API or configuration shape is not required.
+ComputationGraph is already the only execution engine.
 
 <a id="cw-43"></a>
 <a id="cw-43-complete-ordinary-to-native-wiring-and-reconstruction-recipes"></a>
 
 ### CW-43: Make complete native pipelines rebuildable, including their query-result connections
 
-**Priority: P1 for native migration. Implementation: partly implemented.**
+**Priority: P1 for native replacement. Implementation: partly implemented.**
 
 **What works:** native factories, resource descriptions, saved definitions and
 selected Server reconstruction already exist. Export can distinguish a
@@ -1229,12 +1343,13 @@ rebuildable definition from an application-supplied object it cannot recreate.
 **Testing:** selected reconstruction and native query-read tests exist. They
 do not establish every native deployment recipe or live-result outlet.
 
-**Remaining work:** complete the supported native recipes, dependencies and
-versions, including required merger/provider combinations. Standard query
-assembly must preserve the actual catalogue and connected output needed by
-snapshot, saved-result and live-subscription workflows through export, restart
-and replacement. A deliberate processing-only graph may omit that surface;
-a migrated user workflow must not lose it silently.
+**Remaining work:** complete new-release native definitions, dependencies and
+versions, including required merger/provider combinations. Query assembly must
+provide the actual result catalogue and output connections needed for snapshots,
+saved results and live subscriptions through same-version export, restart and
+replacement. A processing-only graph may deliberately omit them; an updated
+user workflow that needs them must include them. Old saved definitions need no
+converter or adoption path.
 
 **Likely complexity:** implementation **High** across assembly, recipes and
 Server; testing **High** for recreation and exact result/subscription behavior.
@@ -1245,13 +1360,16 @@ The proposed ordinary-to-native bridge is retired, not a remaining deliverable.
 
 <a id="cw-43-optional-native-query-plugin"></a>
 
-#### Selected migration: make the native query component an optional plugin
+<a id="selected-migration-make-the-native-query-component-an-optional-plugin"></a>
 
-**Priority: P1 for native migration. Status: design and an initial experiment exist;
+#### Selected work: make the native query component an optional plugin
+
+**Priority: P1 for the selected optional-query component work. Status: design and an initial experiment exist;
 the production plugin is not implemented. Selected: 14 October 2026.**
 
 Here **optional** means a deployment can choose whether to load the query
-component. This is selected migration work, not an unselected future feature.
+component. This is selected work, not an unselected future feature, but dynamic
+query loading is not a prerequisite for replacing the old DrasiLib runtime.
 
 **Current investigation:** the [design and initial experiment][query-plugin-design]
 were preserved in an [isolated performance snapshot][query-plugin-experiment].
@@ -1285,7 +1403,8 @@ must report a clear missing-plugin/factory error when it is unavailable.
 **Host-consolidation preparation:** ordinary queries now use
 `ContinuousQueryTransformer` directly in the instance graph rather than an
 extra query host and private graph. Existing query configuration and recovery
-identities remain supported. This removes an execution-layer dependency; it
+identities were preserved in that completed change; retaining those old forms
+is no longer a requirement of the breaking release. This removes an execution-layer dependency; it
 does **not** make the query component an optional dynamically loaded plugin or
 complete the SDK/ABI work below.
 
@@ -1296,20 +1415,22 @@ snapshot/result reads and live subscriptions across the plugin boundary.
 Do not bypass the missing query-role support by advertising a transformer,
 weakening recovery or supporting only an in-memory subset.
 
-Update supported Server/library assembly, discovery, configuration, saved
-definitions and examples to select the plugin normally. Keep ordinary query
-configuration and APIs unchanged. The user approved moving the low-level Rust
-constructors to factory-based creation, and chose to reject old saved native
-factory references with instructions for manual updates rather than silently
-migrate them. Those policies have not been applied to production query loading.
-Preserve query/storage identities and required ports and data formats. A change
-of plugin identity must not reset or discard saved processing state.
+Update Server/library assembly, discovery, configuration and examples to select
+the plugin normally. Choose the new public APIs, configuration and component
+identities, then update consumers directly. Do not retain old constructors,
+legacy query namespaces or factory-reference migration machinery. This release
+does not need to open old saved definitions or processing data.
+Within the new release, identities still need to remain stable through restart
+and replay; changing a running component must not silently discard its pending
+work. CW-64 owns the built-in query compatibility cleanup and must be coordinated
+with the isolated plugin investigation, not duplicated there.
 
 **Closure criteria:** demonstrate independent build/load and operation with the
 plugin both present and absent. Qualify existing Cypher/GQL behavior, bootstrap
 and scheduled work, exact result changes, supported transactions, cancellation,
-reconstruction and recovery with the real dynamic library. Existing query API,
-snapshot and live-result workflows must retain their behavior; moving files or
+reconstruction and recovery with the real dynamic library. Updated query APIs,
+snapshot and live-result workflows must provide the required behavior; matching
+old method names, wire shapes or data files is not required. Moving files or
 loading a factory alone is not completion.
 
 **Likely complexity:** implementation **High** across component extraction,
@@ -1325,24 +1446,65 @@ ownership and recovery across the dynamic boundary.
 
 ### CW-44: Preserve required connector features when replacing older plugins
 
-**Priority: P1 before each affected native cutover. Implementation: native framework and some connectors present; migration incomplete.**
+**Priority: P1 before each affected native replacement. Implementation: native framework and some connectors present; replacement incomplete.**
 
 **What works:** native HTTP/gRPC sources/sinks, SSE and reference components
 exist. Native admission, progress, initial-loading and completion services also
-exist. Queries currently remain built-in; the selected migration to an optional
+exist. Queries currently remain built-in; the selected optional
 native query component plugin is tracked under
 [CW-43](#cw-43-optional-native-query-plugin), not implemented by the connector split.
 
 **Testing:** selected real native network/service cases passed. That is not
 feature parity with all existing production connectors.
 
-**Remaining work:** migrate the required component/provider set and packaging.
+**Application progress:** native volatile input and durable admission now reuse
+the existing application handle/value logic and graph-owned QoS services.
+Application bootstrap streams an application-owned snapshot; the existing native
+application reaction is reused. Both-runtime integrations cover snapshot/live
+changes, durable stop/restart and retry receipts, unhandled-input reopen, and
+durable input through a persistent query to a native application consumer.
+The user explicitly chose to reject durable sends while stopped, unlike volatile
+channel buffering. No second WAL or admission runtime was added. Host/API cutover,
+permanent-removal/shared-journal ownership and complete assertion mapping remain;
+the old application interfaces have not been retired.
+
+**Remaining work:** implement the required component/provider set and packaging
+against the new interfaces, and update the applications that use them.
+The initial cleanup-stage-6 inventory found 66 component manifests with direct
+old-SDK dependencies, including two test fixtures: 22 sources, 19 bootstrappers,
+18 non-fixture reactions, two non-fixture identity providers and three secret
+stores. Hosted application helpers and ordinary API users are additional
+dependencies. This counts dependency declarations, not completed replacement
+designs. The user selected 23 existing components: application/HTTP/MSSQL/MySQL/
+PostgreSQL source, reaction and bootstrap; gRPC source/reaction; and Kafka/
+Kubernetes/SQLite source/bootstrap. Reuse the existing implementation logic where
+applicable and retain equivalent test coverage. New Kafka/SQLite reactions and
+functional gRPC bootstrap are explicitly outside this first-release scope.
+See the stage-6 scope in the
+[cleanup plan](computation-graph-cleanup-plan.md).
 Concrete gaps include payload/header/routing templates, fixed/adaptive batching,
 and supported snapshot/recovery replacement messages. Native gRPC currently
 supports only `batchSize=1`; applicable native network options reject unsupported
-features. That is missing implementation, not just missing tests. Preserve
-required transport/security and destination-completion behavior or obtain an
-explicitly accepted change before cutover.
+features. That is missing implementation, not just missing tests. Required
+transport/security and destination-completion behavior remain necessary, but
+the old option names, plugin factories and binary layouts need not remain.
+
+<a id="cw-44-retire-ordinary-plugin-adapters"></a>
+
+**Removal targets identified in the code:** once their consumers use the
+selected new interfaces, remove the old Source/Reaction/Bootstrap plugin family,
+its Host proxies, and the `LegacySourceFactory`, `LegacyReactionFactory`,
+`SourcePluginAdapterFactory` and `ReactionPluginAdapterFactory` registrations.
+Retire the corresponding ordinary source/reaction hosts, `Legacy*Resource`
+wrappers and old message-conversion paths. These are active today, not dead
+code: the app/connector changes must accompany removal. Coordinate the Server
+wiring with CW-45. Do not build another ordinary-to-native bridge or maintain
+both families for old consumers.
+
+Native bootstrap, identity/secret services, current result/snapshot reads and
+actual storage providers are required capabilities where used. Remove the old
+interface/adaptation, not those capabilities because their implementation has
+an old name. Smaller old-binary fallbacks are itemized under CW-63.
 
 **Likely complexity:** implementation **Very high** for the full connector set,
 to be split by required connector/feature; testing **Very high** across real
@@ -1362,16 +1524,38 @@ products, protocols, failures and recovery.
 **What works:** Server exposes native definitions, resources, inspection,
 configuration acceptance/receipts and selected result/lifecycle operations.
 Everything already executes through ComputationGraph.
+Query SSE attachment now uses `DrasiLib::subscribe_query_results` directly,
+without a temporary application reaction or asynchronous drop-cleanup task.
+The native catalogue preserves bounded delivery, retained-history gap recovery,
+instance/generation fencing and synchronous reader removal. Each connection
+starts with a consistent snapshot, followed only by changes after its sequence.
+This result-view reader is not a durable consumer.
 
 **Testing:** many Server unit/integration cases and selected live examples have
 recorded passes. This does not establish a fully native Server/UI deployment.
 
-**Remaining work:** remove dependence on older component/plugin interfaces for
-the supported workflows. Preserve creation, loading, configuration, lifecycle,
-results, snapshots, subscriptions, management and UI editing. Show accepted,
-starting, ready and failed states correctly. Define saved-configuration/data
-cutover. Do not retire a supported option or endpoint before its native
-replacement works or its removal is explicitly accepted.
+**Remaining work:** update Server, UI and clients to the new interfaces for
+creation, loading, configuration, lifecycle, results, snapshots, subscriptions,
+management and editing. Show accepted, starting, ready and failed states
+correctly. Old endpoints, DTO names and configuration/data formats can be
+removed; do not implement adoption, migration, compatibility routes or rollback
+to old binaries. CW-65's configuration/route consolidation is complete. The remaining work here
+is native-only component/provider hosting and its current workflows, not another
+Server layout or a first-instance route.
+
+Remove old registry categories and statically wired ordinary helpers as their
+required functionality is provided by the chosen new components. In particular,
+Server's ordinary application/bootstrap registrations still have consumers;
+they cannot simply be deleted before those consumers are updated. CW-44 owns
+the actual connector/SDK replacement. Keep necessary operations working under
+the new API rather than maintaining two APIs for compatibility.
+
+The user selected a snapshot followed by updates on each SSE connection, including
+reconnects. The UI now replaces rows on that initial event, without a separate
+REST fetch, and waits for a fresh snapshot before reporting a reconnect as current.
+The VS Code watcher consumes the same snapshot event; after stream termination it
+refreshes through its existing snapshot-polling path. Neither consumer treats
+malformed stream data as successful updates.
 
 **Likely complexity:** implementation **Very high** across APIs, plugins,
 configuration and UI; testing **Very high** for existing client/workflow behavior.
@@ -1403,8 +1587,10 @@ atomic downstream effects.
 
 **Remaining work:** finish required native templates and packaging for the
 standard Server executable, rather than only custom embedded hosts. Complete
-readiness/reset behavior and exact result/effect checks. Preserve existing
-Getting Started assertions. Keep guides consistent with actual capabilities;
+readiness/reset behavior and exact result/effect checks. Update Getting Started
+and other examples to the new release while retaining their meaningful expected
+outcomes, not their old configuration spelling. No old-example upgrade path is
+required. Keep guides consistent with actual capabilities;
 describing a missing feature does not implement it. Additional tutorial breadth
 is separate from preserving existing supported examples.
 
@@ -1450,6 +1636,9 @@ failed. Quiet output, a received-message count or a manufactured completion
 flag is not enough. Existing Building Comfort captures do not yet establish
 all required completion conditions. CW-46 owns the Server scenarios that use
 this rule, not a second definition of a valid pass.
+Use an independent expected result and baseline/recovery runs of the new release.
+There is no requirement to make old binaries, old APIs or previous-release
+captures compatible with it.
 
 **Likely complexity:** runtime implementation **None unless a test finds a
 bug**; test infrastructure **Medium**, potentially **High** for missing
@@ -1510,9 +1699,10 @@ consumers with damaged history; and lost destination replies with failed
 completion writes.
 Include the remaining merger cases with late input held across crash/reopen and
 additional providers, previously repeated under CW-38. Extend actual
-provider/connector coverage. Specifically bind evidence for the
-old configuration-hash read-error/reset fix instead of inferring its exact
-coverage from a broad successful suite.
+provider/connector coverage. Specifically show that a failure to read current
+query configuration does not authorize deleting saved state, instead of
+inferring that protection from a broad successful suite. This requirement
+survives removal of old hash formats; it does not require their migration.
 
 **Likely complexity:** runtime implementation **None assumed**; test setup
 **Medium to High**, testing **High** for exact rows, positions, effects and
@@ -1526,9 +1716,11 @@ PR [#745][p745] is a scenario lead.
 <a id="cw-41"></a>
 <a id="cw-41-qualify-independently-built-plugin-lifetimes-and-compatibility"></a>
 
-### CW-41: Check real plugin binaries across failure, replacement and version changes
+<a id="cw-41-check-real-plugin-binaries-across-failure-replacement-and-version-changes"></a>
 
-**Priority: P1. Implementation: native SDK/Host present; broader compatibility/lifetime evidence incomplete.**
+### CW-41: Check rebuilt plugin binaries, failure handling and safe replacement
+
+**Priority: P1. Implementation: native SDK/Host present; current-binary lifetime evidence incomplete.**
 
 **What works:** separately built native libraries exercise processing,
 transactions, input receipts, initial loading, consumer completion and panic
@@ -1536,17 +1728,21 @@ handling. Invalid capabilities and revoked storage can be rejected.
 
 **Testing:** actual-binary cases and selected restart/cancellation tests passed
 in recorded runs. They are more than compile-only checks, but not every
-cross-version or late-callback schedule.
+late-callback or replacement schedule. Historical positive tests for old ABIs
+are not a release requirement under the breaking-change policy.
 
 **Remaining work:** expand malformed metadata/buffer, version mismatch,
 cancel/restart, reused handle and delayed callback tests. Measure per-instance
 allocation cleanup under repeated multi-instance use. Libraries intentionally
 loaded for process lifetime are not by themselves a leak; hot unloading is not
-the selected requirement.
+the selected requirement. Use independently rebuilt libraries for the selected
+new contract. Reject unsupported old versions; remove positive old-binary
+compatibility fixtures with their retired code under CW-63/CW-44. No coexistence,
+mixed-version rollout or old-binary rollback facility is required.
 
 **Likely complexity:** implementation **Medium** if tests reveal a lifetime
-gap, **High** if compatibility changes; testing **High** with independently
-built binaries and allocation/lifetime accounting.
+gap; testing **High** with independently built current binaries and
+allocation/lifetime accounting. Preserving old layouts no longer adds work.
 
 **Evidence:** [Host tests][host-tests], [native SDK][native-sdk], [test ledger][requirements].
 Earlier tracking: CG-05/06/07/25, A01-A05. Ordinary SDK expansion is excluded.
@@ -1570,8 +1766,9 @@ workflow matrix. CW-36 owns the shared rules for a trustworthy recovery verdict.
 
 **Remaining work:** cover delayed/failed startup, accepted configuration,
 REST/SSE reconnects, stale readers and required snapshot/result workflows.
-Run baseline and recovered versions under CW-36's completion rules, with
-compatible expected results and exact native binary/plugin identities.
+Run baseline and recovered instances of the new release under CW-36's
+completion rules, with exact expected results and binary/plugin identities.
+Recovery here means restarting the supported release, not upgrading old state.
 Scheduled `main`/nightly runs are not automatically evidence for this branch.
 Actual Server/UI implementation belongs to CW-45; this item owns the integrated
 workflow evidence, not duplicate implementation or test-verdict projects.
@@ -1695,9 +1892,11 @@ build with the policy, and all-target Clippy passes.
 
 **Remaining work:** inventory the warnings and enable them gradually, starting
 with the next small package or a specific warning such as unused imports. Remove true
-leftovers and keep narrow, explained exceptions for compatibility, platform
-differences or tests. Replace the broad suppression only when the supported
-builds are clean; do not start a general public API deletion project.
+leftovers and keep narrow, explained exceptions only for real current uses,
+platform differences or tests. Compatibility-only aliases and helpers need no
+exception: remove them through CW-62 and update their callers. Replace the broad
+suppression only when the selected new-release builds are clean; do not delete
+unrelated useful public interfaces merely to silence warnings.
 The workspace still permits the `unused` group elsewhere.
 
 **Testing:** run the relevant formatting, lint and build checks across supported
@@ -1710,6 +1909,231 @@ first slice; verification **Medium to High** across configurations.
 **Evidence:** [workspace warning settings][workspace-lints],
 [package warning policy and commands][ffi-primitives-guide].
 Original code-review recommendation: **14**.
+
+<a id="breaking-release-removal-work"></a>
+
+### Compatibility removal work found in the code
+
+The following is a source-backed removal inventory, not a claim that all code
+with "legacy" in its name is unused. Pure aliases and deprecated helpers can be
+removed directly with caller updates. Active query, plugin and Server adapters
+must be removed together with the consumers that still use them.
+This inventory began as a document review. Stage 1 has since removed CW-62's
+targets and the narrow CW-64 query wrapper; active query mode and plugin/Server
+replacement work remains.
+
+<a id="cw-62"></a>
+<a id="cw-62-remove-retired-rust-apis-and-transition-settings"></a>
+
+### CW-62: Remove retired Rust APIs and settings kept only for old callers
+
+**Priority: P2. Status: completed in cleanup stage 1.**
+
+**Removed:** `compatibility::QueryBase`, `SequenceDedup`, the deprecated
+`queries::output_state::QueryOutputState` cache, their forwarding modules and
+old root exports. Current query execution/state did not use those helpers.
+
+Removed duplicate names and old import surfaces: `ComponentGraph` in favor
+of `ComponentGraphView`; both old `QuerySnapshot` aliases in favor of the
+specific configuration/result names; the `api` builder alias; `managers`
+forwarding exports; compatibility schema re-exports; and deprecated
+`init_tracing`/`try_init_tracing` entry points. The actual inspection, builder,
+observability and snapshot/outbox/error exchange implementations remain.
+
+The empty DrasiLib `computation` feature and
+`bootstrapBufferSize`/`bootstrap_buffer_size`/`Query::with_bootstrap_buffer_size`
+are removed, including their Server mappings, current client models, examples
+and test-runner output. The real Core/SDK/backend features remain. Live bootstrap
+buffering still uses `priority_queue_capacity`; both removed setting spellings
+are rejected. Historical captured responses retain their original bytes.
+
+**Validation:** the Core workspace and Server all-target builds, library lint,
+public documentation examples, relevant query/recovery and Server configuration/API
+checks, and React SDK/Trading checks pass. Source-order assertions no longer
+depend on the retired deduplication helper. The Learning tutorial's unchanged
+unused-field build error is recorded in the
+[execution record](computation-graph-cleanup-plan.md#execution-record), not
+hidden by a blanket success claim.
+
+**Evidence:** [retained exchange types][ordinary-query-output],
+[public interfaces][public-interface-declarations], [inspection view][inspection-alias],
+[configuration snapshots][config-snapshot-code],
+[result snapshots][result-snapshot-code], [observability][tracing-layer],
+[library features][lib-manifest], [query settings][query-schema-code],
+[query builder][query-builder-code], [Server query DTO][server-query-dto].
+
+<a id="cw-63"></a>
+<a id="cw-63-remove-old-plugin-binary-and-decoder-fallbacks"></a>
+
+### CW-63: Remove old plugin-binary support and permissive compatibility fallbacks
+
+**Priority: P2. Status: removal targets verified; not implemented.**
+
+**Remove:** the Host loader's positive support for ordinary ABI 0.16 and its
+older-prefix behavior. With all plugins rebuilt for the selected release, it
+does not need to retain two old-family ABIs. The loader also still gates fields
+on SDK 0.6 and 0.12 even though its accepted versions start at 0.16; remove those
+obsolete version-dependent branches after selecting the new registration layout.
+Keep strict target, header, version and capability validation.
+
+Remove two concrete decoding workarounds in the ordinary SDK:
+
+- `make_snapshot_stream` retries a failed keyed-row decode as arbitrary JSON
+  and invents row signature zero for old bare rows. Updated producers must send
+  the selected explicit shape. Malformed current data must remain an error,
+  not an old-format success or an apparently empty/end-of-stream result.
+- `DescriptorSchema::new` guesses an old descriptor's root schema from a short
+  type name or `ConfigDto` alias. Update descriptors to name their actual schema
+  and remove the guessing path.
+
+Where CW-44 retires the entire old plugin family, remove these paths with it
+instead of improving and then retaining that SDK. New native ABI layouts may
+change for this breaking release; update all matched hosts/plugins and version
+them honestly rather than maintaining old layouts for compatibility.
+
+**Keep:** optional native capabilities that have a real current use, current
+buffer/lifetime bounds, verification and rejection of unsupported libraries.
+An optional extension is not obsolete solely because an older library lacked
+it. Platform support and protocol-version validation are not old-release
+migration features.
+
+**Closure:** only selected rebuilt libraries load; unsupported old binaries
+fail before their layout is used. Update/remove positive old-binary/bare-row
+fixtures, preserving malformed-input, typed-error and cleanup tests.
+
+**Likely complexity:** implementation **Medium**, larger if the selected ABI is
+redesigned; testing **High** for real independently built libraries and failure
+paths. No mixed-version deployment or rollback support is required.
+
+**Evidence:** [ordinary loader and old-version gates][ordinary-loader],
+[ABI history][ordinary-abi-metadata], [snapshot fallback][ordinary-vtable-code],
+[descriptor schema guessing][ordinary-descriptor-schema].
+
+<a id="cw-64"></a>
+<a id="cw-64-remove-query-compatibility-mode-and-wrapper"></a>
+
+### CW-64: Remove the query compatibility mode and redundant query wrapper
+
+**Priority: P2. Status: completed for the selected current query contract and measured profiles.**
+
+**Completed:** `TransactionTransformer::query`/`from_query` and its query-body
+variant are removed. Callers use `ContinuousQueryTransformer` directly with
+`with_delivery_tracking()`, or the factory which enables tracking automatically.
+The shared evaluator and real linear transaction implementation remain; their
+query fault, replay, persistent restart and transaction checks pass. Dynamic
+query loading is not involved.
+
+The `runtime_compatibility` query, pipeline and source-subscription switches,
+old namespace alias, legacy hash reader/writer and public hash helper are
+removed. Their semantic fingerprint assertions now exercise the current native
+configuration record, preserving meaningful source/middleware ordering and
+ignoring cosmetic label/join ordering and operational tuning.
+
+Source-facing memory queries explicitly supply volatile checkpoint storage;
+there is no provider fallback or persistent downgrade. The minimal processing-only
+Core memory provider remains unchanged. Persistent queries require persistent
+checkpoints, an outbox and live results; atomic publication additionally requires
+their actual shared transaction. Unsupported cleanup fails instead of being
+ignored. Current reset markers require a generation, and unidentified old output
+is rejected rather than assigned a producer identity during recovery.
+
+Both admission paths now share scheduling, source progress, bootstrap and
+empty-source behavior. Result timestamps mean production time; logical event/due
+time remains in the graph envelope. Ordinary result metadata is projected at the
+API boundary rather than stored redundantly in the engine. Query output buffering
+uses the configured dispatch capacity. Native source-host resources are not
+mistaken for independent same-named graph nodes, while actual borrowed instance
+sources retain their ownership dependencies.
+
+**Qualification so far:** current-scope reconstruction and unconfirmed-output
+replay, preservation of retired-namespace files, incomplete-provider rejection on
+both runtimes, configuration/read/reset failures, exact metadata and ordering,
+actual WAL/shared-source restart, source-dependency protection, query updates and
+atomic output checks. The expanded library run has 1,102 passing tests and two
+existing ignored cases. The new persistent native-admission update case passes
+the same output-generation and sequence assertions as ordinary admission.
+
+Matching-artifact SDK/Server checks, no-default library coverage, shared query
+tests, bootstrap recovery, both-runtime responsiveness and scoped lint now pass.
+Nine native libraries were rebuilt, actual HTTP/gRPC projections agree, and
+generated architecture artifacts are refreshed.
+
+The controlled pre-cleanup comparison passed using freshly built baseline and
+current binaries, identical benchmark source/compiler/lockfile and matched
+dependency features. Ordinary fast-path throughput improved 10-18%, with about
+6% fewer allocations; four-query ordinary throughput improved about 4%, while
+native throughput stayed within 0.6% of baseline. Measured shutdown and memory
+showed no material regression. See the cleanup plan for workload bounds and
+evidence; this does not qualify every connector or deployment profile.
+
+Stages 5-9 remain separate, unfinished work.
+
+**Closure:** no old-API construction detour or compatibility-only provider
+relaxation remains; current query behavior and current-version recovery work
+on the chosen providers. Coordinate with CW-43's separate experiment without
+importing unaccepted performance or architecture changes.
+
+**Likely complexity:** wrapper removal **Low to Medium**; complete mode/provider
+consolidation **High**, with **High** lifecycle/recovery testing. No query engine
+rewrite or old-data migration is required.
+
+**Evidence:** [linear transactions][transaction-transformer-code],
+[native query construction/recovery][native-query], [shared assembly][pipeline],
+[current reset protocol][query-recovery], [explicit cleanup errors][index-clear-code].
+
+<a id="cw-65"></a>
+<a id="cw-65-remove-duplicate-server-configuration-and-api-forms"></a>
+
+### CW-65: Remove Server configuration conversion and compatibility-only API forms
+
+**Priority: P2. Status: completed in cleanup stage 5 for the selected Server and consumer scope.**
+
+Server configuration now has only Server-wide fields and explicit `instances`.
+Missing or empty instance lists start an empty Server. Root-level instance fields,
+`instance_configurations`, first-instance routes/middleware, `get_default`, and
+configuration-module DTO aliases are removed. Callers use the canonical API
+models and instance-scoped endpoints.
+
+`ConfigPersistence` retains one Server-settings value and one instance-settings
+map, always writes an instance list, and no longer promotes single-instance
+fields or guesses missing metadata. Atomic saves, real provider settings, secret
+references, and explicit persistence errors remain.
+
+The user-selected identity policy is implemented: file-only missing IDs are
+fresh per load; `configurationStore` imports an uninitialized instance once and
+then owns accepted definitions and the generated ID. Accepted empty definitions
+do not re-seed. Identity discovery reads existing redb instance keys, not a new
+record format, sidecar or migration store. Ambiguous shared-store selection
+fails explicitly. `persistConfig` still means YAML saving and is independent.
+
+UI, Playground, CLI, VS Code, documentation, tutorial and test-infrastructure
+consumers use the selected shape. The unused UI SSE path and Playground proxy
+are removed; source injection uses the shared scoped Server endpoint. Native
+readable authoring and stored definitions remain distinct current purposes.
+
+**Qualification:** complete Server tests: 948 passed, zero failed, 36 existing
+ignored cases across 45 targets; ignored cases are not counted as acceptance.
+Server/backend lint, client builds, scoped SDK/UI tests, configuration generation
+and selected actual browser/dataflow checks pass. Real Playground insert/update
+and SSE CLI delivery/cleanup use rebuilt matching libraries. The pre-existing
+Learning Trading unused-local build limitation remains documented, with its
+scoped type and bundle checks passing. Full connector/container qualification
+remains CW-44/CW-45/CW-47, not implied by this closure. See the stage-5 execution
+record in the [cleanup plan](computation-graph-cleanup-plan.md).
+
+**Closure:** one chosen public configuration/API shape, no silent conversion of
+old root settings, no first-instance route fallback required by old clients,
+and all selected consumers working against the new shape. There is no old-to-new
+configuration migration tool or dual-layout round-trip requirement.
+
+**Likely complexity:** implementation **Medium** across Server and consumers;
+testing **Medium to High** for instance selection, settings persistence and API
+results. Actual component/plugin replacement remains CW-44/CW-45.
+
+**Evidence:** [Server configuration normalization][server-config-types],
+[configuration conversion/persistence][server-persistence],
+[first-instance routes and middleware][server-routes],
+[Server config re-exports][server-config-module].
 
 <a id="optional-capabilities-and-policy-decisions"></a>
 <a id="optional-capabilities-and-explicit-policy-decisions"></a>
@@ -1806,9 +2230,10 @@ or remote effects appear atomically to all observers.
 
 **Remaining work if selected:** define the participants and failure/recovery
 rules before promising wider atomic visibility. Graph feedback cycles,
-distributed scheduling, automatic state migration, undoing an entire live
-deployment and unloading active libraries are separate designs. Child hosting
-does not implement them. Exactly-once remote effects require cooperation from
+distributed scheduling, undoing an entire live deployment and unloading active
+libraries are separate designs. Automatic migration of previous-release state
+is explicitly outside this release's scope. Child hosting does not implement
+these wider guarantees. Exactly-once remote effects require cooperation from
 the destination.
 
 **Likely complexity:** implementation/testing **Very high**; each selected
@@ -1840,7 +2265,9 @@ intentionally unsupported. Source fan-in is not query UNION.
 
 **Likely complexity:** implementation **Low to Medium** for isolated scalar
 functions, **High to Very high** for new query operators/types; testing
-**Medium to High**, including saved-state compatibility where relevant.
+**Medium to High**, including current-release restart behavior where relevant.
+No previous-release state compatibility layer is required. The breaking-release
+policy does not itself select removal of existing Cypher/GQL functionality.
 
 **Evidence:** [Cypher functions][cypher-functions], [GQL functions][gql-functions],
 [Cypher parser][cypher-parser], [GQL parser][gql-parser].
@@ -2077,7 +2504,9 @@ rollback and reconstruction. Real RocksDB cases check saved positions and rows.
 **Remaining work:** none for these rules. Automatic deletion-history expiry
 requires a separate source-history policy; it is not silently enabled.
 Older saved query configurations require explicit supported reset/rebuild or
-a separately designed migration, not reinterpretation of existing rows.
+rejection rather than reinterpretation of existing rows. No previous-release
+migration implementation is required; the completed mutation rules still apply
+to old/stale events within the new supported release.
 
 **Likely complexity:** implementation **None**; testing **Medium** to repeat the
 persistent model and backend checks.
@@ -2187,7 +2616,7 @@ This is not a remote per-component executor or automatic remote provisioning.
 
 Whole-state rewrites, replay-read cost and receipt-update cost are now defined
 once under CW-28 alongside the related storage-efficiency work. Their existing
-evidence, compatibility requirements and estimates moved with them.
+evidence, current-format integrity requirements and estimates moved with them.
 This ID remains so old links and review references still resolve.
 
 <a id="cw-15"></a>
@@ -2336,6 +2765,12 @@ representation; **PX-13 Phase 0** is lost snapshot decode errors.
 
 ## Completion and maintenance rules
 
+Apply the [breaking-release policy](#breaking-release-policy) before expanding
+any item: no old-API/binary/format support or migration code is a release
+requirement. Update consumers directly. Older preservation wording in completed
+records documents what was done then; it does not prohibit removing those
+affordances now.
+
 Close the stated requirement, not a broad heading. Record what changed, the
 exact tested behavior and any remaining gap. A tested subset does not make an
 unimplemented requirement complete; lack of universal proof does not make a
@@ -2355,6 +2790,10 @@ A complete test run, test count, quiet receiver, successful startup or matching
 snapshot does not alone prove full processing/delivery completion. Record
 binary/provider/plugin versions and the actual end-of-work evidence. Never
 weaken a verdict or silently change a stored format to obtain a pass.
+For the breaking release, intentionally choosing a new format is allowed;
+silently treating incompatible existing records as that format is not.
+Remove tests whose sole purpose is preserving a retired alias, binary or format,
+but retain or port their independent correctness/error/ownership assertions.
 
 Keep these CW identifiers stable. Update this document when code or evidence
 changes; historical plans and session records must not become competing claims
@@ -2368,6 +2807,7 @@ of current completion.
 [contracts]: ../tests/runtime_parity/computation-contracts.tsv
 [parity-tooling]: ../tests/runtime_parity/
 [lib-tests]: ../tests/
+[lib-manifest]: ../Cargo.toml
 [controller]: ../src/computation/v1/graph/controller.rs
 [execution]: ../src/computation/v1/graph/execution.rs
 [resource-tasks]: ../src/computation/v1/graph/resource_tasks.rs
@@ -2389,6 +2829,14 @@ of current completion.
 [query-delivery]: ../src/computation/v1/query_delivery.rs
 [query-scheduling]: ../src/computation/v1/query_scheduling.rs
 [query-state]: ../src/computation/internal/query_state.rs
+[ordinary-query-output]: ../src/queries/output_state.rs
+[inspection-alias]: ../src/component_graph/graph.rs
+[config-snapshot-code]: ../src/config/snapshot.rs
+[result-snapshot-code]: ../../components/computation-contracts/src/snapshot.rs
+[query-schema-code]: ../src/config/schema.rs
+[query-builder-code]: ../src/builder.rs
+[transaction-transformer-code]: ../src/computation/v1/transaction_transformer.rs
+[index-clear-code]: ../src/indexes/mod.rs
 [query-configuration]: ../src/computation/v1/query_configuration.rs
 [query-recovery-tests]: ../tests/computation_query_recovery.rs
 [task-tests]: ../tests/computation_task_execution.rs
@@ -2436,6 +2884,10 @@ of current completion.
 [change-receiver]: ../../components/host-sdk/src/proxies/change_receiver.rs
 [old-proxies]: ../../components/host-sdk/src/proxies/
 [old-sdk]: ../../components/plugin-sdk/src/ffi/
+[ordinary-loader]: ../../components/host-sdk/src/loader.rs
+[ordinary-abi-metadata]: ../../components/plugin-sdk/src/ffi/metadata.rs
+[ordinary-vtable-code]: ../../components/plugin-sdk/src/ffi/vtable_gen.rs
+[ordinary-descriptor-schema]: ../../components/plugin-sdk/src/computation.rs
 [native-sdk]: ../../components/computation-plugin-sdk/README.md
 [native-sdk-metadata]: ../../components/computation-plugin-sdk/src/metadata.rs
 [shared-contracts]: ../../components/computation-contracts/src/lib.rs
@@ -2478,6 +2930,10 @@ of current completion.
 [native-ui]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/ui/src/components/inspector/ComputationDetails.tsx
 [gpu-server]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/examples/gpu-cluster-lab/server/README.md
 [server-manifest]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/Cargo.toml
+[server-config-types]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/config/types.rs
+[server-persistence]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/persistence.rs
+[server-config-module]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/config/mod.rs
+[server-query-dto]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/api/models/queries/query.rs
 [recovery-comparison]: https://github.com/drasi-project/test-infra/blob/55ff7eeba41a4222c892c75af526a64d9c16b801/e2e-test-framework/examples/recovery_comparison/README.md
 [scheduled-recovery]: https://github.com/drasi-project/test-infra/blob/55ff7eeba41a4222c892c75af526a64d9c16b801/e2e-test-framework/examples/building_comfort/dynamic/scheduled_recovery.md
 [tutorials]: https://github.com/drasi-project/learning-drasi-server/blob/72770826a214f99b65aa85d092e9b919e08254d8/README.md

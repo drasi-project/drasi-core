@@ -125,7 +125,7 @@ use tokio::sync::RwLock;
 
 use drasi_lib::channels::{ComponentStatus, DispatchMode, SubscriptionResponse};
 use drasi_lib::identity::IdentityProvider;
-use drasi_lib::managers::{log_component_start, log_component_stop};
+use drasi_lib::observability::{log_component_start, log_component_stop};
 use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::{ByteLexPositionComparator, SourceError};

@@ -268,14 +268,15 @@ No WAL, resume position, source recovery handle, durable input or bootstrap clai
 is made. Initial performance-test graph data is ordinary ordered insert traffic.
 
 For the paired comparison, bind the source stream to its source ID
-(`facilities-db`, without `/out`). The host query's `runtime_compatibility=true`
-configuration preserves outward `source_id`, `processed_by` and `result_count`
-metadata while still using native `ContinuousQueryFactory` execution. Native
-sinks forward that `QueryChangeCodec` metadata without reconstructing legacy
-source wrappers. The loopback graph test covers this exact configuration.
+(`facilities-db`, without `/out`). Queries use the single
+`ContinuousQueryFactory` execution path, without a compatibility switch.
+`QueryChangeCodec::result_metadata` projects outward `source_id`, `processed_by`
+and `result_count` at the HTTP/gRPC serialization boundary without storing those
+duplicates in native envelopes or reconstructing legacy source wrappers. The
+loopback graph test covers this exact configuration.
 Receivers must be listening before starting gRPC sinks. Single-query timing is
 the closest scheduling comparison; multi-query runs also include differences
-between the native graph controller and ordinary API query-task/queue scheduling.
+in input/output component wiring and queue policies, not a different query engine.
 
 Construction performs no network I/O and starts no workers. Start binds before
 returning, reporting bind errors directly. Listener work has one explicit owner;

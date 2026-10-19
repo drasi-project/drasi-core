@@ -19,6 +19,7 @@ drasi-core.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true
+drasi-bootstrap-application.workspace = true
 drasi-reaction-http.workspace = true
 drasi-reaction-grpc.workspace = true
 drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }

@@ -10,7 +10,7 @@ use std::{
 
 use super::Runtime;
 use crate::{
-    channels::QuerySubscriptionResponse,
+    channels::{ChangeReceiver, QueryResult, QuerySubscriptionResponse},
     computation::v1::*,
     config::QueryConfig,
     metrics::QueryOutputMetrics,
@@ -128,6 +128,7 @@ pub(super) async fn start_query(
         })
         .transpose()?;
     let mut subscriptions = Vec::new();
+    let mut waiting_for_subscriptions = false;
     if let Some(declaration) = declaration {
         if let Some(cause) = &declaration.failure {
             return Err(GraphError::Reported {
@@ -141,6 +142,17 @@ pub(super) async fn start_query(
             };
             if let Some(resources) = specification.dependencies.get("subscription") {
                 for resource in resources {
+                    if !publication
+                        .observed
+                        .resources
+                        .get(resource)
+                        .is_some_and(|observed| {
+                            observed.realization == ResourceRealization::Created
+                        })
+                    {
+                        waiting_for_subscriptions = true;
+                        continue;
+                    }
                     let subscription = publication
                         .resource(resource)?
                         .get::<LegacySourceSubscription>()?;
@@ -150,8 +162,8 @@ pub(super) async fn start_query(
             }
         }
     }
-    let mut activation = Box::pin(control.start_members(members));
-    let report = if subscriptions.is_empty() {
+    let mut activation = Box::pin(control.start_members(members.clone()));
+    let report = if subscriptions.is_empty() || waiting_for_subscriptions {
         activation.await?
     } else {
         let subscribed = async {
@@ -170,10 +182,24 @@ pub(super) async fn start_query(
             }
         }
     };
-    anyhow::ensure!(
-        report.summary == OperationSummary::Completed,
-        "query startup is incomplete: {report:?}"
-    );
+    if report.summary != OperationSummary::Completed {
+        let observed = control.observed();
+        let waiting: BTreeSet<_> = members
+            .keys()
+            .filter_map(|id| {
+                observed
+                    .components
+                    .get(id)
+                    .and_then(ObservedComponent::waiting_reason)
+            })
+            .collect();
+        anyhow::ensure!(
+            waiting.is_empty(),
+            "Query '{id}' is not ready: {}",
+            waiting.into_iter().collect::<Vec<_>>().join("; ")
+        );
+        anyhow::bail!("query startup is incomplete: {report:?}");
+    }
     Ok(())
 }
 
@@ -241,6 +267,138 @@ pub(super) fn resource_users(
         }
     }
     users
+}
+
+pub(super) fn remove_unused_resources(
+    target: &mut DesiredTopology,
+    candidates: Vec<ResourceSpecification>,
+    preserved: &BTreeSet<ResourceId>,
+) -> anyhow::Result<Vec<DesiredMutation>> {
+    let mut unused: BTreeSet<_> = candidates
+        .into_iter()
+        .filter(|resource| {
+            !preserved.contains(&resource.id) && resource_users(target, &resource.id).is_empty()
+        })
+        .map(|resource| resource.id)
+        .collect();
+    loop {
+        let previous = unused.len();
+        let required: BTreeSet<_> = target
+            .resource_dependencies
+            .iter()
+            .filter(|(id, _)| !unused.contains(*id))
+            .flat_map(|(_, dependencies)| dependencies.keys().cloned())
+            .collect();
+        unused.retain(|id| !required.contains(id));
+        if previous == unused.len() {
+            break;
+        }
+    }
+    let changes = target
+        .resource_construction_order()?
+        .into_iter()
+        .rev()
+        .filter(|id| unused.contains(id))
+        .map(|resource| DesiredMutation::RemoveResource {
+            resource,
+            policy: RemovalPolicy::Reject,
+        })
+        .collect();
+    target
+        .resources
+        .retain(|resource| !unused.contains(&resource.id));
+    target
+        .resource_configurations
+        .retain(|id, _| !unused.contains(id));
+    target
+        .resource_dependencies
+        .retain(|id, _| !unused.contains(id));
+    Ok(changes)
+}
+
+pub(super) fn query_resource_changes(
+    publication: &GraphRegistrySnapshot,
+    target: &mut DesiredTopology,
+    batch: &mut ComponentBatch,
+) -> anyhow::Result<Vec<DesiredMutation>> {
+    let mut changes = Vec::new();
+    for resource in &batch.definition.resources {
+        if let Some(existing) = target
+            .resources
+            .iter_mut()
+            .find(|existing| existing.id == resource.id)
+        {
+            *existing = resource.clone();
+        } else {
+            target.resources.push(resource.clone());
+        }
+        let same_declaration = publication.desired.resources.get(&resource.id) == Some(resource);
+        let unchanged = if !same_declaration {
+            false
+        } else if let Some(supplied) = batch.bindings.resources.get(&resource.id) {
+            if publication.observed.resources[&resource.id].realization
+                == ResourceRealization::Created
+            {
+                publication
+                    .resource(&resource.id)?
+                    .same_shared_instance(supplied)
+            } else {
+                false
+            }
+        } else {
+            !batch
+                .bindings
+                .resource_constructors
+                .contains_key(&resource.id)
+                && publication.observed.resources[&resource.id].realization
+                    == ResourceRealization::Pending
+                && publication.observed.resources[&resource.id]
+                    .failure
+                    .is_none()
+        };
+        if unchanged {
+            batch.bindings.resources.remove(&resource.id);
+        } else {
+            changes.push(DesiredMutation::PutResource(resource.clone()));
+            if publication.desired.resources.contains_key(&resource.id) {
+                changes.push(DesiredMutation::RebindResource(resource.id.clone()));
+            }
+        }
+        if unchanged
+            && !batch
+                .definition
+                .resource_dependencies
+                .contains_key(&resource.id)
+        {
+            continue;
+        }
+        let dependencies = batch
+            .definition
+            .resource_dependencies
+            .get(&resource.id)
+            .cloned()
+            .unwrap_or_default();
+        if target
+            .resource_dependencies
+            .get(&resource.id)
+            .cloned()
+            .unwrap_or_default()
+            != dependencies
+        {
+            changes.push(DesiredMutation::SetResourceDependencies {
+                resource: resource.id.clone(),
+                dependencies: dependencies.clone(),
+            });
+            if dependencies.is_empty() {
+                target.resource_dependencies.remove(&resource.id);
+            } else {
+                target
+                    .resource_dependencies
+                    .insert(resource.id.clone(), dependencies);
+            }
+        }
+    }
+    Ok(changes)
 }
 
 pub(super) struct NativeQueryUpdate {
@@ -354,16 +512,11 @@ impl Runtime {
             policy: RemovalPolicy::Reject,
         });
         let infrastructure = self.infrastructure_resources(&publication, &BTreeSet::new())?;
-        for resource in candidates {
-            if !infrastructure.contains(&resource.id)
-                && resource_users(&target, &resource.id).is_empty()
-            {
-                changes.push(DesiredMutation::RemoveResource {
-                    resource: resource.id,
-                    policy: RemovalPolicy::Reject,
-                });
-            }
-        }
+        changes.extend(remove_unused_resources(
+            &mut target,
+            candidates,
+            &infrastructure,
+        )?);
         let report = control
             .mutate_members(
                 members,
@@ -424,7 +577,7 @@ impl Runtime {
             .contains_key(&ComponentId::try_new(id)?)
         {
             return self
-                .ordinary_query_update_plan(&publication, id, config)
+                .ordinary_query_update_plan(&publication, id, config, true)
                 .await;
         }
         let query_id = ComponentId::try_new(id)?;
@@ -657,45 +810,29 @@ impl Runtime {
                 .cloned()
                 .map(DesiredMutation::Bind),
         );
-        let producers = batch
-            .definition
-            .subscriptions
-            .iter()
-            .filter(|(_, to)| to == &query_id)
-            .map(|(from, _)| from.clone())
-            .collect();
-        changes.push(DesiredMutation::SetSubscriptions {
-            consumer: query_id.clone(),
-            producers,
-        });
-        for resource in &batch.definition.resources {
-            let unchanged = publication.desired.resources.get(&resource.id) == Some(resource)
-                && batch
-                    .bindings
-                    .resources
-                    .get(&resource.id)
-                    .is_some_and(|supplied| {
-                        publication
-                            .resource(&resource.id)
-                            .is_ok_and(|existing| existing.same_shared_instance(supplied))
-                    });
-            if unchanged {
-                batch.bindings.resources.remove(&resource.id);
-            } else {
-                changes.push(DesiredMutation::PutResource(resource.clone()));
-                if publication.desired.resources.contains_key(&resource.id) {
-                    changes.push(DesiredMutation::RebindResource(resource.id.clone()));
-                }
-            }
+        for consumer in &batch.definition.components {
+            let consumer = consumer.descriptor.id();
+            changes.push(DesiredMutation::SetSubscriptions {
+                consumer: consumer.clone(),
+                producers: batch
+                    .definition
+                    .subscriptions
+                    .iter()
+                    .filter(|(_, to)| to == consumer)
+                    .map(|(from, _)| from.clone())
+                    .collect(),
+            });
         }
-        for resource in candidates {
-            if resource_users(&target, &resource.id).is_empty() {
-                changes.push(DesiredMutation::RemoveResource {
-                    resource: resource.id,
-                    policy: RemovalPolicy::Reject,
-                });
-            }
-        }
+        changes.extend(query_resource_changes(
+            &publication,
+            &mut target,
+            &mut batch,
+        )?);
+        changes.extend(remove_unused_resources(
+            &mut target,
+            candidates,
+            &BTreeSet::new(),
+        )?);
         let was_running = publication
             .observed
             .components
@@ -708,13 +845,9 @@ impl Runtime {
             });
         batch.bindings.defer_activation = true;
         for (source, _) in &batch.definition.subscriptions {
-            let generation = publication
-                .observed
-                .components
-                .get(source)
-                .ok_or(GraphError::StaleGeneration)?
-                .generation;
-            members.insert(source.clone(), generation);
+            if let Some(observed) = publication.observed.components.get(source) {
+                members.insert(source.clone(), observed.generation);
+            }
         }
         Ok(NativeQueryUpdate {
             members,
@@ -786,6 +919,53 @@ impl NativeQuery {
         Ok(api)
     }
 
+    async fn subscribe_native(&self) -> anyhow::Result<NativeReceiver> {
+        self.fetch_snapshot().await?;
+        let api = self.access()?;
+        let catalog = Runtime::native_result_catalog(
+            &self.control.registry_snapshot(),
+            &self.config.id,
+            &api,
+        )?;
+        let (receiver, _) = catalog.subscribe_query_at_head(&self.config.id)?;
+        self.handle.observed()?;
+        Ok(NativeReceiver {
+            receiver,
+            handle: self.handle.clone(),
+            control: self.control.clone(),
+        })
+    }
+
+    pub(crate) async fn subscribe_results(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<(
+        SnapshotResponse,
+        impl futures::Stream<Item = anyhow::Result<Arc<QueryResult>>> + Send + 'static,
+    )> {
+        let receiver = self.subscribe_native().await?;
+        let head = receiver.receiver.head()?;
+        let snapshot = self.fetch_snapshot().await?;
+        anyhow::ensure!(
+            snapshot.output_generation == head.generation
+                && snapshot.as_of_sequence >= head.sequence,
+            "query output changed while establishing the snapshot subscription"
+        );
+        let reader = QueryResultReader {
+            query: self.clone(),
+            receiver,
+            generation: head.generation,
+            sequence: snapshot.as_of_sequence,
+            replay: Vec::new().into_iter(),
+        };
+        Ok((
+            snapshot,
+            futures::stream::try_unfold(reader, |mut reader| async move {
+                let result = reader.recv().await?;
+                Ok(Some((result, reader)))
+            }),
+        ))
+    }
+
     async fn guard<T>(
         &self,
         operation: impl std::future::Future<Output = Result<T, FetchError>>,
@@ -820,26 +1000,96 @@ struct NativeReceiver {
     control: GraphControl,
 }
 
+impl NativeReceiver {
+    fn require_current(&self) -> anyhow::Result<()> {
+        self.handle.observed()?;
+        anyhow::ensure!(
+            !matches!(
+                self.control.state(),
+                GraphState::Cancelled
+                    | GraphState::Completed
+                    | GraphState::Failed
+                    | GraphState::CleanupRequired
+            ),
+            "query output owner is shut down"
+        );
+        Ok(())
+    }
+}
+
+struct QueryResultReader {
+    query: Arc<NativeQuery>,
+    receiver: NativeReceiver,
+    generation: u64,
+    sequence: u64,
+    replay: std::vec::IntoIter<Arc<QueryResult>>,
+}
+
+impl QueryResultReader {
+    fn require_current(&self) -> anyhow::Result<()> {
+        self.receiver.require_current()?;
+        anyhow::ensure!(
+            self.query.access()?.generation()? == self.generation,
+            "query output generation changed; recreate the subscription"
+        );
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> anyhow::Result<Arc<QueryResult>> {
+        loop {
+            self.require_current()?;
+            if let Some(result) = self.replay.next() {
+                self.sequence = result.sequence;
+                return Ok(result);
+            }
+            let result = match self.receiver.recv().await {
+                Ok(result) => Some(result),
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<tokio::sync::broadcast::error::RecvError>(),
+                        Some(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            self.require_current()?;
+            if let Some(result) = result {
+                if result.sequence <= self.sequence {
+                    continue;
+                }
+                if self.sequence.checked_add(1) == Some(result.sequence) {
+                    self.sequence = result.sequence;
+                    return Ok(result);
+                }
+            }
+            let replay = self.query.fetch_outbox(self.sequence).await?;
+            self.require_current()?;
+            anyhow::ensure!(
+                replay.output_generation == self.generation,
+                "query output generation changed during subscription recovery"
+            );
+            anyhow::ensure!(
+                replay.is_contiguous_after(self.sequence),
+                "query output history is not contiguous after sequence {}",
+                self.sequence
+            );
+            self.replay = replay.results.into_iter();
+        }
+    }
+}
+
 #[async_trait]
 impl crate::channels::ChangeReceiver<crate::channels::QueryResult> for NativeReceiver {
     async fn recv(&mut self) -> anyhow::Result<Arc<crate::channels::QueryResult>> {
         let mut observed = self.control.subscribe_observed();
         loop {
-            self.handle.observed()?;
-            anyhow::ensure!(
-                !matches!(
-                    self.control.state(),
-                    GraphState::Cancelled
-                        | GraphState::Completed
-                        | GraphState::Failed
-                        | GraphState::CleanupRequired
-                ),
-                "query output owner is shut down"
-            );
+            self.require_current()?;
             tokio::select! {
                 result = self.receiver.receive_after_head() => {
                     let envelope = result?;
-                    self.handle.observed()?;
+                    self.require_current()?;
                     return Ok(Arc::new(QueryChangeCodec::to_legacy_result(&envelope)?));
                 }
                 result = observed.changed() => { result?; }
@@ -891,22 +1141,11 @@ impl Query for NativeQuery {
         }
     }
     async fn subscribe(&self, _: String) -> anyhow::Result<QuerySubscriptionResponse> {
-        self.fetch_snapshot().await?;
-        let api = self.access()?;
-        let catalog = Runtime::native_result_catalog(
-            &self.control.registry_snapshot(),
-            &self.config.id,
-            &api,
-        )?;
-        let (receiver, as_of_sequence) = catalog.subscribe_query_at_head(&self.config.id)?;
-        self.handle.observed()?;
+        let receiver = self.subscribe_native().await?;
+        let as_of_sequence = receiver.receiver.head()?.sequence;
         Ok(QuerySubscriptionResponse {
             query_id: self.config.id.clone(),
-            receiver: Box::new(NativeReceiver {
-                receiver,
-                handle: self.handle.clone(),
-                control: self.control.clone(),
-            }),
+            receiver: Box::new(receiver),
             as_of_sequence,
         })
     }

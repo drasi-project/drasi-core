@@ -1,7 +1,0 @@
-// Copyright 2026 The Drasi Authors.
-// Licensed under the Apache License, Version 2.0.
-
-//! Compatibility import for a retired query helper. Current queries are graph-owned.
-
-#[allow(deprecated)]
-pub use crate::compatibility::QueryBase;

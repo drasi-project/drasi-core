@@ -183,6 +183,7 @@ async fn legacy_library_loading_does_not_grant_durable_admission() {
         },
         stream.clone(),
         None,
+        "unknown-admission",
     )
     .unwrap();
     let from = Endpoint {

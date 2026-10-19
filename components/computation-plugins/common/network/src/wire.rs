@@ -284,7 +284,7 @@ pub fn notifications(
         !QueryChangeCodec::is_snapshot(envelope) && !QueryChangeCodec::is_progress_only(envelope),
         "native network sink does not implement snapshot/recovery control"
     );
-    let metadata = QueryChangeCodec::metadata(envelope)?;
+    let metadata = QueryChangeCodec::result_metadata(envelope)?;
     ensure!(
         metadata.query_id == query_id,
         "query output metadata does not match configured queryId"

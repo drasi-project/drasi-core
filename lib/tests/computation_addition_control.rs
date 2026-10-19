@@ -1127,7 +1127,15 @@ async fn an_unresolved_factory_does_not_block_unrelated_changes() {
             bindings: TopologyBindings::default(),
         };
         let broken = control.add_component(broken).await.unwrap();
-        assert!(broken.wait_created().await.is_err());
+        let observed = broken.observed().unwrap();
+        assert_eq!(observed.realization, RealizationState::Blocked);
+        assert!(observed.failure.is_none());
+        assert_eq!(
+            observed.waiting_for,
+            vec![DependencyWait::Factory {
+                implementation: ImplementationIdentity::try_new("missing", "1").unwrap(),
+            }]
+        );
         let healthy = control
             .add_component(service("healthy").auto_start(false))
             .await
@@ -1284,11 +1292,20 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
         .await
         .unwrap();
     let control = core.computation_control().unwrap();
+    let mut expected = vec![
+        (id("source"), id("query")),
+        (
+            id("source"),
+            ComputationPipelineBuilder::source_component_id("query", "source").unwrap(),
+        ),
+        (id("query"), id("reaction")),
+    ];
+    expected.sort();
     let mut changes = control.subscribe_observed();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             changes.borrow_and_update();
-            if control.desired_snapshot().subscriptions.len() == 2 {
+            if control.desired_snapshot().subscriptions.as_ref() == expected.as_slice() {
                 break;
             }
             changes.changed().await.unwrap();
@@ -1303,7 +1320,7 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
             .values()
             .filter(|node| matches!(node, GraphEntity::SubscriptionPipe(_)))
             .count(),
-        2
+        expected.len()
     );
     let source = core
         .computation_component("source")

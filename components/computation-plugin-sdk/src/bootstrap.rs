@@ -102,8 +102,10 @@ pub trait NativeBootstrapProvider: Send + Sync {
     ) -> anyhow::Result<BootstrapPreparation> {
         self.prepare().await
     }
+    /// Request a prepared snapshot even after the query completed bootstrap.
+    /// Initial bootstrap and explicit reset may request one without this signal.
     fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
-        Ok(true)
+        Ok(false)
     }
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot>;
     async fn snapshot_with_state(
@@ -287,7 +289,6 @@ struct Instance {
     started: AtomicBool,
     ended: AtomicBool,
     damaged: AtomicBool,
-    pending: AtomicBool,
     reader: Option<SourceProgressView>,
 }
 impl Instance {
@@ -349,7 +350,6 @@ impl Instance {
                 };
                 self.validate_reader()?;
                 let pending = self.provider.has_pending_snapshot()?;
-                self.pending.store(pending, Ordering::Release);
                 self.prepared.store(true, Ordering::Release);
                 encode(&Prepared {
                     preparation: preparation.into(),
@@ -358,9 +358,7 @@ impl Instance {
             }
             SNAPSHOT => {
                 anyhow::ensure!(
-                    self.prepared.load(Ordering::Acquire)
-                        && !self.started.load(Ordering::Acquire)
-                        && self.pending.load(Ordering::Acquire),
+                    self.prepared.load(Ordering::Acquire) && !self.started.load(Ordering::Acquire),
                     "bootstrap snapshot must follow preparation exactly once"
                 );
                 let ComputationBootstrapSnapshot {
@@ -509,7 +507,6 @@ pub(crate) fn export_provider(
             started: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             damaged: AtomicBool::new(false),
-            pending: AtomicBool::new(false),
             reader,
         })))
         .cast(),

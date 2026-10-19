@@ -55,7 +55,10 @@
 //!
 //! # Scoped runtime lifecycle
 //!
-//! Build validates the *entire* DAG before pipe creation or lifecycle hooks.
+//! Build validates declared interfaces and graph constraints before pipe creation
+//! or lifecycle hooks. Missing resources, factories and port connections remain
+//! explicit [`DependencyWait`] entries; they are not terminal configuration errors.
+//! The existing controller resumes eligible work when the prerequisites arrive.
 //! [`ComputationGraph::start`] exclusively borrows the graph and returns a
 //! caller-polled [`GraphRun`]; constructing it alone runs nothing. Consumers are
 //! considered before producers, but activation is independent unless a relationship

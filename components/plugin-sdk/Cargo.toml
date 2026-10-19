@@ -47,4 +47,4 @@ workspace = true
 
 [features]
 # Optional configuration/schema factory helpers, not an execution-engine switch.
-computation = ["drasi-lib/computation", "drasi-core/computation", "dep:jsonschema"]
+computation = ["drasi-core/computation", "dep:jsonschema"]

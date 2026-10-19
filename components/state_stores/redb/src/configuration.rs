@@ -58,6 +58,22 @@ pub struct RedbConfigurationStore {
 }
 
 impl RedbConfigurationStore {
+    /// IDs with an accepted configuration, including accepted empty definitions.
+    /// Used for identity discovery before a host opens an instance session.
+    pub async fn configured_instance_ids(&self) -> Result<Vec<String>> {
+        let owner = self.owner.clone();
+        tokio::task::spawn_blocking(move || {
+            let transaction = owner.database.begin_read()?;
+            let table = transaction.open_table(CURRENT)?;
+            table.iter()?.map(|entry| {
+                let (id, _) = entry?;
+                Ok(id.value().to_owned())
+            }).collect()
+        })
+        .await
+        .context("configuration identity discovery worker failed")?
+    }
+
     /// Seed a previously unconfigured instance without replacing accepted state,
     /// including an explicitly accepted empty definition at revision zero.
     /// The exclusive session spans the existence check and the ordinary atomic
@@ -536,14 +552,18 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("configuration.redb");
         let mut changed = DesiredInstance::default();
-        changed.topology.allow_incomplete = true;
+        changed.topology.requirements = drasi_lib::computation::v1::PipeRequirements::new([
+            drasi_lib::computation::v1::PipeCapability::Backpressure,
+        ]);
         {
             let store = RedbConfigurationStore::new(&path, [17; 32])?;
+            assert!(store.configured_instance_ids().await?.is_empty());
             assert!(
                 store
                     .initialize_if_absent("first", "initial", &DesiredInstance::default())
                     .await?
             );
+            assert_eq!(store.configured_instance_ids().await?, ["first"]);
             assert!(
                 !store
                     .initialize_if_absent("first", "changed", &changed)
@@ -567,6 +587,7 @@ mod tests {
             external.close().await?;
         }
         let store = RedbConfigurationStore::new(&path, [17; 32])?;
+        assert_eq!(store.configured_instance_ids().await?, ["external", "first"]);
         for instance in ["first", "external"] {
             assert!(
                 !store

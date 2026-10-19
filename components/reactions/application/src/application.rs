@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use drasi_lib::channels::{ComponentStatus, QueryResult};
-use drasi_lib::managers::log_component_start;
+use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 use std::collections::HashMap;

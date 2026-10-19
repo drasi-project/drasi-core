@@ -29,7 +29,34 @@ pub struct RankedInputPipeConfig {
     pub source_rank: usize,
     /// Some identifies a SourceEvent stream; None explicitly uses native producer sequence.
     pub source_id: Option<String>,
+    /// Resolve dispatch once when a previously unavailable source is bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_dispatch: Option<ResourceId>,
     pub drop_when_full: bool,
+}
+
+impl RankedInputPipeConfig {
+    pub(super) fn resolved_drop_when_full(
+        &self,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<bool, PipeError> {
+        match &self.source_dispatch {
+            None => Ok(self.drop_when_full),
+            Some(id) => {
+                let host = resources
+                    .get(id)
+                    .ok_or_else(|| {
+                        PipeError::Backend(anyhow::anyhow!(
+                            "source dispatch resource '{id}' is unavailable"
+                        ))
+                    })?
+                    .get::<SourcePluginHost>()
+                    .map_err(|error| PipeError::Backend(error.into()))?;
+                Ok(host.source().map_err(PipeError::Backend)?.dispatch_mode()
+                    == crate::DispatchMode::Broadcast)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -195,7 +222,13 @@ impl PipeProvider for RankedInputPipeConfig {
         Some(DesiredPipe::Ranked(self.clone()))
     }
     fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
-        BTreeMap::from([(self.queue.clone(), ResourceRole::Pipe)])
+        std::iter::once((self.queue.clone(), ResourceRole::Pipe))
+            .chain(
+                self.source_dispatch
+                    .iter()
+                    .map(|id| (id.clone(), ResourceRole::LegacySource)),
+            )
+            .collect()
     }
     fn validate_resources(
         &self,
@@ -216,9 +249,10 @@ impl PipeProvider for RankedInputPipeConfig {
         // Ranked ordering is not producer FIFO. Broadcast inputs explicitly
         // permit drop-newest; channel inputs retain blocking backpressure.
         Ok(PipeCapabilities::try_new(
-            [PipeCapability::RankedEventOrder]
-                .into_iter()
-                .chain((!self.drop_when_full).then_some(PipeCapability::Backpressure)),
+            [PipeCapability::RankedEventOrder].into_iter().chain(
+                (!self.drop_when_full && self.source_dispatch.is_none())
+                    .then_some(PipeCapability::Backpressure),
+            ),
             Some(capacity),
         )?)
     }
@@ -236,7 +270,9 @@ impl PipeProvider for RankedInputPipeConfig {
             .ok_or_else(|| PipeError::Backend(anyhow::anyhow!("ranked input queue is unbound")))?
             .get::<RankedInputQueue>()
             .map_err(|error| PipeError::Backend(error.into()))?;
-        let pipe = queue.bind(self)?;
+        let mut config = self.clone();
+        config.drop_when_full = self.resolved_drop_when_full(resources)?;
+        let pipe = queue.bind(&config)?;
         let control = pipe.control.clone();
         Ok(ProvidedPipe {
             pipe: Box::new(pipe),
@@ -509,6 +545,7 @@ mod tests {
             capacity,
             source_rank: rank,
             source_id: Some(source.into()),
+            source_dispatch: None,
             drop_when_full: false,
         }
     }
@@ -931,6 +968,7 @@ mod tests {
             capacity: 2,
             source_rank: 0,
             source_id: Some(future.into()),
+            source_dispatch: None,
             drop_when_full: false,
         }
         .create_with_resources(&bindings)
@@ -940,6 +978,7 @@ mod tests {
             capacity: 2,
             source_rank: 1,
             source_id: None,
+            source_dispatch: None,
             drop_when_full: false,
         }
         .create_with_resources(&bindings)

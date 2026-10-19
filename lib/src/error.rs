@@ -290,10 +290,6 @@ impl DrasiError {
             reason: reason.into(),
         }
     }
-
-    // ========================================================================
-    // Backward compatibility helpers (deprecated, use structured variants)
-    // ========================================================================
 }
 
 /// Result type for drasi-lib operations.
@@ -301,6 +297,27 @@ impl DrasiError {
 /// This is the standard result type for all public API methods in drasi-lib.
 /// It uses `DrasiError` which supports pattern matching on specific error variants.
 pub type Result<T> = std::result::Result<T, DrasiError>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedError(std::sync::Arc<anyhow::Error>);
+
+impl From<anyhow::Error> for RetainedError {
+    fn from(error: anyhow::Error) -> Self {
+        Self(std::sync::Arc::new(error))
+    }
+}
+
+impl std::fmt::Display for RetainedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for RetainedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref().as_ref())
+    }
+}
 
 /// Multiple operation failures, all retained in encounter order.
 ///

@@ -131,11 +131,10 @@ pub trait ComputationBootstrapProvider: Send + Sync {
     ) -> anyhow::Result<BootstrapPreparation> {
         self.prepare().await
     }
-    /// Whether prepared source subscriptions supplied a snapshot for this start.
-    /// Standalone snapshot providers always supply one; plugin adapters can
-    /// distinguish an actual new snapshot from a checkpoint-based replay.
+    /// Whether preparation supplied a new snapshot even after completed bootstrap.
+    /// Initial bootstrap and explicit reset request a snapshot regardless.
     fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
-        Ok(true)
+        Ok(false)
     }
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot>;
     async fn snapshot_with_state(

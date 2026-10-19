@@ -15,20 +15,3 @@ pub struct QueryResultSnapshot {
     /// Rows keyed by their stable result identities.
     pub rows: im::HashMap<RecordId, Record>,
 }
-
-/// Compatibility name for [`QueryResultSnapshot`].
-pub type QuerySnapshot = QueryResultSnapshot;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::any::TypeId;
-
-    #[test]
-    fn query_result_snapshot_preserves_legacy_type_identity() {
-        assert_eq!(
-            TypeId::of::<QueryResultSnapshot>(),
-            TypeId::of::<QuerySnapshot>()
-        );
-    }
-}

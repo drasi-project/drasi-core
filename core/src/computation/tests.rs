@@ -171,12 +171,11 @@ fn domain_cannot_be_attached_to_an_unrelated_actual_session() {
 }
 
 #[tokio::test]
-async fn fallback_checkpoint_is_independent_and_never_replaces_a_provider_store() {
+async fn independent_checkpoint_preserves_progress_without_claiming_atomicity() {
     use crate::{
         in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
         interface::CheckpointStore,
     };
-    let fallback: Arc<dyn CheckpointStore> = Arc::new(InMemoryCheckpointStore::new());
     let declared = ComputationIndexes::try_new(
         memory_indexes(Arc::new(NoOpSessionControl)),
         None,
@@ -191,23 +190,12 @@ async fn fallback_checkpoint_is_independent_and_never_replaces_a_provider_store(
         declared.durability(),
         StorageDurability::LOCAL_PROCESS_RESTART
     );
-    assert_eq!(
-        declared
-            .with_fallback_checkpoint(fallback.clone())
-            .durability()
-            .process_restart,
-        FailureSurvival::Unknown
-    );
     let resources = InMemoryComputationProvider
         .create_indexes("graph", "query")
         .await
-        .unwrap()
-        .with_fallback_checkpoint(fallback.clone());
+        .unwrap();
     assert_eq!(resources.durability(), StorageDurability::VOLATILE);
-    assert!(Arc::ptr_eq(
-        resources.checkpoint_store().unwrap(),
-        &fallback
-    ));
+    assert!(resources.checkpoint_store().is_none());
     assert!(matches!(
         resources.atomic_result_transaction(),
         Err(ComputationQueryError::AtomicOutputUnsupported)
@@ -225,11 +213,14 @@ async fn fallback_checkpoint_is_independent_and_never_replaces_a_provider_store(
         None,
         None,
     )
-    .unwrap()
-    .with_fallback_checkpoint(fallback);
+    .unwrap();
     assert!(Arc::ptr_eq(
         resources.checkpoint_store().unwrap(),
         &configured
+    ));
+    assert!(matches!(
+        resources.atomic_result_transaction(),
+        Err(ComputationQueryError::AtomicOutputUnsupported)
     ));
     assert_eq!(
         resources

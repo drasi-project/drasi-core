@@ -102,8 +102,6 @@ pub struct DesiredTopology {
     pub component_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub component_plugins: BTreeMap<ComponentId, PluginIdentity>,
-    #[serde(default)]
-    pub allow_incomplete: bool,
 }
 
 fn instance_graph_id() -> String {
@@ -216,7 +214,7 @@ pub struct TopologyBindings {
     pub components: BTreeMap<String, ConstructedComponent>,
     pub pipes: BTreeMap<String, Box<dyn PipeProvider>>,
     pub resources: BTreeMap<ResourceId, ResourceHandle>,
-    /// Reconciliation-only bindings, constructed after old owners are released.
+    /// Constructed after dependencies are available and old owners are released.
     /// An ID cannot also have an already constructed resource binding.
     pub resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     pub readiness_required: BTreeSet<ComponentId>,
@@ -402,9 +400,6 @@ impl DesiredTopology {
         Ok(topology)
     }
     pub fn build(&self, mut bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
-        if !bindings.resource_constructors.is_empty() {
-            return Err(topology("deferred resources require graph reconciliation"));
-        }
         if self.version != 1 {
             return Err(topology("unsupported desired topology version"));
         }
@@ -420,8 +415,8 @@ impl DesiredTopology {
         let mut builder = ComputationGraph::builder(self.graph_id.as_str())
             .requirements(self.requirements.clone());
         builder.recovery_requirements = self.recovery_requirements.clone();
-        builder.allow_empty = self.allow_incomplete;
         builder.resource_dependencies = self.resource_dependencies.clone();
+        builder.resource_constructors = std::mem::take(&mut bindings.resource_constructors);
         builder.unbound_relationships = self.boundary_relationships.clone();
         for resource in &self.resources {
             builder = builder.declare_resource(resource.clone())?;
@@ -448,14 +443,14 @@ impl DesiredTopology {
                         .factories
                         .factories
                         .get(&spec.implementation)
-                        .cloned()
-                        .ok_or_else(|| {
-                            topology(format!(
-                                "component implementation {} is not registered",
-                                spec.implementation.name
-                            ))
-                        })?;
-                    builder = builder.component(spec.clone(), factory);
+                        .cloned();
+                    if let Some(factory) = factory {
+                        builder = builder.component(spec.clone(), factory);
+                    } else {
+                        builder
+                            .components
+                            .push(Component::Unresolved(Arc::new(component.clone())));
+                    }
                 }
                 ComponentConstruction::External { binding } => {
                     let instance = bindings.components.remove(binding).ok_or_else(|| {
@@ -549,9 +544,7 @@ impl DesiredTopology {
                 }
             })
             .collect();
-        if !graph.snapshot.allow_incomplete {
-            graph.validate_recovery(true)?;
-        }
+        graph.validate_recovery(true)?;
         for node in graph
             .snapshot
             .nodes
@@ -755,7 +748,6 @@ impl GraphSnapshot {
                 .filter(|(id, _)| selected.contains(*id))
                 .map(|(id, resources)| (id.clone(), resources.clone()))
                 .collect(),
-            allow_incomplete: self.allow_incomplete,
             component_plugins: self
                 .component_plugins
                 .iter()

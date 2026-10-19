@@ -721,16 +721,10 @@ impl Transformer for LinearTransaction {
     }
 }
 
-/// A graph-owned processing transaction: either an explicit linear sequence or
-/// the shared query evaluator with its indexes, projections and scheduled work.
-/// Both use the same core transaction owner; neither runs a nested query runtime.
+/// A graph-owned linear sequence of processing steps in one Core transaction.
+/// Continuous queries use `ContinuousQueryTransformer` directly.
 pub struct TransactionTransformer {
-    body: TransactionBody,
-}
-
-enum TransactionBody {
-    Linear(Box<LinearTransaction>),
-    Query(Box<ContinuousQueryTransformer>),
+    body: Box<LinearTransaction>,
 }
 
 impl TransactionTransformer {
@@ -740,9 +734,7 @@ impl TransactionTransformer {
         provider: Arc<dyn ComputationIndexProvider>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            body: TransactionBody::Linear(Box::new(
-                LinearTransaction::new(definition, registry, provider).await?,
-            )),
+            body: Box::new(LinearTransaction::new(definition, registry, provider).await?),
         })
     }
 
@@ -753,82 +745,27 @@ impl TransactionTransformer {
         scope: String,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            body: TransactionBody::Linear(Box::new(
+            body: Box::new(
                 LinearTransaction::new_scoped(definition, registry, provider, scope).await?,
-            )),
+            ),
         })
     }
 
-    pub async fn query(
-        definition: ContinuousQueryDefinition,
-        provider: Arc<dyn ComputationIndexProvider>,
-        options: QueryOptions,
-        execution: QueryExecutionSettings,
-        middleware: Option<Arc<MiddlewareTypeRegistry>>,
-    ) -> anyhow::Result<Self> {
-        Ok(Self::from_query(
-            ContinuousQueryTransformer::new_configured(
-                definition, provider, options, execution, middleware,
-            )
-            .await?,
-        ))
-    }
-
-    pub fn from_query(query: ContinuousQueryTransformer) -> Self {
-        Self {
-            body: TransactionBody::Query(Box::new(query.with_delivery_tracking())),
-        }
-    }
-
-    pub fn query_results(&self) -> Option<QueryResults> {
-        match &self.body {
-            TransactionBody::Query(query) => Some(query.results()),
-            TransactionBody::Linear(_) => None,
-        }
-    }
-
-    pub fn with_scheduling(self, scheduling: Arc<QuerySchedulingResource>) -> anyhow::Result<Self> {
-        match self.body {
-            TransactionBody::Query(query) => Ok(Self {
-                body: TransactionBody::Query(Box::new(query.with_scheduling(scheduling)?)),
-            }),
-            TransactionBody::Linear(_) => {
-                anyhow::bail!("linear transaction steps do not own scheduled query work")
-            }
-        }
-    }
-
     pub fn step_descriptors(&self) -> Box<dyn Iterator<Item = &ComponentDescriptor> + '_> {
-        match &self.body {
-            TransactionBody::Linear(sequence) => Box::new(sequence.step_descriptors()),
-            TransactionBody::Query(query) => Box::new(std::iter::once(query.descriptor())),
-        }
+        Box::new(self.body.step_descriptors())
     }
 
     pub fn with_source_progress(self, progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
         Ok(Self {
-            body: match self.body {
-                TransactionBody::Linear(sequence) => {
-                    TransactionBody::Linear(Box::new(sequence.with_source_progress(progress)?))
-                }
-                TransactionBody::Query(query) => {
-                    TransactionBody::Query(Box::new(query.with_source_progress(progress)?))
-                }
-            },
+            body: Box::new(self.body.with_source_progress(progress)?),
         })
     }
 
     fn processor(&self) -> &dyn Transformer {
-        match &self.body {
-            TransactionBody::Linear(sequence) => sequence.as_ref(),
-            TransactionBody::Query(query) => query.as_ref(),
-        }
+        self.body.as_ref()
     }
     fn processor_mut(&mut self) -> &mut dyn Transformer {
-        match &mut self.body {
-            TransactionBody::Linear(sequence) => sequence.as_mut(),
-            TransactionBody::Query(query) => query.as_mut(),
-        }
+        self.body.as_mut()
     }
 }
 
@@ -836,10 +773,6 @@ impl TransactionTransformer {
 impl ComputationComponent for TransactionTransformer {
     fn recovery_contract(&self) -> super::ComponentRecovery {
         self.processor().recovery_contract()
-    }
-
-    fn query_api(&self) -> Option<Arc<super::QueryApi>> {
-        self.processor().query_api()
     }
 
     fn descriptor(&self) -> &ComponentDescriptor {

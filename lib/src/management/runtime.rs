@@ -14,6 +14,11 @@ use tokio::sync::{mpsc, oneshot, watch, RwLock};
 
 use super::*;
 use crate::computation::{instance::InstanceGraph, v1::*};
+use crate::error::{OperationFailures, RetainedError};
+
+#[cfg(test)]
+#[path = "close_tests.rs"]
+mod close_tests;
 
 enum Command {
     NewRequestId(oneshot::Sender<Result<String>>),
@@ -44,10 +49,77 @@ pub(crate) struct Management {
     commands: mpsc::Sender<Command>,
     desired: watch::Receiver<CommittedConfiguration>,
     status: watch::Receiver<ManagementStatus>,
-    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: tokio::sync::Mutex<ManagementTask>,
     graph: Arc<InstanceGraph>,
     running: Arc<RwLock<bool>>,
     confirmed: Arc<AtomicBool>,
+}
+
+struct ManagementTask {
+    driver: tokio::task::JoinHandle<()>,
+    close: CloseProgress,
+}
+
+enum CloseProgress {
+    Open,
+    Requested(oneshot::Receiver<Result<()>>),
+    Joining(Option<anyhow::Error>),
+    Complete(Result<(), RetainedError>),
+}
+
+impl ManagementTask {
+    fn new(driver: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            driver,
+            close: CloseProgress::Open,
+        }
+    }
+
+    async fn close(&mut self, commands: &mpsc::Sender<Command>) -> Result<()> {
+        loop {
+            match &mut self.close {
+                CloseProgress::Open => match commands.reserve().await {
+                    Ok(permit) => {
+                        let (send, receive) = oneshot::channel();
+                        self.close = CloseProgress::Requested(receive);
+                        permit.send(Command::Close(send));
+                    }
+                    Err(_) => {
+                        self.close = CloseProgress::Joining(Some(ManagementError::Closed.into()));
+                    }
+                },
+                CloseProgress::Requested(receive) => match receive.await {
+                    Ok(Ok(())) => self.close = CloseProgress::Joining(None),
+                    Ok(Err(error)) => {
+                        // The driver still owns the store and permits another close attempt.
+                        self.close = CloseProgress::Open;
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        self.close = CloseProgress::Joining(Some(
+                            anyhow::Error::new(error)
+                                .context("management close acknowledgement interrupted"),
+                        ));
+                    }
+                },
+                CloseProgress::Joining(prior) => {
+                    let joined = (&mut self.driver).await.context("management driver failed");
+                    let result = match (joined, prior.take()) {
+                        (Ok(()), None) => Ok(()),
+                        (Ok(()), Some(error)) | (Err(error), None) => Err(error),
+                        (Err(error), Some(prior)) => Err(error.context(OperationFailures::new(
+                            "management close acknowledgement also failed",
+                            vec![prior],
+                        ))),
+                    };
+                    self.close = CloseProgress::Complete(result.map_err(RetainedError::from));
+                }
+                CloseProgress::Complete(result) => {
+                    return result.clone().map_err(anyhow::Error::new);
+                }
+            }
+        }
+    }
 }
 
 struct Driver {
@@ -175,7 +247,7 @@ impl Management {
             commands,
             desired: desired_rx,
             status: status_rx,
-            task: tokio::sync::Mutex::new(Some(task)),
+            task: tokio::sync::Mutex::new(ManagementTask::new(task)),
             graph,
             running,
             confirmed,
@@ -299,15 +371,7 @@ impl Management {
             .await
     }
     pub(crate) async fn close(&self) -> Result<()> {
-        let mut task = self.task.lock().await;
-        if task.is_none() {
-            return Ok(());
-        }
-        self.request(Command::Close).await?;
-        if let Some(task) = task.take() {
-            task.await.context("management driver failed")?;
-        }
-        Ok(())
+        self.task.lock().await.close(&self.commands).await
     }
 }
 
@@ -766,6 +830,12 @@ impl Driver {
                 Command::Register(factory, reply) => {
                     let result = if self.shutdown.load(Ordering::Acquire) {
                         Err(ManagementError::Closed.into())
+                    } else if self
+                        .factories
+                        .get(&factory.descriptor().implementation)
+                        .is_some_and(|registered| Arc::ptr_eq(registered, &factory))
+                    {
+                        Ok(())
                     } else {
                         self.factories
                             .register(factory)
@@ -924,10 +994,27 @@ fn resource_errors(
         .iter()
         .filter(|(id, _)| desired.resources.iter().any(|resource| &resource.id == *id))
         .filter_map(|(id, resource)| {
-            resource
+            let reason = resource
                 .failure
                 .as_ref()
-                .map(|failure| (id.clone(), failure.cause.to_string()))
+                .map(|failure| failure.cause.to_string())
+                .or_else(|| {
+                    let missing: Vec<_> = desired
+                        .resource_dependencies
+                        .get(id)
+                        .into_iter()
+                        .flat_map(|dependencies| dependencies.keys())
+                        .filter(|dependency| {
+                            !observed.resources.get(*dependency).is_some_and(|state| {
+                                state.realization == ResourceRealization::Created
+                                    && state.failure.is_none()
+                            })
+                        })
+                        .map(|dependency| format!("resource '{dependency}'"))
+                        .collect();
+                    (!missing.is_empty()).then(|| format!("Waiting for {}", missing.join(", ")))
+                });
+            reason.map(|reason| (id.clone(), reason))
         })
         .collect()
 }
@@ -1040,6 +1127,7 @@ pub(crate) fn compose_definition(
     mut current: DesiredTopology,
     previous: &DesiredTopology,
     desired: &DesiredTopology,
+    observation_resources: &BTreeSet<ResourceId>,
 ) -> Result<DesiredTopology> {
     let old_nodes: BTreeSet<_> = previous
         .components
@@ -1182,7 +1270,7 @@ pub(crate) fn compose_definition(
         .collect();
     let unused: BTreeSet<_> = detached
         .into_iter()
-        .filter(|id| id.as_str().starts_with("attached/") && !referenced.contains(id))
+        .filter(|id| observation_resources.contains(id) && !referenced.contains(id))
         .collect();
     current
         .resources
@@ -1257,7 +1345,7 @@ mod recovery_tests {
         desired.recovery_requirements[0]
             .guarantees
             .insert(RecoveryGuarantee::Replay);
-        let composed = compose_definition(current, &previous, &desired).unwrap();
+        let composed = compose_definition(current, &previous, &desired, &BTreeSet::new()).unwrap();
         assert_eq!(composed.recovery_requirements.len(), 2);
         assert!(composed
             .recovery_requirements
@@ -1298,8 +1386,24 @@ mod recovery_tests {
         current.validate_structure().unwrap();
         let mut target = previous.clone();
         target.components.clear();
-        target.allow_incomplete = true;
-        let composed = compose_definition(current.clone(), &previous, &target).unwrap();
+        let declared =
+            compose_definition(current.clone(), &previous, &target, &BTreeSet::new()).unwrap();
+        assert_eq!(declared.resources.len(), 2);
+        assert_eq!(
+            declared.resource_dependencies,
+            current.resource_dependencies
+        );
+        assert_eq!(
+            declared.resource_configurations,
+            current.resource_configurations
+        );
+        let composed = compose_definition(
+            current.clone(),
+            &previous,
+            &target,
+            &BTreeSet::from([child.clone()]),
+        )
+        .unwrap();
         assert!(composed.resource_dependencies.is_empty());
         assert!(composed.resource_configurations.is_empty());
         assert_eq!(composed.resources.len(), 1);
@@ -1320,11 +1424,26 @@ mod recovery_tests {
         let run = graph.run().unwrap();
         let control = run.control();
         let (outcome, preview) = tokio::join!(run, async {
-            let preview = control
+            let retained = control
                 .preview(
                     control.desired_snapshot().revision,
                     vec![DesiredMutation::RemoveComponents {
                         selection: GraphSelection::All,
+                        policy: RemovalPolicy::Cascade,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(retained.desired().resources.len(), 2);
+            assert_eq!(
+                retained.desired().resource_dependencies,
+                current.resource_dependencies
+            );
+            let preview = control
+                .preview(
+                    control.desired_snapshot().revision,
+                    vec![DesiredMutation::RemoveResource {
+                        resource: child,
                         policy: RemovalPolicy::Cascade,
                     }],
                 )

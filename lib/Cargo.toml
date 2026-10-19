@@ -30,10 +30,8 @@ workspace = true
 [features]
 default = []
 
-# Transitional build-name alias. ComputationGraph is always the runtime.
-computation = []
 # Explicit integration-test wiring; does not enable a backend in the default runtime.
-computation-rocksdb-tests = ["computation", "drasi-index-rocksdb/computation"]
+computation-rocksdb-tests = ["drasi-index-rocksdb/computation"]
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]

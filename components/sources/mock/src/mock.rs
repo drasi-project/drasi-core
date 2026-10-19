@@ -27,7 +27,7 @@ use tokio::sync::RwLock;
 
 use drasi_lib::channels::*;
 use drasi_lib::identity::{CredentialContext, IdentityProvider};
-use drasi_lib::managers::{log_component_start, log_component_stop};
+use drasi_lib::observability::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;

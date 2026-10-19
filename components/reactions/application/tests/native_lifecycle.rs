@@ -221,15 +221,33 @@ async fn graph_preserves_callback_errors_panics_and_receiver_closure() {
         let mut graph = graph(reaction, source).build().unwrap();
         let run = graph.start().unwrap();
         let control = run.control();
-        let (result, ()) = tokio::join!(run, async {
-            control.startup_report().await.unwrap();
-            if expected == "closed" {
-                // Close after startup, exercising the actual handle failure.
-                receiver.close();
-            }
-            release.send(()).unwrap();
-        });
-        let error = result.unwrap_err();
+        let failed_id = ComponentId::try_new(expected).unwrap();
+        let (result, failure) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(run, async {
+                control.startup_report().await.unwrap();
+                if expected == "closed" {
+                    // Close after startup, exercising the actual handle failure.
+                    receiver.close();
+                }
+                release.send(()).unwrap();
+                let mut observations = control.subscribe_observed();
+                let failure = observations
+                    .wait_for(|snapshot| snapshot.components[&failed_id].failure.is_some())
+                    .await
+                    .unwrap()
+                    .components[&failed_id]
+                    .failure
+                    .clone()
+                    .unwrap();
+                assert_eq!(control.state(), GraphState::Running);
+                control.cancel();
+                failure
+            })
+        })
+        .await
+        .expect("component failures must become inspectable without terminating the graph");
+        assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
+        let error = failure.cause;
         let GraphError::Component {
             component,
             operation,

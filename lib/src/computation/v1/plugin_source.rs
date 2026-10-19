@@ -399,7 +399,6 @@ pub struct LegacySourceSubscription {
     progress: Option<Arc<QuerySourceProgress>>,
     phase: watch::Sender<SubscriptionPhase>,
     state: Mutex<SubscriptionState>,
-    runtime_compatibility: bool,
 }
 
 impl LegacySourceSubscription {
@@ -408,7 +407,9 @@ impl LegacySourceSubscription {
         options: SourceSubscriptionOptions,
         stream: StreamId,
         progress: Option<Arc<QuerySourceProgress>>,
+        subscriber_id: &str,
     ) -> anyhow::Result<Arc<Self>> {
+        super::data::validate_identifier("subscriber", subscriber_id)?;
         if options.bootstrap_timeout_secs == 0
             || tokio::time::Instant::now()
                 .checked_add(std::time::Duration::from_secs(
@@ -432,7 +433,7 @@ impl LegacySourceSubscription {
             host,
             options,
             stream,
-            id: format!("computation:{}", uuid::Uuid::new_v4()),
+            id: subscriber_id.to_owned(),
             progress,
             phase: watch::channel(SubscriptionPhase::New).0,
             state: Mutex::new(SubscriptionState {
@@ -442,7 +443,6 @@ impl LegacySourceSubscription {
                 requested_position: false,
                 generation: 0,
             }),
-            runtime_compatibility: false,
         }))
     }
     pub fn host(&self) -> &Arc<SourcePluginHost> {
@@ -456,20 +456,6 @@ impl LegacySourceSubscription {
     }
     pub(crate) fn prepare_start(&self) {
         self.phase.send_replace(SubscriptionPhase::Waiting);
-    }
-    pub(crate) fn for_runtime(
-        host: Arc<SourcePluginHost>,
-        options: SourceSubscriptionOptions,
-        stream: StreamId,
-        progress: Option<Arc<QuerySourceProgress>>,
-        query_id: &str,
-    ) -> anyhow::Result<Arc<Self>> {
-        super::data::validate_identifier("subscriber", query_id)?;
-        let mut subscription = Self::new(host, options, stream, progress)?;
-        let instance = Arc::get_mut(&mut subscription).expect("new subscription");
-        instance.id = query_id.to_owned();
-        instance.runtime_compatibility = true;
-        Ok(subscription)
     }
     pub(crate) async fn wait_subscribed(&self) -> anyhow::Result<()> {
         let mut phase = self.phase.subscribe();
@@ -501,16 +487,14 @@ impl LegacySourceSubscription {
     fn confirm_position(&self) -> anyhow::Result<()> {
         if let Some(progress) = &self.progress {
             let view = progress.snapshot();
-            if view.persistent || self.runtime_compatibility {
-                if let Some(checkpoint) = self.checkpoint(&view) {
-                    if let Some(handle) = &self
-                        .state
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
-                        .position
-                    {
-                        handle.store(checkpoint.sequence, Ordering::Release);
-                    }
+            if let Some(checkpoint) = self.checkpoint(&view) {
+                if let Some(handle) = &self
+                    .state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
+                    .position
+                {
+                    handle.store(checkpoint.sequence, Ordering::Release);
                 }
             }
         }
@@ -589,13 +573,7 @@ impl LegacySourceSubscription {
                 if !view.ready
                     && view.persistent
                     && view.bootstrap_complete
-                    && (!recoverable
-                        || !self.runtime_compatibility
-                            && !replay_from_start
-                            && saved
-                                .as_ref()
-                                .and_then(|saved| saved.source_position.as_ref())
-                                .is_none())
+                    && !recoverable
                 {
                     self.reset(&view, false).await?;
                     continue;
@@ -607,10 +585,7 @@ impl LegacySourceSubscription {
                     relations: self.options.relations.clone(),
                     // Ordinary plugins choose bootstrap/replay from the optional
                     // source cursor and sequence, not the graph-wide marker.
-                    enable_bootstrap: self.options.enable_bootstrap
-                        && (self.runtime_compatibility
-                            || !view.bootstrap_complete
-                            || refresh_volatile),
+                    enable_bootstrap: self.options.enable_bootstrap,
                     resume_from: if view.persistent && recoverable {
                         saved
                             .as_ref()
@@ -629,7 +604,7 @@ impl LegacySourceSubscription {
                     } else {
                         None
                     },
-                    request_position_handle: view.persistent && recoverable,
+                    request_position_handle: self.progress.is_some(),
                 };
                 self.state
                     .lock()
@@ -664,7 +639,6 @@ impl LegacySourceSubscription {
                         .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?;
                     if response.position_handle.is_some()
                         && !state.requested_position
-                        && !self.runtime_compatibility
                     {
                         anyhow::bail!("source supplied unrequested position ownership");
                     }
@@ -999,7 +973,7 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
                     receiver,
                 )
                 .await???;
-                if subscription.runtime_compatibility && result.source_position.is_none() {
+                if result.source_position.is_none() {
                     // An absent bootstrap cursor is not a confirmed sequence-zero
                     // checkpoint: the next start may still require bootstrap.
                     continue;

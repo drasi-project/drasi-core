@@ -15,7 +15,7 @@
 //! Component logs, tracing integration and bounded lifecycle-event history.
 //!
 //! These utilities observe components; they do not own component membership,
-//! processing or lifecycle. The old [`crate::managers`] imports remain aliases.
+//! processing or lifecycle.
 
 mod component_log;
 mod event_history;

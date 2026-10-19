@@ -17,13 +17,14 @@
 //! This module provides all query-related operations including creating, removing,
 //! starting, and stopping queries.
 
-use futures::stream::Stream;
+use futures::{stream::Stream, StreamExt};
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
 use crate::config::{QueryConfig, QueryRuntime};
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
+use crate::queries::QueryResultSubscription;
 
 impl DrasiLib {
     /// Create a query in a running server
@@ -54,6 +55,8 @@ impl DrasiLib {
     /// Declare a query and return its generation-bound computation handle.
     ///
     /// The original configuration is retained even when parsing or construction fails.
+    /// A missing source is a visible dependency wait. Supplying it resumes the
+    /// existing declaration without re-adding the query.
     /// Await `wait_created()` for validation and construction, or `wait_started()`
     /// for activation. Auto-start is requested only when the instance is running.
     /// `wait_started()` includes query bootstrap and actual `Running` readiness;
@@ -233,6 +236,37 @@ impl DrasiLib {
         self.inspection.get_query_results(id).await
     }
 
+    /// Read a consistent snapshot followed by changes, without a reaction or worker.
+    ///
+    /// Registers the live reader before capturing the snapshot, then delivers
+    /// only changes after that snapshot's sequence. Apply `snapshot` first and
+    /// then consume `stream`; reconnecting creates a fresh snapshot/stream pair.
+    /// The query's configured delivery mode and capacity apply. Broadcast gaps
+    /// replay from retained output, or return an error if history is gone.
+    ///
+    /// This is a connection-local reader, not a durable consumer checkpoint.
+    /// Replacement, output reset and owner shutdown invalidate it. Dropping the
+    /// stream unregisters it synchronously, even if it was never polled.
+    pub async fn subscribe_query_results(&self, id: &str) -> Result<QueryResultSubscription> {
+        self.state_guard.require_initialized()?;
+        let result = async {
+            self.computation_runtime
+                .query(id)
+                .await?
+                .subscribe_results()
+                .await
+        }
+        .await;
+        let (snapshot, stream) = map_component_error(result, "query", id, "subscribe")?;
+        let id = id.to_owned();
+        Ok(QueryResultSubscription {
+            snapshot,
+            stream: stream
+                .map(move |result| map_component_error(result, "query", &id, "receive"))
+                .boxed(),
+        })
+    }
+
     /// Get the full configuration for a specific query
     ///
     /// This returns the complete query configuration including all fields like auto_start and joins,
@@ -383,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_query_missing_source_returns_error() {
+    async fn add_query_missing_source_is_retained_as_waiting() {
         let core = build_core_with_source().await;
 
         let config = Query::cypher("q-bad")
@@ -393,13 +427,15 @@ mod tests {
             .build();
 
         let handle = core.add_query_with_handle(config).await.unwrap();
-        assert!(handle.wait_created().await.is_err());
         let observed = handle.observed().unwrap();
         assert_eq!(
             observed.realization,
-            crate::computation::v1::RealizationState::CreationFailed
+            crate::computation::v1::RealizationState::Blocked
         );
-        assert!(format!("{:#}", observed.failure.as_ref().unwrap().cause)
+        assert!(observed.failure.is_none());
+        assert!(observed
+            .waiting_reason()
+            .unwrap()
             .contains("nonexistent-source"));
         core.remove_query("q-bad").await.unwrap();
         core.shutdown().await.unwrap();

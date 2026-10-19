@@ -44,7 +44,7 @@ impl Runtime {
         {
             let config = self.native_query_configuration_at(&publication, handle.id().as_str())?;
             let plan = self
-                .ordinary_query_update_plan(&publication, handle.id().as_str(), config)
+                .ordinary_query_update_plan(&publication, handle.id().as_str(), config, false)
                 .await?;
             for resource in plan
                 .bindings
@@ -134,6 +134,7 @@ impl Runtime {
         publication: &GraphRegistrySnapshot,
         id: &str,
         config: QueryConfig,
+        reset_configuration: bool,
     ) -> anyhow::Result<super::native_query::NativeQueryUpdate> {
         anyhow::ensure!(
             config.id == id,
@@ -195,6 +196,20 @@ impl Runtime {
             "query '{id}' has custom input connections; use computation topology operations"
         );
         let mut batch = self.ordinary_query_batch(&config, catalog).await?;
+        if reset_configuration {
+            for component in &mut batch.definition.components {
+                if component.descriptor.id() == &query {
+                    if let ComponentConstruction::Factory(specification) =
+                        &mut component.construction
+                    {
+                        specification.configuration.insert(
+                            "reset_configuration".into(),
+                            ConfigurationValue::Literal(true.into()),
+                        );
+                    }
+                }
+            }
+        }
         if !outlets.is_empty() {
             let generated_outlets: BTreeSet<_> = batch.definition.components.iter()
                 .filter(|node| matches!(&node.construction, ComponentConstruction::Factory(spec) if spec.implementation == outlet_implementation))
@@ -281,61 +296,38 @@ impl Runtime {
                 .cloned()
                 .map(DesiredMutation::Bind),
         );
-        changes.push(DesiredMutation::SetSubscriptions {
-            consumer: query.clone(),
-            producers: batch
-                .definition
-                .subscriptions
-                .iter()
-                .filter(|(_, target)| target == &query)
-                .map(|(source, _)| source.clone())
-                .collect(),
-        });
-        for resource in &batch.definition.resources {
-            let unchanged = publication.desired.resources.get(&resource.id) == Some(resource)
-                && batch
-                    .bindings
-                    .resources
-                    .get(&resource.id)
-                    .is_some_and(|supplied| {
-                        publication
-                            .resource(&resource.id)
-                            .is_ok_and(|existing| existing.same_shared_instance(supplied))
-                    });
-            if unchanged {
-                batch.bindings.resources.remove(&resource.id);
-            } else {
-                changes.push(DesiredMutation::PutResource(resource.clone()));
-                if publication.desired.resources.contains_key(&resource.id) {
-                    changes.push(DesiredMutation::RebindResource(resource.id.clone()));
-                }
-            }
+        for consumer in &replacements {
+            changes.push(DesiredMutation::SetSubscriptions {
+                consumer: consumer.clone(),
+                producers: batch
+                    .definition
+                    .subscriptions
+                    .iter()
+                    .filter(|(_, target)| target == consumer)
+                    .map(|(source, _)| source.clone())
+                    .collect(),
+            });
         }
+        target
+            .subscriptions
+            .retain(|(_, consumer)| !selected.contains(consumer));
+        target
+            .subscriptions
+            .extend(batch.definition.subscriptions.iter().cloned());
+        changes.extend(super::native_query::query_resource_changes(
+            publication,
+            &mut target,
+            &mut batch,
+        )?);
         let infrastructure = self.infrastructure_resources(publication, &BTreeSet::new())?;
-        for resource in candidates {
-            if !infrastructure.contains(&resource.id)
-                && super::native_query::resource_users(&target, &resource.id).is_empty()
-            {
-                changes.push(DesiredMutation::RemoveResource {
-                    resource: resource.id,
-                    policy: RemovalPolicy::Reject,
-                });
-            }
-        }
-        let assembly_failed = batch
-            .bindings
-            .resources
-            .values()
-            .filter(|resource| resource.is::<OrdinaryQueryDeclaration>())
-            .map(|resource| resource.get::<OrdinaryQueryDeclaration>())
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .iter()
-            .any(|declaration| declaration.failure.is_some());
+        changes.extend(super::native_query::remove_unused_resources(
+            &mut target,
+            candidates,
+            &infrastructure,
+        )?);
         for (source, _) in &batch.definition.subscriptions {
             if let Some(observed) = publication.observed.components.get(source) {
                 members.insert(source.clone(), observed.generation);
-            } else if !assembly_failed {
-                return Err(GraphError::StaleGeneration.into());
             }
         }
         batch.bindings.defer_activation = true;
@@ -405,23 +397,31 @@ impl Runtime {
                 self.config.default_recovery_policy.unwrap_or_default(),
                 self.config.global_priority_queue_capacity.unwrap_or(10_000),
                 self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
-            )?
-            .for_runtime();
+            )?;
             if let Some(catalog) = catalog {
                 builder = builder.with_catalog(catalog);
             }
             for source in &config.sources {
-                let host = self.source_host(&source.source_id).await.map_err(|error| {
-                    if error
-                        .downcast_ref::<crate::error::ComponentNotFoundError>()
-                        .is_some()
-                    {
-                        error.context(format!("Source '{}' not found", source.source_id))
-                    } else {
-                        error
-                    }
-                })?;
-                builder = builder.source(
+                let host =
+                    match self.source_host(&source.source_id).await {
+                        Ok(host) => Some(host),
+                        Err(error)
+                            if error
+                                .downcast_ref::<crate::error::ComponentNotFoundError>()
+                                .is_some()
+                                && !publication.desired.nodes.iter().any(|node| {
+                                    node.descriptor.id().as_str() == source.source_id
+                                }) =>
+                        {
+                            None
+                        }
+                        Err(error) => {
+                            return Err(error
+                                .context(format!("Source '{}' is unavailable", source.source_id)))
+                        }
+                    };
+                builder = builder.source_binding(
+                    &source.source_id,
                     host,
                     SourceSubscriptionOptions {
                         borrowed_recovery: true,
@@ -430,8 +430,7 @@ impl Runtime {
                     },
                 )?;
             }
-            let mut batch = builder.query(config.clone()).build()?;
-            self.bind_batch_source_dependencies(&mut batch).await?;
+            let batch = builder.query(config.clone()).build()?;
             Ok::<_, anyhow::Error>(batch)
         }
         .await;
@@ -458,9 +457,7 @@ impl Runtime {
                         "outbox_capacity": config.outbox_capacity.clamp(1, 1_000_000),
                         "execution": QueryExecutionSettings::from_legacy_config(config),
                         "query_config": config,
-                        "runtime_compatibility": true,
-                        "defer_build": true,
-                        "reset_configuration": true
+                        "defer_build": true
                     }),
                 )?;
                 let mut definition = publication
@@ -480,14 +477,6 @@ impl Runtime {
                     input_merge: InputMergePolicy::default(),
                     construction: ComponentConstruction::Factory(specification),
                 });
-                definition.allow_incomplete = true;
-                for source in &config.sources {
-                    if let Ok(source) = ComponentId::try_new(source.source_id.as_str()) {
-                        if source != id {
-                            definition.subscriptions.push((source, id.clone()));
-                        }
-                    }
-                }
                 let mut bindings = TopologyBindings::default();
                 bindings.factories.register(factory)?;
                 (
@@ -504,6 +493,7 @@ impl Runtime {
             }
         };
         let declaration = declaration_id(&config.id)?;
+        let valid = failure.is_none();
         let backend = self
             .config
             .index_factory
@@ -548,11 +538,26 @@ impl Runtime {
             specification
                 .dependencies
                 .insert("declaration".into(), vec![declaration.clone()]);
+            if valid {
+                specification.dependencies.insert(
+                    "source_hosts".into(),
+                    config
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            ComputationPipelineBuilder::source_resource_id(&source.source_id)
+                        })
+                        .collect::<GraphResult<Vec<_>>>()?,
+                );
+            }
             if let Some((name, _)) = &backend {
                 specification
                     .dependencies
                     .insert("backend".into(), vec![index_resource_id(name)?]);
             }
+        }
+        if valid {
+            self.bind_batch_source_dependencies(&mut batch).await?;
         }
         batch.bindings.deferred_management_validation = true;
         Ok(batch)
@@ -569,14 +574,22 @@ impl Runtime {
         let mut shared = BTreeSet::new();
         for resource in &batch.definition.resources {
             if let Some(existing) = publication.desired.resources.get(&resource.id) {
-                let supplied = batch.bindings.resources.get(&resource.id).ok_or_else(|| {
-                    anyhow::anyhow!("query resource '{}' has no supplied binding", resource.id)
-                })?;
+                let matches = if let Some(supplied) = batch.bindings.resources.get(&resource.id) {
+                    publication
+                        .resource(&resource.id)?
+                        .same_shared_instance(supplied)
+                } else {
+                    publication
+                        .observed
+                        .resources
+                        .get(&resource.id)
+                        .is_some_and(|state| {
+                            state.realization == ResourceRealization::Pending
+                                && state.failure.is_none()
+                        })
+                };
                 anyhow::ensure!(
-                    existing == resource
-                        && publication
-                            .resource(&resource.id)?
-                            .same_shared_instance(supplied),
+                    existing == resource && matches,
                     "query resource '{}' conflicts with an existing binding",
                     resource.id
                 );

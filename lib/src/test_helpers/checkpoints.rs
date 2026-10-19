@@ -28,27 +28,27 @@ impl QueryCheckpointView<'_> {
 pub(crate) async fn store(
     query: &Arc<dyn crate::queries::Query>,
 ) -> Option<Arc<dyn CheckpointStore>> {
+    raw_store(query)
+        .await
+        .map(|inner| Arc::new(NativeCheckpoints(inner)) as Arc<dyn CheckpointStore>)
+}
+
+pub(crate) async fn raw_store(
+    query: &Arc<dyn crate::queries::Query>,
+) -> Option<Arc<dyn CheckpointStore>> {
     query
         .as_any()
         .downcast_ref::<crate::computation::runtime::NativeQuery>()
         .expect("computation query")
         .checkpoint_store()
         .expect("native checkpoint resource")
-        .map(|inner| Arc::new(NativeCheckpoints(inner)) as Arc<dyn CheckpointStore>)
 }
 
 pub(crate) fn storage_id(query: &str) -> String {
     if !query.starts_with("computation-v2-") {
-        let graph = format!(
-            "lib-query/{}",
-            query
-                .bytes()
-                .map(|value| format!("{value:02x}"))
-                .collect::<String>()
-        );
         return crate::computation::v1::LegacyIndexProviderAdapter::storage_key(
             Some("test-instance"),
-            &graph,
+            crate::computation::v1::ComponentBatch::GRAPH_ID,
             query,
         );
     }

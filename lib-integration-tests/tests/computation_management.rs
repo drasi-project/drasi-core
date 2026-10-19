@@ -460,10 +460,17 @@ async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() ->
         .observed()
         .components
         .contains_key(&ComponentId::try_new("missing")?));
+    let waiting = core.computation_component("missing")?;
+    assert!(waiting
+        .observed()?
+        .waiting_for
+        .iter()
+        .any(|dependency| { matches!(dependency, DependencyWait::Factory { .. }) }));
     let count = Arc::new(AtomicUsize::new(0));
     core.register_component_factory(Arc::new(Factory::new(count.clone())))
         .await?;
-    assert!(core.reconcile_desired_state().await?.converged());
+    tokio::time::timeout(Duration::from_secs(3), waiting.wait_created()).await??;
+    assert!(core.management_status().await?.converged());
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert!(core
         .add_query(
@@ -752,6 +759,192 @@ async fn factory_objects_in_persistent_builder_are_explicitly_rejected() -> Resu
         .await;
     assert!(result.is_err());
     Ok(())
+}
+
+mod close_cancellation {
+    use super::*;
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct CloseFailure;
+
+    impl std::fmt::Display for CloseFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("injected configuration close failure")
+        }
+    }
+
+    impl std::error::Error for CloseFailure {}
+
+    struct CloseGate {
+        entered: Notify,
+        release: Notify,
+        finished: Notify,
+        calls: AtomicUsize,
+        fail_first: bool,
+    }
+
+    struct Store {
+        inner: Arc<RedbConfigurationStore>,
+        gate: Arc<CloseGate>,
+    }
+
+    struct Session {
+        inner: Arc<dyn ConfigurationSession>,
+        gate: Arc<CloseGate>,
+    }
+
+    #[async_trait]
+    impl ConfigurationStore for Store {
+        async fn open(&self, id: &str) -> Result<Arc<dyn ConfigurationSession>> {
+            Ok(Arc::new(Session {
+                inner: self.inner.open(id).await?,
+                gate: self.gate.clone(),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl ConfigurationSession for Session {
+        async fn load(&self) -> Result<CommittedConfiguration> {
+            self.inner.load().await
+        }
+
+        async fn commit(
+            &self,
+            expected: u64,
+            request: &str,
+            desired: &DesiredInstance,
+        ) -> Result<AcceptanceReceipt> {
+            self.inner.commit(expected, request, desired).await
+        }
+
+        async fn receipt(&self, request: &str) -> Result<Option<AcceptanceReceipt>> {
+            self.inner.receipt(request).await
+        }
+
+        async fn snapshot(&self, name: &str) -> Result<CommittedConfiguration> {
+            self.inner.snapshot(name).await
+        }
+
+        async fn load_snapshot(&self, name: &str) -> Result<Option<CommittedConfiguration>> {
+            self.inner.load_snapshot(name).await
+        }
+
+        async fn close(&self) -> Result<()> {
+            let first = self.gate.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                self.gate.entered.notify_one();
+                self.gate.release.notified().await;
+                if self.gate.fail_first {
+                    self.gate.finished.notify_one();
+                    return Err(CloseFailure.into());
+                }
+            }
+            let result = self.inner.close().await;
+            self.gate.finished.notify_one();
+            result
+        }
+    }
+
+    async fn verify_cancelled_close() -> Result<()> {
+        for fail_first in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let inner = Arc::new(RedbConfigurationStore::new(
+                directory.path().join("close.redb"),
+                [43; 32],
+            )?);
+            let gate = Arc::new(CloseGate {
+                entered: Notify::new(),
+                release: Notify::new(),
+                finished: Notify::new(),
+                calls: AtomicUsize::new(0),
+                fail_first,
+            });
+            let core = Arc::new(
+                DrasiLib::builder()
+                    .with_id("closing")
+                    .with_configuration_store(Arc::new(Store {
+                        inner: inner.clone(),
+                        gate: gate.clone(),
+                    }))
+                    .build()
+                    .await?,
+            );
+            let expected = core.desired_configuration()?;
+            let shutdown = tokio::spawn({
+                let core = core.clone();
+                async move { core.shutdown().await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), gate.entered.notified()).await?;
+            assert!(matches!(
+                inner
+                    .open("closing")
+                    .await
+                    .err()
+                    .expect("held close must retain the lease")
+                    .downcast_ref(),
+                Some(ManagementError::AlreadyOwned(_))
+            ));
+
+            let created = Arc::new(AtomicUsize::new(0));
+            let sibling = open(inner.clone(), "sibling", created.clone()).await?;
+            sibling
+                .apply_desired_state(0, "add", desired(&[("unrelated", false)]))
+                .await?;
+            assert!(sibling.reconcile_desired_state().await?.converged());
+            assert_eq!(created.load(Ordering::SeqCst), 1);
+            sibling.shutdown().await?;
+
+            shutdown.abort();
+            assert!(shutdown
+                .await
+                .expect_err("the shutdown caller was cancelled")
+                .is_cancelled());
+            gate.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), gate.finished.notified()).await?;
+
+            let retry = core.shutdown().await;
+            assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+            if fail_first {
+                assert!(
+                    retry
+                        .expect_err("the first close failed")
+                        .downcast_ref::<CloseFailure>()
+                        .is_some(),
+                    "retry must report the original failed close"
+                );
+                assert!(matches!(
+                    inner
+                        .open("closing")
+                        .await
+                        .err()
+                        .expect("failed close must retain the lease")
+                        .downcast_ref(),
+                    Some(ManagementError::AlreadyOwned(_))
+                ));
+                core.shutdown().await?;
+                assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+            } else {
+                retry?;
+            }
+            core.shutdown().await?;
+            let reopened = inner.open("closing").await?;
+            assert_eq!(reopened.load().await?, expected);
+            reopened.close().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_management_close_retains_result_and_owner_current_thread() -> Result<()> {
+        verify_cancelled_close().await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_management_close_retains_result_and_owner_multi_thread() -> Result<()> {
+        verify_cancelled_close().await
+    }
 }
 
 mod restore_errors {

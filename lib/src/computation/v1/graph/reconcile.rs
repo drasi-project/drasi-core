@@ -22,7 +22,7 @@ use super::*;
 use crate::computation::v1::{
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentFactory,
     ComponentRole, ConfigurationValue, PipeCapabilities, PipeCapability, PipeProvider,
-    PipeRequirements, PortDirection, RemovalPolicy, ResourceConstructor, ResourceId,
+    PipeRequirements, PortDirection, RemovalPolicy, ResourceConstructor, ResourceId, ResourceRole,
 };
 use std::{future::Future, num::NonZeroUsize};
 
@@ -56,6 +56,10 @@ pub enum DesiredMutation {
         policy: RemovalPolicy,
     },
     PutResource(ResourceSpecification),
+    SetResourceDependencies {
+        resource: ResourceId,
+        dependencies: BTreeMap<ResourceId, ResourceRole>,
+    },
     RebindResource(ResourceId),
     RemoveResource {
         resource: ResourceId,
@@ -83,6 +87,7 @@ pub struct ReconciliationPreview {
     unbind: BTreeSet<EdgeDefinition>,
     resources: BTreeSet<ResourceId>,
     remove_resources: BTreeSet<ResourceId>,
+    observation_resources: BTreeSet<ResourceId>,
     drain: BTreeSet<ComponentId>,
     epochs: BTreeMap<ComponentId, (ComponentGeneration, OperationEpoch)>,
     pub(super) deprovision: BTreeSet<ComponentId>,
@@ -264,9 +269,7 @@ pub(super) fn check_protected(
         || protected_links(&old.subscriptions) != protected_links(&target.subscriptions)
         || protected_links(&old.control_connections) != protected_links(&target.control_connections)
         || protected_recovery(&old) != protected_recovery(target)
-        || (!graph.protected_components.is_empty()
-            && (old.requirements != target.requirements
-                || old.allow_incomplete != target.allow_incomplete))
+        || (!graph.protected_components.is_empty() && old.requirements != target.requirements)
     {
         return Err(topology("connection configuration is managed by DrasiLib"));
     }
@@ -330,6 +333,7 @@ fn remove_components(
     desired: &mut DesiredTopology,
     mut selected: BTreeSet<ComponentId>,
     policy: RemovalPolicy,
+    observation_resources: &BTreeSet<ResourceId>,
 ) -> GraphResult<BTreeSet<ComponentId>> {
     if matches!(policy, RemovalPolicy::Cascade | RemovalPolicy::Drain) {
         dependent_closure(desired, &mut selected);
@@ -391,7 +395,7 @@ fn remove_components(
     let unused: BTreeSet<_> = detached
         .into_iter()
         .filter(|id| {
-            id.as_str().starts_with("attached/")
+            observation_resources.contains(id)
                 && resource_users(desired, id).is_empty()
                 && !desired
                     .resource_dependencies
@@ -428,6 +432,7 @@ pub(super) fn preview(
     let mut restart = BTreeSet::new();
     let mut resources = BTreeSet::new();
     let mut remove_resources = BTreeSet::new();
+    let mut observation_resources = graph.observation_resources.clone();
     let mut drain = BTreeSet::new();
     let mut explicit_binds = BTreeSet::new();
     for change in &changes {
@@ -464,6 +469,7 @@ pub(super) fn preview(
                             })
                     {
                         resources.insert(resource.id.clone());
+                        observation_resources.remove(&resource.id);
                     }
                 }
                 desired = target.clone();
@@ -516,8 +522,12 @@ pub(super) fn preview(
                 }
             }
             DesiredMutation::RemoveComponents { selection, policy } => {
-                let removed =
-                    remove_components(&mut desired, selected_ids(graph, selection)?, *policy)?;
+                let removed = remove_components(
+                    &mut desired,
+                    selected_ids(graph, selection)?,
+                    *policy,
+                    &observation_resources,
+                )?;
                 if *policy == RemovalPolicy::Drain {
                     drain.extend(removed);
                 }
@@ -551,6 +561,7 @@ pub(super) fn preview(
                         &mut desired,
                         BTreeSet::from([edge.to.component.clone()]),
                         *policy,
+                        &observation_resources,
                     )?;
                 } else if *policy == RemovalPolicy::Drain {
                     drain.insert(edge.to.component.clone());
@@ -558,6 +569,7 @@ pub(super) fn preview(
             }
             DesiredMutation::PutResource(spec) => {
                 super::super::validate_identifier("resource binding", &spec.binding)?;
+                observation_resources.remove(&spec.id);
                 if let Some(prior) = desired
                     .resources
                     .iter_mut()
@@ -578,7 +590,37 @@ pub(super) fn preview(
                     return Err(topology(format!("resource {id} was not declared")));
                 }
                 resources.insert(id.clone());
+                observation_resources.remove(id);
                 desired.resource_configurations.remove(id);
+            }
+            DesiredMutation::SetResourceDependencies {
+                resource,
+                dependencies,
+            } => {
+                if !desired
+                    .resources
+                    .iter()
+                    .any(|specification| &specification.id == resource)
+                {
+                    return Err(topology(
+                        "resource dependencies require a declared resource",
+                    ));
+                }
+                let previous = desired
+                    .resource_dependencies
+                    .get(resource)
+                    .cloned()
+                    .unwrap_or_default();
+                if previous != *dependencies {
+                    resources.insert(resource.clone());
+                    if dependencies.is_empty() {
+                        desired.resource_dependencies.remove(resource);
+                    } else {
+                        desired
+                            .resource_dependencies
+                            .insert(resource.clone(), dependencies.clone());
+                    }
+                }
             }
             DesiredMutation::RemoveResource { resource, policy } => {
                 if !desired.resources.iter().any(|spec| &spec.id == resource) {
@@ -616,7 +658,12 @@ pub(super) fn preview(
                 }
                 if !users.is_empty() {
                     if matches!(policy, RemovalPolicy::Cascade | RemovalPolicy::Drain) {
-                        let removed = remove_components(&mut desired, users, *policy)?;
+                        let removed = remove_components(
+                            &mut desired,
+                            users,
+                            *policy,
+                            &observation_resources,
+                        )?;
                         if *policy == RemovalPolicy::Drain {
                             drain.extend(removed);
                         }
@@ -922,7 +969,7 @@ pub(super) fn preview(
     let retired_reports: BTreeSet<_> = retired_reports
         .into_iter()
         .filter(|id| {
-            id.as_str().starts_with("attached/")
+            observation_resources.contains(id)
                 && resource_users(&desired, id).is_empty()
                 && !desired
                     .resource_dependencies
@@ -940,6 +987,12 @@ pub(super) fn preview(
         .resource_dependencies
         .retain(|id, _| !retired_reports.contains(id));
     remove_resources.extend(retired_reports);
+    let retained_resources: BTreeSet<_> = desired
+        .resources
+        .iter()
+        .map(|resource| &resource.id)
+        .collect();
+    observation_resources.retain(|id| retained_resources.contains(id));
     describe(&desired)?;
     let epochs = pause
         .iter()
@@ -963,6 +1016,7 @@ pub(super) fn preview(
         unbind,
         resources,
         remove_resources,
+        observation_resources,
         drain,
         epochs,
         deprovision: BTreeSet::new(),
@@ -1007,16 +1061,10 @@ fn describe(
         if ids.insert(id.clone(), index).is_some() {
             return Err(topology("duplicate desired component"));
         }
-        if !desired.allow_incomplete {
-            super::super::validate_role(&node.descriptor, node.role, node.completion)?;
-        }
         for port in node.descriptor.ports() {
             if port.direction() == PortDirection::Output {
                 let Some(stream) = node.streams.get(port.id()) else {
-                    if desired.allow_incomplete {
-                        continue;
-                    }
-                    return Err(topology("output port must bind a stream"));
+                    continue;
                 };
                 if !streams.insert(stream.clone()) {
                     return Err(topology("duplicate output stream"));
@@ -1042,7 +1090,6 @@ fn describe(
             input_merge: node.input_merge,
         });
     }
-    let mut connected = BTreeSet::new();
     let mut unique = BTreeSet::new();
     let mut destinations = BTreeSet::new();
     let mut edges = Vec::new();
@@ -1108,8 +1155,6 @@ fn describe(
             &capabilities,
             &desired.requirements,
         )?;
-        connected.insert(edge.definition.from.clone());
-        connected.insert(edge.definition.to.clone());
         let resources = edge.pipe.resource_dependencies();
         for (id, role) in &resources {
             if !desired
@@ -1144,20 +1189,6 @@ fn describe(
                 return Err(topology(
                     "unbound relationship requires an undeclared or incompatible resource",
                 ));
-            }
-        }
-        connected.insert(edge.definition.from.clone());
-        connected.insert(edge.definition.to.clone());
-    }
-    for node in &nodes {
-        for port in node.descriptor.ports() {
-            if !desired.allow_incomplete
-                && !connected.contains(&Endpoint::new(
-                    node.descriptor.id().clone(),
-                    port.id().clone(),
-                ))
-            {
-                return Err(topology("mutation would leave a port unbound without an explicit permissible orphan relationship"));
             }
         }
     }
@@ -1203,9 +1234,10 @@ pub(crate) fn validate_definition(desired: &DesiredTopology) -> GraphResult<()> 
         .control_connections
         .iter()
         .any(|(from, to)| from == to || !ids.contains(from) || !ids.contains(to))
-        || desired.subscriptions.iter().any(|(from, to)| {
-            from == to || !ids.contains(to) || (!desired.allow_incomplete && !ids.contains(from))
-        })
+        || desired
+            .subscriptions
+            .iter()
+            .any(|(from, to)| from == to || !ids.contains(to))
         || desired
             .readiness_required
             .iter()
@@ -1262,6 +1294,7 @@ struct PreparationSnapshot {
     providers: BTreeMap<usize, Arc<dyn PipeProvider>>,
     factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     execution_scope: Arc<str>,
     next_generation: u64,
     next_edge: usize,
@@ -1280,6 +1313,7 @@ impl PreparationSnapshot {
             providers: graph.providers.clone(),
             factories: graph.factories.clone(),
             resource_handles: graph.resource_handles.clone(),
+            resource_constructors: graph.resource_constructors.clone(),
             execution_scope: graph.execution_scope.clone(),
             next_generation: graph.next_generation,
             next_edge: graph.next_edge,
@@ -1445,6 +1479,20 @@ fn prepare(
     for id in &plan.remove_resources {
         resources.remove(id);
     }
+    for id in &plan.resources {
+        if !bindings.resource_constructors.contains_key(id)
+            && !bindings.resources.contains_key(id)
+            && graph.snapshot.resources.get(id) == declarations.get(id)
+            && graph.snapshot.resource_configurations.get(id)
+                == plan.desired.resource_configurations.get(id)
+        {
+            if let Some(constructor) = graph.resource_constructors.get(id) {
+                bindings
+                    .resource_constructors
+                    .insert(id.clone(), constructor.clone());
+            }
+        }
+    }
     for id in bindings.resource_constructors.keys() {
         if !plan.resources.contains(id) || !declarations.contains_key(id) {
             return Err(topology(
@@ -1511,12 +1559,12 @@ fn prepare(
                     ));
                 }
                 let Some(factory) = factories.get(&spec.implementation) else {
-                    if bindings.deferred_management_validation && construct {
+                    if construct {
                         components
                             .insert(id.clone(), Component::Unresolved(Arc::new(node.clone())));
                         continue;
                     }
-                    return Err(topology("implementation is not registered"));
+                    continue;
                 };
                 if !bindings.deferred_management_validation {
                     super::super::specification::validate_specification(
@@ -2184,6 +2232,7 @@ pub(super) async fn execute(
     )
     .await;
     operations.reconciliation = None;
+    operations.dependencies_changed();
     flush_metadata(graph, operations, controls, cancel, commands).await?;
     result
 }
@@ -2777,7 +2826,20 @@ async fn realize_resources(
         let Some(constructor) = constructors.remove(&id) else {
             continue;
         };
+        graph
+            .resource_constructors
+            .insert(id.clone(), constructor.clone());
         let specification = graph.snapshot.resources[&id].clone();
+        if graph
+            .snapshot
+            .resource_dependencies
+            .get(&id)
+            .into_iter()
+            .flat_map(|dependencies| dependencies.keys())
+            .any(|dependency| !graph.resource_handles.contains_key(dependency))
+        {
+            continue;
+        }
         let dependencies: GraphResult<BTreeMap<_, _>> = graph
             .snapshot
             .resource_dependencies
@@ -3101,6 +3163,11 @@ fn commit_desired(
         &mut graph.resource_handles,
         std::mem::take(&mut prepared.resources),
     );
+    let (retired_constructors, retained_constructors): (BTreeMap<_, _>, BTreeMap<_, _>) =
+        std::mem::take(&mut graph.resource_constructors)
+            .into_iter()
+            .partition(|(id, _)| plan.remove_resources.contains(id) || plan.resources.contains(id));
+    graph.resource_constructors = retained_constructors;
     graph.snapshot.resource_dependencies = plan.desired.resource_dependencies.clone();
     let retired_factories = std::mem::replace(
         &mut graph.factories,
@@ -3109,7 +3176,6 @@ fn commit_desired(
     graph.snapshot.revision = plan.desired.revision;
     graph.snapshot.requirements = plan.desired.requirements.clone();
     graph.snapshot.recovery_requirements = plan.desired.recovery_requirements.clone();
-    graph.snapshot.allow_incomplete = plan.desired.allow_incomplete;
     graph.snapshot.nodes = prepared.nodes.clone().into();
     graph.snapshot.edges = prepared.edges.clone().into();
     graph.snapshot.unbound_relationships = plan.desired.boundary_relationships.clone().into();
@@ -3156,6 +3222,7 @@ fn commit_desired(
         .iter()
         .map(|spec| (spec.id.clone(), spec.clone()))
         .collect();
+    graph.observation_resources = plan.observation_resources.clone();
     graph.snapshot.resource_configurations = plan
         .desired
         .resource_configurations
@@ -3216,6 +3283,7 @@ fn commit_desired(
                     lifecycle: ComponentLifecycle::Stopped,
                     health: ComponentHealth::Unknown,
                     failure: None,
+                    waiting_for: Vec::new(),
                     exhausted: false,
                     started: false,
                     lifecycle_requested: false,
@@ -3376,6 +3444,7 @@ fn commit_desired(
                     retire!(retired_providers);
                     retire!(retired_resources);
                     retire!(retired_factories);
+                    retire!(retired_constructors);
                     retire!(retired_outputs);
                     retire!(retired_inputs);
                     if errors.is_empty() {
@@ -3417,48 +3486,9 @@ async fn realize_component(
     commands: &mut CommandReceiver,
 ) -> GraphResult<CreationOutcome> {
     let id = graph.nodes[index].descriptor.id().clone();
-    if let Some(specification) = graph.snapshot.specifications.get(&id) {
-        let resources: Vec<_> = specification
-            .dependencies
-            .values()
-            .flatten()
-            .chain(
-                specification
-                    .configuration
-                    .values()
-                    .filter_map(|value| match value {
-                        ConfigurationValue::Reference { resource, .. } => Some(resource),
-                        _ => None,
-                    }),
-            )
-            .filter(|resource| !graph.resource_handles.contains_key(*resource))
-            .cloned()
-            .collect();
-        let dependencies: Vec<_> = graph
-            .snapshot
-            .edges
-            .iter()
-            .filter(|edge| {
-                edge.policy.required_for_creation
-                    && edge.definition.to.component == id
-                    && graph.observed().components[&edge.definition.from.component].realization
-                        != RealizationState::Created
-            })
-            .map(|edge| edge.definition.from.component.clone())
-            .collect();
-        if !resources.is_empty() || !dependencies.is_empty() {
-            update(graph, |state| {
-                state
-                    .components
-                    .get_mut(&id)
-                    .expect("component")
-                    .realization = RealizationState::Blocked
-            });
-            return Ok(CreationOutcome::Blocked {
-                dependencies,
-                resources,
-            });
-        }
+    let waiting = creation_dependencies(graph, index);
+    if !waiting.is_empty() {
+        return Ok(operations.defer_creation(graph, index, operation, waiting));
     }
     operations.attach_control(graph, index)?;
     operations.launch(graph, index, operation)?;
@@ -3553,6 +3583,13 @@ async fn realize(
         if !plan.rebind.contains(&edge.definition) {
             continue;
         }
+        if edge
+            .resources
+            .keys()
+            .any(|id| !graph.resource_handles.contains_key(id))
+        {
+            continue;
+        }
         let from = graph.ids[&edge.definition.from.component];
         let to = graph.ids[&edge.definition.to.component];
         if [from, to].iter().any(|index| {
@@ -3642,8 +3679,9 @@ async fn realize(
         ) && binding_dependencies(graph, id).is_empty()
         {
             update(graph, |state| {
-                state.components.get_mut(id).expect("component").realization =
-                    RealizationState::Created
+                let component = state.components.get_mut(id).expect("component");
+                component.realization = RealizationState::Created;
+                component.waiting_for.clear();
             });
         }
     }

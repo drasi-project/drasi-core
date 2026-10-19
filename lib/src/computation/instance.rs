@@ -157,22 +157,7 @@ impl Drop for RejectedComputations {
 enum DriverState {
     Initializing,
     Running,
-    Finished(Option<DriverFailure>),
-}
-
-#[derive(Clone, Debug)]
-struct DriverFailure(Arc<anyhow::Error>);
-
-impl std::fmt::Display for DriverFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#}", self.0)
-    }
-}
-
-impl std::error::Error for DriverFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.0.as_ref().as_ref())
-    }
+    Finished(Option<crate::error::RetainedError>),
 }
 
 pub(super) struct GraphSlot(pub(super) Mutex<Option<ComputationGraph>>);
@@ -223,7 +208,7 @@ struct DriverPublication {
 impl DriverPublication {
     fn finish(&mut self, outcome: anyhow::Result<()>) {
         self.state.send_replace(DriverState::Finished(
-            outcome.err().map(|error| DriverFailure(Arc::new(error))),
+            outcome.err().map(crate::error::RetainedError::from),
         ));
         self.finished = true;
     }
@@ -818,7 +803,9 @@ mod tests {
             resource: ResourceId::try_new("state").unwrap(),
             source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
         };
-        let state = DriverState::Finished(Some(DriverFailure(Arc::new(error.into()))));
+        let state = DriverState::Finished(Some(crate::error::RetainedError::from(
+            anyhow::Error::new(error),
+        )));
         let retained = state.clone();
         drop(state);
         let DriverState::Finished(Some(cause)) = retained else {

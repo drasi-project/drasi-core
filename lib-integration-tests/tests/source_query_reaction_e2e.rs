@@ -259,6 +259,216 @@ async fn wait_for_status(drasi: &DrasiLib, component: &str, id: &str, expected: 
 // Tests
 // ============================================================================
 
+async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
+    stop_before_source: bool,
+    declare_before_start: bool,
+) {
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+    use drasi_lib::computation::v1::{ComponentId, DependencyWait, RealizationState};
+
+    let drasi = DrasiLib::builder().build().await.expect("instance");
+    if !declare_before_start {
+        drasi.start().await.expect("start instance");
+    }
+    let reaction = CapturingReaction::new("late-reaction", vec!["late-query".into()]);
+    let captured = reaction.captured();
+    let notify = reaction.notify();
+    let reaction = drasi
+        .add_reaction_with_handle(reaction)
+        .await
+        .expect("declare reaction");
+    let observed = reaction.observed().expect("reaction observation");
+    assert_eq!(
+        observed.realization,
+        RealizationState::Blocked,
+        "{observed:#?}"
+    );
+    assert_eq!(
+        observed.waiting_for,
+        [DependencyWait::Component {
+            id: ComponentId::try_new("late-query").expect("query ID"),
+        }]
+    );
+    assert!(observed.failure.is_none());
+
+    let query = drasi
+        .add_query_with_handle(
+            Query::cypher("late-query")
+                .query("MATCH (s:Sensor) RETURN s.temperature AS temperature")
+                .from_source("late-source")
+                .enable_bootstrap(false)
+                .build(),
+        )
+        .await
+        .expect("declare query");
+    let observed = query.observed().expect("query observation");
+    assert_eq!(
+        observed.realization,
+        RealizationState::Blocked,
+        "{observed:#?}"
+    );
+    assert!(observed.waiting_for.contains(&DependencyWait::Component {
+        id: ComponentId::try_new("late-source").expect("source ID"),
+    }));
+    assert!(observed.failure.is_none());
+    let saved = drasi
+        .snapshot_computation_configuration()
+        .await
+        .expect("save waiting instance");
+    assert_eq!(saved.instance.queries.len(), 1);
+    if declare_before_start {
+        timeout(Duration::from_secs(5), drasi.start())
+            .await
+            .expect("instance startup must not wait for an absent dependency")
+            .expect("start with waiting declarations");
+    }
+    if stop_before_source {
+        drasi
+            .stop_query("late-query")
+            .await
+            .expect("withdraw pending startup");
+    }
+
+    let (source, injector) = InjectableSource::new("late-source").expect("source");
+    drasi
+        .add_source_with_handle(source)
+        .await
+        .expect("declare source");
+    if stop_before_source {
+        timeout(Duration::from_secs(5), query.wait_created())
+            .await
+            .expect("creation deadline")
+            .expect("query constructs without activation");
+        let control = drasi.computation_control().expect("control");
+        timeout(Duration::from_secs(3), async {
+            loop {
+                match control
+                    .preview(control.desired_snapshot().revision, Vec::new())
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(drasi_lib::computation::v1::GraphError::StaleRevision { .. }) => {}
+                    Err(error) => panic!("controller barrier failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("controller barrier deadline");
+        assert_eq!(
+            query.observed().expect("stopped query").lifecycle,
+            drasi_lib::computation::v1::ComponentLifecycle::Stopped
+        );
+        drasi
+            .start_query("late-query")
+            .await
+            .expect("explicitly activate the stopped query");
+    }
+    timeout(Duration::from_secs(5), async {
+        query
+            .wait_started()
+            .await
+            .expect("query automatically starts");
+        reaction
+            .wait_started()
+            .await
+            .expect("reaction automatically starts");
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "dependency arrival did not activate the original handles: {:#?}",
+            drasi.computation_control().expect("control").observed()
+        )
+    });
+    assert!(query.observed().expect("query").waiting_for.is_empty());
+    assert!(reaction
+        .observed()
+        .expect("reaction")
+        .waiting_for
+        .is_empty());
+
+    let metadata = ElementMetadata {
+        reference: ElementReference::new("late-source", "sensor"),
+        labels: Arc::from([Arc::from("Sensor")]),
+        effective_from: 1000,
+    };
+    for (index, value) in [Some(23), Some(31), None].into_iter().enumerate() {
+        let change = match value {
+            Some(temperature) => {
+                let element = Element::Node {
+                    metadata: ElementMetadata {
+                        effective_from: 1000 + index as u64,
+                        ..metadata.clone()
+                    },
+                    properties: ElementPropertyMap::from(
+                        serde_json::json!({"temperature": temperature}),
+                    ),
+                };
+                if index == 0 {
+                    SourceChange::Insert { element }
+                } else {
+                    SourceChange::Update { element }
+                }
+            }
+            None => SourceChange::Delete {
+                metadata: ElementMetadata {
+                    effective_from: 1000 + index as u64,
+                    ..metadata.clone()
+                },
+            },
+        };
+        injector.inject(change).await.expect("source change");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let changed = notify.notified();
+                if captured.read().await.len() > index {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("exact result delivery");
+        let expected: Vec<_> = value
+            .into_iter()
+            .map(|temperature| serde_json::json!({"temperature": temperature}))
+            .collect();
+        assert_eq!(
+            drasi
+                .get_query_results("late-query")
+                .await
+                .expect("query snapshot"),
+            expected
+        );
+    }
+    let results = captured.read().await;
+    assert_eq!(results.len(), 3);
+    assert!(results
+        .iter()
+        .all(|result| result.query_id == "late-query" && result.results.len() == 1));
+    assert!(matches!(results[0].results[0], ResultDiff::Add { .. }));
+    assert!(matches!(results[1].results[0], ResultDiff::Update { .. }));
+    assert!(matches!(results[2].results[0], ResultDiff::Delete { .. }));
+    drop(results);
+    drasi.shutdown().await.expect("complete cleanup");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_dependencies_activate_query_and_reaction_current_thread() {
+    dependencies_arriving_out_of_order_activate_the_complete_pipeline(false, false).await;
+    dependencies_arriving_out_of_order_activate_the_complete_pipeline(true, false).await;
+    dependencies_arriving_out_of_order_activate_the_complete_pipeline(false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_dependencies_activate_query_and_reaction_multi_thread() {
+    dependencies_arriving_out_of_order_activate_the_complete_pipeline(false, false).await;
+    dependencies_arriving_out_of_order_activate_the_complete_pipeline(true, false).await;
+    dependencies_arriving_out_of_order_activate_the_complete_pipeline(false, true).await;
+}
+
 /// Full end-to-end test: Source emits data → Query processes → Reaction receives results.
 ///
 /// This validates the host-managed query subscription model where:

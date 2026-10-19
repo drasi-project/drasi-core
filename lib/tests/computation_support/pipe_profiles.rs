@@ -91,6 +91,7 @@ impl Profile {
                     capacity: capacity.get(),
                     source_rank: 0,
                     source_id: None,
+                    source_dispatch: None,
                     drop_when_full: !self.backpressure(),
                 }),
                 BTreeMap::from([(

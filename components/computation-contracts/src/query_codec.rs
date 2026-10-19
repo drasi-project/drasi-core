@@ -708,10 +708,32 @@ impl QueryChangeCodec {
             .collect()
     }
 
-    /// Explicit projection into the unchanged legacy query-result boundary.
-    /// The original A2 projection code is executed, not copied into a new facade.
+    /// Project public result metadata without storing duplicate fields in native
+    /// envelopes. Shared by ordinary APIs and native network serializers.
+    pub fn result_metadata(
+        envelope: &ChangeEnvelope,
+    ) -> Result<QueryOutputMetadata, QueryCodecError> {
+        let mut metadata = Self::metadata(envelope)?;
+        if let Some(source) = &metadata.source_id {
+            metadata
+                .metadata
+                .entry("source_id".into())
+                .or_insert_with(|| serde_json::json!(source));
+        }
+        metadata
+            .metadata
+            .entry("processed_by".into())
+            .or_insert_with(|| serde_json::json!("drasi-core"));
+        metadata
+            .metadata
+            .entry("result_count".into())
+            .or_insert_with(|| serde_json::json!(envelope.changes().operations().len()));
+        Ok(metadata)
+    }
+
+    /// Project native results into the ordinary query-result boundary.
     pub fn to_legacy_result(envelope: &ChangeEnvelope) -> Result<QueryResult, QueryCodecError> {
-        let metadata = Self::metadata(envelope)?;
+        let metadata = Self::result_metadata(envelope)?;
         if envelope
             .changes()
             .operations()
@@ -912,6 +934,35 @@ mod profiling_tests {
             panic!("query metadata bytes");
         };
         bytes
+    }
+
+    #[test]
+    fn public_result_metadata_is_projected_without_rewriting_native_metadata() {
+        let envelope = output(None, "query", None);
+        let original = metadata_bytes(&envelope);
+        let expected = HashMap::from([
+            ("preserved".into(), serde_json::json!(true)),
+            ("source_id".into(), serde_json::json!("source")),
+            ("processed_by".into(), serde_json::json!("drasi-core")),
+            ("result_count".into(), serde_json::json!(1)),
+        ]);
+        assert_eq!(
+            QueryChangeCodec::result_metadata(&envelope)
+                .unwrap()
+                .metadata,
+            expected
+        );
+        assert_eq!(
+            QueryChangeCodec::to_legacy_result(&envelope)
+                .unwrap()
+                .metadata,
+            expected
+        );
+        assert_eq!(
+            QueryChangeCodec::metadata(&envelope).unwrap().metadata,
+            HashMap::from([("preserved".into(), serde_json::json!(true))])
+        );
+        assert_eq!(metadata_bytes(&envelope), original);
     }
 
     #[test]

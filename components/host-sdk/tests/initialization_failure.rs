@@ -639,6 +639,7 @@ async fn framework_reconstructs_only_after_failed_initializer_cleanup_is_confirm
                     SourceSubscriptionOptions::default(),
                     StreamId::try_new("initializer/out").unwrap(),
                     None,
+                    "initializer",
                 )
                 .unwrap();
                 Box::new(SourcePluginAdapter::new(id, subscription))

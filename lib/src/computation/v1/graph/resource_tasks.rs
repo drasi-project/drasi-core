@@ -419,6 +419,46 @@ pub(super) fn construct(
     ))
 }
 
+pub(super) fn advance_construction(graph: &ComputationGraph) -> GraphResult<()> {
+    if graph.retirement_active() {
+        return Ok(());
+    }
+    let observed = graph.observed();
+    for (id, constructor) in &graph.resource_constructors {
+        if graph.resource_handles.contains_key(id)
+            || graph.pending_resource_cleanup.contains_key(id)
+            || graph.tasks.resources.contains(id)
+            || observed
+                .resources
+                .get(id)
+                .is_some_and(|state| state.failure.is_some())
+        {
+            continue;
+        }
+        let required = graph.snapshot.resource_dependencies.get(id);
+        if required
+            .into_iter()
+            .flat_map(|values| values.keys())
+            .any(|dependency| !graph.resource_handles.contains_key(dependency))
+        {
+            continue;
+        }
+        let dependencies = required
+            .into_iter()
+            .flat_map(|values| values.keys())
+            .map(|id| (id.clone(), graph.resource_handles[id].clone()))
+            .collect();
+        construct(
+            graph,
+            id,
+            constructor.clone(),
+            dependencies,
+            graph.snapshot.resources[id].role,
+        )?;
+    }
+    Ok(())
+}
+
 struct ResourceLease {
     value: Arc<Mutex<Value>>,
     handle: Option<ResourceHandle>,

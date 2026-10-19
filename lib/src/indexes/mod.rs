@@ -117,15 +117,8 @@ pub(crate) fn check_clear(
     query: &str,
     operation: &str,
     result: Result<(), drasi_core::interface::IndexError>,
-    allow_unsupported: bool,
 ) -> Result<(), drasi_core::interface::IndexError> {
-    match result {
-        Err(drasi_core::interface::IndexError::NotSupported) if allow_unsupported => {
-            log::debug!("Query '{query}' provider does not support {operation}");
-            Ok(())
-        }
-        result => result.map_err(|error| operation_error(query, operation, error)),
-    }
+    result.map_err(|error| operation_error(query, operation, error))
 }
 
 // Re-export IndexSet and IndexBackendPlugin from drasi_core for plugin developers

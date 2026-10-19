@@ -29,8 +29,8 @@ fn provider(root: &Path) -> Arc<dyn ComputationIndexProvider> {
     LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)))
 }
 
-async fn query(root: &Path) -> Result<TransactionTransformer> {
-    let mut query = TransactionTransformer::query(
+async fn query(root: &Path) -> Result<ContinuousQueryTransformer> {
+    let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "transaction-query".into(),
             id: ComponentId::try_new("query")?,
@@ -44,7 +44,8 @@ async fn query(root: &Path) -> Result<TransactionTransformer> {
         QueryExecutionSettings::default(),
         None,
     )
-    .await?;
+    .await?
+    .with_delivery_tracking();
     query.start().await?;
     Ok(query)
 }
@@ -104,8 +105,8 @@ fn input(sequence: u64) -> Result<ChangeEnvelope> {
     )?)
 }
 
-fn total(query: &TransactionTransformer) -> Result<i64> {
-    let snapshot = query.query_results().context("query results")?.snapshot()?;
+fn total(query: &ContinuousQueryTransformer) -> Result<i64> {
+    let snapshot = query.results().snapshot()?;
     anyhow::ensure!(snapshot.rows.len() == 1, "expected one aggregate");
     let row =
         QueryChangeCodec::decode_row(snapshot.rows.values().next().context("aggregate row")?)?;
@@ -320,7 +321,7 @@ async fn scheduled_query_worker() -> Result<()> {
     let phase = std::env::var("DRASI_QUERY_HANDOFF_PHASE")?;
     let boundary = std::env::var("DRASI_QUERY_HANDOFF_BOUNDARY")?;
     let scheduling = Arc::new(QuerySchedulingResource::default());
-    let mut query = TransactionTransformer::query(
+    let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "scheduled-query".into(),
             id: ComponentId::try_new("query")?,
@@ -335,6 +336,7 @@ async fn scheduled_query_worker() -> Result<()> {
         None,
     )
     .await?
+    .with_delivery_tracking()
     .with_scheduling(scheduling.clone())?;
     let mut source = QueryScheduledSource::new(
         ComponentId::try_new("clock")?,
@@ -402,8 +404,8 @@ async fn scheduled_query_worker() -> Result<()> {
         })
         .await?
         .is_empty());
-    assert_eq!(query.query_results().unwrap().snapshot()?.rows.len(), 1);
-    assert_eq!(query.query_results().unwrap().snapshot()?.as_of_sequence, 1);
+    assert_eq!(query.results().snapshot()?.rows.len(), 1);
+    assert_eq!(query.results().snapshot()?.as_of_sequence, 1);
     source.stop().await?;
     query.stop().await?;
     Ok(())
@@ -482,9 +484,9 @@ fn scheduled_named_input(
 async fn scheduled_pair(
     root: &Path,
     progress: Arc<QuerySourceProgress>,
-) -> Result<(TransactionTransformer, QueryScheduledSource)> {
+) -> Result<(ContinuousQueryTransformer, QueryScheduledSource)> {
     let scheduling = Arc::new(QuerySchedulingResource::default());
-    let mut query = TransactionTransformer::query(
+    let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "timer-pressure".into(),
             id: ComponentId::try_new("query")?,
@@ -500,6 +502,7 @@ async fn scheduled_pair(
         None,
     )
     .await?
+    .with_delivery_tracking()
     .with_scheduling(scheduling.clone())?
     .with_source_progress(progress)?;
     let mut source = QueryScheduledSource::new(
@@ -595,15 +598,7 @@ async fn timer_burst_reconstruction() -> Result<()> {
             .sequence,
         sequence
     );
-    assert_eq!(
-        query
-            .query_results()
-            .context("query results")?
-            .snapshot()?
-            .rows
-            .len(),
-        expected.len()
-    );
+    assert_eq!(query.results().snapshot()?.rows.len(), expected.len());
     let stale = GraphChangeCodec::encode_futures_due(
         &ComponentId::try_new("clock")?,
         StreamId::try_new("clock/out")?,
@@ -781,7 +776,7 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
                 .sequence,
             4
         );
-        let snapshot = query.query_results().context("query results")?.snapshot()?;
+        let snapshot = query.results().snapshot()?;
         assert!(snapshot.rows.is_empty());
         assert_eq!(snapshot.as_of_sequence, 2);
         clock.stop().await?;
@@ -789,14 +784,7 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
     }
     let (mut query, mut clock) = scheduled_pair(directory.path(), progress).await?;
     assert!(!query.has_pending_emissions());
-    assert_eq!(
-        query
-            .query_results()
-            .context("query results")?
-            .replay(0)?
-            .len(),
-        2
-    );
+    assert_eq!(query.results().replay(0)?.len(), 2);
     clock.stop().await?;
     query.stop().await?;
     outgoing.shutdown().await?;

@@ -411,7 +411,18 @@ impl DrasiLib {
         drop(lifecycle);
         if let Some(management) = self.management.get() {
             let report = management.reconcile().await?;
-            if !report.converged() {
+            let observed = self.computation_control()?.observed();
+            if !report.converged()
+                && (report.error.is_some()
+                    || observed
+                        .components
+                        .values()
+                        .any(|node| node.failure.is_some())
+                    || observed
+                        .resources
+                        .values()
+                        .any(|resource| resource.failure.is_some()))
+            {
                 return Err(DrasiError::invalid_state(
                     "managed components did not all become ready; inspect management status",
                 ));

@@ -245,6 +245,7 @@ fn ensure_stoppable(kind: &str, id: &str, observed: &ObservedComponent) -> anyho
         observed.lifecycle,
         ComponentLifecycle::Running | ComponentLifecycle::Starting | ComponentLifecycle::Failed
     ) || observed.failure.is_some()
+        || !observed.waiting_for.is_empty()
         || matches!(
             observed.realization,
             RealizationState::Pending | RealizationState::Creating
@@ -264,6 +265,27 @@ fn is_active(observed: &ObservedComponent) -> bool {
         observed.lifecycle,
         ComponentLifecycle::Starting | ComponentLifecycle::Running
     ) && !observed.exhausted
+}
+
+fn accept_waiting_start(report: StartReport, observed: &ObservedGraph) -> anyhow::Result<()> {
+    if report.summary == OperationSummary::Completed {
+        return Ok(());
+    }
+    let waiting = report.summary == OperationSummary::CompletedWithFailures
+        && !report.components.is_empty()
+        && report.components.iter().all(|(id, outcome)| match outcome {
+            StartOutcome::StartFailed(_) => false,
+            StartOutcome::NotCreated | StartOutcome::Blocked { .. } => observed
+                .components
+                .get(id)
+                .is_some_and(|node| node.failure.is_none() && !node.waiting_for.is_empty()),
+            _ => true,
+        });
+    if waiting {
+        Ok(())
+    } else {
+        Err(LifecycleReportError::Start(report).into())
+    }
 }
 
 /// Whether `error` reports that a concurrent configuration change replaced or
@@ -343,7 +365,7 @@ impl Runtime {
     ) -> anyhow::Result<()> {
         let mut builder = self
             .services
-            .declare(ComputationGraph::builder("__drasi_lib_runtime__").for_additions())?;
+            .declare(ComputationGraph::builder("__drasi_lib_runtime__"))?;
         for (name, provider) in self.config.index_factory.configured_providers() {
             // Provider names are configuration keys, not validated graph identifiers.
             let id = index_resource_id(&name)?;
@@ -387,19 +409,8 @@ impl Runtime {
         &self,
         batch: &mut ComponentBatch,
     ) -> anyhow::Result<()> {
-        let records = self.current_records().await?;
-        let mut sources = BTreeSet::new();
-        for resource in batch.bindings.resources.values().filter(|resource| {
-            resource.role() == ResourceRole::LegacySource && resource.is::<SourcePluginHost>()
-        }) {
-            let host = resource.get::<SourcePluginHost>()?;
-            let source = host.source()?;
-            if records.get(source.id()).is_some_and(|record| {
-                matches!(&record.value, Value::Source(current) if Arc::ptr_eq(&current.source, &source))
-            }) {
-                sources.insert(source.id().to_owned());
-            }
-        }
+        let mut subscriptions = BTreeSet::new();
+        let mut records = None;
         for node in &batch.definition.components {
             let ComponentConstruction::Factory(spec) = &node.construction else {
                 continue;
@@ -427,15 +438,53 @@ impl Runtime {
                 _ => continue,
             };
             for source in config.sources {
-                if sources.contains(&source.source_id) {
-                    let link = (
-                        ComponentId::try_new(source.source_id)?,
-                        node.descriptor.id().clone(),
-                    );
-                    if !batch.definition.subscriptions.contains(&link) {
-                        batch.definition.subscriptions.push(link);
+                if !spec.dependencies.contains_key("declaration") {
+                    let resource =
+                        ComputationPipelineBuilder::source_resource_id(&source.source_id)?;
+                    let Some(binding) = batch.bindings.resources.get(&resource) else {
+                        continue;
+                    };
+                    let host = binding.get::<SourcePluginHost>()?;
+                    if host.is_owned() {
+                        continue;
+                    }
+                    if records.is_none() {
+                        records = Some(self.current_records().await?);
+                    }
+                    let Some(record) = records
+                        .as_ref()
+                        .expect("source records were loaded")
+                        .get(&source.source_id)
+                    else {
+                        continue;
+                    };
+                    let Value::Source(owner) = &record.value else {
+                        continue;
+                    };
+                    // A resource-owned or external host has no independent source node.
+                    if !Arc::ptr_eq(&host.source()?, &owner.borrowed.source()?) {
+                        continue;
                     }
                 }
+                let producer = ComponentId::try_new(source.source_id.as_str())?;
+                subscriptions.insert((producer.clone(), node.descriptor.id().clone()));
+                let reader = ComputationPipelineBuilder::source_component_id(
+                    node.descriptor.id().as_str(),
+                    &source.source_id,
+                )?;
+                if batch
+                    .definition
+                    .components
+                    .iter()
+                    .any(|node| node.descriptor.id() == &reader)
+                {
+                    subscriptions.insert((producer, reader));
+                }
+            }
+        }
+        for subscription in subscriptions {
+            if !batch.definition.subscriptions.contains(&subscription) {
+                batch.definition.subscriptions.push(subscription);
             }
         }
         Ok(())
@@ -757,6 +806,32 @@ impl Runtime {
                 ResourceHandle::new(ResourceRole::Component, instance.clone())
                     .with_cleanup(instance),
             );
+            if let Value::Source(source) = &record.value {
+                let source_resource =
+                    ComputationPipelineBuilder::source_resource_id(source.source.id())?;
+                let publication = control.registry_snapshot();
+                if publication
+                    .desired
+                    .resources
+                    .get(&source_resource)
+                    .is_some_and(|specification| {
+                        specification.role == ResourceRole::LegacySource
+                            && specification.ownership == ResourceOwnership::Borrowed
+                    })
+                    && publication
+                        .observed
+                        .resources
+                        .get(&source_resource)
+                        .is_some_and(|state| {
+                            state.realization == ResourceRealization::Pending
+                                && state.failure.is_none()
+                        })
+                {
+                    bindings
+                        .resources
+                        .insert(source_resource, source.borrowed.resource());
+                }
+            }
             let handle = control
                 .add_component(ComponentAddition {
                     definition: desired,
@@ -1594,6 +1669,13 @@ impl Runtime {
                 if self.active(&record)? {
                     return Ok(());
                 }
+                let (control, _, observed) = self.control_for(&record)?;
+                if observed.failure.is_none() && !observed.waiting_for.is_empty() {
+                    let report = control
+                        .start_members(BTreeMap::from([(record.node.clone(), observed.generation)]))
+                        .await?;
+                    return accept_waiting_start(report, &control.observed());
+                }
                 self.start_component_checked(record.value.instance().id(), kind, Some(record.token))
                     .await
             }
@@ -1689,7 +1771,9 @@ impl Runtime {
                     })
                     .context(id.to_string()),
                 );
-            } else if observed.realization == RealizationState::Created {
+            } else if observed.realization == RealizationState::Created
+                || !observed.waiting_for.is_empty()
+            {
                 ready.push(handle);
             } else {
                 failures.push(anyhow::anyhow!(
@@ -1714,8 +1798,8 @@ impl Runtime {
                     ),
                 )
                 .await?;
-            if report.summary != OperationSummary::Completed {
-                failures.push(super::v1::LifecycleReportError::Start(report).into());
+            if let Err(error) = accept_waiting_start(report, &control.observed()) {
+                failures.push(error);
             }
         }
         if !failures.is_empty() {

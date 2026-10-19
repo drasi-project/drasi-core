@@ -1123,7 +1123,6 @@ fn query_config() -> QueryConfig {
         auto_start: false,
         joins: None,
         enable_bootstrap: false,
-        bootstrap_buffer_size: 100,
         priority_queue_capacity: None,
         dispatch_buffer_capacity: None,
         dispatch_mode: None,

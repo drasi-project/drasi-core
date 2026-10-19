@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::managers::log_component_start;
+use drasi_lib::observability::log_component_start;
 use drasi_lib::profiling::ProfilingMetadata;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;

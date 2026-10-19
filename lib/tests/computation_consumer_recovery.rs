@@ -1131,7 +1131,7 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
 
 #[cfg(feature = "computation-rocksdb-tests")]
 #[tokio::test]
-async fn persistent_reopen_keeps_identity_and_owner_verified_old_outbox_gets_in_memory_identity() {
+async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_without_rewriting() {
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
     };
@@ -1165,6 +1165,20 @@ async fn persistent_reopen_keeps_identity_and_owner_verified_old_outbox_gets_in_
     };
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).unwrap());
     codec.register_schema(QueryChangeCodec::schema()).unwrap();
+    let mut reopened =
+        ContinuousQueryTransformer::new(definition("persistent", TEXT, 4), provider.clone())
+            .await
+            .unwrap();
+    reopened.start().await.unwrap();
+    let view = reopened.results().recovery_view(Some(0)).unwrap();
+    assert_eq!(view.identity, identity);
+    assert_eq!(view.snapshot.as_of_sequence, 1);
+    assert_eq!(
+        QueryRecoveryIdentity::from_envelope(&view.retained.as_ref().unwrap()[0]).unwrap(),
+        identity
+    );
+    reopened.stop().await.unwrap();
+    drop(reopened);
     {
         let resources = provider
             .create_indexes("persistent", "query")
@@ -1181,21 +1195,18 @@ async fn persistent_reopen_keeps_identity_and_owner_verified_old_outbox_gets_in_
         resources.indexes().session_control.commit().await.unwrap();
         resources.cleanup().unwrap().shutdown().await.unwrap();
     }
-    let mut reopened =
-        ContinuousQueryTransformer::new(definition("persistent", TEXT, 4), provider.clone())
-            .await
-            .unwrap();
-    reopened.start().await.unwrap();
-    let view = reopened.results().recovery_view(Some(0)).unwrap();
-    assert_eq!(view.identity, identity);
-    assert_eq!(view.snapshot.as_of_sequence, 1);
-    let output = &view.retained.as_ref().unwrap()[0];
-    assert_eq!(
-        QueryRecoveryIdentity::from_envelope(output).unwrap(),
-        identity
-    );
-    reopened.stop().await.unwrap();
-    drop(reopened);
+    for _ in 0..2 {
+        let mut rejected =
+            ContinuousQueryTransformer::new(definition("persistent", TEXT, 4), provider.clone())
+                .await
+                .unwrap();
+        let error = rejected.start().await.unwrap_err();
+        assert!(
+            error.to_string().contains("no producer identity"),
+            "{error:#}"
+        );
+        rejected.stop().await.unwrap();
+    }
     {
         let resources = provider
             .create_indexes("persistent", "query")
@@ -1209,7 +1220,7 @@ async fn persistent_reopen_keeps_identity_and_owner_verified_old_outbox_gets_in_
             .unwrap();
         assert!(
             QueryRecoveryIdentity::from_envelope(&codec.decode(&stored[0].1).unwrap()).is_err(),
-            "old persisted bytes are not migrated"
+            "unidentified persisted bytes must not be rewritten"
         );
         resources.indexes().session_control.begin().await.unwrap();
         let checkpoints = resources.checkpoint_store().unwrap();
@@ -1225,9 +1236,21 @@ async fn persistent_reopen_keeps_identity_and_owner_verified_old_outbox_gets_in_
                 .unwrap();
         let error = unverified.start().await.unwrap_err();
         assert!(
-            error.to_string().contains("verified owner configuration"),
+            error.to_string().contains("no producer identity"),
             "{error:#}"
         );
         unverified.stop().await.unwrap();
     }
+    let resources = provider
+        .create_indexes("persistent", "query")
+        .await
+        .unwrap();
+    assert!(resources
+        .checkpoint_store()
+        .unwrap()
+        .read_all_checkpoints()
+        .await
+        .unwrap()
+        .is_empty());
+    resources.cleanup().unwrap().shutdown().await.unwrap();
 }

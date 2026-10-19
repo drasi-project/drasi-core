@@ -32,9 +32,6 @@ pub struct ComponentGraphView {
     runtime: Weak<Runtime>,
 }
 
-/// Compatibility name for [`ComponentGraphView`], not a separate runtime graph.
-pub type ComponentGraph = ComponentGraphView;
-
 impl ComponentGraphView {
     pub(crate) fn from_runtime(runtime: &Arc<Runtime>) -> Self {
         Self {

@@ -1,18 +1,14 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Source/reaction helpers and the retained legacy query helper's cleanup contract.
+//! Source/reaction helpers' cleanup contract.
 //! Native query execution is covered by the ComputationGraph lifecycle suites.
-
-#![allow(deprecated)]
 
 use drasi_lib::{
     channels::ComponentStatus,
     context::workers::WorkerCleanupError,
-    queries::base::QueryBase,
     reactions::common::base::{ReactionBase, ReactionBaseParams},
     sources::base::{SourceBase, SourceBaseParams},
-    Query,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -25,18 +21,13 @@ use tokio::{
 
 enum Base {
     Source(SourceBase),
-    Query(QueryBase),
     Reaction(ReactionBase),
 }
 
 impl Base {
-    fn cases() -> [Self; 3] {
+    fn cases() -> [Self; 2] {
         [
             Self::Source(SourceBase::new(SourceBaseParams::new("source")).expect("source base")),
-            Self::Query(
-                QueryBase::new(Query::cypher("query").query("MATCH (n) RETURN n").build())
-                    .expect("query base"),
-            ),
             Self::Reaction(ReactionBase::new(ReactionBaseParams::new(
                 "reaction",
                 vec![],
@@ -47,7 +38,6 @@ impl Base {
     async fn install(&self, worker: JoinHandle<()>) {
         match self {
             Self::Source(base) => base.set_task_handle(worker).await,
-            Self::Query(base) => base.set_task_handle(worker).await,
             Self::Reaction(base) => base.set_processing_task(worker).await,
         }
     }
@@ -55,7 +45,6 @@ impl Base {
     fn slot(&self) -> &RwLock<Option<JoinHandle<()>>> {
         match self {
             Self::Source(base) => &base.task_handle,
-            Self::Query(base) => &base.task_handle,
             Self::Reaction(base) => &base.processing_task,
         }
     }
@@ -63,7 +52,6 @@ impl Base {
     async fn stop(&self) -> anyhow::Result<()> {
         match self {
             Self::Source(base) => base.stop_common().await,
-            Self::Query(base) => base.stop_common().await,
             Self::Reaction(base) => base.stop_common().await,
         }
     }
@@ -71,7 +59,6 @@ impl Base {
     async fn set_running(&self) {
         match self {
             Self::Source(base) => base.set_status(ComponentStatus::Running, None).await,
-            Self::Query(base) => base.set_status(ComponentStatus::Running, None).await,
             Self::Reaction(base) => base.set_status(ComponentStatus::Running, None).await,
         }
     }
@@ -79,7 +66,6 @@ impl Base {
     async fn status(&self) -> ComponentStatus {
         match self {
             Self::Source(base) => base.get_status().await,
-            Self::Query(base) => base.get_status().await,
             Self::Reaction(base) => base.get_status().await,
         }
     }

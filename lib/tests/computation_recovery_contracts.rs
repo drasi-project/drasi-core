@@ -328,7 +328,11 @@ fn host_subscriptions_and_missing_dependencies_are_not_omitted() -> GraphResult<
     desired
         .subscriptions
         .push((component("missing"), component("sink")));
-    assert!(desired.validate_structure().is_err());
+    desired.validate_structure()?;
+    let restored = DesiredTopology::from_json(&desired.to_json()?)?;
+    assert!(restored
+        .subscriptions
+        .contains(&(component("missing"), component("sink"))));
     let mut desired = graph.snapshot().select(GraphSelection::All)?;
     desired
         .subscriptions

@@ -44,7 +44,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! ### Existing ordinary plugins and compatibility imports
+//! ### Existing ordinary plugin interfaces
 //!
 //! Ordinary [`Source`], [`Reaction`] and [`BootstrapProvider`] contracts remain
 //! available while native migration proceeds. Their base helpers and contexts
@@ -68,11 +68,10 @@
 //! }
 //! ```
 //!
-//! [`compatibility`] contains deprecated query helpers, not another executor.
 //! Use [`QueryConfigurationSnapshot`] for saved settings and
-//! [`computation::v1::QueryResultSnapshot`] for result rows. The older snapshot
-//! aliases and `managers` imports remain available, but new logging code should
-//! use [`observability`].
+//! [`computation::v1::QueryResultSnapshot`] for result rows. Logging and event
+//! history use [`observability`]. Retired query helpers and old import aliases
+//! are not part of this breaking release.
 //!
 //! Some public implementation modules remain hidden from the main documentation
 //! index. They are **not crate-private**: existing callers may depend on their
@@ -107,11 +106,8 @@
 // Core Public Modules
 // ============================================================================
 
-/// Read-only component inspection and compatibility data types.
+/// Read-only component inspection.
 pub mod component_graph;
-
-/// Retired public helpers retained for existing callers, not runtime components.
-pub mod compatibility;
 
 /// Fluent builders for DrasiLib and components
 pub mod builder;
@@ -143,7 +139,7 @@ pub mod identity;
 pub mod recovery;
 
 // ============================================================================
-// Public ordinary integration and compatibility modules
+// Public ordinary integration modules
 // ============================================================================
 
 /// Ordinary bootstrap providers and their snapshot request/context types.
@@ -159,7 +155,7 @@ pub mod inspection;
 /// Implementation of the root-exported `DrasiLib`; prefer the root import.
 #[cfg_attr(not(test), doc(hidden))]
 pub mod lib_core;
-/// Query read contracts and ordinary API facades, including compatibility helpers.
+/// Query read contracts, snapshot/outbox exchange types and ordinary API facades.
 pub mod queries;
 /// Ordinary reaction traits, base helpers and result-snapshot interfaces.
 pub mod reactions;
@@ -168,8 +164,6 @@ pub mod sources;
 
 // Sub-modules for lib_core operations (split for maintainability)
 mod lib_core_ops;
-#[cfg_attr(not(test), doc(hidden))]
-pub mod managers;
 /// Public initialization helper retained for existing callers, not a native service.
 #[cfg_attr(not(test), doc(hidden))]
 pub mod state_guard;
@@ -244,15 +238,11 @@ pub use observability::{ComponentLogType, LogLevel, LogMessage};
 /// Tracing initialization function - call to set up component log routing
 pub use observability::get_or_init_global_registry;
 
-/// Deprecated tracing initialization functions — use `get_or_init_global_registry()` instead.
-#[allow(deprecated)]
-pub use observability::{init_tracing, try_init_tracing};
-
 // ============================================================================
 // Configuration Types
 // ============================================================================
 
-pub use config::snapshot::{QueryConfigurationSnapshot, QuerySnapshot};
+pub use config::snapshot::QueryConfigurationSnapshot;
 /// Configuration types
 pub use config::{
     BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
@@ -260,7 +250,7 @@ pub use config::{
     SourceSubscriptionSettings,
 };
 
-/// Schema discovery types (also available via `config::` for backward compatibility)
+/// Schema discovery types.
 pub use schema::{
     normalize_table_label, GraphNodeSchema, GraphRelationSchema, GraphSchema, NodeSchema,
     PropertySchema, PropertyType, RelationSchema, SourceSchema,
@@ -331,16 +321,5 @@ pub use builder::Query;
 pub use component_graph::wait_for_status;
 /// Component graph types for dependency tracking and configuration queries
 pub use component_graph::{
-    ComponentGraph, ComponentGraphView, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot,
-    RelationshipKind,
+    ComponentGraphView, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot, RelationshipKind,
 };
-
-// ============================================================================
-// API Module (backward compatibility alias)
-// ============================================================================
-
-/// Re-export builders as `api` module for backward compatibility with tests.
-/// This allows `use crate::api::{Query};` to work.
-pub mod api {
-    pub use crate::builder::Query;
-}

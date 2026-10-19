@@ -320,7 +320,7 @@ The fingerprint covers parsed Rust sources and all four scoped crate manifests.
 
 ## Alphabetical type inventory
 
-Generated from **363 source files**; **1181 named types**. Source fingerprint: `fnv1a64:72cb699654261df5`.
+Generated from **356 source files**; **1176 named types**. Source fingerprint: `fnv1a64:99da087de4d84714`.
 
 Names below are definition-site paths, not duplicate public re-export paths. Block-local declarations use an explicit `<local@line>` lexical identifier because Rust provides no importable path for them. Traits and aliases are included, but are not extra runtime objects.
 
@@ -484,12 +484,11 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_computation_contracts::query_codec::QueryOutputMetadata` — struct; [source](../../components/computation-contracts/src/query_codec.rs#L63).
 - `drasi_computation_contracts::query_codec::QueryRowKind` — enum; [source](../../components/computation-contracts/src/query_codec.rs#L73).
 - `drasi_computation_contracts::query_codec::Row` — struct; [source](../../components/computation-contracts/src/query_codec.rs#L83).
-- `drasi_computation_contracts::query_codec::RowValidator` — struct; [source](../../components/computation-contracts/src/query_codec.rs#L742).
+- `drasi_computation_contracts::query_codec::RowValidator` — struct; [source](../../components/computation-contracts/src/query_codec.rs#L764).
 - `drasi_computation_contracts::query_identity::IdentityRecord` — struct; [source](../../components/computation-contracts/src/query_identity.rs#L59).
 - `drasi_computation_contracts::query_identity::QueryIdentityError` — enum; [source](../../components/computation-contracts/src/query_identity.rs#L45).
 - `drasi_computation_contracts::query_identity::QueryRecoveryIdentity` — struct; [source](../../components/computation-contracts/src/query_identity.rs#L23).
 - `drasi_computation_contracts::snapshot::QueryResultSnapshot` — struct; [source](../../components/computation-contracts/src/snapshot.rs#L6).
-- `drasi_computation_contracts::snapshot::QuerySnapshot` — type alias; [source](../../components/computation-contracts/src/snapshot.rs#L19).
 - `drasi_computation_contracts::source_transaction::Frame` — struct; [source](../../components/computation-contracts/src/source_transaction.rs#L100).
 - `drasi_computation_contracts::source_transaction::PreparedSourceTransaction` — struct; [source](../../components/computation-contracts/src/source_transaction.rs#L273).
 - `drasi_computation_contracts::source_transaction::ReplayProgress` — struct; [source](../../components/computation-contracts/src/source_transaction.rs#L36).
@@ -507,11 +506,11 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_core::computation::ComputationQueryError` — enum; [source](../../core/src/computation/mod.rs#L68); conditional: `cfg (feature = "computation")`.
 - `drasi_core::computation::Result` — type alias; [source](../../core/src/computation/mod.rs#L92); conditional: `cfg (feature = "computation")`.
 - `drasi_core::computation::group_outbox::GroupOutbox` — struct; [source](../../core/src/computation/group_outbox.rs#L10); conditional: `cfg (feature = "computation")`.
-- `drasi_core::computation::indexes::ComputationIndexProvider` — trait; [source](../../core/src/computation/indexes.rs#L216); conditional: `cfg (feature = "computation")`.
+- `drasi_core::computation::indexes::ComputationIndexProvider` — trait; [source](../../core/src/computation/indexes.rs#L206); conditional: `cfg (feature = "computation")`.
 - `drasi_core::computation::indexes::ComputationIndexes` — struct; [source](../../core/src/computation/indexes.rs#L57); conditional: `cfg (feature = "computation")`.
 - `drasi_core::computation::indexes::ComputationResource` — struct; [source](../../core/src/computation/indexes.rs#L25); conditional: `cfg (feature = "computation")`.
-- `drasi_core::computation::indexes::ComputationResourceCleanup` — trait; [source](../../core/src/computation/indexes.rs#L251); conditional: `cfg (feature = "computation")`.
-- `drasi_core::computation::indexes::InMemoryComputationProvider` — struct; [source](../../core/src/computation/indexes.rs#L264); conditional: `cfg (feature = "computation")`.
+- `drasi_core::computation::indexes::ComputationResourceCleanup` — trait; [source](../../core/src/computation/indexes.rs#L241); conditional: `cfg (feature = "computation")`.
+- `drasi_core::computation::indexes::InMemoryComputationProvider` — struct; [source](../../core/src/computation/indexes.rs#L254); conditional: `cfg (feature = "computation")`.
 - `drasi_core::computation::io_scope::BlockingFailures` — struct; [source](../../core/src/computation/io_scope.rs#L202); conditional: `cfg (feature = "computation")`.
 - `drasi_core::computation::io_scope::BlockingScope` — struct; [source](../../core/src/computation/io_scope.rs#L69); conditional: `cfg (feature = "computation")`.
 - `drasi_core::computation::io_scope::CleanupPass` — struct; [source](../../core/src/computation/io_scope.rs#L181); conditional: `cfg (feature = "computation")`.
@@ -648,7 +647,7 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_core::hashing::spooky::SpookyHasher` — struct; [source](../../core/src/hashing/spooky.rs#L385).
 - `drasi_core::in_memory_index::in_memory_checkpoint_store::CheckpointEntry` — struct; [source](../../core/src/in_memory_index/in_memory_checkpoint_store.rs#L30).
 - `drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore` — struct; [source](../../core/src/in_memory_index/in_memory_checkpoint_store.rs#L37).
-- `drasi_core::in_memory_index::in_memory_element_index::ElementArchive` — struct; [source](../../core/src/in_memory_index/in_memory_element_index.rs#L680).
+- `drasi_core::in_memory_index::in_memory_element_index::ElementArchive` — struct; [source](../../core/src/in_memory_index/in_memory_element_index.rs#L676).
 - `drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex` — struct; [source](../../core/src/in_memory_index/in_memory_element_index.rs#L37).
 - `drasi_core::in_memory_index::in_memory_future_queue::FutureQueueState` — struct; [source](../../core/src/in_memory_index/in_memory_future_queue.rs#L26).
 - `drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue` — struct; [source](../../core/src/in_memory_index/in_memory_future_queue.rs#L34).
@@ -836,9 +835,6 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::channels::priority_queue::PriorityQueueEvent` — struct; [source](../../lib/src/channels/priority_queue.rs#L24).
 - `drasi_lib::channels::priority_queue::PriorityQueueMetrics` — struct; [source](../../lib/src/channels/priority_queue.rs#L201).
 - `drasi_lib::channels::priority_queue::StreamKey` — enum; [source](../../lib/src/channels/priority_queue.rs#L92).
-- `drasi_lib::compatibility::query_base::QueryBase` — struct; [source](../../lib/src/compatibility/query_base.rs#L32).
-- `drasi_lib::compatibility::sequence_dedup::SequenceDedup` — struct; [source](../../lib/src/compatibility/sequence_dedup.rs#L22).
-- `drasi_lib::component_graph::graph::ComponentGraph` — type alias; [source](../../lib/src/component_graph/graph.rs#L35).
 - `drasi_lib::component_graph::graph::ComponentGraphView` — struct; [source](../../lib/src/component_graph/graph.rs#L24).
 - `drasi_lib::component_graph::node::ComponentKind` — enum; [source](../../lib/src/component_graph/node.rs#L29).
 - `drasi_lib::component_graph::node::ComponentNode` — struct; [source](../../lib/src/component_graph/node.rs#L124).
@@ -846,19 +842,18 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::component_graph::node::GraphSnapshot` — struct; [source](../../lib/src/component_graph/node.rs#L146).
 - `drasi_lib::component_graph::node::RelationshipKind` — enum; [source](../../lib/src/component_graph/node.rs#L76).
 - `drasi_lib::computation::components::ComponentBatch` — struct; [source](../../lib/src/computation/components.rs#L10).
-- `drasi_lib::computation::components::ComponentBatchBuilder` — struct; [source](../../lib/src/computation/components.rs#L31).
+- `drasi_lib::computation::components::ComponentBatchBuilder` — struct; [source](../../lib/src/computation/components.rs#L37).
 - `drasi_lib::computation::instance::ComputationCleanupError` — struct; [source](../../lib/src/computation/instance.rs#L41).
-- `drasi_lib::computation::instance::ComputationHandle` — struct; [source](../../lib/src/computation/instance.rs#L410).
+- `drasi_lib::computation::instance::ComputationHandle` — struct; [source](../../lib/src/computation/instance.rs#L395).
 - `drasi_lib::computation::instance::ComputationInfo` — struct; [source](../../lib/src/computation/instance.rs#L33).
-- `drasi_lib::computation::instance::DriverFailure` — struct; [source](../../lib/src/computation/instance.rs#L163).
-- `drasi_lib::computation::instance::DriverPublication` — struct; [source](../../lib/src/computation/instance.rs#L218).
+- `drasi_lib::computation::instance::DriverPublication` — struct; [source](../../lib/src/computation/instance.rs#L203).
 - `drasi_lib::computation::instance::DriverState` — enum; [source](../../lib/src/computation/instance.rs#L156).
-- `drasi_lib::computation::instance::Entry` — struct; [source](../../lib/src/computation/instance.rs#L246).
-- `drasi_lib::computation::instance::GraphLease` — struct; [source](../../lib/src/computation/instance.rs#L179).
-- `drasi_lib::computation::instance::GraphSlot` — struct; [source](../../lib/src/computation/instance.rs#L178).
-- `drasi_lib::computation::instance::InstanceGraph` — struct; [source](../../lib/src/computation/instance.rs#L511).
-- `drasi_lib::computation::instance::InstanceLifecycle` — struct; [source](../../lib/src/computation/instance.rs#L500).
-- `drasi_lib::computation::instance::PendingComponents` — struct; [source](../../lib/src/computation/instance.rs#L706).
+- `drasi_lib::computation::instance::Entry` — struct; [source](../../lib/src/computation/instance.rs#L231).
+- `drasi_lib::computation::instance::GraphLease` — struct; [source](../../lib/src/computation/instance.rs#L164).
+- `drasi_lib::computation::instance::GraphSlot` — struct; [source](../../lib/src/computation/instance.rs#L163).
+- `drasi_lib::computation::instance::InstanceGraph` — struct; [source](../../lib/src/computation/instance.rs#L496).
+- `drasi_lib::computation::instance::InstanceLifecycle` — struct; [source](../../lib/src/computation/instance.rs#L485).
+- `drasi_lib::computation::instance::PendingComponents` — struct; [source](../../lib/src/computation/instance.rs#L691).
 - `drasi_lib::computation::instance::RejectedComputations` — struct; [source](../../lib/src/computation/instance.rs#L103).
 - `drasi_lib::computation::instance_ops::InstanceConfigurationSnapshot` — struct; [source](../../lib/src/computation/instance_ops.rs#L18).
 - `drasi_lib::computation::internal::query_state::QueryHistoryError` — enum; [source](../../lib/src/computation/internal/query_state.rs#L39).
@@ -869,7 +864,7 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::runtime::ReactionRegistration` — type alias; [source](../../lib/src/computation/runtime/mod.rs#L53).
 - `drasi_lib::computation::runtime::Record` — struct; [source](../../lib/src/computation/runtime/mod.rs#L161).
 - `drasi_lib::computation::runtime::RecordData` — struct; [source](../../lib/src/computation/runtime/mod.rs#L174).
-- `drasi_lib::computation::runtime::Runtime` — struct; [source](../../lib/src/computation/runtime/mod.rs#L284).
+- `drasi_lib::computation::runtime::Runtime` — struct; [source](../../lib/src/computation/runtime/mod.rs#L306).
 - `drasi_lib::computation::runtime::SourceRegistration` — type alias; [source](../../lib/src/computation/runtime/mod.rs#L52).
 - `drasi_lib::computation::runtime::Value` — enum; [source](../../lib/src/computation/runtime/mod.rs#L124).
 - `drasi_lib::computation::runtime::component::RuntimeComponent` — trait; [source](../../lib/src/computation/runtime/component.rs#L26).
@@ -877,9 +872,9 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::runtime::component::RuntimeInstance` — struct; [source](../../lib/src/computation/runtime/component.rs#L49).
 - `drasi_lib::computation::runtime::component::Service` — struct; [source](../../lib/src/computation/runtime/component.rs#L126).
 - `drasi_lib::computation::runtime::events::Events` — struct; [source](../../lib/src/computation/runtime/events.rs#L22).
-- `drasi_lib::computation::runtime::native_query::NativeQuery` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L728).
-- `drasi_lib::computation::runtime::native_query::NativeQueryUpdate` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L246).
-- `drasi_lib::computation::runtime::native_query::NativeReceiver` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L817).
+- `drasi_lib::computation::runtime::native_query::NativeQuery` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L861).
+- `drasi_lib::computation::runtime::native_query::NativeQueryUpdate` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L404).
+- `drasi_lib::computation::runtime::native_query::NativeReceiver` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L950).
 - `drasi_lib::computation::runtime::reaction::ReactionInstance` — struct; [source](../../lib/src/computation/runtime/reaction.rs#L28).
 - `drasi_lib::computation::runtime::snapshot::ProviderProjection` — struct; [source](../../lib/src/computation/runtime/snapshot.rs#L18).
 - `drasi_lib::computation::runtime::source::Life` — struct; [source](../../lib/src/computation/runtime/source.rs#L28).
@@ -968,61 +963,61 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::entities::PluginFamilyEntity` — struct; [source](../../lib/src/computation/v1/entities.rs#L152).
 - `drasi_lib::computation::v1::entities::ResourceEntity` — struct; [source](../../lib/src/computation/v1/entities.rs#L130).
 - `drasi_lib::computation::v1::entities::SubscriptionPipeEntity` — struct; [source](../../lib/src/computation/v1/entities.rs#L219).
-- `drasi_lib::computation::v1::graph::Component` — enum; [source](../../lib/src/computation/v1/graph.rs#L419).
-- `drasi_lib::computation::v1::graph::ComputationGraph` — struct; [source](../../lib/src/computation/v1/graph.rs#L1329).
-- `drasi_lib::computation::v1::graph::ComputationGraphBuilder` — struct; [source](../../lib/src/computation/v1/graph.rs#L595).
-- `drasi_lib::computation::v1::graph::DeliveryWork` — struct; [source](../../lib/src/computation/v1/graph.rs#L2077).
+- `drasi_lib::computation::v1::graph::Component` — enum; [source](../../lib/src/computation/v1/graph.rs#L418).
+- `drasi_lib::computation::v1::graph::ComputationGraph` — struct; [source](../../lib/src/computation/v1/graph.rs#L1319).
+- `drasi_lib::computation::v1::graph::ComputationGraphBuilder` — struct; [source](../../lib/src/computation/v1/graph.rs#L594).
+- `drasi_lib::computation::v1::graph::DeliveryWork` — struct; [source](../../lib/src/computation/v1/graph.rs#L2074).
 - `drasi_lib::computation::v1::graph::EdgeDefinition` — struct; [source](../../lib/src/computation/v1/graph.rs#L330).
 - `drasi_lib::computation::v1::graph::EdgeSnapshot` — struct; [source](../../lib/src/computation/v1/graph.rs#L352).
 - `drasi_lib::computation::v1::graph::Endpoint` — struct; [source](../../lib/src/computation/v1/graph.rs#L318).
-- `drasi_lib::computation::v1::graph::FlowProgress` — struct; [source](../../lib/src/computation/v1/graph.rs#L2052).
-- `drasi_lib::computation::v1::graph::GraphControl` — struct; [source](../../lib/src/computation/v1/graph.rs#L1268).
+- `drasi_lib::computation::v1::graph::FlowProgress` — struct; [source](../../lib/src/computation/v1/graph.rs#L2049).
+- `drasi_lib::computation::v1::graph::GraphControl` — struct; [source](../../lib/src/computation/v1/graph.rs#L1258).
 - `drasi_lib::computation::v1::graph::GraphError` — enum; [source](../../lib/src/computation/v1/graph.rs#L62).
 - `drasi_lib::computation::v1::graph::GraphResult` — type alias; [source](../../lib/src/computation/v1/graph.rs#L60).
-- `drasi_lib::computation::v1::graph::GraphRun` — struct; [source](../../lib/src/computation/v1/graph.rs#L1748).
+- `drasi_lib::computation::v1::graph::GraphRun` — struct; [source](../../lib/src/computation/v1/graph.rs#L1745).
 - `drasi_lib::computation::v1::graph::GraphSnapshot` — struct; [source](../../lib/src/computation/v1/graph.rs#L361).
 - `drasi_lib::computation::v1::graph::GraphState` — enum; [source](../../lib/src/computation/v1/graph.rs#L302).
-- `drasi_lib::computation::v1::graph::Incoming` — struct; [source](../../lib/src/computation/v1/graph.rs#L1885).
+- `drasi_lib::computation::v1::graph::Incoming` — struct; [source](../../lib/src/computation/v1/graph.rs#L1882).
 - `drasi_lib::computation::v1::graph::NodeSnapshot` — struct; [source](../../lib/src/computation/v1/graph.rs#L342).
-- `drasi_lib::computation::v1::graph::NodeWorkBudget` — struct; [source](../../lib/src/computation/v1/graph.rs#L2259).
-- `drasi_lib::computation::v1::graph::Outgoing` — struct; [source](../../lib/src/computation/v1/graph.rs#L1895).
-- `drasi_lib::computation::v1::graph::PendingInput` — struct; [source](../../lib/src/computation/v1/graph.rs#L2099).
-- `drasi_lib::computation::v1::graph::PipeGuard` — struct; [source](../../lib/src/computation/v1/graph.rs#L1871).
-- `drasi_lib::computation::v1::graph::SourceRouting` — struct; [source](../../lib/src/computation/v1/graph.rs#L2251).
+- `drasi_lib::computation::v1::graph::NodeWorkBudget` — struct; [source](../../lib/src/computation/v1/graph.rs#L2256).
+- `drasi_lib::computation::v1::graph::Outgoing` — struct; [source](../../lib/src/computation/v1/graph.rs#L1892).
+- `drasi_lib::computation::v1::graph::PendingInput` — struct; [source](../../lib/src/computation/v1/graph.rs#L2096).
+- `drasi_lib::computation::v1::graph::PipeGuard` — struct; [source](../../lib/src/computation/v1/graph.rs#L1868).
+- `drasi_lib::computation::v1::graph::SourceRouting` — struct; [source](../../lib/src/computation/v1/graph.rs#L2248).
 - `drasi_lib::computation::v1::graph::addition::ComponentAddition` — struct; [source](../../lib/src/computation/v1/graph/addition.rs#L257).
 - `drasi_lib::computation::v1::graph::addition::ComponentHandle` — struct; [source](../../lib/src/computation/v1/graph/addition.rs#L350).
 - `drasi_lib::computation::v1::graph::addition::RejectedAddition` — struct; [source](../../lib/src/computation/v1/graph/addition.rs#L23).
 - `drasi_lib::computation::v1::graph::addition::RejectedResources` — struct; [source](../../lib/src/computation/v1/graph/addition.rs#L111).
 - `drasi_lib::computation::v1::graph::configuration::CapturedComponentConfiguration` — enum; [source](../../lib/src/computation/v1/graph/configuration.rs#L17).
 - `drasi_lib::computation::v1::graph::configuration::GraphConfigurationSnapshot` — struct; [source](../../lib/src/computation/v1/graph/configuration.rs#L33).
-- `drasi_lib::computation::v1::graph::controller::Active` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1504).
+- `drasi_lib::computation::v1::graph::controller::Active` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1616).
 - `drasi_lib::computation::v1::graph::controller::Command` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L318).
-- `drasi_lib::computation::v1::graph::controller::CommandReceiver` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L569).
-- `drasi_lib::computation::v1::graph::controller::CommandSender` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L563).
-- `drasi_lib::computation::v1::graph::controller::Completion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1513).
-- `drasi_lib::computation::v1::graph::controller::ControlCompletion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1736).
-- `drasi_lib::computation::v1::graph::controller::DrainCompletion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1595).
-- `drasi_lib::computation::v1::graph::controller::DrainReply` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1568).
-- `drasi_lib::computation::v1::graph::controller::Draining` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1586).
-- `drasi_lib::computation::v1::graph::controller::ExecutionTasks` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1743).
-- `drasi_lib::computation::v1::graph::controller::HandleRequest` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1601).
+- `drasi_lib::computation::v1::graph::controller::CommandReceiver` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L574).
+- `drasi_lib::computation::v1::graph::controller::CommandSender` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L568).
+- `drasi_lib::computation::v1::graph::controller::Completion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1625).
+- `drasi_lib::computation::v1::graph::controller::ControlCompletion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1841).
+- `drasi_lib::computation::v1::graph::controller::DrainCompletion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1707).
+- `drasi_lib::computation::v1::graph::controller::DrainReply` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1680).
+- `drasi_lib::computation::v1::graph::controller::Draining` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1698).
+- `drasi_lib::computation::v1::graph::controller::ExecutionTasks` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1848).
+- `drasi_lib::computation::v1::graph::controller::HandleRequest` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1713).
 - `drasi_lib::computation::v1::graph::controller::Instance` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L61).
 - `drasi_lib::computation::v1::graph::controller::InstanceLease` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L217).
 - `drasi_lib::computation::v1::graph::controller::InstanceSlot` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L49).
-- `drasi_lib::computation::v1::graph::controller::Operation` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1474).
-- `drasi_lib::computation::v1::graph::controller::Operations` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L2120).
-- `drasi_lib::computation::v1::graph::controller::PeerDriver` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L2018).
-- `drasi_lib::computation::v1::graph::controller::ProvidedBinding` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1775).
-- `drasi_lib::computation::v1::graph::controller::ReconciliationReservation` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L2154).
-- `drasi_lib::computation::v1::graph::controller::RetirementCompletion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1901).
-- `drasi_lib::computation::v1::graph::controller::Starting` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1521).
-- `drasi_lib::computation::v1::graph::controller::StopReply` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1538).
-- `drasi_lib::computation::v1::graph::controller::Stopping` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1530).
+- `drasi_lib::computation::v1::graph::controller::Operation` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1586).
+- `drasi_lib::computation::v1::graph::controller::Operations` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L2225).
+- `drasi_lib::computation::v1::graph::controller::PeerDriver` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L2123).
+- `drasi_lib::computation::v1::graph::controller::ProvidedBinding` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1880).
+- `drasi_lib::computation::v1::graph::controller::ReconciliationReservation` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L2266).
+- `drasi_lib::computation::v1::graph::controller::RetirementCompletion` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L2006).
+- `drasi_lib::computation::v1::graph::controller::Starting` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1633).
+- `drasi_lib::computation::v1::graph::controller::StopReply` — enum; [source](../../lib/src/computation/v1/graph/controller.rs#L1650).
+- `drasi_lib::computation::v1::graph::controller::Stopping` — struct; [source](../../lib/src/computation/v1/graph/controller.rs#L1642).
 - `drasi_lib::computation::v1::graph::controller::reconcile::DesiredMutation` — enum; [source](../../lib/src/computation/v1/graph/reconcile.rs#L33).
-- `drasi_lib::computation::v1::graph::controller::reconcile::PreparationSnapshot` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L1256).
-- `drasi_lib::computation::v1::graph::controller::reconcile::Prepared` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L1245).
-- `drasi_lib::computation::v1::graph::controller::reconcile::ReconciliationPreview` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L68).
-- `drasi_lib::computation::v1::graph::controller::reconcile::ReconciliationReport` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L128).
+- `drasi_lib::computation::v1::graph::controller::reconcile::PreparationSnapshot` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L1288).
+- `drasi_lib::computation::v1::graph::controller::reconcile::Prepared` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L1277).
+- `drasi_lib::computation::v1::graph::controller::reconcile::ReconciliationPreview` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L72).
+- `drasi_lib::computation::v1::graph::controller::reconcile::ReconciliationReport` — struct; [source](../../lib/src/computation/v1/graph/reconcile.rs#L133).
 - `drasi_lib::computation::v1::graph::execution::GraphIdentity` — struct; [source](../../lib/src/computation/v1/graph/execution.rs#L165).
 - `drasi_lib::computation::v1::graph::execution::Identity` — struct; [source](../../lib/src/computation/v1/graph/execution.rs#L31).
 - `drasi_lib::computation::v1::graph::execution::ResourceIdentity` — struct; [source](../../lib/src/computation/v1/graph/execution.rs#L95).
@@ -1033,48 +1028,48 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::graph::registry::GraphRegistrySnapshot` — struct; [source](../../lib/src/computation/v1/graph/registry.rs#L17).
 - `drasi_lib::computation::v1::graph::resource_tasks::Outcome` — type alias; [source](../../lib/src/computation/v1/graph/resource_tasks.rs#L37).
 - `drasi_lib::computation::v1::graph::resource_tasks::ResourceJob` — struct; [source](../../lib/src/computation/v1/graph/resource_tasks.rs#L45).
-- `drasi_lib::computation::v1::graph::resource_tasks::ResourceLease` — struct; [source](../../lib/src/computation/v1/graph/resource_tasks.rs#L422).
+- `drasi_lib::computation::v1::graph::resource_tasks::ResourceLease` — struct; [source](../../lib/src/computation/v1/graph/resource_tasks.rs#L462).
 - `drasi_lib::computation::v1::graph::resource_tasks::ResourceOperation` — enum; [source](../../lib/src/computation/v1/graph/resource_tasks.rs#L31).
 - `drasi_lib::computation::v1::graph::resource_tasks::ResourceTasks` — struct; [source](../../lib/src/computation/v1/graph/resource_tasks.rs#L97).
 - `drasi_lib::computation::v1::graph::resource_tasks::Value` — struct; [source](../../lib/src/computation/v1/graph/resource_tasks.rs#L39).
 - `drasi_lib::computation::v1::graph::retirement::RecoveryFreeze` — struct; [source](../../lib/src/computation/v1/graph/retirement.rs#L36).
 - `drasi_lib::computation::v1::graph::retirement::RetirementState` — struct; [source](../../lib/src/computation/v1/graph/retirement.rs#L20).
-- `drasi_lib::computation::v1::graph::specification::ComponentCreationError` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L468).
-- `drasi_lib::computation::v1::graph::specification::ComponentFactory` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L512).
-- `drasi_lib::computation::v1::graph::specification::ComponentSpecification` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L457).
+- `drasi_lib::computation::v1::graph::specification::ComponentCreationError` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L471).
+- `drasi_lib::computation::v1::graph::specification::ComponentFactory` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L515).
+- `drasi_lib::computation::v1::graph::specification::ComponentSpecification` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L460).
 - `drasi_lib::computation::v1::graph::specification::ConfigurationField` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L64).
-- `drasi_lib::computation::v1::graph::specification::ConfigurationResolver` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L563).
-- `drasi_lib::computation::v1::graph::specification::ConfigurationResolverResource` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L570).
+- `drasi_lib::computation::v1::graph::specification::ConfigurationResolver` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L566).
+- `drasi_lib::computation::v1::graph::specification::ConfigurationResolverResource` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L573).
 - `drasi_lib::computation::v1::graph::specification::ConfigurationSchema` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L71).
 - `drasi_lib::computation::v1::graph::specification::ConfigurationType` — enum; [source](../../lib/src/computation/v1/graph/specification.rs#L41).
 - `drasi_lib::computation::v1::graph::specification::ConfigurationValue` — enum; [source](../../lib/src/computation/v1/graph/specification.rs#L31).
-- `drasi_lib::computation::v1::graph::specification::ConstructedComponent` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L492).
-- `drasi_lib::computation::v1::graph::specification::ConstructionContext` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L572).
-- `drasi_lib::computation::v1::graph::specification::FactoryDescriptor` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L448).
-- `drasi_lib::computation::v1::graph::specification::ResourceCleanup` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L219).
-- `drasi_lib::computation::v1::graph::specification::ResourceConstructor` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L224).
-- `drasi_lib::computation::v1::graph::specification::ResourceHandle` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L245).
-- `drasi_lib::computation::v1::graph::specification::ResourceIdentity` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L255).
-- `drasi_lib::computation::v1::graph::specification::ResourceOwnership` — enum; [source](../../lib/src/computation/v1/graph/specification.rs#L204).
-- `drasi_lib::computation::v1::graph::specification::ResourceRequirement` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L429).
-- `drasi_lib::computation::v1::graph::specification::ResourceRole` — enum; [source](../../lib/src/computation/v1/graph/specification.rs#L182).
-- `drasi_lib::computation::v1::graph::specification::ResourceScopeIdentity` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L275).
-- `drasi_lib::computation::v1::graph::specification::ResourceSpecification` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L210).
-- `drasi_lib::computation::v1::graph::specification::SharedResourceIdentity` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L295).
-- `drasi_lib::computation::v1::graph::specification::WeakResourceHandle` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L314).
-- `drasi_lib::computation::v1::graph::specification::WeakResourceIdentity` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L261).
-- `drasi_lib::computation::v1::graph::specification::WeakSharedResourceIdentity` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L265).
+- `drasi_lib::computation::v1::graph::specification::ConstructedComponent` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L495).
+- `drasi_lib::computation::v1::graph::specification::ConstructionContext` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L575).
+- `drasi_lib::computation::v1::graph::specification::FactoryDescriptor` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L451).
+- `drasi_lib::computation::v1::graph::specification::ResourceCleanup` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L222).
+- `drasi_lib::computation::v1::graph::specification::ResourceConstructor` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L227).
+- `drasi_lib::computation::v1::graph::specification::ResourceHandle` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L248).
+- `drasi_lib::computation::v1::graph::specification::ResourceIdentity` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L258).
+- `drasi_lib::computation::v1::graph::specification::ResourceOwnership` — enum; [source](../../lib/src/computation/v1/graph/specification.rs#L207).
+- `drasi_lib::computation::v1::graph::specification::ResourceRequirement` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L432).
+- `drasi_lib::computation::v1::graph::specification::ResourceRole` — enum; [source](../../lib/src/computation/v1/graph/specification.rs#L185).
+- `drasi_lib::computation::v1::graph::specification::ResourceScopeIdentity` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L278).
+- `drasi_lib::computation::v1::graph::specification::ResourceSpecification` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L213).
+- `drasi_lib::computation::v1::graph::specification::SharedResourceIdentity` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L298).
+- `drasi_lib::computation::v1::graph::specification::WeakResourceHandle` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L317).
+- `drasi_lib::computation::v1::graph::specification::WeakResourceIdentity` — trait; [source](../../lib/src/computation/v1/graph/specification.rs#L264).
+- `drasi_lib::computation::v1::graph::specification::WeakSharedResourceIdentity` — struct; [source](../../lib/src/computation/v1/graph/specification.rs#L268).
 - `drasi_lib::computation::v1::graph::topology::ComponentConstruction` — enum; [source](../../lib/src/computation/v1/graph/topology.rs#L47).
 - `drasi_lib::computation::v1::graph::topology::DesiredComponent` — struct; [source](../../lib/src/computation/v1/graph/topology.rs#L53).
 - `drasi_lib::computation::v1::graph::topology::DesiredPipe` — enum; [source](../../lib/src/computation/v1/graph/topology.rs#L23).
 - `drasi_lib::computation::v1::graph::topology::DesiredRelationship` — struct; [source](../../lib/src/computation/v1/graph/topology.rs#L65).
 - `drasi_lib::computation::v1::graph::topology::DesiredTopology` — struct; [source](../../lib/src/computation/v1/graph/topology.rs#L73).
-- `drasi_lib::computation::v1::graph::topology::FactoryRegistry` — struct; [source](../../lib/src/computation/v1/graph/topology.rs#L113).
-- `drasi_lib::computation::v1::graph::topology::TopologyBindings` — struct; [source](../../lib/src/computation/v1/graph/topology.rs#L213).
+- `drasi_lib::computation::v1::graph::topology::FactoryRegistry` — struct; [source](../../lib/src/computation/v1/graph/topology.rs#L111).
+- `drasi_lib::computation::v1::graph::topology::TopologyBindings` — struct; [source](../../lib/src/computation/v1/graph/topology.rs#L211).
 - `drasi_lib::computation::v1::inspection::ComputationInspection` — struct; [source](../../lib/src/computation/v1/inspection.rs#L27).
 - `drasi_lib::computation::v1::inspection::ComputationInspectionResource` — struct; [source](../../lib/src/computation/v1/inspection.rs#L159).
 - `drasi_lib::computation::v1::inspection::ComputationInspector` — struct; [source](../../lib/src/computation/v1/inspection.rs#L60).
-- `drasi_lib::computation::v1::inspection::ComputationTopologyFactory` — struct; [source](../../lib/src/computation/v1/inspection.rs#L665).
+- `drasi_lib::computation::v1::inspection::ComputationTopologyFactory` — struct; [source](../../lib/src/computation/v1/inspection.rs#L666).
 - `drasi_lib::computation::v1::inspection::ComputationTopologySource` — struct; [source](../../lib/src/computation/v1/inspection.rs#L161).
 - `drasi_lib::computation::v1::inspection::History` — struct; [source](../../lib/src/computation/v1/inspection.rs#L44).
 - `drasi_lib::computation::v1::inspection::InspectionState` — struct; [source](../../lib/src/computation/v1/inspection.rs#L48).
@@ -1095,7 +1090,7 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::legacy_source::LegacySourceAdapter` — struct; [source](../../lib/src/computation/v1/legacy_source.rs#L205).
 - `drasi_lib::computation::v1::legacy_source::LegacySourceFactory` — struct; [source](../../lib/src/computation/v1/legacy_source.rs#L347).
 - `drasi_lib::computation::v1::legacy_source::LegacySourceResource` — struct; [source](../../lib/src/computation/v1/legacy_source.rs#L46).
-- `drasi_lib::computation::v1::lifecycle::ActivationCoupling` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L640).
+- `drasi_lib::computation::v1::lifecycle::ActivationCoupling` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L706).
 - `drasi_lib::computation::v1::lifecycle::BindingState` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L63).
 - `drasi_lib::computation::v1::lifecycle::ComponentFailure` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L382).
 - `drasi_lib::computation::v1::lifecycle::ComponentGeneration` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L29).
@@ -1105,34 +1100,35 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::lifecycle::ComponentOperationError` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L173).
 - `drasi_lib::computation::v1::lifecycle::ComponentPanic` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L99).
 - `drasi_lib::computation::v1::lifecycle::ComponentUnwind` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L119).
-- `drasi_lib::computation::v1::lifecycle::CreationOutcome` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L492).
+- `drasi_lib::computation::v1::lifecycle::CreationOutcome` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L558).
 - `drasi_lib::computation::v1::lifecycle::DataAvailability` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L72).
-- `drasi_lib::computation::v1::lifecycle::DeploymentReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L503).
+- `drasi_lib::computation::v1::lifecycle::DependencyWait` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L410).
+- `drasi_lib::computation::v1::lifecycle::DeploymentReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L569).
 - `drasi_lib::computation::v1::lifecycle::FailureDisposition` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L93).
 - `drasi_lib::computation::v1::lifecycle::FailurePhase` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L81).
-- `drasi_lib::computation::v1::lifecycle::ForceCancellationReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L543).
-- `drasi_lib::computation::v1::lifecycle::ForceCancellationResourceUnavailable` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L560).
-- `drasi_lib::computation::v1::lifecycle::ForceCancellationScopeError` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L553).
+- `drasi_lib::computation::v1::lifecycle::ForceCancellationReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L609).
+- `drasi_lib::computation::v1::lifecycle::ForceCancellationResourceUnavailable` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L626).
+- `drasi_lib::computation::v1::lifecycle::ForceCancellationScopeError` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L619).
 - `drasi_lib::computation::v1::lifecycle::GraphRevision` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L24).
-- `drasi_lib::computation::v1::lifecycle::GraphSelection` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L704).
-- `drasi_lib::computation::v1::lifecycle::HealthObservation` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L696).
-- `drasi_lib::computation::v1::lifecycle::LifecyclePolicy` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L685).
-- `drasi_lib::computation::v1::lifecycle::LifecycleReportError` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L566).
-- `drasi_lib::computation::v1::lifecycle::ObservedComponent` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L410).
-- `drasi_lib::computation::v1::lifecycle::ObservedGraph` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L612).
-- `drasi_lib::computation::v1::lifecycle::ObservedRelationship` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L475).
-- `drasi_lib::computation::v1::lifecycle::ObservedResource` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L631).
+- `drasi_lib::computation::v1::lifecycle::GraphSelection` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L770).
+- `drasi_lib::computation::v1::lifecycle::HealthObservation` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L762).
+- `drasi_lib::computation::v1::lifecycle::LifecyclePolicy` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L751).
+- `drasi_lib::computation::v1::lifecycle::LifecycleReportError` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L632).
+- `drasi_lib::computation::v1::lifecycle::ObservedComponent` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L457).
+- `drasi_lib::computation::v1::lifecycle::ObservedGraph` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L678).
+- `drasi_lib::computation::v1::lifecycle::ObservedRelationship` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L541).
+- `drasi_lib::computation::v1::lifecycle::ObservedResource` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L697).
 - `drasi_lib::computation::v1::lifecycle::OperationEpoch` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L32).
-- `drasi_lib::computation::v1::lifecycle::OperationSummary` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L485).
+- `drasi_lib::computation::v1::lifecycle::OperationSummary` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L551).
 - `drasi_lib::computation::v1::lifecycle::RealizationState` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L35).
-- `drasi_lib::computation::v1::lifecycle::RelationshipPolicy` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L654).
-- `drasi_lib::computation::v1::lifecycle::RemovalPolicy` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L646).
-- `drasi_lib::computation::v1::lifecycle::ResourceRealization` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L623).
+- `drasi_lib::computation::v1::lifecycle::RelationshipPolicy` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L720).
+- `drasi_lib::computation::v1::lifecycle::RemovalPolicy` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L712).
+- `drasi_lib::computation::v1::lifecycle::ResourceRealization` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L689).
 - `drasi_lib::computation::v1::lifecycle::ResourceUnwind` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L142).
-- `drasi_lib::computation::v1::lifecycle::StartOutcome` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L511).
-- `drasi_lib::computation::v1::lifecycle::StartReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L521).
-- `drasi_lib::computation::v1::lifecycle::StopOutcome` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L528).
-- `drasi_lib::computation::v1::lifecycle::StopReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L536).
+- `drasi_lib::computation::v1::lifecycle::StartOutcome` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L577).
+- `drasi_lib::computation::v1::lifecycle::StartReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L587).
+- `drasi_lib::computation::v1::lifecycle::StopOutcome` — enum; [source](../../lib/src/computation/v1/lifecycle.rs#L594).
+- `drasi_lib::computation::v1::lifecycle::StopReport` — struct; [source](../../lib/src/computation/v1/lifecycle.rs#L602).
 - `drasi_lib::computation::v1::middleware::MiddlewareTransformer` — struct; [source](../../lib/src/computation/v1/middleware.rs#L270).
 - `drasi_lib::computation::v1::middleware::MiddlewareTransformerDefinition` — struct; [source](../../lib/src/computation/v1/middleware.rs#L81).
 - `drasi_lib::computation::v1::middleware::MiddlewareTransformerFactory` — struct; [source](../../lib/src/computation/v1/middleware.rs#L667).
@@ -1170,8 +1166,11 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::pipe::SendFailure` — struct; [source](../../lib/src/computation/v1/pipe.rs#L59).
 - `drasi_lib::computation::v1::pipe_metrics::PipeMetrics` — struct; [source](../../lib/src/computation/v1/pipe_metrics.rs#L29).
 - `drasi_lib::computation::v1::pipe_metrics::PipeMetricsSnapshot` — struct; [source](../../lib/src/computation/v1/pipe_metrics.rs#L17).
-- `drasi_lib::computation::v1::pipeline::ComputationPipelineBuilder` — struct; [source](../../lib/src/computation/v1/pipeline.rs#L68).
+- `drasi_lib::computation::v1::pipeline::BootstrapRecipe` — struct; [source](../../lib/src/computation/v1/pipeline.rs#L122).
+- `drasi_lib::computation::v1::pipeline::ComputationPipelineBuilder` — struct; [source](../../lib/src/computation/v1/pipeline.rs#L183).
 - `drasi_lib::computation::v1::pipeline::FactoryProvider` — struct; [source](../../lib/src/computation/v1/pipeline.rs#L32).
+- `drasi_lib::computation::v1::pipeline::MemoryQueryProvider` — struct; [source](../../lib/src/computation/v1/pipeline.rs#L40).
+- `drasi_lib::computation::v1::pipeline::SubscriptionRecipe` — struct; [source](../../lib/src/computation/v1/pipeline.rs#L82).
 - `drasi_lib::computation::v1::plugin_reaction::BootstrapView` — struct; [source](../../lib/src/computation/v1/plugin_reaction.rs#L237).
 - `drasi_lib::computation::v1::plugin_reaction::Fetcher` — struct; [source](../../lib/src/computation/v1/plugin_reaction.rs#L192).
 - `drasi_lib::computation::v1::plugin_reaction::OutputView` — struct; [source](../../lib/src/computation/v1/plugin_reaction.rs#L59).
@@ -1193,12 +1192,12 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::plugin_services::PluginObservations` — struct; [source](../../lib/src/computation/v1/plugin_services.rs#L47).
 - `drasi_lib::computation::v1::plugin_services::ScopedStateStore` — struct; [source](../../lib/src/computation/v1/plugin_services.rs#L547).
 - `drasi_lib::computation::v1::plugin_services::ScopedWal` — struct; [source](../../lib/src/computation/v1/plugin_services.rs#L604).
-- `drasi_lib::computation::v1::plugin_source::LegacySourceBootstrap` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L900).
+- `drasi_lib::computation::v1::plugin_source::LegacySourceBootstrap` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L874).
 - `drasi_lib::computation::v1::plugin_source::LegacySourceSubscription` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L394).
 - `drasi_lib::computation::v1::plugin_source::SharedBootstrap` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L54).
 - `drasi_lib::computation::v1::plugin_source::SourceLife` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L36).
-- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapter` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L769).
-- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapterFactory` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L1026).
+- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapter` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L743).
+- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapterFactory` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L1000).
 - `drasi_lib::computation::v1::plugin_source::SourcePluginConstructor` — trait; [source](../../lib/src/computation/v1/plugin_source.rs#L49).
 - `drasi_lib::computation::v1::plugin_source::SourcePluginHost` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L68).
 - `drasi_lib::computation::v1::plugin_source::SourceSubscriptionOptions` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L341).
@@ -1244,56 +1243,56 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::qos_pipe::shared::SharedMutation` — struct; [source](../../lib/src/computation/v1/qos_pipe/shared.rs#L200).
 - `drasi_lib::computation::v1::qos_pipe::shared::SubscriberWrite` — struct; [source](../../lib/src/computation/v1/qos_pipe/shared.rs#L169).
 - `drasi_lib::computation::v1::qos_pipe::shared::Update` — struct; [source](../../lib/src/computation/v1/qos_pipe/shared.rs#L193).
-- `drasi_lib::computation::v1::query::ComputationQueryLanguage` — enum; [source](../../lib/src/computation/v1/query.rs#L87).
-- `drasi_lib::computation::v1::query::ContinuousQueryDefinition` — struct; [source](../../lib/src/computation/v1/query.rs#L94).
-- `drasi_lib::computation::v1::query::ContinuousQueryFactory` — struct; [source](../../lib/src/computation/v1/query.rs#L1952).
-- `drasi_lib::computation::v1::query::ContinuousQueryTransformer` — struct; [source](../../lib/src/computation/v1/query.rs#L330).
-- `drasi_lib::computation::v1::query::FutureWakeup` — struct; [source](../../lib/src/computation/v1/query.rs#L189).
-- `drasi_lib::computation::v1::query::InputProgress` — struct; [source](../../lib/src/computation/v1/query.rs#L246).
-- `drasi_lib::computation::v1::query::ProcessingGuard` — struct; [source](../../lib/src/computation/v1/query.rs#L215).
-- `drasi_lib::computation::v1::query::QueryIndexProviderResource` — struct; [source](../../lib/src/computation/v1/query.rs#L1950).
-- `drasi_lib::computation::v1::query::TransactionTimer` — struct; [source](../../lib/src/computation/v1/query.rs#L231).
+- `drasi_lib::computation::v1::query::ComputationQueryLanguage` — enum; [source](../../lib/src/computation/v1/query.rs#L89).
+- `drasi_lib::computation::v1::query::ContinuousQueryDefinition` — struct; [source](../../lib/src/computation/v1/query.rs#L96).
+- `drasi_lib::computation::v1::query::ContinuousQueryFactory` — struct; [source](../../lib/src/computation/v1/query.rs#L1865).
+- `drasi_lib::computation::v1::query::ContinuousQueryTransformer` — struct; [source](../../lib/src/computation/v1/query.rs#L335).
+- `drasi_lib::computation::v1::query::FutureWakeup` — struct; [source](../../lib/src/computation/v1/query.rs#L195).
+- `drasi_lib::computation::v1::query::InputProgress` — struct; [source](../../lib/src/computation/v1/query.rs#L251).
+- `drasi_lib::computation::v1::query::ProcessingGuard` — struct; [source](../../lib/src/computation/v1/query.rs#L220).
+- `drasi_lib::computation::v1::query::QueryIndexProviderResource` — struct; [source](../../lib/src/computation/v1/query.rs#L1863).
+- `drasi_lib::computation::v1::query::TransactionTimer` — struct; [source](../../lib/src/computation/v1/query.rs#L236).
 - `drasi_lib::computation::v1::query::delivery::QueryDeliveryWakeup` — struct; [source](../../lib/src/computation/v1/query_delivery.rs#L9).
 - `drasi_lib::computation::v1::query::recovery::ResetMarker` — struct; [source](../../lib/src/computation/v1/query_recovery.rs#L22).
 - `drasi_lib::computation::v1::query_api::QueryApi` — struct; [source](../../lib/src/computation/v1/query_api.rs#L14).
 - `drasi_lib::computation::v1::query_bootstrap::BootstrapRetirement` — trait; [source](../../lib/src/computation/v1/query_bootstrap.rs#L86).
 - `drasi_lib::computation::v1::query_bootstrap::ComputationBootstrapProvider` — trait; [source](../../lib/src/computation/v1/query_bootstrap.rs#L94).
-- `drasi_lib::computation::v1::query_bootstrap::QueryBootstrapResource` — struct; [source](../../lib/src/computation/v1/query_bootstrap.rs#L158).
+- `drasi_lib::computation::v1::query_bootstrap::QueryBootstrapResource` — struct; [source](../../lib/src/computation/v1/query_bootstrap.rs#L157).
 - `drasi_lib::computation::v1::query_bootstrap::QueryBootstrapState` — struct; [source](../../lib/src/computation/v1/query_bootstrap.rs#L33).
-- `drasi_lib::computation::v1::query_bootstrap::QueryOptions` — struct; [source](../../lib/src/computation/v1/query_bootstrap.rs#L176).
-- `drasi_lib::computation::v1::query_bootstrap::QueryPublicationMode` — enum; [source](../../lib/src/computation/v1/query_bootstrap.rs#L167).
-- `drasi_lib::computation::v1::query_bootstrap::QueryRecoveryError` — enum; [source](../../lib/src/computation/v1/query_bootstrap.rs#L182).
-- `drasi_lib::computation::v1::query_bootstrap::QueryRecoveryPolicy` — enum; [source](../../lib/src/computation/v1/query_bootstrap.rs#L160).
-- `drasi_lib::computation::v1::query_catalog::CatalogInner` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L150).
-- `drasi_lib::computation::v1::query_catalog::CatalogLink` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L167).
+- `drasi_lib::computation::v1::query_bootstrap::QueryOptions` — struct; [source](../../lib/src/computation/v1/query_bootstrap.rs#L175).
+- `drasi_lib::computation::v1::query_bootstrap::QueryPublicationMode` — enum; [source](../../lib/src/computation/v1/query_bootstrap.rs#L166).
+- `drasi_lib::computation::v1::query_bootstrap::QueryRecoveryError` — enum; [source](../../lib/src/computation/v1/query_bootstrap.rs#L181).
+- `drasi_lib::computation::v1::query_bootstrap::QueryRecoveryPolicy` — enum; [source](../../lib/src/computation/v1/query_bootstrap.rs#L159).
+- `drasi_lib::computation::v1::query_catalog::CatalogInner` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L147).
+- `drasi_lib::computation::v1::query_catalog::CatalogLink` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L164).
 - `drasi_lib::computation::v1::query_catalog::CatalogQuery` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L23).
-- `drasi_lib::computation::v1::query_catalog::CatalogState` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L57).
-- `drasi_lib::computation::v1::query_catalog::CatalogSubscription` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L81).
-- `drasi_lib::computation::v1::query_catalog::DeliveryConfiguration` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L65).
-- `drasi_lib::computation::v1::query_catalog::QueryOutputGenerationReader` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L35).
-- `drasi_lib::computation::v1::query_catalog::QueryRegistration` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L162).
-- `drasi_lib::computation::v1::query_catalog::QueryResultsCatalog` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L157).
-- `drasi_lib::computation::v1::query_catalog::QueryResultsOutlet` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L525).
-- `drasi_lib::computation::v1::query_catalog::QueryResultsOutletFactory` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L572).
-- `drasi_lib::computation::v1::query_catalog::QuerySubscriptionHead` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L88).
-- `drasi_lib::computation::v1::query_catalog::Subscriber` — enum; [source](../../lib/src/computation/v1/query_catalog.rs#L72).
-- `drasi_lib::computation::v1::query_catalog::SubscriberReceiver` — enum; [source](../../lib/src/computation/v1/query_catalog.rs#L77).
+- `drasi_lib::computation::v1::query_catalog::CatalogState` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L56).
+- `drasi_lib::computation::v1::query_catalog::CatalogSubscription` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L78).
+- `drasi_lib::computation::v1::query_catalog::DeliveryConfiguration` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L64).
+- `drasi_lib::computation::v1::query_catalog::QueryOutputGenerationReader` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L34).
+- `drasi_lib::computation::v1::query_catalog::QueryRegistration` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L159).
+- `drasi_lib::computation::v1::query_catalog::QueryResultsCatalog` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L154).
+- `drasi_lib::computation::v1::query_catalog::QueryResultsOutlet` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L463).
+- `drasi_lib::computation::v1::query_catalog::QueryResultsOutletFactory` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L510).
+- `drasi_lib::computation::v1::query_catalog::QuerySubscriptionHead` — struct; [source](../../lib/src/computation/v1/query_catalog.rs#L85).
+- `drasi_lib::computation::v1::query_catalog::Subscriber` — enum; [source](../../lib/src/computation/v1/query_catalog.rs#L69).
+- `drasi_lib::computation::v1::query_catalog::SubscriberReceiver` — enum; [source](../../lib/src/computation/v1/query_catalog.rs#L74).
 - `drasi_lib::computation::v1::query_configuration::OrdinaryQueryDeclaration` — struct; [source](../../lib/src/computation/v1/query_configuration.rs#L41).
 - `drasi_lib::computation::v1::query_configuration::QueryExecutionSettings` — struct; [source](../../lib/src/computation/v1/query_configuration.rs#L24).
 - `drasi_lib::computation::v1::query_configuration::QueryMiddlewareResource` — struct; [source](../../lib/src/computation/v1/query_configuration.rs#L39).
 - `drasi_lib::computation::v1::query_scheduling::QueryScheduledSource` — struct; [source](../../lib/src/computation/v1/query_scheduling.rs#L63).
 - `drasi_lib::computation::v1::query_scheduling::QueryScheduledSourceFactory` — struct; [source](../../lib/src/computation/v1/query_scheduling.rs#L186).
 - `drasi_lib::computation::v1::query_scheduling::QuerySchedulingResource` — struct; [source](../../lib/src/computation/v1/query_scheduling.rs#L28).
-- `drasi_lib::computation::v1::ranked_pipe::Binding` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L42).
-- `drasi_lib::computation::v1::ranked_pipe::Closure` — enum; [source](../../lib/src/computation/v1/ranked_pipe.rs#L35).
-- `drasi_lib::computation::v1::ranked_pipe::Control` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L248).
-- `drasi_lib::computation::v1::ranked_pipe::Entry` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L48).
+- `drasi_lib::computation::v1::ranked_pipe::Binding` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L69).
+- `drasi_lib::computation::v1::ranked_pipe::Closure` — enum; [source](../../lib/src/computation/v1/ranked_pipe.rs#L62).
+- `drasi_lib::computation::v1::ranked_pipe::Control` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L284).
+- `drasi_lib::computation::v1::ranked_pipe::Entry` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L75).
 - `drasi_lib::computation::v1::ranked_pipe::RankedInputPipeConfig` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L25).
-- `drasi_lib::computation::v1::ranked_pipe::RankedInputQueue` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L73).
-- `drasi_lib::computation::v1::ranked_pipe::RankedPipe` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L433).
-- `drasi_lib::computation::v1::ranked_pipe::Receiver` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L388).
-- `drasi_lib::computation::v1::ranked_pipe::Sender` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L280).
-- `drasi_lib::computation::v1::ranked_pipe::State` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L64).
+- `drasi_lib::computation::v1::ranked_pipe::RankedInputQueue` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L100).
+- `drasi_lib::computation::v1::ranked_pipe::RankedPipe` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L469).
+- `drasi_lib::computation::v1::ranked_pipe::Receiver` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L424).
+- `drasi_lib::computation::v1::ranked_pipe::Sender` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L316).
+- `drasi_lib::computation::v1::ranked_pipe::State` — struct; [source](../../lib/src/computation/v1/ranked_pipe.rs#L91).
 - `drasi_lib::computation::v1::recovery::ComponentRecovery` — struct; [source](../../lib/src/computation/v1/recovery.rs#L74).
 - `drasi_lib::computation::v1::recovery::ProcessingRecovery` — enum; [source](../../lib/src/computation/v1/recovery.rs#L65).
 - `drasi_lib::computation::v1::recovery::RecoveryGuarantee` — enum; [source](../../lib/src/computation/v1/recovery.rs#L41).
@@ -1343,18 +1342,17 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::time_merge::recovery::Saved` — struct; [source](../../lib/src/computation/v1/time_merge/recovery.rs#L9).
 - `drasi_lib::computation::v1::transaction_state::StepElements` — struct; [source](../../lib/src/computation/v1/transaction_state.rs#L190).
 - `drasi_lib::computation::v1::transaction_state::TransactionContext` — struct; [source](../../lib/src/computation/v1/transaction_state.rs#L38).
-- `drasi_lib::computation::v1::transaction_transformer::<local@1079>::Configuration` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L1079).
+- `drasi_lib::computation::v1::transaction_transformer::<local@1012>::Configuration` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L1012).
 - `drasi_lib::computation::v1::transaction_transformer::LinearTransaction` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L367).
 - `drasi_lib::computation::v1::transaction_transformer::Prepared` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L197).
 - `drasi_lib::computation::v1::transaction_transformer::RunGuard` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L350).
 - `drasi_lib::computation::v1::transaction_transformer::Step` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L189).
-- `drasi_lib::computation::v1::transaction_transformer::TransactionBody` — enum; [source](../../lib/src/computation/v1/transaction_transformer.rs#L731).
 - `drasi_lib::computation::v1::transaction_transformer::TransactionStepDefinition` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L59).
 - `drasi_lib::computation::v1::transaction_transformer::TransactionTransformer` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L724).
 - `drasi_lib::computation::v1::transaction_transformer::TransactionTransformerDefinition` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L145).
-- `drasi_lib::computation::v1::transaction_transformer::TransactionTransformerFactory` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L899).
+- `drasi_lib::computation::v1::transaction_transformer::TransactionTransformerFactory` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L832).
 - `drasi_lib::computation::v1::transaction_transformer::TransactionWakeup` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L319).
-- `drasi_lib::computation::v1::transaction_transformer::TransactionalMiddlewareFactory` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L1065).
+- `drasi_lib::computation::v1::transaction_transformer::TransactionalMiddlewareFactory` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L998).
 - `drasi_lib::computation::v1::transaction_transformer::TransactionalTransformer` — trait; [source](../../lib/src/computation/v1/transaction_transformer.rs#L36).
 - `drasi_lib::computation::v1::transaction_transformer::TransactionalTransformerFactory` — trait; [source](../../lib/src/computation/v1/transaction_transformer.rs#L68).
 - `drasi_lib::computation::v1::transaction_transformer::TransactionalTransformerRegistry` — struct; [source](../../lib/src/computation/v1/transaction_transformer.rs#L80).
@@ -1366,18 +1364,17 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::config::runtime::ReactionRuntime` — struct; [source](../../lib/src/config/runtime.rs#L129).
 - `drasi_lib::config::runtime::RuntimeConfig` — struct; [source](../../lib/src/config/runtime.rs#L196).
 - `drasi_lib::config::runtime::SourceRuntime` — struct; [source](../../lib/src/config/runtime.rs#L26).
-- `drasi_lib::config::schema::DrasiLibConfig` — struct; [source](../../lib/src/config/schema.rs#L223).
-- `drasi_lib::config::schema::QueryConfig` — struct; [source](../../lib/src/config/schema.rs#L320).
-- `drasi_lib::config::schema::QueryJoinConfig` — struct; [source](../../lib/src/config/schema.rs#L507).
-- `drasi_lib::config::schema::QueryJoinKeyConfig` — struct; [source](../../lib/src/config/schema.rs#L553).
-- `drasi_lib::config::schema::QueryLanguage` — enum; [source](../../lib/src/config/schema.rs#L32).
-- `drasi_lib::config::schema::SourceSubscriptionConfig` — struct; [source](../../lib/src/config/schema.rs#L85).
-- `drasi_lib::config::schema::SourceSubscriptionSettings` — struct; [source](../../lib/src/config/schema.rs#L152).
+- `drasi_lib::config::schema::DrasiLibConfig` — struct; [source](../../lib/src/config/schema.rs#L216).
+- `drasi_lib::config::schema::QueryConfig` — struct; [source](../../lib/src/config/schema.rs#L313).
+- `drasi_lib::config::schema::QueryJoinConfig` — struct; [source](../../lib/src/config/schema.rs#L491).
+- `drasi_lib::config::schema::QueryJoinKeyConfig` — struct; [source](../../lib/src/config/schema.rs#L537).
+- `drasi_lib::config::schema::QueryLanguage` — enum; [source](../../lib/src/config/schema.rs#L25).
+- `drasi_lib::config::schema::SourceSubscriptionConfig` — struct; [source](../../lib/src/config/schema.rs#L78).
+- `drasi_lib::config::schema::SourceSubscriptionSettings` — struct; [source](../../lib/src/config/schema.rs#L145).
 - `drasi_lib::config::snapshot::BootstrapSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L91).
 - `drasi_lib::config::snapshot::ConfigurationSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L33).
 - `drasi_lib::config::snapshot::QueryConfigurationSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L100).
-- `drasi_lib::config::snapshot::QuerySnapshot` — type alias; [source](../../lib/src/config/snapshot.rs#L115).
-- `drasi_lib::config::snapshot::ReactionSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L118).
+- `drasi_lib::config::snapshot::ReactionSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L114).
 - `drasi_lib::config::snapshot::SourceSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L70).
 - `drasi_lib::context::QueryRuntimeContext` — struct; [source](../../lib/src/context/mod.rs#L355).
 - `drasi_lib::context::ReactionRuntimeContext` — struct; [source](../../lib/src/context/mod.rs#L214).
@@ -1387,8 +1384,9 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::context::resource_observer::PluginOrigin` — struct; [source](../../lib/src/context/resource_observer.rs#L36).
 - `drasi_lib::error::ComponentNotFoundError` — struct; [source](../../lib/src/error.rs#L71).
 - `drasi_lib::error::DrasiError` — enum; [source](../../lib/src/error.rs#L90).
-- `drasi_lib::error::OperationFailures` — struct; [source](../../lib/src/error.rs#L305).
-- `drasi_lib::error::Result` — type alias; [source](../../lib/src/error.rs#L299).
+- `drasi_lib::error::OperationFailures` — struct; [source](../../lib/src/error.rs#L322).
+- `drasi_lib::error::Result` — type alias; [source](../../lib/src/error.rs#L295).
+- `drasi_lib::error::RetainedError` — struct; [source](../../lib/src/error.rs#L301).
 - `drasi_lib::identity::CredentialContext` — struct; [source](../../lib/src/identity/mod.rs#L21).
 - `drasi_lib::identity::Credentials` — enum; [source](../../lib/src/identity/mod.rs#L83).
 - `drasi_lib::identity::IdentityProvider` — trait; [source](../../lib/src/identity/mod.rs#L58).
@@ -1407,10 +1405,12 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::management::ManagementResourceResolver` — trait; [source](../../lib/src/management/mod.rs#L77).
 - `drasi_lib::management::ManagementStatus` — struct; [source](../../lib/src/management/mod.rs#L173).
 - `drasi_lib::management::NoManagementResources` — struct; [source](../../lib/src/management/mod.rs#L140).
-- `drasi_lib::management::runtime::Command` — enum; [source](../../lib/src/management/runtime.rs#L18).
-- `drasi_lib::management::runtime::Driver` — struct; [source](../../lib/src/management/runtime.rs#L53).
-- `drasi_lib::management::runtime::ManagedResource` — struct; [source](../../lib/src/management/runtime.rs#L71).
-- `drasi_lib::management::runtime::Management` — struct; [source](../../lib/src/management/runtime.rs#L43).
+- `drasi_lib::management::runtime::CloseProgress` — enum; [source](../../lib/src/management/runtime.rs#L63).
+- `drasi_lib::management::runtime::Command` — enum; [source](../../lib/src/management/runtime.rs#L23).
+- `drasi_lib::management::runtime::Driver` — struct; [source](../../lib/src/management/runtime.rs#L125).
+- `drasi_lib::management::runtime::ManagedResource` — struct; [source](../../lib/src/management/runtime.rs#L143).
+- `drasi_lib::management::runtime::Management` — struct; [source](../../lib/src/management/runtime.rs#L48).
+- `drasi_lib::management::runtime::ManagementTask` — struct; [source](../../lib/src/management/runtime.rs#L58).
 - `drasi_lib::management::store::AcceptanceReceipt` — struct; [source](../../lib/src/management/store.rs#L19).
 - `drasi_lib::management::store::CommittedConfiguration` — struct; [source](../../lib/src/management/store.rs#L11).
 - `drasi_lib::management::store::ConfigurationSession` — trait; [source](../../lib/src/management/store.rs#L70).
@@ -1436,26 +1436,21 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::observability::component_log::LogMessage` — struct; [source](../../lib/src/observability/component_log.rs#L255).
 - `drasi_lib::observability::event_history::ComponentEventChannel` — struct; [source](../../lib/src/observability/event_history.rs#L34).
 - `drasi_lib::observability::event_history::ComponentEventHistory` — struct; [source](../../lib/src/observability/event_history.rs#L82).
-- `drasi_lib::observability::tracing_layer::ComponentInfo` — struct; [source](../../lib/src/observability/tracing_layer.rs#L331).
-- `drasi_lib::observability::tracing_layer::ComponentInfoVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L351).
-- `drasi_lib::observability::tracing_layer::ComponentLogLayer` — struct; [source](../../lib/src/observability/tracing_layer.rs#L252).
-- `drasi_lib::observability::tracing_layer::MessageVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L405).
-- `drasi_lib::queries::config_hash::JoinIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L86).
-- `drasi_lib::queries::config_hash::QueryIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L46).
-- `drasi_lib::queries::config_hash::SourceIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L72).
+- `drasi_lib::observability::tracing_layer::ComponentInfo` — struct; [source](../../lib/src/observability/tracing_layer.rs#L245).
+- `drasi_lib::observability::tracing_layer::ComponentInfoVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L265).
+- `drasi_lib::observability::tracing_layer::ComponentLogLayer` — struct; [source](../../lib/src/observability/tracing_layer.rs#L166).
+- `drasi_lib::observability::tracing_layer::MessageVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L319).
 - `drasi_lib::queries::label_extractor::DefaultQueryConfig` — struct; [source](../../lib/src/queries/label_extractor.rs#L29).
 - `drasi_lib::queries::label_extractor::LabelExtractor` — struct; [source](../../lib/src/queries/label_extractor.rs#L47).
 - `drasi_lib::queries::label_extractor::QueryLabels` — struct; [source](../../lib/src/queries/label_extractor.rs#L116).
 - `drasi_lib::queries::manager::QueryManager` — struct; [source](../../lib/src/queries/manager.rs#L31).
-- `drasi_lib::queries::output_state::DurableOutputInconsistency` — enum; [source](../../lib/src/queries/output_state.rs#L365).
-- `drasi_lib::queries::output_state::FetchError` — enum; [source](../../lib/src/queries/output_state.rs#L481).
-- `drasi_lib::queries::output_state::KeyedSnapshotRow` — struct; [source](../../lib/src/queries/output_state.rs#L28).
-- `drasi_lib::queries::output_state::OutboxGap` — struct; [source](../../lib/src/queries/output_state.rs#L467).
-- `drasi_lib::queries::output_state::OutboxResponse` — struct; [source](../../lib/src/queries/output_state.rs#L568).
-- `drasi_lib::queries::output_state::OutboxStream` — struct; [source](../../lib/src/queries/output_state.rs#L696).
-- `drasi_lib::queries::output_state::QueryOutputState` — struct; [source](../../lib/src/queries/output_state.rs#L43).
-- `drasi_lib::queries::output_state::SnapshotResponse` — struct; [source](../../lib/src/queries/output_state.rs#L499).
-- `drasi_lib::queries::output_state::SnapshotStream` — struct; [source](../../lib/src/queries/output_state.rs#L581).
+- `drasi_lib::queries::output_state::FetchError` — enum; [source](../../lib/src/queries/output_state.rs#L64).
+- `drasi_lib::queries::output_state::KeyedSnapshotRow` — struct; [source](../../lib/src/queries/output_state.rs#L26).
+- `drasi_lib::queries::output_state::OutboxGap` — struct; [source](../../lib/src/queries/output_state.rs#L50).
+- `drasi_lib::queries::output_state::OutboxResponse` — struct; [source](../../lib/src/queries/output_state.rs#L151).
+- `drasi_lib::queries::output_state::OutboxStream` — struct; [source](../../lib/src/queries/output_state.rs#L279).
+- `drasi_lib::queries::output_state::SnapshotResponse` — struct; [source](../../lib/src/queries/output_state.rs#L82).
+- `drasi_lib::queries::output_state::SnapshotStream` — struct; [source](../../lib/src/queries/output_state.rs#L164).
 - `drasi_lib::queries::priority_queue::PriorityQueue` — type alias; [source](../../lib/src/queries/priority_queue.rs#L24).
 - `drasi_lib::queries::priority_queue::QueryEventQueue` — struct; [source](../../lib/src/queries/priority_queue.rs#L48).
 - `drasi_lib::queries::priority_queue::RankedSourceEvent` — struct; [source](../../lib/src/queries/priority_queue.rs#L31).
@@ -1487,7 +1482,7 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::sources::Publisher` — trait; [source](../../lib/src/sources/mod.rs#L37).
 - `drasi_lib::sources::base::SourceBase` — struct; [source](../../lib/src/sources/base.rs#L160).
 - `drasi_lib::sources::base::SourceBaseParams` — struct; [source](../../lib/src/sources/base.rs#L51).
-- `drasi_lib::sources::component_graph_source::ComponentGraphSource` — struct; [source](../../lib/src/sources/component_graph_source.rs#L65).
+- `drasi_lib::sources::component_graph_source::ComponentGraphSource` — struct; [source](../../lib/src/sources/component_graph_source.rs#L63).
 - `drasi_lib::sources::future_queue_source::FutureQueueSource` — struct; [source](../../lib/src/sources/future_queue_source.rs#L43).
 - `drasi_lib::sources::future_queue_source::FutureQueueSourceStatus` — enum; [source](../../lib/src/sources/future_queue_source.rs#L35).
 - `drasi_lib::sources::manager::SourceManager` — struct; [source](../../lib/src/sources/manager.rs#L60).
@@ -1536,15 +1531,15 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_computation_contracts::ports` | 250 | 7 |
 | `drasi_computation_contracts::producer_identity` | 166 | 2 |
 | `drasi_computation_contracts::progress` | 100 | 5 |
-| `drasi_computation_contracts::query_codec` | 733 | 7 |
+| `drasi_computation_contracts::query_codec` | 753 | 7 |
 | `drasi_computation_contracts::query_identity` | 145 | 3 |
-| `drasi_computation_contracts::snapshot` | 8 | 2 |
+| `drasi_computation_contracts::snapshot` | 7 | 1 |
 | `drasi_computation_contracts::source_transaction` | 462 | 10 |
 | `drasi_computation_contracts::workers` | 126 | 3 |
 | `drasi_core` | 11 | 0 |
 | `drasi_core::computation` | 61 | 3 |
 | `drasi_core::computation::group_outbox` | 93 | 1 |
-| `drasi_core::computation::indexes` | 232 | 5 |
+| `drasi_core::computation::indexes` | 225 | 5 |
 | `drasi_core::computation::io_scope` | 190 | 6 |
 | `drasi_core::computation::operation` | 304 | 4 |
 | `drasi_core::computation::query_adapter` | 351 | 2 |
@@ -1631,7 +1626,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_core::hashing::spooky` | 436 | 1 |
 | `drasi_core::in_memory_index` | 6 | 0 |
 | `drasi_core::in_memory_index::in_memory_checkpoint_store` | 123 | 2 |
-| `drasi_core::in_memory_index::in_memory_element_index` | 665 | 2 |
+| `drasi_core::in_memory_index::in_memory_element_index` | 662 | 2 |
 | `drasi_core::in_memory_index::in_memory_future_queue` | 135 | 2 |
 | `drasi_core::in_memory_index::in_memory_live_results_writer` | 58 | 1 |
 | `drasi_core::in_memory_index::in_memory_outbox_writer` | 112 | 1 |
@@ -1692,36 +1687,32 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_core_types::profiling` | 243 | 6 |
 | `drasi_core_types::query` | 77 | 2 |
 | `drasi_core_types::schema` | 181 | 8 |
-| `drasi_lib` | 82 | 0 |
-| `drasi_lib::api` | 3 | 0 |
+| `drasi_lib` | 76 | 0 |
 | `drasi_lib::bootstrap` | 170 | 10 |
 | `drasi_lib::bootstrap::component_graph` | 161 | 1 |
-| `drasi_lib::builder` | 467 | 2 |
+| `drasi_lib::builder` | 459 | 2 |
 | `drasi_lib::channels` | 11 | 0 |
 | `drasi_lib::channels::component_status` | 246 | 7 |
 | `drasi_lib::channels::dispatcher` | 203 | 8 |
 | `drasi_lib::channels::events` | 181 | 30 |
 | `drasi_lib::channels::priority_queue` | 422 | 7 |
-| `drasi_lib::compatibility` | 8 | 0 |
-| `drasi_lib::compatibility::query_base` | 159 | 1 |
-| `drasi_lib::compatibility::sequence_dedup` | 32 | 1 |
 | `drasi_lib::component_graph` | 6 | 0 |
-| `drasi_lib::component_graph::graph` | 59 | 2 |
+| `drasi_lib::component_graph::graph` | 58 | 1 |
 | `drasi_lib::component_graph::node` | 84 | 5 |
 | `drasi_lib::component_graph::wait` | 29 | 0 |
 | `drasi_lib::component_ops` | 20 | 0 |
 | `drasi_lib::computation` | 6 | 0 |
-| `drasi_lib::computation::components` | 204 | 2 |
-| `drasi_lib::computation::instance` | 747 | 13 |
+| `drasi_lib::computation::components` | 205 | 2 |
+| `drasi_lib::computation::instance` | 735 | 12 |
 | `drasi_lib::computation::instance_ops` | 402 | 1 |
 | `drasi_lib::computation::internal` | 1 | 0 |
 | `drasi_lib::computation::internal::query_state` | 213 | 4 |
-| `drasi_lib::computation::runtime` | 1853 | 7 |
+| `drasi_lib::computation::runtime` | 1935 | 7 |
 | `drasi_lib::computation::runtime::component` | 318 | 4 |
 | `drasi_lib::computation::runtime::events` | 153 | 1 |
-| `drasi_lib::computation::runtime::inspection` | 696 | 0 |
-| `drasi_lib::computation::runtime::native_query` | 963 | 3 |
-| `drasi_lib::computation::runtime::query_assembly` | 618 | 0 |
+| `drasi_lib::computation::runtime::inspection` | 717 | 0 |
+| `drasi_lib::computation::runtime::native_query` | 1094 | 3 |
+| `drasi_lib::computation::runtime::query_assembly` | 631 | 0 |
 | `drasi_lib::computation::runtime::reaction` | 257 | 1 |
 | `drasi_lib::computation::runtime::snapshot` | 217 | 1 |
 | `drasi_lib::computation::runtime::source` | 180 | 2 |
@@ -1740,38 +1731,38 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::v1::envelope` | 1 | 0 |
 | `drasi_lib::computation::v1::error` | 1 | 0 |
 | `drasi_lib::computation::v1::factories` | 37 | 0 |
-| `drasi_lib::computation::v1::graph` | 2479 | 21 |
-| `drasi_lib::computation::v1::graph::addition` | 927 | 4 |
+| `drasi_lib::computation::v1::graph` | 2474 | 21 |
+| `drasi_lib::computation::v1::graph::addition` | 981 | 4 |
 | `drasi_lib::computation::v1::graph::configuration` | 61 | 2 |
-| `drasi_lib::computation::v1::graph::controller` | 5336 | 23 |
-| `drasi_lib::computation::v1::graph::controller::reconcile` | 3534 | 5 |
+| `drasi_lib::computation::v1::graph::controller` | 5763 | 23 |
+| `drasi_lib::computation::v1::graph::controller::reconcile` | 3572 | 5 |
 | `drasi_lib::computation::v1::graph::execution` | 373 | 6 |
-| `drasi_lib::computation::v1::graph::recovery` | 498 | 1 |
+| `drasi_lib::computation::v1::graph::recovery` | 500 | 1 |
 | `drasi_lib::computation::v1::graph::registry` | 99 | 1 |
-| `drasi_lib::computation::v1::graph::resource_tasks` | 521 | 6 |
+| `drasi_lib::computation::v1::graph::resource_tasks` | 560 | 6 |
 | `drasi_lib::computation::v1::graph::resources` | 447 | 0 |
 | `drasi_lib::computation::v1::graph::retirement` | 165 | 2 |
-| `drasi_lib::computation::v1::graph::specification` | 620 | 25 |
-| `drasi_lib::computation::v1::graph::topology` | 711 | 7 |
+| `drasi_lib::computation::v1::graph::specification` | 634 | 25 |
+| `drasi_lib::computation::v1::graph::topology` | 703 | 7 |
 | `drasi_lib::computation::v1::graph_codec` | 1 | 0 |
-| `drasi_lib::computation::v1::inspection` | 695 | 8 |
+| `drasi_lib::computation::v1::inspection` | 696 | 8 |
 | `drasi_lib::computation::v1::inventory` | 139 | 6 |
 | `drasi_lib::computation::v1::journal_budget` | 66 | 2 |
 | `drasi_lib::computation::v1::legacy_index` | 156 | 1 |
 | `drasi_lib::computation::v1::legacy_reaction` | 127 | 3 |
 | `drasi_lib::computation::v1::legacy_resources` | 138 | 1 |
 | `drasi_lib::computation::v1::legacy_source` | 402 | 3 |
-| `drasi_lib::computation::v1::lifecycle` | 599 | 38 |
+| `drasi_lib::computation::v1::lifecycle` | 661 | 39 |
 | `drasi_lib::computation::v1::middleware` | 870 | 5 |
 | `drasi_lib::computation::v1::middleware_recovery` | 917 | 10 |
 | `drasi_lib::computation::v1::output_bindings` | 408 | 9 |
 | `drasi_lib::computation::v1::output_identity` | 2 | 0 |
 | `drasi_lib::computation::v1::pipe` | 131 | 11 |
 | `drasi_lib::computation::v1::pipe_metrics` | 47 | 2 |
-| `drasi_lib::computation::v1::pipeline` | 918 | 2 |
+| `drasi_lib::computation::v1::pipeline` | 1075 | 5 |
 | `drasi_lib::computation::v1::plugin_reaction` | 1341 | 11 |
 | `drasi_lib::computation::v1::plugin_services` | 503 | 10 |
-| `drasi_lib::computation::v1::plugin_source` | 1197 | 11 |
+| `drasi_lib::computation::v1::plugin_source` | 1171 | 11 |
 | `drasi_lib::computation::v1::ports` | 1 | 0 |
 | `drasi_lib::computation::v1::producer_progress` | 233 | 1 |
 | `drasi_lib::computation::v1::qos_pipe` | 1619 | 18 |
@@ -1781,17 +1772,17 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::v1::qos_pipe::replay` | 233 | 4 |
 | `drasi_lib::computation::v1::qos_pipe::retirement` | 60 | 1 |
 | `drasi_lib::computation::v1::qos_pipe::shared` | 649 | 7 |
-| `drasi_lib::computation::v1::query` | 2397 | 9 |
+| `drasi_lib::computation::v1::query` | 2329 | 9 |
 | `drasi_lib::computation::v1::query::delivery` | 350 | 1 |
-| `drasi_lib::computation::v1::query::recovery` | 594 | 1 |
+| `drasi_lib::computation::v1::query::recovery` | 554 | 1 |
 | `drasi_lib::computation::v1::query_api` | 76 | 1 |
 | `drasi_lib::computation::v1::query_bootstrap` | 144 | 8 |
-| `drasi_lib::computation::v1::query_catalog` | 799 | 14 |
+| `drasi_lib::computation::v1::query_catalog` | 721 | 14 |
 | `drasi_lib::computation::v1::query_codec` | 1 | 0 |
-| `drasi_lib::computation::v1::query_configuration` | 122 | 3 |
+| `drasi_lib::computation::v1::query_configuration` | 139 | 3 |
 | `drasi_lib::computation::v1::query_identity` | 1 | 0 |
 | `drasi_lib::computation::v1::query_scheduling` | 258 | 3 |
-| `drasi_lib::computation::v1::ranked_pipe` | 412 | 10 |
+| `drasi_lib::computation::v1::ranked_pipe` | 446 | 10 |
 | `drasi_lib::computation::v1::recovery` | 218 | 10 |
 | `drasi_lib::computation::v1::retained_pipe` | 404 | 10 |
 | `drasi_lib::computation::v1::retained_store` | 781 | 9 |
@@ -1801,35 +1792,34 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::v1::time_merge` | 853 | 13 |
 | `drasi_lib::computation::v1::time_merge::recovery` | 376 | 1 |
 | `drasi_lib::computation::v1::transaction_state` | 266 | 2 |
-| `drasi_lib::computation::v1::transaction_transformer` | 995 | 16 |
+| `drasi_lib::computation::v1::transaction_transformer` | 935 | 15 |
 | `drasi_lib::computation::v1::wal_source` | 312 | 3 |
 | `drasi_lib::config` | 9 | 0 |
 | `drasi_lib::config::runtime` | 160 | 4 |
-| `drasi_lib::config::schema` | 194 | 7 |
-| `drasi_lib::config::snapshot` | 45 | 6 |
+| `drasi_lib::config::schema` | 183 | 7 |
+| `drasi_lib::config::snapshot` | 43 | 5 |
 | `drasi_lib::context` | 181 | 3 |
 | `drasi_lib::context::resource_observer` | 40 | 3 |
 | `drasi_lib::context::workers` | 1 | 0 |
-| `drasi_lib::error` | 160 | 4 |
+| `drasi_lib::error` | 177 | 5 |
 | `drasi_lib::identity` | 99 | 3 |
 | `drasi_lib::identity::application` | 49 | 2 |
 | `drasi_lib::identity::password` | 28 | 1 |
-| `drasi_lib::indexes` | 32 | 0 |
+| `drasi_lib::indexes` | 25 | 0 |
 | `drasi_lib::indexes::config` | 48 | 3 |
 | `drasi_lib::indexes::factory` | 267 | 2 |
 | `drasi_lib::inspection` | 346 | 1 |
-| `drasi_lib::lib_core` | 275 | 1 |
+| `drasi_lib::lib_core` | 286 | 1 |
 | `drasi_lib::lib_core_ops` | 5 | 0 |
 | `drasi_lib::lib_core_ops::graph_ops` | 53 | 0 |
 | `drasi_lib::lib_core_ops::metrics_ops` | 23 | 0 |
 | `drasi_lib::lib_core_ops::query_ops` | 100 | 0 |
 | `drasi_lib::lib_core_ops::reaction_ops` | 132 | 0 |
 | `drasi_lib::lib_core_ops::source_ops` | 132 | 0 |
-| `drasi_lib::management` | 259 | 5 |
-| `drasi_lib::management::runtime` | 1160 | 4 |
+| `drasi_lib::management` | 264 | 5 |
+| `drasi_lib::management::runtime` | 1239 | 6 |
 | `drasi_lib::management::store` | 80 | 6 |
 | `drasi_lib::management::transitions` | 511 | 3 |
-| `drasi_lib::managers` | 2 | 0 |
 | `drasi_lib::metrics` | 6 | 0 |
 | `drasi_lib::metrics::lifecycle_metrics` | 98 | 3 |
 | `drasi_lib::metrics::query_metrics` | 96 | 2 |
@@ -1838,16 +1828,13 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::observability::component_log` | 305 | 6 |
 | `drasi_lib::observability::event_history` | 138 | 2 |
 | `drasi_lib::observability::logging` | 10 | 0 |
-| `drasi_lib::observability::tracing_layer` | 250 | 4 |
+| `drasi_lib::observability::tracing_layer` | 220 | 4 |
 | `drasi_lib::profiling` | 1 | 0 |
-| `drasi_lib::queries` | 25 | 0 |
-| `drasi_lib::queries::base` | 2 | 0 |
-| `drasi_lib::queries::config_hash` | 76 | 3 |
+| `drasi_lib::queries` | 15 | 0 |
 | `drasi_lib::queries::label_extractor` | 79 | 3 |
 | `drasi_lib::queries::manager` | 119 | 1 |
-| `drasi_lib::queries::output_state` | 444 | 9 |
+| `drasi_lib::queries::output_state` | 187 | 7 |
 | `drasi_lib::queries::priority_queue` | 94 | 3 |
-| `drasi_lib::queries::sequence_dedup` | 2 | 0 |
 | `drasi_lib::queries::subscription_builder` | 114 | 1 |
 | `drasi_lib::queries::traits` | 33 | 1 |
 | `drasi_lib::reactions` | 14 | 0 |
@@ -1866,7 +1853,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::secret_store` | 55 | 2 |
 | `drasi_lib::sources` | 27 | 1 |
 | `drasi_lib::sources::base` | 996 | 2 |
-| `drasi_lib::sources::component_graph_source` | 338 | 1 |
+| `drasi_lib::sources::component_graph_source` | 336 | 1 |
 | `drasi_lib::sources::durability_config` | 1 | 0 |
 | `drasi_lib::sources::future_queue_source` | 169 | 2 |
 | `drasi_lib::sources::graph_elements` | 78 | 0 |
@@ -1881,7 +1868,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 
 ## Extraction limitations requiring review
 
-**23 explicit diagnostics.** These are also searchable in the companion and retained in the JSON. An unresolved or erased target is never silently matched by its short name. The field declaration remains available even when no concrete matrix edge can be inferred.
+**24 explicit diagnostics.** These are also searchable in the companion and retained in the JSON. An unresolved or erased target is never silently matched by its short name. The field declaration remains available even when no concrete matrix edge can be inferred.
 
 - `drasi_computation_contracts::internal::change::ProcessingContextNode field contribution: generic/associated target T is not a concrete runtime type`
 - `drasi_computation_contracts::workers::WorkerCompletion field 0: generic/associated target T is not a concrete runtime type`
@@ -1905,4 +1892,5 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 - `drasi_lib::computation::v1::bounded_pipe::Sender field sender: generic/associated target T is not a concrete runtime type`
 - `drasi_lib::computation::v1::graph::specification::SharedResourceIdentity field 0: generic/associated target T is not a concrete runtime type`
 - `drasi_lib::computation::v1::graph::specification::WeakSharedResourceIdentity field 0: generic/associated target T is not a concrete runtime type`
+- `drasi_lib::computation::v1::lifecycle::DependencyWait field endpoint: ambiguous target super::Endpoint: {"drasi_lib::computation::v1::control::Endpoint", "drasi_lib::computation::v1::graph::Endpoint", "drasi_lib::computation::v1::qos_pipe::Endpoint"}`
 - `drasi_lib::reactions::common::templates::TemplateSpec field extension: generic/associated target T is not a concrete runtime type`

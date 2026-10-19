@@ -667,10 +667,6 @@ impl ElementArchiveIndex for InMemoryElementIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        if !self.archive_enabled {
-            return Err(IndexError::NotSupported);
-        }
-
         let mut guard = self.element_archive.write().await;
         guard.clear();
         Ok(())
@@ -1500,10 +1496,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clear_archive_disabled_returns_not_supported() {
-        let index = InMemoryElementIndex::new();
-        let result = ElementArchiveIndex::clear(&index).await;
-        assert!(matches!(result, Err(IndexError::NotSupported)));
+    async fn test_clear_archive_is_independent_of_read_enablement() {
+        let mut index = InMemoryElementIndex::new();
+        index.enable_archive();
+        let element = create_test_node("source1", "node1", "Person");
+        index.set_element(&element, &vec![0]).await.unwrap();
+        index.archive_enabled = false;
+
+        ElementArchiveIndex::clear(&index).await.unwrap();
+        assert_eq!(
+            index
+                .get_element(element.get_reference())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(&element)
+        );
+        assert!(matches!(
+            index.get_element_as_at(element.get_reference(), 10).await,
+            Err(IndexError::ArchiveNotEnabled)
+        ));
+        index.enable_archive();
+        assert!(index
+            .get_element_as_at(element.get_reference(), 10)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

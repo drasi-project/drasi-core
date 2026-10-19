@@ -81,10 +81,12 @@ fn transport(
 ) -> Result<Option<StorageDurability>, RecoveryIncompatibility> {
     match &edge.pipe {
         DesiredPipe::Bounded { .. } | DesiredPipe::ByteBounded(_) => Ok(None),
-        DesiredPipe::Ranked(config) if !config.drop_when_full => Ok(None),
-        DesiredPipe::Ranked(_) | DesiredPipe::Broadcast { .. } => {
-            Err(RecoveryIncompatibility::LossyDelivery)
-        }
+        DesiredPipe::Ranked(config) => match config.resolved_drop_when_full(resources) {
+            Ok(false) => Ok(None),
+            Ok(true) => Err(RecoveryIncompatibility::LossyDelivery),
+            Err(_) => Err(RecoveryIncompatibility::UnknownTransport),
+        },
+        DesiredPipe::Broadcast { .. } => Err(RecoveryIncompatibility::LossyDelivery),
         DesiredPipe::Retained(config) => {
             if config.retention != RetentionPolicy::Backpressure
                 || config.gap_policy != ReplayGapPolicy::Strict

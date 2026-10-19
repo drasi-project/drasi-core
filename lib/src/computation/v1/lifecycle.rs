@@ -407,6 +407,53 @@ impl ComponentFailure {
     }
 }
 
+/// An unavailable prerequisite, not a processing or configuration failure.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DependencyWait {
+    Component {
+        id: ComponentId,
+    },
+    Resource {
+        id: ResourceId,
+    },
+    Factory {
+        implementation: super::ImplementationIdentity,
+    },
+    Connection {
+        endpoint: super::Endpoint,
+    },
+    Stream {
+        endpoint: super::Endpoint,
+    },
+}
+
+impl std::fmt::Display for DependencyWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Component { id } => write!(f, "component '{id}'"),
+            Self::Resource { id } => write!(f, "resource '{id}'"),
+            Self::Factory { implementation } => {
+                write!(
+                    f,
+                    "factory '{}' version '{}'",
+                    implementation.name, implementation.version
+                )
+            }
+            Self::Connection { endpoint } => write!(
+                f,
+                "connection for '{}:{}'",
+                endpoint.component, endpoint.port
+            ),
+            Self::Stream { endpoint } => write!(
+                f,
+                "output stream for '{}:{}'",
+                endpoint.component, endpoint.port
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObservedComponent {
     pub generation: ComponentGeneration,
@@ -416,6 +463,7 @@ pub struct ObservedComponent {
     pub lifecycle: ComponentLifecycle,
     pub health: ComponentHealth,
     pub failure: Option<ComponentFailure>,
+    pub waiting_for: Vec<DependencyWait>,
     pub exhausted: bool,
     /// A successful start has completed in this construction generation.
     pub started: bool,
@@ -425,6 +473,21 @@ pub struct ObservedComponent {
 }
 
 impl ObservedComponent {
+    pub fn waiting_reason(&self) -> Option<String> {
+        if self.waiting_for.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Waiting for {}",
+                self.waiting_for
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    }
+
     /// Records that the component stopped successfully.
     ///
     /// `Stopped` is an explicit stop, which acknowledges any failure that
@@ -442,6 +505,9 @@ impl ObservedComponent {
         } else {
             lifecycle
         };
+        if self.realization == RealizationState::Created {
+            self.waiting_for.clear();
+        }
         if self.failure.as_ref().is_some_and(|failure| {
             !damaged
                 && (failure.phase == FailurePhase::Stop
@@ -870,6 +936,7 @@ mod tests {
             lifecycle,
             health: ComponentHealth::Unknown,
             failure,
+            waiting_for: Vec::new(),
             exhausted: false,
             started: false,
             lifecycle_requested: true,

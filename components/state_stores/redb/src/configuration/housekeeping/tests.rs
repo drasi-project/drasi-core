@@ -12,7 +12,9 @@ fn options(capacity: usize) -> ConfigurationStoreOptions {
 
 fn changed() -> DesiredInstance {
     let mut desired = DesiredInstance::default();
-    desired.topology.allow_incomplete = !desired.topology.allow_incomplete;
+    desired.topology.requirements = drasi_lib::computation::v1::PipeRequirements::new([
+        drasi_lib::computation::v1::PipeCapability::Backpressure,
+    ]);
     desired
 }
 

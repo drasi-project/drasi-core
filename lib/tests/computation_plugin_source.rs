@@ -296,6 +296,7 @@ async fn scenario() {
         },
         stream.clone(),
         Some(progress.clone()),
+        "query",
     )
     .expect("subscription");
     let bootstrap = LegacySourceBootstrap::new(vec![subscription.clone()]);
@@ -642,7 +643,12 @@ async fn persistent_shared_source() {
         .await
         .expect("register");
         let start = managed.start().await.expect("start");
-        assert_eq!(start.summary, OperationSummary::Completed, "{start:?}");
+        assert_eq!(
+            start.summary,
+            OperationSummary::Completed,
+            "{start:?}; observed: {:?}",
+            managed.observed().components
+        );
         if generation == 0 {
             let input = factory
                 .input
@@ -791,9 +797,12 @@ async fn volatile_restart(subscription_control: bool) {
         .await
         .expect("register");
     for epoch in 0..2 {
+        let start = handle.start().await.expect("start");
         assert_eq!(
-            handle.start().await.expect("start").summary,
-            OperationSummary::Completed
+            start.summary,
+            OperationSummary::Completed,
+            "{start:?}; observed: {:?}",
+            handle.observed().components
         );
         let input = factory
             .input

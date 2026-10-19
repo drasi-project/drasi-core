@@ -87,13 +87,16 @@ cargo run --locked -p drasi-lib --example computation_runtime
 
 Use `DrasiLib::builder()` directly: no engine-selection call is needed or
 supported. The [usage guide](docs/computation-graph-usage.md#use-the-library-in-an-application)
-shows the dependency setup for this branch. The `computation` feature name is
-retained as a build-compatibility alias, not a runtime switch.
+shows the dependency setup for this branch. There is no `computation` feature
+or runtime-selection switch.
 
 The main behaviour to understand before using it:
 
 - Adding a component accepts its node; it does not prove successful
   initialization or startup. Use a component handle to wait for readiness.
+- Valid declarations can wait for missing dependencies. The node explains
+  what is missing and starts automatically when prerequisites arrive, subject
+  to auto-start settings and explicit stops.
 - Native components default to arrival-order input merging. Explicit
   `EventTimeAcrossStreams` compares available stream heads while preserving
   each stream's order. Ordinary source subscriptions use a shared ranked
@@ -337,7 +340,6 @@ let config = Query::gql("active-orders")
 | `from_source_with_pipeline(id, Vec<String>)` | Subscribe with named middleware pipeline | — |
 | `auto_start(bool)` | Start with `core.start()` | `true` |
 | `enable_bootstrap(bool)` | Load initial data from sources | `true` |
-| `with_bootstrap_buffer_size(usize)` | Buffer size during bootstrap | `10,000` |
 | `with_joins(Vec<QueryJoinConfig>)` | Synthetic joins for multi-source queries | `None` |
 | `with_priority_queue_capacity(usize)` | Override instance-level queue capacity | Inherited |
 | `with_dispatch_buffer_capacity(usize)` | Override instance-level buffer size | Inherited |
@@ -1093,7 +1095,6 @@ queries:
       - source_id: sensors
     auto_start: true
     enableBootstrap: true
-    bootstrapBufferSize: 10000
 
   - id: cross-source
     query: |
@@ -1169,7 +1170,6 @@ see the [ComputationGraph configuration reference](docs/computation-graph-config
 | `middleware` | `middleware` | `Vec<SourceMiddlewareConfig>` | `[]` |
 | `auto_start` | `auto_start` | `bool` | `true` |
 | `enable_bootstrap` | `enableBootstrap` | `bool` | `true` |
-| `bootstrap_buffer_size` | `bootstrapBufferSize` | `usize` | `10,000` |
 | `joins` | `joins` | `Option<Vec<QueryJoinConfig>>` | `None` |
 | `priority_queue_capacity` | `priority_queue_capacity` | `Option<usize>` | Instance default, otherwise `10,000` |
 | `dispatch_buffer_capacity` | `dispatch_buffer_capacity` | `Option<usize>` | Instance default, otherwise `1,000` |

@@ -49,7 +49,7 @@ use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::context::workers::{
     join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned, WorkerCompletion,
 };
-use drasi_lib::managers::log_component_start;
+use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 

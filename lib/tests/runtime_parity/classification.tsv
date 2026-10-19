@@ -42,28 +42,24 @@ lib::observability::event_history::tests::	shared	Inspection event history moved
 lib::observability::tracing_layer::tests::	shared	Tracing conversion and component-type parsing moved from managers.
 lib::metrics::	shared	Unchanged atomic metric values; runtime metric increments are separately exercised in metrics_e2e.
 lib::profiling::tests::	shared	Unchanged profiling values and timestamp helpers.
-lib::queries::base::tests::	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib::compatibility::query_base::tests::	legacy-structure	Retained QueryBase compatibility tests; current queries do not instantiate this helper.
-lib::compatibility::sequence_dedup::tests::	legacy-structure	Retained checkpoint-helper compatibility tests; actual query recovery is tested through the runtime.
-lib::compatibility::tests::	shared	Original public helper paths resolve to the retained compatibility types.
 lib::queries::checkpoint_tests::	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib::queries::checkpoint_tests::tests::test_sequence_assignment_monotonic	shared	Direct unchanged source plugin sequence assignment.
 lib::queries::checkpoint_tests::tests::test_source_position_preserved_through_dispatch	shared	Direct unchanged source plugin dispatch and cursor.
 lib::queries::checkpoint_tests::tests::test_source_position_size_validation	shared	Direct unchanged source plugin position validation.
 lib::queries::checkpoint_tests::tests::test_in_memory_checkpoint_various_sizes	shared	Direct unchanged core in-memory checkpoint store.
 lib::queries::checkpoint_tests::tests::test_checkpoint_and_sequence_consistency	shared	Direct unchanged core in-memory checkpoint store.
-lib::queries::config_hash::tests::	shared	Unchanged public configuration hash used by the compatibility profile.
+lib::queries::config_hash::tests::	shared	Historical hash cases map to the current native configuration fingerprint; the old public helper is removed.
+lib::computation::v1::query::fingerprint_tests::tests::	shared	Current native semantic fingerprint preserves operational exclusions, source ranks and unordered label/join semantics.
 lib::queries::e2e_checkpoint_tests::	runtime	Original durable-store reconstruction scenarios use the selected DrasiLib builder.
 lib::queries::joins_test::	runtime	Original multi-source join inputs and assertions use shared native/legacy manager fixtures.
 lib::queries::label_extractor::tests::	shared	Unchanged parser-based label extraction used by both runtimes.
 lib::queries::manager::pipeline_characterization_tests::	legacy-boundary	Pins legacy query internals: transactional commit/rollback, MessagePack payloads, delivery order, replay and restart deduplication; not native parity coverage.
 lib::queries::manager::tests::	codec	The same original temporal-value assertions execute the selected native result codec or legacy conversion.
-lib::queries::output_state::tests::	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
+lib::queries::output_state::tests::	shared	Active snapshot/outbox exchange types and output identity; the retired cache implementation has been removed.
 lib::queries::output_state::tests::test_snapshot_stream_from_bare_values_uses_zero_signature	shared	Unchanged public SnapshotStream constructor.
 lib::queries::output_state::tests::test_snapshot_stream_preserves_row_signatures	shared	Unchanged public SnapshotStream keyed projection.
 lib::queries::output_state::tests::snapshot_stream_yields_all_values	shared	Unchanged public SnapshotStream values.
 lib::queries::priority_queue::tests::	legacy-structure	Concrete old source-event heap; native merge/pipes preserve producer FIFO instead of exposing that heap implementation.
-lib::queries::sequence_dedup::tests::	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
 lib::queries::subscription_builder::tests::	shared	Unchanged source label/cardinality/join subscription planner used by both runtimes.
 lib::queries::tests::manager_tests::	runtime	Original query CRUD, subscriptions and lifecycle assertions use shared manager fixtures.
 lib::queries::tests::manager_tests::test_query_auto_start_defaults_to_true	shared	Query configuration value only.

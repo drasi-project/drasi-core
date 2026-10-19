@@ -18,7 +18,7 @@
 use super::*;
 use crate::{
     channels::ComponentStatusHandle,
-    metrics::{LifecycleMetrics, QueryOutputMetrics, ReactionMetrics},
+    metrics::{LifecycleMetrics, ReactionMetrics},
     state_store::{MemoryStateStoreProvider, StateStoreProvider},
 };
 use drasi_core::models::{
@@ -194,27 +194,20 @@ struct Harness {
     catalog: QueryResultsCatalog,
     queries: BTreeMap<String, ContinuousQueryTransformer>,
     store: Arc<MemoryStateStoreProvider>,
-    _statuses: Vec<tokio::sync::watch::Sender<ComponentStatus>>,
 }
 
 impl Harness {
     async fn new(ids: &[&str], capacity: usize) -> Self {
         let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
         let mut queries = BTreeMap::new();
-        let mut statuses = Vec::new();
         for id in ids {
-            let (status, status_rx) = tokio::sync::watch::channel(ComponentStatus::Running);
-            statuses.push(status);
-            catalog
-                .configure_delivery(
-                    id,
-                    crate::DispatchMode::Broadcast,
-                    1,
-                    123,
-                    Arc::new(QueryOutputMetrics::new()),
-                    status_rx,
-                )
-                .unwrap();
+            let mut configuration = crate::Query::cypher(*id)
+                .query("MATCH (n:Person) RETURN n.name AS name")
+                .with_outbox_capacity(capacity)
+                .enable_bootstrap(false)
+                .build();
+            configuration.dispatch_mode = Some(crate::DispatchMode::Broadcast);
+            configuration.dispatch_buffer_capacity = Some(1);
             let mut query = ContinuousQueryTransformer::new(
                 ContinuousQueryDefinition {
                     graph_id: "reaction-recovery".into(),
@@ -228,6 +221,8 @@ impl Harness {
             )
             .await
             .unwrap()
+            .with_query_configuration(configuration)
+            .unwrap()
             .with_result_catalog(&catalog)
             .unwrap();
             query.start().await.unwrap();
@@ -237,7 +232,6 @@ impl Harness {
             catalog,
             queries,
             store: Arc::new(MemoryStateStoreProvider::new()),
-            _statuses: statuses,
         }
     }
 

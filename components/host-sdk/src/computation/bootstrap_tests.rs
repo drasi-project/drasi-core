@@ -43,6 +43,27 @@ fn provider(config: Value) -> Arc<NativeBootstrapProxy> {
         )
         .unwrap()
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_initial_snapshot_does_not_require_a_restart_refresh_signal() -> anyhow::Result<()> {
+    let provider = provider(json!({"mode": "no-snapshot", "count": 2}));
+    provider.prepare().await?;
+    assert!(!provider.has_pending_snapshot()?);
+    let mut snapshot = provider.snapshot().await?;
+    let mut received = 0;
+    while let Some(envelope) = snapshot.changes.next().await {
+        assert_eq!(envelope?.changes().operations().len(), 1);
+        received += 1;
+    }
+    assert_eq!(received, 2);
+    assert!(
+        provider.snapshot().await.is_err(),
+        "preparation permits only one snapshot"
+    );
+    provider.stop().await?;
+    Ok(())
+}
+
 #[derive(Default)]
 struct State {
     value: Mutex<Option<Bytes>>,

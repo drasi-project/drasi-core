@@ -52,11 +52,9 @@ fn dependency_order<'a>(
             .get(id)
             .ok_or_else(|| topology(format!("undeclared dependent resource {id}")))?;
         for (dependency, role) in required {
-            let parent = specifications.get(dependency).ok_or_else(|| {
-                topology(format!(
-                    "resource {id} requires undeclared resource {dependency}"
-                ))
-            })?;
+            let Some(parent) = specifications.get(dependency) else {
+                continue;
+            };
             if parent.role != *role {
                 return Err(topology(format!(
                     "resource {id} dependency {dependency} has the wrong role"
@@ -368,6 +366,7 @@ pub(super) fn observe(
             specification.id = id.clone();
         }
         graph.snapshot.resources.insert(id.clone(), specification);
+        graph.observation_resources.insert(id.clone());
         graph.resource_handles.insert(id.clone(), handle);
         graph
             .snapshot
@@ -391,7 +390,7 @@ pub(super) fn observe(
     graph.reported_resources.insert(component.clone(), reported);
     let mut released = Vec::new();
     for id in previous {
-        if id.as_str().starts_with("attached/")
+        if graph.observation_resources.contains(&id)
             && graph.snapshot.resources.get(&id).is_some_and(|resource| {
                 resource.ownership == ResourceOwnership::Borrowed
             })
@@ -406,6 +405,7 @@ pub(super) fn observe(
             && !graph.snapshot.resource_dependencies.values().any(|dependencies| dependencies.contains_key(&id))
         {
             graph.snapshot.resources.remove(&id);
+            graph.observation_resources.remove(&id);
             graph.snapshot.resource_configurations.remove(&id);
             graph.snapshot.resource_dependencies.remove(&id);
             if let Some(handle) = graph.resource_handles.remove(&id) {

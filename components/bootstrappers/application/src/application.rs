@@ -14,7 +14,7 @@
 
 //! Application bootstrap provider for replaying stored insert events
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::models::{Element, SourceChange};
 use log::info;
@@ -23,27 +23,53 @@ use tokio::sync::RwLock;
 
 use drasi_lib::bootstrap::BootstrapRequest;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapResult};
+use drasi_lib::computation::v1::{
+    ComputationBootstrapProvider, ComputationBootstrapSnapshot, GraphChangeCodec, StreamId,
+};
 
 /// Bootstrap provider for application sources that replays stored insert events
 pub struct ApplicationBootstrapProvider {
     /// Shared reference to bootstrap data (insert events) for replay
-    /// This should be connected to ApplicationSource's bootstrap_data via shared Arc
+    /// Application code maintains this independently of live source input.
     bootstrap_data: Arc<RwLock<Vec<SourceChange>>>,
+    stream: StreamId,
+    node_labels: Vec<String>,
+    relation_labels: Vec<String>,
 }
 
 impl ApplicationBootstrapProvider {
     /// Create a new provider with its own isolated bootstrap data storage
     /// Note: This creates an independent storage that won't be connected to any ApplicationSource
     pub fn new() -> Self {
+        Self::with_shared_data(Arc::new(RwLock::new(Vec::new())))
+    }
+
+    /// Create a provider over application-owned snapshot data.
+    pub fn with_shared_data(bootstrap_data: Arc<RwLock<Vec<SourceChange>>>) -> Self {
         Self {
-            bootstrap_data: Arc::new(RwLock::new(Vec::new())),
+            bootstrap_data,
+            stream: StreamId::try_new("application/bootstrap").expect("constant stream"),
+            node_labels: Vec::new(),
+            relation_labels: Vec::new(),
         }
     }
 
-    /// Create a new provider with a shared reference to ApplicationSource's bootstrap data
-    /// This allows the provider to access the actual data stored by ApplicationSource
-    pub fn with_shared_data(bootstrap_data: Arc<RwLock<Vec<SourceChange>>>) -> Self {
-        Self { bootstrap_data }
+    /// Select the native snapshot stream. It is not a live-source checkpoint.
+    pub fn with_stream(mut self, stream: StreamId) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// Limit native snapshots to nodes with any selected label. Empty means all nodes.
+    pub fn with_node_labels(mut self, labels: Vec<String>) -> Self {
+        self.node_labels = labels;
+        self
+    }
+
+    /// Limit native snapshots to relations with any selected label. Empty means all relations.
+    pub fn with_relation_labels(mut self, labels: Vec<String>) -> Self {
+        self.relation_labels = labels;
+        self
     }
 
     /// Create a builder for ApplicationBootstrapProvider
@@ -131,31 +157,39 @@ impl ApplicationBootstrapProvider {
     }
 
     /// Check if a change matches the requested labels
-    fn matches_labels(&self, change: &SourceChange, request: &BootstrapRequest) -> bool {
+    fn matches_labels(
+        change: &SourceChange,
+        node_labels: &[String],
+        relation_labels: &[String],
+    ) -> bool {
         match change {
             SourceChange::Insert { element } | SourceChange::Update { element, .. } => {
                 match element {
                     Element::Node { metadata, .. } => {
-                        request.node_labels.is_empty()
-                            || metadata
-                                .labels
-                                .iter()
-                                .any(|l| request.node_labels.contains(&l.to_string()))
+                        node_labels.is_empty()
+                            || metadata.labels.iter().any(|label| {
+                                node_labels
+                                    .iter()
+                                    .any(|requested| requested == label.as_ref())
+                            })
                     }
                     Element::Relation { metadata, .. } => {
-                        request.relation_labels.is_empty()
-                            || metadata
-                                .labels
-                                .iter()
-                                .any(|l| request.relation_labels.contains(&l.to_string()))
+                        relation_labels.is_empty()
+                            || metadata.labels.iter().any(|label| {
+                                relation_labels
+                                    .iter()
+                                    .any(|requested| requested == label.as_ref())
+                            })
                     }
                 }
             }
             SourceChange::Delete { metadata } => {
-                request.node_labels.is_empty() && request.relation_labels.is_empty()
+                node_labels.is_empty() && relation_labels.is_empty()
                     || metadata.labels.iter().any(|l| {
-                        request.node_labels.contains(&l.to_string())
-                            || request.relation_labels.contains(&l.to_string())
+                        node_labels
+                            .iter()
+                            .chain(relation_labels)
+                            .any(|requested| requested == l.as_ref())
                     })
             }
             SourceChange::Future { .. } => {
@@ -163,6 +197,39 @@ impl ApplicationBootstrapProvider {
                 false
             }
         }
+    }
+}
+
+#[async_trait]
+impl ComputationBootstrapProvider for ApplicationBootstrapProvider {
+    async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
+        let events = self.get_stored_events().await;
+        let stream = self.stream.clone();
+        let node_labels = self.node_labels.clone();
+        let relation_labels = self.relation_labels.clone();
+        let changes = events
+            .into_iter()
+            .filter(move |change| Self::matches_labels(change, &node_labels, &relation_labels))
+            .enumerate()
+            .map(move |(index, change)| {
+                let sequence = u64::try_from(index)?
+                    .checked_add(1)
+                    .context("application bootstrap sequence exhausted")?;
+                let timestamp = chrono::DateTime::from_timestamp_millis(i64::try_from(
+                    change.get_transaction_time(),
+                )?)
+                .context("application bootstrap timestamp cannot be represented")?;
+                Ok::<_, anyhow::Error>(GraphChangeCodec::encode_change(
+                    change,
+                    stream.clone(),
+                    sequence,
+                    Some(timestamp),
+                )?)
+            });
+        Ok(ComputationBootstrapSnapshot {
+            changes: Box::pin(tokio_stream::iter(changes)),
+            watermarks: Vec::new(),
+        })
     }
 }
 
@@ -201,7 +268,7 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
 
         for change in bootstrap_data.iter() {
             // Filter by requested labels
-            if self.matches_labels(change, &request) {
+            if Self::matches_labels(change, &request.node_labels, &request.relation_labels) {
                 // Note: Sequence numbering and profiling metadata are handled by
                 // ApplicationSource.subscribe() which sends bootstrap events through
                 // dedicated channels. This provider only counts matching events.
@@ -210,7 +277,7 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         }
 
         info!(
-            "ApplicationBootstrapProvider sent {} bootstrap events for query '{}'",
+            "ApplicationBootstrapProvider matched {} bootstrap events for query '{}'",
             count, request.query_id
         );
         Ok(BootstrapResult {
@@ -219,25 +286,3 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         })
     }
 }
-
-// Implementation Note: Bootstrap Data Connection
-//
-// This provider can be connected to ApplicationSource's actual bootstrap data in two ways:
-//
-// 1. Via with_shared_data() constructor:
-//    When creating an ApplicationSource, pass the bootstrap_data Arc to the provider:
-//    ```rust
-//    let (source, handle) = ApplicationSource::new(config, event_tx);
-//    let provider = ApplicationBootstrapProvider::with_shared_data(
-//        source.get_bootstrap_data()
-//    );
-//    ```
-//
-// 2. Via BootstrapContext properties:
-//    Store the bootstrap_data Arc in the source config properties as a special internal
-//    property that can be retrieved by the provider during bootstrap operations.
-//
-// Currently, ApplicationSource handles bootstrap directly in its subscribe() method
-// (lines 337-384 in sources/application/mod.rs), so this provider is not actively used
-// by ApplicationSource. The provider exists for testing and potential future integration
-// where bootstrap logic might be delegated to the provider system.

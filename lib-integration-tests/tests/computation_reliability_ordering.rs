@@ -23,6 +23,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
         capacity: 8,
         source_rank: 0,
         source_id: Some("source".into()),
+        source_dispatch: None,
         drop_when_full: false,
     }
     .create_with_resources(&BTreeMap::from([(queue_id, queue.resource())]))?;
@@ -54,7 +55,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
             )?)
             .await?;
     }
-    let mut query = TransactionTransformer::query(
+    let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "order".into(),
             id: ComponentId::try_new("query")?,
@@ -68,7 +69,8 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
         QueryExecutionSettings::default(),
         None,
     )
-    .await?;
+    .await?
+    .with_delivery_tracking();
     query.start().await?;
     let mut receiver = pipe.pipe.take_receiver()?;
     for expected in [1, 2] {
@@ -89,7 +91,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
         assert_eq!(output[0].envelope.changes().operations().len(), 1);
         query.delivery_completed(&output).await?;
     }
-    assert_eq!(query.query_results().unwrap().snapshot()?.rows.len(), 2);
+    assert_eq!(query.results().snapshot()?.rows.len(), 2);
     query.stop().await?;
     queue.shutdown().await?;
     Ok(())

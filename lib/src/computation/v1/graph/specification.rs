@@ -76,6 +76,8 @@ pub struct ConfigurationSchema {
 
 impl ConfigurationSchema {
     /// Validate unresolved values without fetching configuration or secrets.
+    /// Missing resources remain dependencies; supplied declarations and handles
+    /// must have the expected role and interface.
     pub fn validate_values(
         &self,
         configuration: &BTreeMap<Arc<str>, ConfigurationValue>,
@@ -109,10 +111,11 @@ impl ConfigurationSchema {
                     secret,
                 } => {
                     validate_identifier("configuration reference", reference)?;
-                    let role = declarations.get(resource).ok_or_else(|| {
-                        super::topology(format!("unknown configuration resource {resource}"))
-                    })?;
-                    if *secret && *role != ResourceRole::SecretStore {
+                    if *secret
+                        && declarations
+                            .get(resource)
+                            .is_some_and(|role| *role != ResourceRole::SecretStore)
+                    {
                         return Err(super::topology(
                             "secret references require a secret-store resource",
                         ));
@@ -678,10 +681,11 @@ pub(super) fn validate_specification(
         }
         let mut unique = std::collections::BTreeSet::new();
         for id in dependencies {
-            let declaration = declarations
-                .get(id)
-                .ok_or_else(|| super::topology(format!("unknown resource {id}")))?;
-            if !unique.insert(id) || declaration.role != requirement.role {
+            if !unique.insert(id)
+                || declarations
+                    .get(id)
+                    .is_some_and(|declaration| declaration.role != requirement.role)
+            {
                 return Err(super::topology(format!(
                     "duplicate or incompatible dependency {slot}"
                 )));
@@ -705,14 +709,26 @@ pub(super) fn validate_specification(
     {
         return Err(super::topology("undeclared factory dependency slot"));
     }
-    factory
-        .validate_scope(graph_id, spec, declarations, resources)
-        .map_err(|error| {
-            if let Some(GraphError::Reported { cause }) = error.downcast_ref::<GraphError>() {
-                return GraphError::Reported {
-                    cause: cause.clone(),
-                };
-            }
-            super::topology(format!("invalid component definition: {error:#}"))
-        })
+    let declared = spec
+        .dependencies
+        .values()
+        .flatten()
+        .chain(spec.configuration.values().filter_map(|value| match value {
+            ConfigurationValue::Reference { resource, .. } => Some(resource),
+            _ => None,
+        }))
+        .all(|id| declarations.contains_key(id));
+    let validation = if declared {
+        factory.validate_scope(graph_id, spec, declarations, resources)
+    } else {
+        factory.validate(spec)
+    };
+    validation.map_err(|error| {
+        if let Some(GraphError::Reported { cause }) = error.downcast_ref::<GraphError>() {
+            return GraphError::Reported {
+                cause: cause.clone(),
+            };
+        }
+        super::topology(format!("invalid component definition: {error:#}"))
+    })
 }

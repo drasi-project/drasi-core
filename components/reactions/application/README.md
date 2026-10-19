@@ -37,6 +37,22 @@ queuing work confirms only that queuing. Channel mode rejects completed-handling
 acknowledgement claims. Recovery evidence remains unknown unless a separate,
 properly integrated service supplies it.
 
+### Query readers without a reaction node
+
+Use `DrasiLib::subscribe_query_results(query_id)` when Rust code only needs a
+snapshot followed by query-result changes. This reads the query's existing native result outlet
+without an application reaction, forwarding task or asynchronous drop cleanup.
+It honors the query's bounded delivery settings and replays Broadcast gaps from
+retained query output, failing explicitly if that history is unavailable.
+Apply the returned `snapshot` first, then consume `stream`; its changes are
+strictly after that snapshot's sequence. Dropping the stream unregisters it
+immediately. It has no durable consumer checkpoint, and each new connection
+starts from a fresh snapshot.
+
+Use `NativeApplicationReaction` instead when the application is a graph
+destination with an explicit schema, pipe and acceptance/handling boundary.
+See the [query-reader example](../../../lib/docs/computation-graph-usage.md#read-live-query-results-without-a-reaction).
+
 ### Native query wiring
 
 Ordinary `.with_query(...)` declarations and explicit native query pipelines
@@ -89,7 +105,7 @@ For a complete source/query/reaction program, run this from the drasi-core
 repository root:
 
 ```bash
-cargo run --locked -p drasi-lib --features computation --example computation_runtime
+cargo run --locked -p drasi-lib --example computation_runtime
 ```
 
 See the [example source](../../../lib/examples/computation_runtime.rs) and

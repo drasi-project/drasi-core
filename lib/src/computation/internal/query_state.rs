@@ -24,7 +24,7 @@ use crate::computation::v1::{
     ChangeEnvelope, ChangeOperation, QueryRecoveryIdentity, Record, RecordId,
 };
 
-pub use drasi_computation_contracts::{QueryResultSnapshot, QuerySnapshot};
+pub use drasi_computation_contracts::QueryResultSnapshot;
 
 /// One coherent recovery observation. Rows share the immutable snapshot tree;
 /// retained envelopes are copied only when a caller requests a replay suffix.

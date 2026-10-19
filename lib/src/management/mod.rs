@@ -238,14 +238,21 @@ impl crate::DrasiLib {
         self.management()?.reconcile().await.map_err(Into::into)
     }
 
+    /// Supply a factory to existing declarations without enabling desired-state
+    /// management. Managed instances also retain it for later reconciliation.
     pub async fn register_component_factory(
         &self,
         factory: Arc<dyn crate::computation::v1::ComponentFactory>,
     ) -> crate::Result<()> {
-        self.management()?
-            .register(factory)
-            .await
-            .map_err(Into::into)
+        self.state_guard.require_initialized()?;
+        if let Some(management) = self.management.get() {
+            management.register(factory).await.map_err(Into::into)
+        } else {
+            self.computation_control()?
+                .register_factory(factory)
+                .await
+                .map_err(|error| crate::DrasiError::Internal(error.into()))
+        }
     }
 
     pub async fn configuration_receipt(

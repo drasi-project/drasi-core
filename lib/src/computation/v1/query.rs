@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Graph-owned continuous query host. No legacy query manager, QueryBase, or
-//! ComponentGraph is involved in construction, processing or output publication.
+//! Graph-owned continuous query processing using the shared evaluator.
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -48,7 +47,7 @@ use crate::{
 };
 
 pub use crate::computation::internal::query_state::{
-    QueryHistoryError, QueryRecoveryView, QueryResultSnapshot, QueryResults, QuerySnapshot,
+    QueryHistoryError, QueryRecoveryView, QueryResultSnapshot, QueryResults,
 };
 
 use super::{
@@ -67,7 +66,7 @@ use super::{
     QuerySourceProgress, QuerySourceProgressResource, SourceProgressKey, SourceProgressSnapshot,
 };
 
-const CONFIGURATION: &str = "\0computation:query-configuration:v1";
+pub(crate) const QUERY_CONFIGURATION: &str = "\0computation:query-configuration:v1";
 const INPUT_PREFIX: &str = "computation:input:";
 const BOOTSTRAP: &str = "\0computation:query-bootstrap:v1";
 const PENDING_OUTPUT: &str = "\0computation:pending-output:v1";
@@ -78,6 +77,9 @@ pub(crate) fn query_reset_key(query: &str) -> String {
 
 #[path = "query_delivery.rs"]
 mod delivery;
+#[cfg(test)]
+#[path = "query_fingerprint_tests.rs"]
+mod fingerprint_tests;
 #[cfg(test)]
 #[path = "query_hosting_tests.rs"]
 mod hosting_tests;
@@ -114,11 +116,15 @@ impl ContinuousQueryDefinition {
         query_descriptor(self.id.clone(), execution.source_transactions.is_some())
     }
 
-    fn configuration_bytes(&self, execution: &QueryExecutionSettings) -> anyhow::Result<Bytes> {
+    pub(crate) fn configuration_bytes(
+        &self,
+        execution: &QueryExecutionSettings,
+    ) -> anyhow::Result<Bytes> {
+        let execution = execution.fingerprint_settings();
         if execution.source_transactions.is_some() {
             // Admission limits may increase to resume rejected input without
             // resetting already committed state. Grouped semantics may not.
-            let mut semantics = execution.clone();
+            let mut semantics = execution;
             semantics.source_transactions = None;
             return Ok(Bytes::from(serde_json::to_vec(&(
                 6u32,
@@ -188,7 +194,6 @@ fn parser(language: ComputationQueryLanguage) -> (Arc<dyn QueryParser>, Arc<Func
 
 struct FutureWakeup {
     queue: Arc<dyn FutureQueue>,
-    keep_alive: bool,
 }
 
 #[async_trait]
@@ -208,7 +213,7 @@ impl WakeupSource for FutureWakeup {
         }
     }
     async fn has_pending(&self) -> anyhow::Result<bool> {
-        Ok(self.keep_alive || self.queue.peek_due_time().await?.is_some())
+        Ok(self.queue.peek_due_time().await?.is_some())
     }
 }
 
@@ -349,14 +354,11 @@ pub struct ContinuousQueryTransformer {
     api_view: std::sync::OnceLock<Arc<super::QueryApi>>,
     metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
     reset_configuration: bool,
-    runtime_compatibility: bool,
     output_persistent: bool,
-    legacy_hash: Option<u64>,
     checkpoint_view: Arc<RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
     output_persistence_view: Arc<RwLock<Option<bool>>>,
     publication_identity: Arc<RwLock<Option<uuid::Uuid>>>,
     recovery_scope: Arc<str>,
-    recovery_graph_id: String,
     default_dispatch_capacity: usize,
     declaration: Option<Arc<super::query_configuration::OrdinaryQueryDeclaration>>,
     scheduling: Option<Arc<super::QuerySchedulingResource>>,
@@ -401,10 +403,7 @@ impl ContinuousQueryTransformer {
         execution: QueryExecutionSettings,
         middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     ) -> anyhow::Result<Self> {
-        Self::construct(
-            definition, provider, options, execution, middleware, false, false,
-        )
-        .await
+        Self::construct(definition, provider, options, execution, middleware, false).await
     }
     async fn construct(
         definition: ContinuousQueryDefinition,
@@ -412,7 +411,6 @@ impl ContinuousQueryTransformer {
         options: QueryOptions,
         execution: QueryExecutionSettings,
         middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
-        runtime_compatibility: bool,
         defer_build: bool,
     ) -> anyhow::Result<Self> {
         execution.validate(middleware.as_deref())?;
@@ -435,24 +433,9 @@ impl ContinuousQueryTransformer {
             ))),
             notify: Arc::new(tokio::sync::Notify::new()),
         };
-        // Preserve ordinary queries' persisted namespace without retaining a private graph.
-        let recovery_graph_id = if runtime_compatibility {
-            format!(
-                "lib-query/{}",
-                definition
-                    .id
-                    .as_str()
-                    .bytes()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            )
-        } else {
-            definition.graph_id.clone()
-        };
         let mut instance = Self {
             descriptor: definition.descriptor_with_execution(&execution),
             recovery_scope: Arc::from(definition.graph_id.as_str()),
-            recovery_graph_id,
             default_dispatch_capacity: 1_000,
             declaration: None,
             definition,
@@ -475,9 +458,7 @@ impl ContinuousQueryTransformer {
             api_view: std::sync::OnceLock::new(),
             metrics: Some(Arc::new(crate::metrics::QueryOutputMetrics::new())),
             reset_configuration: false,
-            runtime_compatibility,
             output_persistent: false,
-            legacy_hash: None,
             checkpoint_view: Arc::new(RwLock::new(None)),
             output_persistence_view: Arc::new(RwLock::new(None)),
             publication_identity: Arc::new(RwLock::new(Some(uuid::Uuid::new_v4()))),
@@ -496,30 +477,6 @@ impl ContinuousQueryTransformer {
             instance.build().await?;
         }
         Ok(instance)
-    }
-
-    fn result_metadata(
-        &self,
-        source_id: &str,
-        results: &[drasi_core::evaluation::context::QueryPartEvaluationContext],
-    ) -> HashMap<String, serde_json::Value> {
-        if !self.runtime_compatibility {
-            return HashMap::new();
-        }
-        let count = results
-            .iter()
-            .filter(|result| {
-                !matches!(
-                    result,
-                    drasi_core::evaluation::context::QueryPartEvaluationContext::Noop
-                )
-            })
-            .count();
-        HashMap::from([
-            ("source_id".into(), serde_json::json!(source_id)),
-            ("processed_by".into(), serde_json::json!("drasi-core")),
-            ("result_count".into(), serde_json::json!(count)),
-        ])
     }
 
     pub fn results(&self) -> QueryResults {
@@ -567,14 +524,9 @@ impl ContinuousQueryTransformer {
             anyhow::bail!("query catalogue belongs to another graph");
         }
         let configuration = self.api_configuration();
-        let hash = if self.runtime_compatibility {
-            crate::queries::compute_config_hash(&configuration)
-        } else {
-            self.definition.configuration_hash(&self.execution)?
-        };
-        catalog.configure_native_delivery(
+        let hash = self.definition.configuration_hash(&self.execution)?;
+        catalog.configure_delivery(
             &configuration,
-            hash,
             self.metrics.clone().expect("query metrics"),
             self.default_dispatch_capacity,
         )?;
@@ -582,12 +534,11 @@ impl ContinuousQueryTransformer {
         if let Some(metrics) = catalog.configured_metrics(&self.definition.id)? {
             self.metrics = Some(metrics);
         }
-        self.legacy_hash = catalog.configured_hash(&self.definition.id)?;
         self.registration = Some(catalog.register(
             self.definition.id.clone(),
             self.results.clone(),
             self.source_progress.clone(),
-            self.definition.configuration_hash(&self.execution)?,
+            hash,
             self.publication_identity.clone(),
             self.checkpoint_view.clone(),
             self.output_persistence_view.clone(),
@@ -732,13 +683,10 @@ impl ContinuousQueryTransformer {
             .output_persistence_view
             .write()
             .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? = None;
-        let mut resources = self
+        let resources = self
             .provider
-            .create_indexes(&self.recovery_graph_id, self.definition.id.as_str())
+            .create_indexes(&self.definition.graph_id, self.definition.id.as_str())
             .await?;
-        if self.runtime_compatibility {
-            resources = resources.with_fallback_checkpoint(Arc::new(drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore::new()));
-        }
         self.output_persistent = !self.provider.is_volatile()
             && resources
                 .checkpoint_store()
@@ -769,7 +717,7 @@ impl ContinuousQueryTransformer {
         } else {
             super::ComponentRecovery::default()
         };
-        if !self.runtime_compatibility && !self.provider.is_volatile() && !self.output_persistent {
+        if !self.provider.is_volatile() && !self.output_persistent {
             anyhow::bail!(
                 "persistent query recovery requires persistent checkpoint, outbox and live-result resources"
             );
@@ -822,7 +770,7 @@ impl ContinuousQueryTransformer {
 
     fn recovery_identity(&self) -> anyhow::Result<super::QueryRecoveryIdentity> {
         Ok(super::QueryRecoveryIdentity::try_new(
-            self.recovery_graph_id.clone(),
+            self.definition.graph_id.clone(),
             self.definition.id.clone(),
             self.definition.configuration_hash(&self.execution)?,
             *self
@@ -856,21 +804,6 @@ impl ContinuousQueryTransformer {
         if self.output_persistent {
             self.load_delivery_bindings().await?;
         }
-        if self.runtime_compatibility && checkpoint.is_persistent() {
-            if let Some(expected) = self.legacy_hash {
-                // Only a readable, absent or different hash is a configuration
-                // change; a storage fault must never authorise a reset.
-                let stored = checkpoint.read_config_hash().await.with_context(|| {
-                    format!(
-                        "query {} cannot read its configuration hash",
-                        self.definition.id
-                    )
-                })?;
-                if stored != Some(expected) {
-                    return Err(QueryRecoveryError::ConfigurationChanged.into());
-                }
-            }
-        }
         if let Some(marker) = checkpoint.read_checkpoint(BOOTSTRAP).await? {
             if marker.sequence > 1 || marker.source_position.is_some() {
                 return Err(
@@ -899,11 +832,13 @@ impl ContinuousQueryTransformer {
             .unwrap_or(0)
             .max(reset.as_ref().map_or(0, |marker| marker.generation));
         let configuration = self.definition.configuration_bytes(&self.execution)?;
-        let stored = checkpoint.read_checkpoint(CONFIGURATION).await?;
+        let stored = checkpoint
+            .read_checkpoint(QUERY_CONFIGURATION)
+            .await
+            .with_context(|| {
+                format!("query {} cannot read its configuration", self.definition.id)
+            })?;
         let configuration_missing = stored.is_none();
-        let configuration_verified = stored.as_ref().is_some_and(|stored| {
-            stored.sequence == 1 && stored.source_position.as_ref() == Some(&configuration)
-        });
         if let Some(stored) = stored {
             if stored.sequence != 1 {
                 return Err(QueryRecoveryError::Inconsistent(
@@ -915,7 +850,7 @@ impl ContinuousQueryTransformer {
                 return Err(QueryRecoveryError::ConfigurationChanged.into());
             }
         }
-        if self.runtime_compatibility && !self.output_persistent {
+        if !self.output_persistent {
             if configuration_missing {
                 self.write_configuration(&configuration).await?;
             }
@@ -1001,7 +936,7 @@ impl ContinuousQueryTransformer {
                 )
                 .into());
             }
-            let mut envelope = self.codec.decode(&bytes).with_context(|| {
+            let envelope = self.codec.decode(&bytes).with_context(|| {
                 QueryRecoveryError::Inconsistent(format!(
                     "failed to deserialize durable outbox entry {position}"
                 ))
@@ -1045,12 +980,9 @@ impl ContinuousQueryTransformer {
                     )
                     .into())
                 }
-                None if configuration_verified => {
-                    identity.annotate(&mut envelope, &self.definition.id)?;
-                }
                 None => {
                     return Err(QueryRecoveryError::Inconsistent(
-                        "unidentified retained output has no verified owner configuration".into(),
+                        "retained output has no producer identity".into(),
                     )
                     .into())
                 }
@@ -1078,8 +1010,6 @@ impl ContinuousQueryTransformer {
             }
         }
         if configuration_missing {
-            // A failed recovery must not manufacture the owner evidence that
-            // would let the next start adopt unidentified retained output.
             self.write_configuration(&configuration).await?;
         }
         self.results
@@ -1108,7 +1038,7 @@ impl ContinuousQueryTransformer {
         query
             .resource_transaction(|| async {
                 checkpoint
-                    .stage_checkpoint(CONFIGURATION, 1, Some(configuration))
+                    .stage_checkpoint(QUERY_CONFIGURATION, 1, Some(configuration))
                     .await
             })
             .await?;
@@ -1325,13 +1255,7 @@ impl ContinuousQueryTransformer {
         };
         self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);
-        let mut profiling = progress.profiling.clone().unwrap_or_else(|| {
-            if self.runtime_compatibility {
-                ProfilingMetadata::new()
-            } else {
-                ProfilingMetadata::default()
-            }
-        });
+        let mut profiling = progress.profiling.clone().unwrap_or_default();
         // An input may carry another query's timings; this commit has not completed.
         profiling.query_core_return_ns = None;
         profiling.query_send_ns = None;
@@ -1366,7 +1290,7 @@ impl ContinuousQueryTransformer {
                         query_id: self.definition.id.to_string(),
                         source_id: Some(progress.source_id.clone()),
                         timestamp: Utc::now(),
-                        metadata: self.result_metadata(&progress.source_id, &results),
+                        metadata: HashMap::new(),
                         profiling: Some(profiling),
                     },
                 )
@@ -1532,15 +1456,13 @@ impl ComputationComponent for ContinuousQueryTransformer {
                         links: Mutex::new(Vec::new()),
                         output: super::query_catalog::CatalogQuery {
                             generation: 0,
-                            config_hash: self.legacy_hash.unwrap_or_else(|| {
-                                self.definition
-                                    .configuration_hash(&self.execution)
-                                    .expect("query configuration encoding")
-                            }),
+                            config_hash: self
+                                .definition
+                                .configuration_hash(&self.execution)
+                                .expect("query configuration encoding"),
                             results: self.results.clone(),
                             progress: self.source_progress.clone(),
                             incarnation: self.publication_identity.clone(),
-                            status: None,
                             checkpoint: self.checkpoint_view.clone(),
                             output_persistence: self.output_persistence_view.clone(),
                         },
@@ -1571,9 +1493,6 @@ impl ComputationComponent for ContinuousQueryTransformer {
         });
         if let Some(config) = &self.api_configuration {
             configuration["query_config"] = serde_json::to_value(config)?;
-        }
-        if self.runtime_compatibility {
-            configuration["runtime_compatibility"] = true.into();
         }
         Ok(configuration)
     }
@@ -1769,7 +1688,6 @@ impl Transformer for ContinuousQueryTransformer {
                 Arc::new(delivery::QueryDeliveryWakeup {
                     scheduled: self.scheduling.is_none().then(|| FutureWakeup {
                         queue: query.future_queue(),
-                        keep_alive: self.runtime_compatibility,
                     }),
                     pending: self.replay_pending.clone(),
                     changed: self.delivery_changed.clone(),
@@ -1782,7 +1700,6 @@ impl Transformer for ContinuousQueryTransformer {
         self.query.as_ref().map(|query| {
             Arc::new(FutureWakeup {
                 queue: query.future_queue(),
-                keep_alive: self.runtime_compatibility,
             }) as Arc<dyn WakeupSource>
         })
     }
@@ -1871,13 +1788,9 @@ impl Transformer for ContinuousQueryTransformer {
                     QueryOutputMetadata {
                         query_id: owner.definition.id.to_string(),
                         source_id: Some(due.source_id.to_string()),
-                        timestamp: if owner.runtime_compatibility {
-                            Utc::now()
-                        } else {
-                            timestamp
-                        },
-                        metadata: owner.result_metadata(&due.source_id, &due.results),
-                        profiling: owner.runtime_compatibility.then(ProfilingMetadata::new),
+                        timestamp: Utc::now(),
+                        metadata: HashMap::new(),
+                        profiling: Some(ProfilingMetadata::new()),
                     },
                 )
                 .map_err(IndexError::other)?;
@@ -1966,7 +1879,6 @@ impl Default for ContinuousQueryFactory {
             ("query_config", ConfigurationType::Object, false),
             ("defer_build", ConfigurationType::Boolean, false),
             ("reset_configuration", ConfigurationType::Boolean, false),
-            ("runtime_compatibility", ConfigurationType::Boolean, false),
         ]
         .into_iter()
         .map(|(name, value_type, required)| {
@@ -1991,6 +1903,16 @@ impl Default for ContinuousQueryFactory {
                     allow_additional: false,
                 },
                 dependencies: BTreeMap::from([
+                    (
+                        Arc::from("source_hosts"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            maximum: None,
+                            ..ResourceRequirement::exactly_one::<super::SourcePluginHost>(
+                                ResourceRole::LegacySource,
+                            )
+                        },
+                    ),
                     (
                         Arc::from("declaration"),
                         ResourceRequirement {
@@ -2421,10 +2343,6 @@ impl ComponentFactory for ContinuousQueryFactory {
             execution,
             middleware,
             config
-                .get("runtime_compatibility")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            config
                 .get("defer_build")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
@@ -2448,7 +2366,17 @@ impl ComponentFactory for ContinuousQueryFactory {
                 .pop()
             {
                 query.default_dispatch_capacity = declaration.default_dispatch_capacity;
-                query.declaration = Some(declaration);
+                let mut resolved = (*declaration).clone();
+                if context
+                    .specification
+                    .dependencies
+                    .contains_key("source_hosts")
+                {
+                    resolved.sources = context
+                        .resources::<super::SourcePluginHost>("source_hosts")
+                        .map_err(ComponentCreationError::terminal)?;
+                }
+                query.declaration = Some(Arc::new(resolved));
             }
         }
         if context

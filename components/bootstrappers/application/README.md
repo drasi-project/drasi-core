@@ -2,7 +2,45 @@
 
 ## Overview
 
-The Application Bootstrap Provider is a bootstrap plugin for Drasi that replays stored insert events during query subscription. It works in conjunction with the Application Source to provide initial data (bootstrap) to queries when they start or subscribe to a data source.
+The Application Bootstrap Provider supplies application-owned, in-memory data
+to a query's initial snapshot. Its native `ComputationBootstrapProvider`
+implementation streams actual graph changes, not merely an event count.
+Application code owns and populates the data; live Application Source input does
+not automatically maintain this snapshot.
+
+## Native ComputationGraph use
+
+```rust
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use drasi_core::models::SourceChange;
+use drasi_bootstrap_application::ApplicationBootstrapProvider;
+use drasi_lib::computation::v1::StreamId;
+
+let stored = Arc::new(RwLock::new(Vec::<SourceChange>::new()));
+let bootstrap = Arc::new(
+    ApplicationBootstrapProvider::with_shared_data(stored.clone())
+        .with_stream(StreamId::try_new("people/bootstrap")?)
+        .with_node_labels(vec!["Person".into()])
+        .with_relation_labels(vec!["KNOWS".into()]),
+);
+// Attach with ContinuousQueryTransformer::with_bootstrap(bootstrap).
+// Populate `stored`, or use `store_insert_event`, before starting the query.
+```
+
+Each snapshot captures an immutable copy of the current data. Encoding proceeds
+one record at a time as the query polls the stream; no writer lock is retained
+while streaming and no worker is spawned. Changes to the shared data affect later
+snapshots, not a snapshot already returned. Errors stay visible in the stream.
+
+The stream defaults to `application/bootstrap`. Node and relation filters are
+independent: an empty list includes every element of that type. This provider
+does not own live-source progress and does not invent a replay watermark.
+Initial rows are available through the query's result snapshot; connected
+application reactions consume subsequent live query changes.
+
+The older callback descriptor remains during the host cutover. Its callback only
+counts matching records; it must not be mistaken for native snapshot delivery.
 
 This provider implements in-memory replay of historical insert events, enabling queries to establish their initial state before processing real-time updates. It's designed primarily for testing scenarios, embedded applications, and situations where you need programmatic control over bootstrap data.
 
@@ -10,17 +48,17 @@ This provider implements in-memory replay of historical insert events, enabling 
 
 - **In-Memory Event Replay**: Stores and replays insert events that were previously sent through an Application Source
 - **Label-Based Filtering**: Filters bootstrap events based on node and relation labels requested by queries
-- **Shared Data Storage**: Can share bootstrap data with Application Source instances via `Arc<RwLock<Vec<SourceChange>>>`
+- **Shared Data Storage**: Shares application-owned data through `Arc<RwLock<Vec<SourceChange>>>`
 - **Isolated Storage Mode**: Can operate independently with its own isolated bootstrap data storage
 - **Event Counting**: Tracks and reports the number of bootstrap events replayed to each query
 
 ### How It Works
 
-1. **Event Storage**: Insert events sent through an Application Source are stored in a shared vector
-2. **Bootstrap Request**: When a query subscribes to a source, it sends a bootstrap request with required labels
+1. **Event Storage**: Application code populates a shared vector
+2. **Bootstrap Request**: A native query requests its configured bootstrap snapshot
 3. **Event Filtering**: The provider filters stored events to match the requested node/relation labels
-4. **Event Replay**: Matching events are counted and made available to the query
-5. **Completion**: The provider reports the count of replayed events
+4. **Event Replay**: Matching events are encoded as native graph-change envelopes
+5. **Completion**: End of the snapshot stream completes the in-memory snapshot
 
 ### Use Cases
 

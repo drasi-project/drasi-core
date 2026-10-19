@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
-use drasi_lib::managers::log_component_start;
+use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 

@@ -82,10 +82,16 @@ async fn separately_assembled_pipelines_share_one_root_without_helper_collisions
                 .count(),
             1
         );
-        assert_eq!(inventory.scopes.len(), 2);
+        assert_eq!(inventory.scopes.len(), 1);
         let after = query_graph.snapshot();
         assert_eq!(after.desired.id, before.desired.id);
-        assert_eq!(after.desired.revision, before.desired.revision);
+        assert!(after.desired.revision > before.desired.revision);
+        for id in ["ordinary", "first", "second"] {
+            assert!(after
+                .observed
+                .components
+                .contains_key(&ComponentId::try_new(id).unwrap()));
+        }
         for (id, state) in &before.observed.components {
             assert_eq!(after.observed.components[id].generation, state.generation);
         }

@@ -799,6 +799,34 @@ pub(super) fn insert(
         {
             return Err(topology(format!("duplicate resource {}", resource.id)));
         }
+        if addition
+            .bindings
+            .resources
+            .get(&resource.id)
+            .is_some_and(|handle| handle.role() != resource.role)
+        {
+            return Err(topology(format!(
+                "resource {} has an incompatible role",
+                resource.id
+            )));
+        }
+        for (dependent, required) in &graph.snapshot.resource_dependencies {
+            if let Some(role) = required.get(&resource.id) {
+                if *role != resource.role {
+                    return Err(topology(format!(
+                        "resource {dependent} requires a different role for {}",
+                        resource.id
+                    )));
+                }
+                if graph.snapshot.resources[dependent].ownership == ResourceOwnership::Borrowed
+                    && resource.ownership == ResourceOwnership::Graph
+                {
+                    return Err(topology(
+                        "a borrowed resource cannot retain a graph-owned dependency",
+                    ));
+                }
+            }
+        }
     }
     let next_resource_generation = graph
         .next_resource_generation
@@ -809,13 +837,29 @@ pub(super) fn insert(
         .enumerate()
         .map(|(offset, id)| (id.clone(), graph.next_resource_generation + offset as u64))
         .collect();
-    if addition
-        .bindings
-        .resources
-        .keys()
-        .any(|id| !resource_ids.contains(id))
-    {
-        return Err(topology("an addition cannot replace an existing resource"));
+    let mut newly_bound = BTreeSet::new();
+    for (id, handle) in &addition.bindings.resources {
+        if resource_ids.contains(id) {
+            continue;
+        }
+        let declaration = graph
+            .snapshot
+            .resources
+            .get(id)
+            .ok_or_else(|| topology("an addition cannot bind an undeclared resource"))?;
+        if declaration.ownership != ResourceOwnership::Borrowed
+            || declaration.role != handle.role()
+            || handle.has_cleanup()
+            || graph.resource_handles.contains_key(id)
+            || graph.pending_resource_cleanup.contains_key(id)
+            || graph.tasks.resources.contains(id)
+            || graph.resource_constructors.contains_key(id)
+        {
+            return Err(topology(
+                "an addition can only supply a previously unbound borrowed resource",
+            ));
+        }
+        newly_bound.insert(id.clone());
     }
     if !addition.bindings.pipes.is_empty() {
         return Err(topology("add pipes using a connection mutation"));
@@ -914,7 +958,6 @@ pub(super) fn insert(
     nodes.push(node);
     graph.snapshot.nodes = nodes.into();
     graph.snapshot.revision = revision;
-    graph.snapshot.allow_incomplete = true;
     let mut subscriptions: BTreeSet<_> = graph.snapshot.subscriptions.iter().cloned().collect();
     subscriptions.extend(addition.bindings.subscriptions);
     graph.snapshot.subscriptions = subscriptions.into_iter().collect::<Vec<_>>().into();
@@ -960,6 +1003,7 @@ pub(super) fn insert(
                 lifecycle: ComponentLifecycle::Stopped,
                 health: super::super::ComponentHealth::Unknown,
                 failure: None,
+                waiting_for: Vec::new(),
                 exhausted: false,
                 started: false,
                 lifecycle_requested: false,
@@ -984,6 +1028,16 @@ pub(super) fn insert(
                     failure: None,
                 },
             );
+        }
+        for resource in newly_bound {
+            let observed = state
+                .resources
+                .get_mut(&resource)
+                .expect("declared borrowed resource");
+            observed.realization = ResourceRealization::Created;
+            observed.revision = revision;
+            observed.failure = None;
+            observed.transition_time = chrono::Utc::now();
         }
         if let Some(deployment) = &mut state.deployment {
             deployment.revision = revision;

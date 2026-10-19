@@ -582,6 +582,7 @@ async fn broadcast_replay_still_requires_explicit_loss_permission() -> Result<()
         SourceSubscriptionOptions::default(),
         stream.clone(),
         None,
+        "broadcast-query",
     )
     .is_err());
     LegacySourceSubscription::new(
@@ -592,6 +593,7 @@ async fn broadcast_replay_still_requires_explicit_loss_permission() -> Result<()
         },
         stream,
         None,
+        "broadcast-query",
     )?;
     Ok(())
 }

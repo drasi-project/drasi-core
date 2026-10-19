@@ -685,7 +685,6 @@ pub struct Query {
     auto_start: bool,
     joins: Option<Vec<QueryJoinConfig>>,
     enable_bootstrap: bool,
-    bootstrap_buffer_size: usize,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
     dispatch_mode: Option<DispatchMode>,
@@ -707,7 +706,6 @@ impl Query {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -729,7 +727,6 @@ impl Query {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -805,12 +802,6 @@ impl Query {
         self
     }
 
-    /// Set the bootstrap buffer size.
-    pub fn with_bootstrap_buffer_size(mut self, size: usize) -> Self {
-        self.bootstrap_buffer_size = size;
-        self
-    }
-
     /// Set the priority queue capacity.
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
@@ -869,7 +860,6 @@ impl Query {
             auto_start: self.auto_start,
             joins: self.joins,
             enable_bootstrap: self.enable_bootstrap,
-            bootstrap_buffer_size: self.bootstrap_buffer_size,
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             dispatch_mode: self.dispatch_mode,
@@ -1526,18 +1516,6 @@ mod tests {
     }
 
     #[test]
-    fn test_query_bootstrap_buffer_size_default() {
-        let q = Query::cypher("q");
-        assert_eq!(q.bootstrap_buffer_size, 10000);
-    }
-
-    #[test]
-    fn test_query_with_bootstrap_buffer_size() {
-        let q = Query::cypher("q").with_bootstrap_buffer_size(5000);
-        assert_eq!(q.bootstrap_buffer_size, 5000);
-    }
-
-    #[test]
     fn test_query_with_dispatch_mode_broadcast() {
         let q = Query::cypher("q").with_dispatch_mode(DispatchMode::Broadcast);
         assert_eq!(q.dispatch_mode, Some(DispatchMode::Broadcast));
@@ -1587,7 +1565,6 @@ mod tests {
             .from_source("source-b")
             .auto_start(false)
             .enable_bootstrap(false)
-            .with_bootstrap_buffer_size(5000)
             .with_priority_queue_capacity(50000)
             .with_dispatch_buffer_capacity(2500)
             .with_dispatch_mode(DispatchMode::Broadcast)
@@ -1601,7 +1578,6 @@ mod tests {
         assert_eq!(config.sources[1].source_id, "source-b");
         assert!(!config.auto_start);
         assert!(!config.enable_bootstrap);
-        assert_eq!(config.bootstrap_buffer_size, 5000);
         assert_eq!(config.priority_queue_capacity, Some(50000));
         assert_eq!(config.dispatch_buffer_capacity, Some(2500));
         assert_eq!(config.dispatch_mode, Some(DispatchMode::Broadcast));
@@ -1624,7 +1600,6 @@ mod tests {
         // Verify defaults are preserved through build
         assert!(config.auto_start);
         assert!(config.enable_bootstrap);
-        assert_eq!(config.bootstrap_buffer_size, 10000);
     }
 
     #[test]
@@ -1639,7 +1614,6 @@ mod tests {
         assert!(config.auto_start);
         assert!(config.joins.is_none());
         assert!(config.enable_bootstrap);
-        assert_eq!(config.bootstrap_buffer_size, 10000);
         assert_eq!(config.priority_queue_capacity, None);
         assert_eq!(config.dispatch_buffer_capacity, None);
         assert_eq!(config.dispatch_mode, None);

@@ -24,7 +24,6 @@ use super::*;
 pub(super) struct ResetMarker {
     pub(super) sequence: u64,
     pub(super) in_progress: bool,
-    #[serde(default)]
     pub(super) generation: u64,
 }
 
@@ -68,15 +67,6 @@ impl ContinuousQueryTransformer {
                     .await?;
             }
             if let Some(store) = resources.checkpoint_store() {
-                if self.runtime_compatibility {
-                    if let Some(hash) = self.legacy_hash {
-                        store
-                            .write_config_hash(
-                                crate::queries::config_hash::output_reset_in_progress_hash(hash),
-                            )
-                            .await?;
-                    }
-                }
                 store.write_output_generation(id, generation).await?;
             }
             let baseline = marker(false)?;
@@ -86,33 +76,21 @@ impl ContinuousQueryTransformer {
                         id,
                         "clear element index",
                         resources.indexes().element_index.clear().await,
-                        self.runtime_compatibility,
                     )?;
                     crate::indexes::check_clear(
                         id,
                         "clear archive index",
                         resources.indexes().archive_index.clear().await,
-                        self.runtime_compatibility,
                     )?;
                     crate::indexes::check_clear(
                         id,
                         "clear result index",
                         resources.indexes().result_index.clear().await,
-                        self.runtime_compatibility,
                     )?;
-                    if self.runtime_compatibility {
-                        crate::indexes::check_clear(
-                            id,
-                            "reset result sequence",
-                            resources.indexes().result_index.apply_sequence(0, "").await,
-                            true,
-                        )?;
-                    }
                     crate::indexes::check_clear(
                         id,
                         "clear future queue",
                         query.future_queue().clear().await,
-                        self.runtime_compatibility,
                     )?;
                     if let Some(store) = resources.checkpoint_store() {
                         store.clear_checkpoints().await.map_err(|error| {
@@ -310,13 +288,6 @@ impl ContinuousQueryTransformer {
                 .await?;
         }
         if let Some(checkpoint) = resources.checkpoint_store() {
-            if let Some(hash) = self.legacy_hash.filter(|_| self.runtime_compatibility) {
-                checkpoint
-                    .write_config_hash(crate::queries::config_hash::output_reset_in_progress_hash(
-                        hash,
-                    ))
-                    .await?;
-            }
             checkpoint
                 .write_output_generation(self.definition.id.as_str(), generation)
                 .await?;
@@ -329,25 +300,21 @@ impl ContinuousQueryTransformer {
                     self.definition.id.as_str(),
                     "clear element index",
                     resources.indexes().element_index.clear().await,
-                    self.runtime_compatibility,
                 )?;
                 crate::indexes::check_clear(
                     self.definition.id.as_str(),
                     "clear archive index",
                     resources.indexes().archive_index.clear().await,
-                    self.runtime_compatibility,
                 )?;
                 crate::indexes::check_clear(
                     self.definition.id.as_str(),
                     "clear result index",
                     resources.indexes().result_index.clear().await,
-                    self.runtime_compatibility,
                 )?;
                 crate::indexes::check_clear(
                     self.definition.id.as_str(),
                     "clear future queue",
                     query.future_queue().clear().await,
-                    self.runtime_compatibility,
                 )?;
                 if let Some(outbox) = resources.outbox_writer() {
                     outbox.clear(self.definition.id.as_str()).await?;
@@ -363,7 +330,7 @@ impl ContinuousQueryTransformer {
                             .await?;
                     }
                     checkpoint
-                        .stage_checkpoint(CONFIGURATION, 1, Some(&config))
+                        .stage_checkpoint(QUERY_CONFIGURATION, 1, Some(&config))
                         .await?;
                     checkpoint.stage_checkpoint(BOOTSTRAP, 0, None).await?;
                     checkpoint
@@ -381,13 +348,6 @@ impl ContinuousQueryTransformer {
                 Ok(())
             })
             .await?;
-        if let (true, Some(hash), Some(checkpoint)) = (
-            self.runtime_compatibility,
-            self.legacy_hash,
-            resources.checkpoint_store(),
-        ) {
-            checkpoint.write_config_hash(hash).await?;
-        }
         self.results
             .state
             .write()
@@ -408,7 +368,7 @@ impl ContinuousQueryTransformer {
         // Ordinary Source subscriptions can request a new snapshot when no
         // source checkpoint exists. Consume the receivers chosen for this start
         // without resetting previously committed output or its generation.
-        let requested_snapshot = self.runtime_compatibility && provider.has_pending_snapshot()?;
+        let requested_snapshot = provider.has_pending_snapshot()?;
         if self.bootstrap_complete.load(Ordering::Acquire) && !requested_snapshot {
             return Ok(());
         }

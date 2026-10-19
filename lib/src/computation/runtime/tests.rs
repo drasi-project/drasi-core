@@ -708,7 +708,7 @@ async fn subscriptions_are_declared_with_nodes_and_enforce_graph_removal_policy(
         .desired_snapshot()
         .subscriptions
         .contains(&(source_id.clone(), query.id().clone())));
-    assert!(query.wait_created().await.is_err());
+    assert_waiting_for(&query, "later");
     let (unrelated, _) = ControlledSource::new("unrelated");
     core.add_source_with_handle(unrelated)
         .await
@@ -1113,6 +1113,18 @@ async fn assert_creation_failed(core: &DrasiLib, handle: &ComponentHandle, messa
     assert!(failure.contains(message), "{failure}");
 }
 
+fn assert_waiting_for(handle: &ComponentHandle, dependency: &str) {
+    let observed = handle.observed().unwrap();
+    assert_eq!(observed.realization, RealizationState::Blocked);
+    assert!(observed.failure.is_none(), "{observed:?}");
+    assert!(
+        observed.waiting_for.iter().any(|waiting| {
+            matches!(waiting, DependencyWait::Component { id } if id.as_str() == dependency)
+        }),
+        "{observed:?}"
+    );
+}
+
 async fn wait_for_attached_resources(
     core: &DrasiLib,
     component: &ComponentId,
@@ -1333,13 +1345,14 @@ async fn builder_query_validation_failures_remain_on_declared_nodes() {
     capacity.dispatch_buffer_capacity = Some(0);
     let invalid = [
         (syntax, ""),
-        (dependency, "missing-source"),
         (unknown_backend, "missing-backend"),
         (invalid_inline, "must not be empty"),
         (unsupported_inline, ""),
-        (capacity, "capacity must be nonzero"),
+        (capacity, "bounded pipe capacity"),
     ];
-    let mut configured = builder().with_query(config("valid", None));
+    let mut configured = builder()
+        .with_query(config("valid", None))
+        .with_query(dependency);
     for (query, _) in &invalid {
         configured = configured.with_query(query.clone());
     }
@@ -1347,6 +1360,10 @@ async fn builder_query_validation_failures_remain_on_declared_nodes() {
         .build()
         .await
         .expect("query-specific validation must happen after graph addition");
+    assert_waiting_for(
+        &core.computation_component("dependency").unwrap(),
+        "missing-source",
+    );
     for (query, message) in invalid {
         let handle = core.computation_component(&query.id).unwrap();
         assert_creation_failed(&core, &handle, message).await;
@@ -1396,18 +1413,18 @@ async fn query_constructor_validation_happens_after_declaration() {
 }
 
 #[tokio::test]
-async fn missing_dependencies_fail_on_nodes_and_can_be_retried_when_available() {
+async fn missing_dependencies_wait_and_are_created_when_available() {
     let core = builder().build().await.unwrap();
     core.add_query(config("query", Some("source")))
         .await
         .unwrap();
     let query = component_handle(&core, "query", "query").await;
-    assert_creation_failed(&core, &query, "Source 'source' not found").await;
+    assert_waiting_for(&query, "source");
     assert!(!core.get_graph().await.contains("source"));
 
     let (reaction, _, _) = ControlledReaction::new("reaction", &["missing-query"]);
     let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
-    assert_creation_failed(&core, &reaction, "Query 'missing-query' not found").await;
+    assert_waiting_for(&reaction, "missing-query");
     assert!(!core.get_graph().await.contains("missing-query"));
 
     let (source, _) = ControlledSource::new("source");
@@ -1417,11 +1434,14 @@ async fn missing_dependencies_fail_on_nodes_and_can_be_retried_when_available() 
         .wait_created()
         .await
         .unwrap();
-    core.start_query("query").await.unwrap();
-    assert!(matches!(
-        query.wait_created().await,
-        Err(GraphError::StaleGeneration)
-    ));
+    tokio::time::timeout(Duration::from_secs(3), query.wait_created())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        query.observed().unwrap().lifecycle,
+        ComponentLifecycle::Stopped
+    );
     core.add_query_with_handle(config("missing-query", None))
         .await
         .unwrap()
@@ -1429,11 +1449,10 @@ async fn missing_dependencies_fail_on_nodes_and_can_be_retried_when_available() 
         .await
         .unwrap();
     core.start_query("missing-query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
-    assert!(matches!(
-        reaction.wait_created().await,
-        Err(GraphError::StaleGeneration)
-    ));
+    tokio::time::timeout(Duration::from_secs(3), reaction.wait_created())
+        .await
+        .unwrap()
+        .unwrap();
     core.shutdown().await.unwrap();
 }
 
@@ -1571,7 +1590,7 @@ async fn pending_initialization_does_not_block_addition_or_removal() {
         .auto_start(false)
         .build();
     let invalid = core.add_query_with_handle(invalid).await.unwrap();
-    assert_creation_failed(&core, &invalid, "Source 'missing' not found").await;
+    assert_waiting_for(&invalid, "missing");
     core.remove_query("invalid-dependency").await.unwrap();
     let (independent, independent_control) = ControlledSource::new("independent");
     let independent = tokio::time::timeout(
@@ -2233,12 +2252,10 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         .unwrap();
     let handle = core.computation_component("query").unwrap();
     handle.wait_created().await.unwrap();
-    assert!(core
-        .computation_component("unresolved")
-        .unwrap()
-        .wait_created()
-        .await
-        .is_err());
+    assert_waiting_for(
+        &core.computation_component("unresolved").unwrap(),
+        "missing",
+    );
     let runtime = core.computation_runtime.as_ref();
     runtime.cleanup_candidates.write().await.clear();
     let inventory = core.inspect_computation_inventory().await.unwrap();
@@ -2767,7 +2784,7 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         .expect("blocked and failed creation must not leave startup waiting")
         .unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("native-blocked"), "{message}");
+    assert!(!message.contains("native-blocked"), "{message}");
     assert!(
         message.contains("injected native creation failure"),
         "{message}"
@@ -2775,7 +2792,7 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
     let failures = error
         .downcast_ref::<crate::error::OperationFailures>()
         .unwrap();
-    assert_eq!(failures.failures().len(), 2);
+    assert_eq!(failures.failures().len(), 1);
     assert!(failures.failures().iter().any(|error| error
         .chain()
         .any(|cause| { cause.downcast_ref::<NativeCreationFailure>().is_some() })));
@@ -2783,6 +2800,12 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         blocked.observed().unwrap().realization,
         RealizationState::Blocked
     );
+    assert!(blocked
+        .observed()
+        .unwrap()
+        .waiting_reason()
+        .unwrap()
+        .contains("native-blocked:out"));
     assert_eq!(starts.load(Ordering::Acquire), 1);
     assert_eq!(source_control.starts.load(Ordering::Acquire), 0);
     assert_eq!(
@@ -2816,12 +2839,7 @@ async fn default_builder_is_native_and_preserves_public_result_signatures() {
     core.add_query(config("missing", Some("source")))
         .await
         .unwrap();
-    assert!(core
-        .computation_component("missing")
-        .unwrap()
-        .wait_created()
-        .await
-        .is_err());
+    assert_waiting_for(&core.computation_component("missing").unwrap(), "source");
     core.remove_query("missing").await.unwrap();
     assert!(core.list_queries().await.unwrap().is_empty());
     let (source, source_control) = ControlledSource::new("source");
@@ -2924,8 +2942,19 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
         .set_control_connections(control_only.clone())
         .await
         .unwrap();
-    let mut expected =
-        vec![(a.clone(), q1.clone()), (b.clone(), q2.clone()), (q1.clone(), reaction.clone())];
+    let mut expected = vec![
+        (a.clone(), q1.clone()),
+        (
+            a.clone(),
+            ComputationPipelineBuilder::source_component_id("q1", "a").unwrap(),
+        ),
+        (b.clone(), q2.clone()),
+        (
+            b.clone(),
+            ComputationPipelineBuilder::source_component_id("q2", "b").unwrap(),
+        ),
+        (q1.clone(), reaction.clone()),
+    ];
     expected.sort();
     assert_eq!(
         runtime
@@ -2953,8 +2982,19 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
     core.update_reaction("reaction", new_reaction)
         .await
         .unwrap();
-    let mut expected =
-        vec![(b.clone(), q1.clone()), (b.clone(), q2.clone()), (q2.clone(), reaction.clone())];
+    let mut expected = vec![
+        (b.clone(), q1.clone()),
+        (
+            b.clone(),
+            ComputationPipelineBuilder::source_component_id("q1", "b").unwrap(),
+        ),
+        (b.clone(), q2.clone()),
+        (
+            b.clone(),
+            ComputationPipelineBuilder::source_component_id("q2", "b").unwrap(),
+        ),
+        (q2.clone(), reaction.clone()),
+    ];
     expected.sort();
     assert_eq!(
         runtime
@@ -2986,7 +3026,13 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
             .desired_snapshot()
             .subscriptions
             .as_ref(),
-        &[(b, q2)]
+        &[
+            (b.clone(), q2),
+            (
+                b,
+                ComputationPipelineBuilder::source_component_id("q2", "b").unwrap()
+            )
+        ]
     );
     core.shutdown().await.unwrap();
 }

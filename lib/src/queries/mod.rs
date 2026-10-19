@@ -18,16 +18,13 @@
 //! The manager delegates to the instance graph's native query component.
 //! [`crate::queries::SnapshotResponse`], [`crate::queries::OutboxResponse`] and
 //! [`crate::queries::FetchError`] remain active
-//! read contracts. Deprecated query base/state/dedup helpers are retained through
-//! [`crate::compatibility`]; they do not run the current query pipeline.
+//! read contracts. Query execution and recovery state belong to the instance
+//! graph, not separate query base/state/dedup utilities.
 
-pub mod base;
-pub mod config_hash;
 pub mod label_extractor;
 pub mod manager;
 pub mod output_state;
 pub mod priority_queue;
-pub mod sequence_dedup;
 pub mod subscription_builder;
 pub mod traits;
 
@@ -43,19 +40,12 @@ mod checkpoint_tests;
 #[cfg(test)]
 mod e2e_checkpoint_tests;
 
-#[allow(deprecated)]
-pub use base::QueryBase;
-pub use config_hash::compute_config_hash;
 pub use label_extractor::*;
 pub use manager::*;
-#[allow(deprecated)]
-pub use output_state::QueryOutputState;
 pub use output_state::{
-    output_epoch_hash, DurableOutputInconsistency, FetchError, KeyedSnapshotRow, OutboxGap,
-    OutboxResponse, OutboxStream, SnapshotResponse, SnapshotStream,
+    output_epoch_hash, FetchError, KeyedSnapshotRow, OutboxGap, OutboxResponse, OutboxStream,
+    QueryResultSubscription, SnapshotResponse, SnapshotStream,
 };
 pub use priority_queue::*;
-#[allow(deprecated)]
-pub use sequence_dedup::SequenceDedup;
 pub use subscription_builder::*;
 pub use traits::Query;

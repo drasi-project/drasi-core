@@ -143,17 +143,45 @@ helpers before reporting completion, without stopping a shared source.
 
 Failed definitions remain inspectable and retryable. The declaration resource
 contains configuration-related metadata and any typed preparation error; it does
-not run the query. Ordinary queries retain their previous `lib-query/<hex ID>`
-storage and producer identity even though they now execute in the instance
-graph. This preserves checkpoints, retained results and unconfirmed output
-without a data reset. Catalog transport counters survive replacement so a new
-component generation cannot reuse an already-published stream position.
+not run the query. Ordinary and directly constructed queries now use the actual
+graph ID and query ID, with the enclosing instance scope, for storage and producer
+identity. The retired `lib-query/<hex ID>` namespace is not adopted or translated;
+this is part of the breaking release and does not delete the old files.
+Current-release reconstruction must keep these identities stable. Catalog
+transport counters survive replacement so a new component generation cannot
+reuse an already-published stream position.
 
-### Ordinary APIs are assembly and compatibility, not a fallback engine
+There is no query execution compatibility switch or legacy hash reader. The
+native configuration record and fingerprint are shared by both admission paths.
+Source order and middleware order remain meaningful; label sets and join
+declarations are canonicalized. Operational capacity/startup changes do not
+invalidate processing identity.
+
+Source-facing memory queries explicitly include volatile checkpoints alongside
+native memory indexes. The minimal processing-only Core memory provider does
+not acquire that extra capability. Persistent queries require persistent
+checkpoints, an outbox and live results; those interfaces alone do not establish
+atomicity without their actual shared transaction. Reset and deprovisioning
+propagate unsupported cleanup errors. Current reset markers require their
+generation, and stored output must already carry its producer identity.
+
+The result timestamp is production time, including scheduled results; the
+envelope retains logical event/due time separately. Ordinary result metadata is
+projected when crossing the result API boundary, without adding those duplicate
+fields to the native execution path.
+
+Completed bootstrap is reused on clean restart. `has_pending_snapshot` requests
+an additional prepared snapshot, for example a source subscription with no
+checkpoint; it defaults to false in both Rust and native SDK contracts. Initial
+bootstrap and explicit reset can still request a snapshot without that refresh
+signal. Native preparation still permits only one snapshot and retains cleanup
+ownership across cancellation.
+
+### Ordinary APIs are assembly, not a fallback engine
 
 The ordinary APIs preserve familiar configuration and plugin interfaces.
 ComputationGraph is the only engine, including in `--no-default-features`
-builds; the `computation` feature is an empty compatibility alias.
+builds; there is no DrasiLib runtime-selection feature.
 [`runtime/mod.rs`](../src/computation/runtime/mod.rs) translates those
 registrations into graph declarations and retrieves current objects from
 registry publications. The retained
@@ -170,13 +198,16 @@ evaluation, timer and outlet components. A bug in how ordinary queries are
 assembled usually belongs here or in their runtime adapter, not in the core
 evaluator.
 
-### Native assembly bypasses compatibility, not ownership
+### Native assembly shares execution and ownership
 
 Native components implement the graph contracts directly. Their data paths
 can connect source to transformer to sink without an ordinary Query object.
 Ordinary and explicitly assembled queries use the same native query component.
 Explicit assembly can omit ordinary configuration metadata and API adapters;
 neither path creates a private query graph or an additional execution host.
+An explicitly supplied source-host resource need not have a same-named graph
+component. A host borrowed from an actual instance source retains that source's
+dependency edges; source names in query metadata alone do not prove ownership.
 
 Factories describe reconstructible components and resolve declared resources;
 supplied objects provide already-constructed instances. Both enter the same

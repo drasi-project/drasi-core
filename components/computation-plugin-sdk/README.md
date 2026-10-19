@@ -431,6 +431,12 @@ before external initialization effects. The final `completion_state()` is
 returned to the query and committed with its watermarks/completed marker, not
 written eagerly by the bridge.
 
+Completed bootstrap is reused on healthy restart. `has_pending_snapshot()`
+defaults to false and requests an additional snapshot only when preparation has
+produced new work, such as a source subscription without a checkpoint. Initial
+bootstrap and explicit reset can request a snapshot without that refresh signal.
+Preparation still permits exactly one snapshot before cleanup and reuse.
+
 Snapshots transfer one envelope per caller-polled operation. Control frames are
 bounded to **1 MiB**, with **4,096 watermarks** per response; envelopes retain the
 existing **64 MiB** wire bound. Stream generations prevent an old stream from

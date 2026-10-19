@@ -296,6 +296,7 @@ impl ComputationTopologySource {
                         "generation": observed.map(|state| state.generation.0),
                         "operation": observed.map(|state| state.operation.0),
                         "failurePhase": observed.and_then(|state| state.failure.as_ref()).map(|failure| format!("{:?}", failure.phase)),
+                        "waitingFor": observed.map(|state| &state.waiting_for),
                     })));
                     let relation = format!("owns:{key}");
                     elements.insert(

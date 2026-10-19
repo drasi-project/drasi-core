@@ -172,9 +172,7 @@ pub(super) fn outbox_response(
             QueryChangeCodec::to_legacy_result(event)
                 .map(Arc::new)
                 .map_err(|error| {
-                    log::error!(
-                        "Cannot decode native query history for a legacy reaction: {error}"
-                    );
+                    log::error!("Cannot decode native query history: {error}");
                     FetchError::NotRunning {
                         status: ComponentStatus::Error,
                     }
@@ -1140,13 +1138,7 @@ impl ReactionPluginHost {
         if generation == view.snapshot.generation {
             match outbox_response(&view, after) {
                 Ok(replay) => {
-                    let mut last = after;
-                    let contiguous = replay.results.iter().all(|result| {
-                        let next = last.checked_add(1) == Some(result.sequence);
-                        last = result.sequence;
-                        next
-                    }) && last == view.snapshot.as_of_sequence;
-                    if contiguous {
+                    if replay.is_contiguous_after(after) {
                         // Recover transport loss from the last in-memory acceptance.
                         // The reaction alone checkpoints completed side effects.
                         for result in replay.results {
@@ -1161,7 +1153,10 @@ impl ReactionPluginHost {
                                 .insert(query.to_owned(), (generation, result.sequence));
                         }
                         if let Some(metrics) = metrics {
-                            metrics.record_checkpoint(last, self.catalog.current_sequence(query)?);
+                            metrics.record_checkpoint(
+                                replay.latest_sequence,
+                                self.catalog.current_sequence(query)?,
+                            );
                         }
                         return Ok(());
                     }

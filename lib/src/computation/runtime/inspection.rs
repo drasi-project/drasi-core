@@ -25,7 +25,7 @@ pub(super) fn status(record: &Record, observed: &ObservedComponent) -> Component
 
 fn error_message(record: &Record, observed: &ObservedComponent) -> Option<String> {
     if status(record, observed) != ComponentStatus::Error {
-        return None;
+        return observed.waiting_reason();
     }
     observed
         .failure
@@ -232,7 +232,25 @@ impl Runtime {
             ComputationTopology::new(&publication.desired, &publication.observed),
         )?;
         for (id, declaration) in self.ordinary_queries_at(&publication)? {
-            for host in &declaration.sources {
+            let hosts = if let Some(resources) = publication.desired.specifications[&id]
+                .dependencies
+                .get("source_hosts")
+            {
+                resources
+                    .iter()
+                    .filter(|resource| {
+                        publication
+                            .observed
+                            .resources
+                            .get(*resource)
+                            .is_some_and(|state| state.realization == ResourceRealization::Created)
+                    })
+                    .map(|resource| publication.resource(resource)?.get::<SourcePluginHost>())
+                    .collect::<GraphResult<Vec<_>>>()?
+            } else {
+                declaration.sources.clone()
+            };
+            for host in &hosts {
                 let source = host.source()?;
                 let Some(current) = records.get(source.id()) else {
                     continue;
@@ -371,7 +389,8 @@ impl Runtime {
             error_message: observed
                 .failure
                 .as_ref()
-                .map(|failure| format!("{:#}", failure.cause)),
+                .map(|failure| format!("{:#}", failure.cause))
+                .or_else(|| observed.waiting_reason()),
             source_subscriptions: config.sources,
             joins: config.joins,
         })
@@ -412,7 +431,8 @@ impl Runtime {
             error_message: state
                 .failure
                 .as_ref()
-                .map(|failure| format!("{:#}", failure.cause)),
+                .map(|failure| format!("{:#}", failure.cause))
+                .or_else(|| state.waiting_reason()),
         })
     }
 
@@ -446,7 +466,8 @@ impl Runtime {
             error_message: state
                 .failure
                 .as_ref()
-                .map(|failure| format!("{:#}", failure.cause)),
+                .map(|failure| format!("{:#}", failure.cause))
+                .or_else(|| state.waiting_reason()),
         })
     }
 

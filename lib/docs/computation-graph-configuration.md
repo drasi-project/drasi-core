@@ -16,12 +16,27 @@ the branch implementation, not a promise about released crate versions.
 | Embedded instance in the test framework | Normal embedded-instance configuration; no `execution_mode` override | [Harness reference](https://github.com/drasi-project/test-infra/blob/agentofreality-parallel-computation-graph/e2e-test-framework/README.md) |
 
 Remove obsolete engine-selector settings. They must not suggest that
-ComponentGraph remains a supported option. The compatibility `computation`
-Cargo feature does not select an engine; disabling default features does not
-disable ComputationGraph.
+ComponentGraph remains a supported option. DrasiLib no longer has a
+`computation` Cargo feature; disabling default features does not disable
+ComputationGraph.
 
 This change does not import the retired engine's saved indexes/checkpoints.
 ComputationGraph keeps its existing storage namespaces.
+
+## Declare before dependencies are available
+
+A valid component can be declared before a required source, query, resource or
+factory is available. Its observation lists the missing prerequisites in
+`waiting_for`; `waiting_reason()` provides a readable explanation. The graph
+resumes construction and eligible startup when those prerequisites arrive.
+Explicitly stopped components and components with auto-start disabled stay
+stopped. Real validation, provider and processing failures are not automatically
+retried as dependency waits.
+
+Unconnected ports wait for an explicit connection; the graph does not guess
+wiring. The old `allow_incomplete`/`allowIncomplete` switch is removed and
+rejected. Construction, live additions and saved definitions use the same
+declaration-first policy.
 
 ## Library settings
 
@@ -99,10 +114,9 @@ a replacement for Server's configuration DTOs.
 An omitted mapping does not mean that all data will match the query; the query
 and source still perform their normal label filtering.
 
-The retained `with_bootstrap_buffer_size` / `bootstrapBufferSize` setting
-defaults to 10,000 in `QueryConfig`. It does **not** set a separate
-ComputationGraph live-event inbox limit: use `priority_queue_capacity` for live
-events queued while the query bootstraps.
+Use `priority_queue_capacity` for live events queued while the query
+bootstraps. There is no separate bootstrap-buffer setting. Unknown query
+settings are rejected rather than silently ignored.
 
 For example:
 

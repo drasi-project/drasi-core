@@ -1,3 +1,6 @@
+# Breaking release: retired QueryBase/SequenceDedup/cache-only cases were removed;
+# current graph recovery and snapshot/stream behavior remain required.
+# Tests only asserting the removed no-op bootstrap-buffer setting were also retired.
 # Current main reviewed at c2d80aa7e4de874302b301584a6c7134c3609ed7.
 # Union of all 970 main library cases and the earlier 01813156 corpus (9 older names).
 # Every case requires execution or an explicit mapping; only listed diagnostics may be ignored.
@@ -45,7 +48,6 @@ lib	builder::tests::test_drasi_lib_builder_with_id	runtime	Selected ordinary bui
 lib	builder::tests::test_drasi_lib_builder_with_query_no_source	runtime	Selected ordinary builder constructs an unbound query.
 lib	builder::tests::test_query_auto_start_default_true	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_auto_start_false	shared	Unchanged configuration-builder values; no component execution.
-lib	builder::tests::test_query_bootstrap_buffer_size_default	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_build_defaults	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_build_gql_propagates_language	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_build_propagates_all_fields	shared	Unchanged configuration-builder values; no component execution.
@@ -61,7 +63,6 @@ lib	builder::tests::test_query_from_source_adds_source	shared	Unchanged configur
 lib	builder::tests::test_query_from_source_chaining	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_gql_sets_id_and_language	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_priority_queue_capacity_default_none	shared	Unchanged configuration-builder values; no component execution.
-lib	builder::tests::test_query_with_bootstrap_buffer_size	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_with_dispatch_buffer_capacity	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_with_dispatch_mode_broadcast	shared	Unchanged configuration-builder values; no component execution.
 lib	builder::tests::test_query_with_dispatch_mode_channel	shared	Unchanged configuration-builder values; no component execution.
@@ -490,24 +491,6 @@ lib	profiling::tests::test_profiling_metadata_new	shared	Unchanged profiling val
 lib	profiling::tests::test_profiling_metadata_with_source_timestamp	shared	Unchanged profiling values and timestamp helpers.
 lib	profiling::tests::test_should_profile	shared	Unchanged profiling values and timestamp helpers.
 lib	profiling::tests::test_timestamp_ns	shared	Unchanged profiling values and timestamp helpers.
-lib	queries::base::tests::test_new_broadcast_mode_starts_with_one_dispatcher	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_new_channel_mode_starts_with_no_dispatchers	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_new_default_dispatch_mode_is_channel	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_new_initial_status_is_stopped	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_query_base_broadcast_mode	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_query_base_channel_mode	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_set_and_get_status	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_set_status_without_initialization	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_status_handle_returns_handle	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_status_handle_shares_state_with_base	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_stop_common_graceful_shutdown_timing	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_stop_common_sends_shutdown_signal	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_stop_common_sets_status_to_stopped	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_stop_common_without_task_or_shutdown	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_subscribe_broadcast_mode_reuses_single_dispatcher	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_subscribe_channel_mode_adds_dispatcher_per_subscription	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_subscribe_channel_mode_creates_receiver	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
-lib	queries::base::tests::test_subscribe_returns_correct_query_id	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
 lib	queries::checkpoint_tests::orchestration_tests::test_auto_reset_double_failure_errors	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::orchestration_tests::test_default_strict_policy_when_none_configured	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::orchestration_tests::test_global_default_policy_auto_reset	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
@@ -539,7 +522,6 @@ lib	queries::checkpoint_tests::tests::test_teardown_archive_clear_failure_marks_
 lib	queries::checkpoint_tests::tests::test_teardown_fails_when_clear_checkpoints_fails	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
 lib	queries::checkpoint_tests::tests::test_wipe_failure_then_restart_clears_stale_indexes	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
 lib	queries::config_hash::tests::auto_start_change_same_hash	shared	Unchanged public configuration hash used by the compatibility profile.
-lib	queries::config_hash::tests::bootstrap_buffer_size_change_same_hash	shared	Unchanged public configuration hash used by the compatibility profile.
 lib	queries::config_hash::tests::different_join_property_different_hash	shared	Unchanged public configuration hash used by the compatibility profile.
 lib	queries::config_hash::tests::different_middleware_config_different_hash	shared	Unchanged public configuration hash used by the compatibility profile.
 lib	queries::config_hash::tests::different_middleware_name_different_hash	shared	Unchanged public configuration hash used by the compatibility profile.
@@ -588,38 +570,8 @@ lib	queries::manager::pipeline_characterization_tests::committed_input_has_no_re
 lib	queries::manager::pipeline_characterization_tests::due_future_output_is_dispatched_after_core_commit	legacy-boundary	Pins legacy query internals: transactional commit/rollback, MessagePack payloads, delivery order, replay and restart deduplication; not native parity coverage.
 lib	queries::manager::pipeline_characterization_tests::evaluation_results_map_to_ordered_query_result_and_sequence	legacy-boundary	Pins legacy query internals: transactional commit/rollback, MessagePack payloads, delivery order, replay and restart deduplication; not native parity coverage.
 lib	queries::manager::tests::temporal_values_serialize_as_plain_strings	codec	The same original temporal-value assertions execute the selected native result codec or legacy conversion.
-lib	queries::output_state::tests::hydrate_from_empty_installs_sequence	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::hydrate_installs_results_outbox_and_sequence	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::hydrate_trims_outbox_to_capacity_keeping_newest	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::next_output_generation_always_bumps_from_disk	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
 lib	queries::output_state::tests::output_epoch_hash_generation_zero_is_identity	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_does_not_lower_stored_sequence_below_outbox_hwm	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_duplicate_outbox_sequence_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_empty_durable_output_is_sequence_zero	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_gapped_outbox_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_matching_sequence_and_outbox_hwm	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_missing_live_rows_for_stored_sequence	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_outbox_ahead_of_sequence_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_sequence_zero_against_live_rows_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reconcile_sequence_zero_against_outbox_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reset_clears_hydrated_state	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reset_from_generation_bumps_existing_ram_generation	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::reset_from_persisted_generation_does_not_restart_at_one	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
 lib	queries::output_state::tests::snapshot_stream_yields_all_values	shared	Unchanged public SnapshotStream values.
-lib	queries::output_state::tests::test_advance_sequence_and_push	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_apply_committed_sequence_uses_durable_seq	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
-lib	queries::output_state::tests::test_apply_diffs_add	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_apply_diffs_aggregation	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_apply_diffs_delete	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_apply_diffs_noop	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_apply_diffs_update	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_fetch_outbox_after_caught_up	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_fetch_outbox_after_gap_error	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_fetch_outbox_after_returns_entries	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_get_results_as_vec	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_outbox_capacity_eviction	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_outbox_capacity_zero_clamped_to_one	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
-lib	queries::output_state::tests::test_snapshot_clone_is_independent	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
 lib	queries::output_state::tests::test_snapshot_stream_from_bare_values_uses_zero_signature	shared	Unchanged public SnapshotStream constructor.
 lib	queries::output_state::tests::test_snapshot_stream_preserves_row_signatures	shared	Unchanged public SnapshotStream keyed projection.
 lib	queries::priority_queue::tests::test_blocking_dequeue	legacy-structure	Concrete old source-event heap; native merge/pipes preserve producer FIFO instead of exposing that heap implementation.
@@ -627,18 +579,6 @@ lib	queries::priority_queue::tests::test_drain	legacy-structure	Concrete old sou
 lib	queries::priority_queue::tests::test_priority_queue_capacity	legacy-structure	Concrete old source-event heap; native merge/pipes preserve producer FIFO instead of exposing that heap implementation.
 lib	queries::priority_queue::tests::test_priority_queue_metrics	legacy-structure	Concrete old source-event heap; native merge/pipes preserve producer FIFO instead of exposing that heap implementation.
 lib	queries::priority_queue::tests::test_priority_queue_ordering	legacy-structure	Concrete old source-event heap; native merge/pipes preserve producer FIFO instead of exposing that heap implementation.
-lib	queries::sequence_dedup::tests::advance_equal_is_noop	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::advance_inserts_new_source	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::advance_is_monotonic	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::advance_updates_checkpoint	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::all_checkpoints_returns_full_map	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::checkpoint_for_unknown_returns_none	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::empty_dedup_passes_everything	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::none_sequence_always_passes	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::passes_events_above_checkpoint	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::per_source_isolation	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::skips_events_at_or_below_checkpoint	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
-lib	queries::sequence_dedup::tests::unknown_source_passes	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
 lib	queries::subscription_builder::tests::test_complex_multi_source_scenario	shared	Unchanged source label/cardinality/join subscription planner used by both runtimes.
 lib	queries::subscription_builder::tests::test_configured_join_relation_error	shared	Unchanged source label/cardinality/join subscription planner used by both runtimes.
 lib	queries::subscription_builder::tests::test_cross_source_join_settings_are_order_independent	shared	Unchanged source label/cardinality/join subscription planner used by both runtimes.

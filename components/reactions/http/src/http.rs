@@ -25,7 +25,7 @@ use reqwest::Client;
 use tokio::sync::Mutex;
 
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::managers::log_component_start;
+use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::CheckpointState;
 use drasi_lib::recovery::ReactionRecoveryPolicy;

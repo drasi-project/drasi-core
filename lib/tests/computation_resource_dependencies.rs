@@ -525,16 +525,6 @@ async fn invalid_dependency_definitions_are_rejected_before_acceptance_or_effect
         BTreeMap::from([(id("a-leaf"), ResourceRole::StateStore)]),
     );
     cases.push(cycle);
-    let mut missing = definition(0);
-    missing
-        .topology
-        .resources
-        .retain(|resource| resource.id != id("z-root"));
-    missing
-        .topology
-        .resource_configurations
-        .remove(&id("z-root"));
-    cases.push(missing);
     let mut wrong_role = definition(0);
     wrong_role
         .topology
@@ -556,6 +546,38 @@ async fn invalid_dependency_definitions_are_rejected_before_acceptance_or_effect
     }
     assert!(state.calls().is_empty());
     assert_eq!(core.desired_configuration()?.revision, 0);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_resource_definitions_wait_until_their_prerequisites_are_declared() -> Result<()> {
+    let state = Arc::new(State::default());
+    let core = open(&state).await?;
+    let mut missing = definition(0);
+    missing
+        .topology
+        .resources
+        .retain(|resource| resource.id != id("z-root"));
+    missing
+        .topology
+        .resource_configurations
+        .remove(&id("z-root"));
+    core.apply_desired_state(0, "waiting", missing).await?;
+    let status = core.management_status().await?;
+    assert!(!status.converged());
+    assert_eq!(
+        status.resource_errors[&id("m-middle")],
+        "Waiting for resource 'z-root'"
+    );
+    assert!(state.calls().is_empty());
+    core.apply_desired_state(1, "root-arrived", definition(0))
+        .await?;
+    assert!(core.management_status().await?.converged());
+    assert_eq!(
+        state.calls(),
+        ["open:z-root", "open:m-middle", "open:a-leaf"]
+    );
     core.shutdown().await?;
     Ok(())
 }

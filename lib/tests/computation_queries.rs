@@ -244,8 +244,8 @@ async fn real_cypher_query_runs_inside_computation_graph_with_typed_add_update_d
     assert_eq!(results.replay(0).expect("retained output").len(), 3);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn future_work_runs_after_source_eof_and_preserves_original_source_provenance() {
+async fn scheduled_result_times_and_provenance() {
+    let earliest = chrono::Utc::now();
     let (results, output) = run_query(
         definition("MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name"),
         Arc::new(InMemoryComputationProvider),
@@ -253,6 +253,12 @@ async fn future_work_runs_after_source_eof_and_preserves_original_source_provena
     )
     .await;
     assert_eq!(output.len(), 1);
+    let metadata = QueryChangeCodec::metadata(&output[0]).expect("metadata");
+    assert!(
+        metadata.timestamp >= earliest,
+        "result timestamp must represent production time"
+    );
+    assert!(metadata.timestamp <= chrono::Utc::now());
     assert_eq!(
         QueryChangeCodec::metadata(&output[0])
             .expect("metadata")
@@ -270,6 +276,16 @@ async fn future_work_runs_after_source_eof_and_preserves_original_source_provena
     );
     assert!(output[0].lineage().is_some());
     assert_eq!(results.snapshot().expect("snapshot").as_of_sequence, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn future_work_runs_after_source_eof_and_preserves_original_source_provenance() {
+    scheduled_result_times_and_provenance().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduled_results_keep_production_and_logical_event_times_separate() {
+    scheduled_result_times_and_provenance().await;
 }
 
 #[cfg(feature = "computation-rocksdb-tests")]

@@ -4,8 +4,7 @@
 [Usage](computation-graph-usage.md) |
 [Middleware](computation-graph-middleware.md)
 
-`TransactionTransformer` owns either a linear sequence of transactional steps
-or a complete query-processing body. Both use the same core transaction owner.
+`TransactionTransformer` owns a linear sequence of transactional steps.
 It is one component in the graph, not a nested graph:
 
 ```text
@@ -19,8 +18,8 @@ The output event from one step is passed directly to the next.
 
 `ContinuousQueryFactory` constructs `ContinuousQueryTransformer` directly,
 including output-delivery tracking for ordinary DrasiLib queries.
-`TransactionTransformer` retains compatible query constructors for direct
-assembly. Both use the reusable `QueryEvaluator`, which contains
+Direct assembly uses the same query component. It uses the reusable
+`QueryEvaluator`, which contains
 the existing matching, change detection, projection, aggregation and middleware
 algorithms. The standalone `ContinuousQuery` API also uses that same evaluator;
 the graph does not construct a nested standalone runtime or copy query semantics.
@@ -28,14 +27,14 @@ the graph does not construct a nested standalone runtime or copy query semantics
 For direct graph construction:
 
 ```rust,ignore
-let query = TransactionTransformer::query(
+let query = ContinuousQueryTransformer::new_configured(
     definition,       // ContinuousQueryDefinition
     provider,         // Arc<dyn ComputationIndexProvider>
     QueryOptions::default(),
     QueryExecutionSettings::default(),
     None,             // optional middleware registry
-).await?;
-let results = query.query_results().expect("query body");
+).await?.with_delivery_tracking();
+let results = query.results();
 ```
 
 A query body owns the full index bundle, materialized rows, source checkpoints,
@@ -48,20 +47,20 @@ The query's state, input position, result sequence, live rows and output commit
 together. Forwarding confirmation is separate. A crash after commit but before
 confirmation replays saved output without running the query again. Replay uses
 a fresh transport sequence while preserving logical query-result identity.
-The container drains recovered output before accepting new input, and does not
+The query drains recovered output before accepting new input, and does not
 evict unconfirmed output to make room.
 
 An optional `QuerySchedulingResource` binds an independent `QueryScheduledSource`.
-Use `with_scheduling` before starting a directly constructed query container, or
+Use `with_scheduling` before starting a directly constructed query component, or
 the factory's `scheduling` resource dependency. The source observes committed
 due work through a read-only view and emits typed notifications. Schedule changes
 commit with the query state; removing due work, reevaluating it and storing the
 result commit together. Notifications never destructively remove scheduled work.
 
-`ContinuousQueryTransformer` remains the lower-level query state/evaluation body.
-Use the container or registered query factory for automatic pending-output
-handoff and replay. A query body is not an ordinary linear step and cannot be
-nested into another transaction container.
+Direct query construction opts into pending-output tracking and replay with
+`with_delivery_tracking()`. The registered query factory enables this
+automatically. A query is not an ordinary linear step and cannot be nested
+into a transaction container.
 
 ## Transaction behaviour
 

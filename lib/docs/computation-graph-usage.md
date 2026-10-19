@@ -59,11 +59,60 @@ drasi.start().await?;
 
 The add, update, remove, status and result APIs use the instance's ComputationGraph.
 
+### Read live query results without a reaction
+
+For an application/API reader, subscribe directly to a query's existing result
+outlet instead of adding a temporary application reaction:
+
+The example uses `futures = "0.3"` for stream iteration.
+
+```rust,ignore
+use futures::StreamExt;
+
+let subscription = drasi.subscribe_query_results("order-names").await?;
+println!("Initial rows: {:?}", subscription.snapshot.to_vec());
+let mut results = subscription.stream;
+while let Some(result) = results.next().await {
+    let result = result?;
+    println!("{}: {:?}", result.query_id, result.results);
+}
+```
+
+Subscription waits for readiness and registers its reader before capturing an
+initial snapshot. Apply that snapshot first; the stream contains only changes
+after its `as_of_sequence`, with no snapshot/live gap or repeated earlier changes.
+Channel delivery applies the configured bounded backpressure; Broadcast delivery
+replays transport gaps from the existing query outbox and fails explicitly if
+the required history has been evicted. It never silently skips missing results.
+
+The stream adds no graph node, output edge, journal member or worker. Dropping it
+unregisters the reader synchronously, even without a first poll. The reader is
+bound to the query's component/output generation, so replacement, removal, reset
+or instance shutdown invalidates it rather than leaking old results. It is not
+a durable consumer checkpoint or confirmation of application-side effects.
+Reconnecting creates a fresh snapshot/stream pair, not a resume token for effects.
+Use a native application reaction when application handling belongs in the graph.
+
 ## Add a component and wait for readiness
 
 Successful addition means the node was accepted.
 Initialization or startup may still fail afterwards. The node and its error
 remain available for inspection.
+
+Missing dependencies are a waiting condition, not a terminal error. You can
+declare a reaction before its query or a query before its source. Inspect
+`component.observed()?.waiting_for` or
+`component.observed()?.waiting_reason()` to see what is missing. When the
+dependency becomes available, the graph constructs and starts eligible nodes
+without re-adding them or requesting a retry. Auto-start settings and explicit
+stops still apply. Unconnected ports need an explicit connection, not another
+component declaration with a guessed connection.
+
+`wait_created()` and `wait_started()` really wait for those states. Bound a
+wait with a timeout if the dependency may never be supplied; timing out the
+caller does not discard the node, its accepted configuration or its cleanup
+owner. A real constructor/processing failure is still an error and is not
+retried merely because an unrelated dependency changes.
 
 Use a handle when subsequent work requires successful creation or startup.
 In this example, `drasi` is running and a source named `orders` already exists:

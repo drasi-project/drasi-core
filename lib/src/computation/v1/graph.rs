@@ -382,7 +382,6 @@ pub struct GraphSnapshot {
     pub readiness_required: BTreeSet<ComponentId>,
     pub component_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
     pub component_plugins: BTreeMap<ComponentId, PluginIdentity>,
-    pub allow_incomplete: bool,
 }
 
 impl GraphSnapshot {
@@ -616,10 +615,10 @@ pub struct ComputationGraphBuilder {
     resource_configurations: BTreeMap<ResourceId, serde_json::Value>,
     resource_dependencies: BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     input_merge: BTreeMap<ComponentId, InputMergePolicy>,
     unbound_relationships: Vec<DesiredRelationship>,
     readiness_required: BTreeSet<ComponentId>,
-    allow_empty: bool,
 }
 
 impl ComputationGraphBuilder {
@@ -631,11 +630,6 @@ impl ComputationGraphBuilder {
     /// Build component declarations and bindings without starting their execution.
     pub fn build_components(self) -> GraphResult<super::ComponentBatch> {
         self.build()?.into_component_batch()
-    }
-
-    pub(crate) fn for_additions(mut self) -> Self {
-        self.allow_empty = true;
-        self
     }
 
     pub fn require_downstream_ready(mut self, component: ComponentId) -> Self {
@@ -696,6 +690,18 @@ impl ComputationGraphBuilder {
     ) -> GraphResult<Self> {
         if self.resource_handles.insert(id, resource).is_some() {
             return Err(topology("duplicate constructed resource binding"));
+        }
+        Ok(self)
+    }
+
+    /// Retain construction until the declared dependencies are available.
+    pub fn construct_resource(
+        mut self,
+        id: ResourceId,
+        constructor: Arc<dyn ResourceConstructor>,
+    ) -> GraphResult<Self> {
+        if self.resource_constructors.insert(id, constructor).is_some() {
+            return Err(topology("duplicate resource constructor"));
         }
         Ok(self)
     }
@@ -784,6 +790,15 @@ impl ComputationGraphBuilder {
 
     pub fn build(self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
+        if self
+            .resource_constructors
+            .keys()
+            .any(|id| !self.resources.contains_key(id) || self.resource_handles.contains_key(id))
+        {
+            return Err(topology(
+                "a resource constructor needs an unbound resource declaration",
+            ));
+        }
         resources::construction_order(self.resources.values(), &self.resource_dependencies)?;
         resources::validate_constructed_dependencies(
             &self.resource_dependencies,
@@ -797,9 +812,6 @@ impl ComputationGraphBuilder {
             return Err(topology(
                 "resource configuration names an undeclared resource",
             ));
-        }
-        if self.components.is_empty() && !self.allow_empty {
-            return Err(topology("graph must be nonempty"));
         }
         if self.cleanup_timeout.is_zero()
             || std::time::Instant::now()
@@ -888,7 +900,6 @@ impl ComputationGraphBuilder {
                 return Err(topology("duplicate stream identity or output binding"));
             }
         }
-        let mut connected = BTreeSet::new();
         for relationship in &self.unbound_relationships {
             validate_orphan(relationship, &ids, &nodes)?;
             for (id, role) in relationship.pipe.resource_dependencies() {
@@ -897,12 +908,6 @@ impl ComputationGraphBuilder {
                         "unbound relationship requires an undeclared or incompatible resource",
                     ));
                 }
-            }
-            if ids.contains_key(&relationship.definition.from.component) {
-                connected.insert(relationship.definition.from.clone());
-            }
-            if ids.contains_key(&relationship.definition.to.component) {
-                connected.insert(relationship.definition.to.clone());
             }
         }
         let mut unique_edges = BTreeSet::new();
@@ -983,8 +988,6 @@ impl ComputationGraphBuilder {
                 &capabilities,
                 &self.requirements,
             )?;
-            connected.insert(edge.from.clone());
-            connected.insert(edge.to.clone());
             let pipe = provider
                 .specification()
                 .unwrap_or_else(|| DesiredPipe::External {
@@ -1010,24 +1013,6 @@ impl ComputationGraphBuilder {
                     .unwrap_or_default(),
                 resources,
             });
-        }
-        for node in &nodes {
-            for port in node.descriptor.ports() {
-                if !self.allow_empty
-                    && !connected.contains(&Endpoint::new(
-                        node.descriptor.id().clone(),
-                        port.id().clone(),
-                    ))
-                {
-                    return Err(topology("every declared port must be connected"));
-                }
-                if port.direction() == PortDirection::Output
-                    && !node.output_streams.contains_key(port.id())
-                    && !self.allow_empty
-                {
-                    return Err(topology("every output port must bind a stream"));
-                }
-            }
         }
         let order = dependency_order(&ids, &edges)?;
         if self
@@ -1071,22 +1056,28 @@ impl ComputationGraphBuilder {
             specifications: self
                 .components
                 .iter()
-                .filter_map(|component| {
-                    if let Component::Deferred { specification, .. } = component {
-                        Some((
-                            specification.descriptor.id().clone(),
-                            specification.as_ref().clone(),
-                        ))
-                    } else {
-                        None
-                    }
+                .filter_map(|component| match component {
+                    Component::Deferred { specification, .. } => Some((
+                        specification.descriptor.id().clone(),
+                        specification.as_ref().clone(),
+                    )),
+                    Component::Unresolved(definition) => match &definition.construction {
+                        ComponentConstruction::Factory(specification) => {
+                            Some((specification.descriptor.id().clone(), specification.clone()))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
                 })
                 .collect(),
             external_bindings: self
                 .components
                 .iter()
                 .filter_map(|component| {
-                    if matches!(component, Component::Deferred { .. }) {
+                    if matches!(component, Component::Deferred { .. })
+                        || matches!(component, Component::Unresolved(definition)
+                            if matches!(definition.construction, ComponentConstruction::Factory(_)))
+                    {
                         None
                     } else {
                         Some((
@@ -1105,7 +1096,6 @@ impl ComputationGraphBuilder {
             readiness_required: self.readiness_required,
             component_resources: BTreeMap::new(),
             component_plugins: BTreeMap::new(),
-            allow_incomplete: self.allow_empty,
         };
         for (component, node) in self.components.iter().zip(&nodes) {
             if let Some(admission) = component.recovery_contract().source_admission {
@@ -1178,6 +1168,7 @@ impl ComputationGraphBuilder {
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
             resource_handles: self.resource_handles,
+            resource_constructors: self.resource_constructors,
             pending_resource_cleanup: BTreeMap::new(),
             registry,
             peers: super::ControlPlane::new(64)?,
@@ -1188,13 +1179,12 @@ impl ComputationGraphBuilder {
             protected_resources: BTreeSet::new(),
             deferred_activation: BTreeSet::new(),
             reported_resources: BTreeMap::new(),
+            observation_resources: BTreeSet::new(),
             management_protected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             retirement: None,
             tasks: Arc::default(),
         };
-        if !graph.snapshot.allow_incomplete {
-            graph.validate_recovery(true)?;
-        }
+        graph.validate_recovery(true)?;
         for id in transitive_sources {
             if !graph.transitive_source_recovery(&id)? {
                 return Err(topology(
@@ -1364,6 +1354,7 @@ pub struct ComputationGraph {
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     pending_resource_cleanup: BTreeMap<ResourceId, ResourceHandle>,
     registry: watch::Sender<Arc<GraphRegistrySnapshot>>,
     inspector: super::ComputationInspector,
@@ -1376,6 +1367,8 @@ pub struct ComputationGraph {
     protected_components: BTreeSet<ComponentId>,
     protected_resources: BTreeSet<ResourceId>,
     reported_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
+    // Declaration origin is independent of the provider's cleanup ownership or name.
+    observation_resources: BTreeSet<ResourceId>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
     retirement: Option<Arc<retirement::RetirementState>>,
     tasks: Arc<controller::ExecutionTasks>,
@@ -1391,6 +1384,7 @@ impl ComputationGraph {
         let definition = self.snapshot.select(super::GraphSelection::All)?;
         let mut bindings = TopologyBindings {
             resources: self.resource_handles,
+            resource_constructors: self.resource_constructors,
             factories: FactoryRegistry {
                 factories: self.factories,
             },
@@ -1398,7 +1392,10 @@ impl ComputationGraph {
         };
         for slot in self.components {
             let component = slot.take_unstarted();
-            if !matches!(component, Component::Deferred { .. }) {
+            if !matches!(
+                component,
+                Component::Deferred { .. } | Component::Unresolved(_)
+            ) {
                 bindings.components.insert(
                     component.descriptor().id().as_str().to_owned(),
                     ConstructedComponent(component),
@@ -1443,17 +1440,17 @@ impl ComputationGraph {
             resource_configurations: BTreeMap::new(),
             resource_dependencies: BTreeMap::new(),
             resource_handles: BTreeMap::new(),
+            resource_constructors: BTreeMap::new(),
             input_merge: BTreeMap::new(),
             unbound_relationships: Vec::new(),
             readiness_required: BTreeSet::new(),
-            allow_empty: false,
         }
     }
 
     /// Create an empty graph whose controller can accept individual additions.
     /// Use `run()` to keep it open while adding nodes and connecting their ports.
     pub fn empty(id: impl Into<Arc<str>>) -> GraphResult<Self> {
-        Self::builder(id).for_additions().build()
+        Self::builder(id).build()
     }
 
     pub fn snapshot(&self) -> &GraphSnapshot {
@@ -2211,7 +2208,7 @@ fn validate_admission(
         .iter()
         .filter(|edge| &edge.definition.from.component == node.descriptor.id())
         .peekable();
-    if outputs.peek().is_none() && snapshot.allow_incomplete && scope.is_none() {
+    if outputs.peek().is_none() && scope.is_none() {
         return Ok(());
     }
     if outputs.peek().is_none()

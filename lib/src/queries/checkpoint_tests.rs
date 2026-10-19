@@ -25,7 +25,15 @@
 mod tests {
     use bytes::Bytes;
     use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
-    use drasi_core::interface::{CheckpointStore, ElementArchiveIndex, ElementIndex};
+    use drasi_core::in_memory_index::{
+        in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
+        in_memory_live_results_writer::InMemoryLiveResultsWriter,
+        in_memory_outbox_writer::InMemoryOutboxWriter, in_memory_result_index::InMemoryResultIndex,
+    };
+    use drasi_core::interface::{
+        CheckpointStore, CreatedIndexes, ElementArchiveIndex, ElementIndex, IndexSet,
+        NoOpSessionControl, OutboxWriter,
+    };
     use drasi_core::models::{ElementTimestamp, QueryJoin, TimestampRange};
     use drasi_core::path_solver::match_path::MatchPath;
     use std::sync::Arc;
@@ -33,6 +41,10 @@ mod tests {
 
     use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
     use crate::channels::*;
+    use crate::computation::v1::{
+        query_reset_key, ComponentBatch, ComponentId, ComputationQueryLanguage,
+        ContinuousQueryDefinition, QueryExecutionSettings, StreamId, QUERY_CONFIGURATION,
+    };
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
     use crate::sources::base::{SourceBase, SourceBaseParams};
     use crate::sources::Source;
@@ -202,7 +214,6 @@ mod tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: false,
-            bootstrap_buffer_size: 100,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -1389,12 +1400,51 @@ mod tests {
     }
 
     // ========================================================================
-    // Config hash integration tests (#370)
+    // Current query configuration and recovery tests
     // ========================================================================
 
-    /// In-memory checkpoint store that reports `is_persistent() == true`.
-    ///
-    /// Used for testing config hash check logic which only runs for persistent backends.
+    /// Retained in-process state for fault injection, not a disk-durability fixture.
+    struct RetainedIndexes {
+        set: IndexSet,
+        checkpoint: Arc<dyn CheckpointStore>,
+        outbox: Arc<InMemoryOutboxWriter>,
+        live: Arc<InMemoryLiveResultsWriter>,
+    }
+
+    impl RetainedIndexes {
+        fn new(checkpoint: Arc<dyn CheckpointStore>) -> Self {
+            let element = Arc::new(InMemoryElementIndex::new());
+            Self {
+                set: IndexSet {
+                    element_index: element.clone(),
+                    archive_index: element,
+                    result_index: Arc::new(InMemoryResultIndex::new()),
+                    future_queue: Arc::new(InMemoryFutureQueue::new()),
+                    session_control: Arc::new(NoOpSessionControl),
+                },
+                checkpoint,
+                outbox: Arc::new(InMemoryOutboxWriter::new()),
+                live: Arc::new(InMemoryLiveResultsWriter::new()),
+            }
+        }
+
+        fn create(&self) -> CreatedIndexes {
+            CreatedIndexes {
+                set: IndexSet {
+                    element_index: self.set.element_index.clone(),
+                    archive_index: self.set.archive_index.clone(),
+                    result_index: self.set.result_index.clone(),
+                    future_queue: self.set.future_queue.clone(),
+                    session_control: self.set.session_control.clone(),
+                },
+                checkpoint_store: Some(self.checkpoint.clone()),
+                live_results_writer: Some(self.live.clone()),
+                outbox_writer: Some(self.outbox.clone()),
+            }
+        }
+    }
+
+    /// Exposes the persistent-query protocol for same-process recovery tests.
     struct PersistentInMemoryCheckpointStore {
         inner: drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
     }
@@ -1449,13 +1499,13 @@ mod tests {
 
         async fn write_config_hash(
             &self,
-            hash: u64,
+            _hash: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.write_config_hash(hash).await
+            Err(drasi_core::interface::IndexError::NotSupported)
         }
 
         async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
-            self.inner.read_config_hash().await
+            Err(drasi_core::interface::IndexError::NotSupported)
         }
 
         async fn stage_result_sequence(
@@ -1464,6 +1514,13 @@ mod tests {
             sequence: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.stage_result_sequence(query_id, sequence).await
+        }
+
+        async fn read_result_sequence(
+            &self,
+            query_id: &str,
+        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+            self.inner.read_result_sequence(query_id).await
         }
 
         async fn write_output_generation(
@@ -1484,18 +1541,14 @@ mod tests {
         }
     }
 
-    /// Mock persistent plugin that gives each query its own
-    /// PersistentInMemoryCheckpointStore. The store is keyed by query_id
-    /// so the same query gets the same store across restart (simulating
-    /// persistent storage), while different queries are isolated.
-    struct MockPersistentPlugin {
-        stores: RwLock<std::collections::HashMap<String, Arc<PersistentInMemoryCheckpointStore>>>,
+    pub(super) struct MockPersistentPlugin {
+        indexes: RwLock<std::collections::HashMap<String, Arc<RetainedIndexes>>>,
     }
 
     impl MockPersistentPlugin {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
-                stores: RwLock::new(std::collections::HashMap::new()),
+                indexes: RwLock::new(std::collections::HashMap::new()),
             }
         }
     }
@@ -1507,31 +1560,15 @@ mod tests {
             query_id: &str,
         ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
         {
-            use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
-            use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
-            use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-            use drasi_core::interface::{IndexSet, NoOpSessionControl};
-
-            let checkpoint_store = {
-                let mut map = self.stores.write().await;
-                map.entry(query_id.to_string())
-                    .or_insert_with(|| Arc::new(PersistentInMemoryCheckpointStore::new()))
-                    .clone()
-            };
-
-            let element_index = Arc::new(InMemoryElementIndex::new());
-            Ok(drasi_core::interface::CreatedIndexes {
-                set: IndexSet {
-                    element_index: element_index.clone(),
-                    archive_index: element_index,
-                    result_index: Arc::new(InMemoryResultIndex::new()),
-                    future_queue: Arc::new(InMemoryFutureQueue::new()),
-                    session_control: Arc::new(NoOpSessionControl),
-                },
-                checkpoint_store: Some(checkpoint_store),
-                live_results_writer: None,
-                outbox_writer: None,
-            })
+            let mut indexes = self.indexes.write().await;
+            Ok(indexes
+                .entry(query_id.to_owned())
+                .or_insert_with(|| {
+                    Arc::new(RetainedIndexes::new(Arc::new(
+                        PersistentInMemoryCheckpointStore::new(),
+                    )))
+                })
+                .create())
         }
 
         fn is_volatile(&self) -> bool {
@@ -1584,7 +1621,6 @@ mod tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: false,
-            bootstrap_buffer_size: 100,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -1595,10 +1631,30 @@ mod tests {
         }
     }
 
+    async fn change_stored_configuration(store: &dyn CheckpointStore, query: &str, source: &str) {
+        let mut config = create_persistent_query_config(query, vec![source.to_owned()]);
+        config.query = "MATCH (n:Person) RETURN n.age".into();
+        let definition = ContinuousQueryDefinition {
+            graph_id: ComponentBatch::GRAPH_ID.into(),
+            id: ComponentId::try_new(query).unwrap(),
+            query: config.query.clone(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new(format!("{query}/out")).unwrap(),
+            outbox_capacity: std::num::NonZeroUsize::new(config.outbox_capacity).unwrap(),
+        };
+        let bytes = definition
+            .configuration_bytes(&QueryExecutionSettings::from_legacy_config(&config))
+            .unwrap();
+        store
+            .stage_checkpoint(QUERY_CONFIGURATION, 1, Some(&bytes))
+            .await
+            .unwrap();
+    }
+
     /// Test that when the query config hasn't changed, checkpoints are preserved
     /// across stop/start and resume_from is populated on restart.
     #[tokio::test]
-    async fn test_config_hash_match_preserves_checkpoints() {
+    async fn test_configuration_match_preserves_checkpoints() {
         let (query_manager, source_manager, graph) =
             create_test_env_with_persistent_backend().await;
         let mut event_rx = graph.subscribe().unwrap();
@@ -1747,7 +1803,7 @@ mod tests {
     /// Test that when the query config changes (different query text), checkpoints
     /// are cleared and a full bootstrap is triggered.
     #[tokio::test]
-    async fn test_config_hash_mismatch_clears_checkpoints() {
+    async fn test_configuration_change_clears_checkpoints() {
         let (query_manager, source_manager, graph) =
             create_test_env_with_persistent_backend().await;
         let mut event_rx = graph.subscribe().unwrap();
@@ -1832,11 +1888,16 @@ mod tests {
         let cp = cp_store.read_checkpoint("mismatch-src").await.unwrap();
         assert!(cp.is_some(), "Checkpoint should exist before config change");
 
-        // Also verify the config hash was written
-        let hash_before = cp_store.read_config_hash().await.unwrap();
+        let configuration_before = crate::test_helpers::checkpoints::raw_store(&query_instance)
+            .await
+            .unwrap()
+            .read_checkpoint(QUERY_CONFIGURATION)
+            .await
+            .unwrap()
+            .and_then(|record| record.source_position);
         assert!(
-            hash_before.is_some(),
-            "Config hash should be written on first start"
+            configuration_before.is_some(),
+            "Current configuration must be written on first start"
         );
 
         // Stop query
@@ -1870,7 +1931,6 @@ mod tests {
                     auto_start: true,
                     joins: None,
                     enable_bootstrap: false,
-                    bootstrap_buffer_size: 100,
                     priority_queue_capacity: None,
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
@@ -1924,12 +1984,20 @@ mod tests {
             "Checkpoints should be cleared after config change"
         );
 
-        // Verify the new config hash was written
-        let hash_after = cp_store.read_config_hash().await.unwrap();
-        assert!(hash_after.is_some(), "New config hash should be written");
+        let configuration_after = crate::test_helpers::checkpoints::raw_store(&query_instance)
+            .await
+            .unwrap()
+            .read_checkpoint(QUERY_CONFIGURATION)
+            .await
+            .unwrap()
+            .and_then(|record| record.source_position);
+        assert!(
+            configuration_after.is_some(),
+            "New configuration must be written"
+        );
         assert_ne!(
-            hash_before, hash_after,
-            "Config hash should differ after config change"
+            configuration_before, configuration_after,
+            "Stored configuration must differ after the query changes"
         );
     }
 
@@ -2116,10 +2184,10 @@ mod tests {
     // ========================================================================
 
     /// A checkpoint store wrapper that allows injecting failures on specific
-    /// operations, for testing error-handling branches in config hash logic.
+    /// operations, for testing configuration and reset failure handling.
     struct FailableCheckpointStore {
         inner: PersistentInMemoryCheckpointStore,
-        fail_read_config_hash: std::sync::atomic::AtomicBool,
+        fail_read_configuration: std::sync::atomic::AtomicBool,
         fail_clear_checkpoints: std::sync::atomic::AtomicBool,
         fail_write_result_sequence: std::sync::atomic::AtomicBool,
     }
@@ -2128,14 +2196,14 @@ mod tests {
         fn new() -> Self {
             Self {
                 inner: PersistentInMemoryCheckpointStore::new(),
-                fail_read_config_hash: std::sync::atomic::AtomicBool::new(false),
+                fail_read_configuration: std::sync::atomic::AtomicBool::new(false),
                 fail_clear_checkpoints: std::sync::atomic::AtomicBool::new(false),
                 fail_write_result_sequence: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
-        fn set_fail_read_config_hash(&self, fail: bool) {
-            self.fail_read_config_hash
+        fn set_fail_read_configuration(&self, fail: bool) {
+            self.fail_read_configuration
                 .store(fail, std::sync::atomic::Ordering::Relaxed);
         }
 
@@ -2189,6 +2257,15 @@ mod tests {
             Option<drasi_core::interface::SourceCheckpoint>,
             drasi_core::interface::IndexError,
         > {
+            if source_id == QUERY_CONFIGURATION
+                && self
+                    .fail_read_configuration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(drasi_core::interface::IndexError::other(
+                    std::io::Error::other("injected configuration read failure"),
+                ));
+            }
             self.inner.read_checkpoint(source_id).await
         }
 
@@ -2224,17 +2301,6 @@ mod tests {
         }
 
         async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
-            if self
-                .fail_read_config_hash
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                return Err(drasi_core::interface::IndexError::other(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "injected read_config_hash failure",
-                    ),
-                ));
-            }
             self.inner.read_config_hash().await
         }
 
@@ -2254,6 +2320,13 @@ mod tests {
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.check_result_sequence_write()?;
             self.inner.write_result_sequence(query_id, sequence).await
+        }
+
+        async fn read_result_sequence(
+            &self,
+            query_id: &str,
+        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+            self.inner.read_result_sequence(query_id).await
         }
 
         async fn write_output_generation(
@@ -2413,32 +2486,61 @@ mod tests {
         }
     }
 
-    /// Mock plugin that uses a pre-created FailableCheckpointStore.
+    struct FailableIndexes {
+        retained: RetainedIndexes,
+        checkpoint: Arc<FailableCheckpointStore>,
+        element: Arc<ClearFailingElementIndex>,
+    }
+
     struct FailablePlugin {
-        stores: RwLock<std::collections::HashMap<String, Arc<FailableCheckpointStore>>>,
-        element_indexes: RwLock<std::collections::HashMap<String, Arc<ClearFailingElementIndex>>>,
+        indexes: RwLock<std::collections::HashMap<String, Arc<FailableIndexes>>>,
     }
 
     impl FailablePlugin {
         fn new() -> Self {
             Self {
-                stores: RwLock::new(std::collections::HashMap::new()),
-                element_indexes: RwLock::new(std::collections::HashMap::new()),
+                indexes: RwLock::new(std::collections::HashMap::new()),
             }
         }
 
-        async fn get_store(&self, query_id: &str) -> Arc<FailableCheckpointStore> {
-            let mut map = self.stores.write().await;
+        async fn get_indexes(&self, query_id: &str) -> Arc<FailableIndexes> {
+            let mut map = self.indexes.write().await;
             map.entry(crate::test_helpers::checkpoints::storage_id(query_id))
-                .or_insert_with(|| Arc::new(FailableCheckpointStore::new()))
+                .or_insert_with(|| {
+                    let checkpoint = Arc::new(FailableCheckpointStore::new());
+                    let element = Arc::new(ClearFailingElementIndex::new());
+                    let mut retained = RetainedIndexes::new(checkpoint.clone());
+                    retained.set.element_index = element.clone();
+                    retained.set.archive_index = element.clone();
+                    Arc::new(FailableIndexes {
+                        retained,
+                        checkpoint,
+                        element,
+                    })
+                })
                 .clone()
         }
 
+        async fn get_store(&self, query_id: &str) -> Arc<FailableCheckpointStore> {
+            self.get_indexes(query_id).await.checkpoint.clone()
+        }
+
         async fn get_element_index(&self, query_id: &str) -> Arc<ClearFailingElementIndex> {
-            let mut map = self.element_indexes.write().await;
-            map.entry(crate::test_helpers::checkpoints::storage_id(query_id))
-                .or_insert_with(|| Arc::new(ClearFailingElementIndex::new()))
-                .clone()
+            self.get_indexes(query_id).await.element.clone()
+        }
+
+        async fn reset_marker(&self, query_id: &str) -> serde_json::Value {
+            let rows = self
+                .get_indexes(query_id)
+                .await
+                .retained
+                .outbox
+                .read_from(&query_reset_key(query_id), 0)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "one current reset marker must be retained");
+            assert_eq!(rows[0].0, 1);
+            serde_json::from_slice(&rows[0].1).unwrap()
         }
     }
 
@@ -2449,26 +2551,7 @@ mod tests {
             query_id: &str,
         ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
         {
-            use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
-            use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
-            use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-            use drasi_core::interface::{IndexSet, NoOpSessionControl};
-
-            let checkpoint_store = self.get_store(query_id).await;
-
-            let element_index = self.get_element_index(query_id).await;
-            Ok(drasi_core::interface::CreatedIndexes {
-                set: IndexSet {
-                    element_index: element_index.clone(),
-                    archive_index: element_index.clone(),
-                    result_index: Arc::new(InMemoryResultIndex::new()),
-                    future_queue: Arc::new(InMemoryFutureQueue::new()),
-                    session_control: Arc::new(NoOpSessionControl),
-                },
-                checkpoint_store: Some(checkpoint_store),
-                live_results_writer: None,
-                outbox_writer: None,
-            })
+            Ok(self.get_indexes(query_id).await.retained.create())
         }
 
         fn is_volatile(&self) -> bool {
@@ -2502,11 +2585,11 @@ mod tests {
         )
     }
 
-    /// Test: a failure to *read* the configuration hash is a storage fault, not
+    /// A failure to read the configuration record is a storage fault, not
     /// evidence of a configuration change. Start must fail without touching
     /// durable state, and a retry after the fault clears must resume it.
     #[tokio::test]
-    async fn test_config_hash_read_failure_fails_start_without_wiping_state() {
+    async fn test_configuration_read_failure_fails_start_without_wiping_state() {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
@@ -2552,26 +2635,28 @@ mod tests {
         .await;
 
         let store = plugin.get_store("fail-query").await;
-        let configured_hash = store
-            .read_config_hash()
+        let configuration = store
+            .read_checkpoint(QUERY_CONFIGURATION)
             .await
             .unwrap()
-            .expect("first start persists the configuration hash");
+            .and_then(|record| record.source_position)
+            .expect("first start persists the current configuration");
         store.stage_checkpoint("fail-src", 42, None).await.unwrap();
 
-        store.set_fail_read_config_hash(true);
+        store.set_fail_read_configuration(true);
         let error = query_manager
             .start_query("fail-query".to_string())
             .await
-            .expect_err("an unreadable configuration hash must fail start");
+            .expect_err("an unreadable configuration record must fail start");
         assert!(
-            format!("{error:#}").contains("fail-query cannot read its configuration hash"),
+            format!("{error:#}").contains("fail-query cannot read its configuration"),
             "start must report the storage fault, got: {error:#}"
         );
-        store.set_fail_read_config_hash(false);
+        store.set_fail_read_configuration(false);
 
         let preserved = |label: &'static str| {
             let store = store.clone();
+            let configuration = configuration.clone();
             async move {
                 assert_eq!(
                     store
@@ -2580,12 +2665,16 @@ mod tests {
                         .unwrap()
                         .map(|checkpoint| checkpoint.sequence),
                     Some(42),
-                    "{label}: committed checkpoints must survive a hash read fault"
+                    "{label}: committed checkpoints must survive a configuration read fault"
                 );
                 assert_eq!(
-                    store.read_config_hash().await.unwrap(),
-                    Some(configured_hash),
-                    "{label}: the stored configuration hash must not be rewritten"
+                    store
+                        .read_checkpoint(QUERY_CONFIGURATION)
+                        .await
+                        .unwrap()
+                        .and_then(|record| record.source_position),
+                    Some(configuration),
+                    "{label}: the stored configuration must not be rewritten"
                 );
             }
         };
@@ -2605,10 +2694,10 @@ mod tests {
         preserved("after the retried start").await;
     }
 
-    /// Test: when clear_checkpoints() fails on config hash mismatch,
-    /// the new config hash should NOT be written (preventing stale resume on next restart).
+    /// Checkpoint-clear failure must retain an incomplete reset, not authorize
+    /// recovery against a partially rebuilt query.
     #[tokio::test]
-    async fn test_clear_checkpoints_failure_prevents_hash_write() {
+    async fn test_clear_checkpoints_failure_retains_incomplete_reset() {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
@@ -2629,9 +2718,8 @@ mod tests {
         )
         .await;
 
-        // Pre-seed with a different hash to trigger mismatch
         let store = plugin.get_store("clear-fail-query").await;
-        store.write_config_hash(99999).await.unwrap();
+        change_stored_configuration(&*store, "clear-fail-query", "clear-fail-src").await;
         store
             .stage_checkpoint("clear-fail-src", 10, None)
             .await
@@ -2640,40 +2728,29 @@ mod tests {
         // Make clear_checkpoints fail
         store.set_fail_clear_checkpoints(true);
 
-        // Start query — config hash mismatch should try to clear, fail,
-        // and fail startup rather than proceeding with stale checkpoint data
-        let config =
+        let mut config =
             create_persistent_query_config("clear-fail-query", vec!["clear-fail-src".to_string()]);
-        let current_hash = crate::queries::compute_config_hash(&config);
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         add_query(&query_manager, &graph, config).await.unwrap();
         let result = query_manager
             .start_query_and_wait("clear-fail-query".to_string())
             .await;
         assert!(
             result.is_err(),
-            "start_query should fail when clear_checkpoints fails on config hash mismatch"
+            "start_query must fail when resetting changed configuration cannot clear checkpoints"
         );
 
-        // The in-progress marker is written before clear_checkpoints so a
-        // later start finishes the wipe. The new config hash must not be
-        // committed as complete.
-        let stored_hash = store.read_config_hash().await.unwrap();
         assert_eq!(
-            stored_hash,
-            Some(!current_hash),
-            "In-progress marker should remain when clear_checkpoints fails on mismatch"
-        );
-        assert_ne!(
-            stored_hash,
-            Some(current_hash),
-            "New config hash must not be committed when rebuild is incomplete"
+            plugin.reset_marker("clear-fail-query").await["in_progress"],
+            true,
+            "incomplete rebuilds must remain fenced by the current reset marker"
         );
     }
 
-    /// Test: when wiping output fails on config hash mismatch, start is aborted
+    /// When wiping output fails on configuration change, start is aborted
     /// rather than proceeding against leftover durable output.
     #[tokio::test]
-    async fn test_reset_output_failure_on_hash_mismatch_aborts_start() {
+    async fn test_reset_output_failure_on_configuration_change_aborts_start() {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
@@ -2694,22 +2771,23 @@ mod tests {
         .await;
 
         let store = plugin.get_store("wipe-fail-query").await;
-        store.write_config_hash(99999).await.unwrap();
+        change_stored_configuration(&*store, "wipe-fail-query", "wipe-fail-src").await;
         store
             .stage_checkpoint("wipe-fail-src", 10, None)
             .await
             .unwrap();
         store.set_fail_write_result_sequence(true);
 
-        let config =
+        let mut config =
             create_persistent_query_config("wipe-fail-query", vec!["wipe-fail-src".to_string()]);
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         add_query(&query_manager, &graph, config).await.unwrap();
         let result = query_manager
             .start_query_and_wait("wipe-fail-query".to_string())
             .await;
         assert!(
             result.is_err(),
-            "start_query should fail when reset_output fails on config hash mismatch"
+            "start_query must fail when resetting changed configuration cannot clear output"
         );
         let msg = format!("{}", result.unwrap_err());
         assert!(
@@ -2741,8 +2819,9 @@ mod tests {
         )
         .await;
 
-        let config =
+        let mut config =
             create_persistent_query_config("stale-idx-query", vec!["stale-idx-src".to_string()]);
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
             .start_query_and_wait("stale-idx-query".to_string())
@@ -2779,7 +2858,7 @@ mod tests {
         .await;
 
         let store = plugin.get_store("stale-idx-query").await;
-        store.write_config_hash(99999).await.unwrap();
+        change_stored_configuration(&*store, "stale-idx-query", "stale-idx-src").await;
         store.set_fail_write_result_sequence(true);
         let failed = query_manager
             .start_query_and_wait("stale-idx-query".to_string())
@@ -2809,10 +2888,9 @@ mod tests {
         );
     }
 
-    /// If mismatch writes the new config hash before index clear fails, retry
-    /// takes the MATCH path and hydrates leftover graph state.
+    /// A failed index clear must not let recovery hydrate a half-reset query.
     #[tokio::test]
-    async fn test_mismatch_index_clear_failure_does_not_leave_matching_hash() {
+    async fn test_configuration_change_index_clear_failure_fences_recovery() {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
@@ -2832,10 +2910,11 @@ mod tests {
         )
         .await;
 
-        let config = create_persistent_query_config(
+        let mut config = create_persistent_query_config(
             "mismatch-idx-query",
             vec!["mismatch-idx-src".to_string()],
         );
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
             .start_query_and_wait("mismatch-idx-query".to_string())
@@ -2875,9 +2954,12 @@ mod tests {
         .await;
 
         let store = plugin.get_store("mismatch-idx-query").await;
-        let current_hash = store.read_config_hash().await.unwrap();
-        assert!(current_hash.is_some(), "first start should persist a hash");
-        store.write_config_hash(99999).await.unwrap();
+        assert!(store
+            .read_checkpoint(QUERY_CONFIGURATION)
+            .await
+            .unwrap()
+            .is_some());
+        change_stored_configuration(&*store, "mismatch-idx-query", "mismatch-idx-src").await;
         element_index.set_fail_clear(true);
 
         let failed = query_manager
@@ -2886,6 +2968,10 @@ mod tests {
         assert!(
             failed.is_err(),
             "index clear failure on mismatch should abort start"
+        );
+        assert_eq!(
+            plugin.reset_marker("mismatch-idx-query").await["in_progress"],
+            true
         );
 
         element_index.set_fail_clear(false);
@@ -2934,10 +3020,11 @@ mod tests {
         )
         .await;
 
-        let config = create_persistent_query_config(
+        let mut config = create_persistent_query_config(
             "autoreset-gen-query",
             vec!["autoreset-gen-src".to_string()],
         );
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
             .start_query("autoreset-gen-query".to_string())
@@ -2963,16 +3050,25 @@ mod tests {
         .await;
 
         let store = plugin.get_store("autoreset-gen-query").await;
-        let current_hash = store
-            .read_config_hash()
-            .await
-            .unwrap()
-            .expect("first start should persist a hash");
         store
             .write_output_generation("autoreset-gen-query", 5)
             .await
             .unwrap();
-        store.write_config_hash(!current_hash).await.unwrap();
+        plugin
+            .get_indexes("autoreset-gen-query")
+            .await
+            .retained
+            .outbox
+            .append(
+                &query_reset_key("autoreset-gen-query"),
+                1,
+                &serde_json::to_vec(&serde_json::json!({
+                    "sequence": 0, "in_progress": true, "generation": 5,
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         store.set_fail_clear_checkpoints(true);
 
         let failed = query_manager
@@ -2995,7 +3091,7 @@ mod tests {
     }
 
     /// Test: `teardown_query` fails when checkpoint clearing fails so delete-and-recreate
-    /// cannot silently leave source checkpoints/config hash behind.
+    /// cannot silently leave old source checkpoints behind.
     #[tokio::test]
     async fn test_teardown_fails_when_clear_checkpoints_fails() {
         let plugin = Arc::new(FailablePlugin::new());
@@ -3021,7 +3117,6 @@ mod tests {
             "teardown-fail-query",
             vec!["teardown-fail-src".to_string()],
         );
-        let expected_in_progress = Some(!crate::queries::compute_config_hash(&config));
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
             .start_query("teardown-fail-query".to_string())
@@ -3036,7 +3131,6 @@ mod tests {
         .await;
 
         let store = plugin.get_store("teardown-fail-query").await;
-        store.write_config_hash(12345).await.unwrap();
         store
             .stage_checkpoint("teardown-fail-src", 7, None)
             .await
@@ -3056,11 +3150,10 @@ mod tests {
             "Error should mention checkpoint cleanup: {msg}"
         );
 
-        let stored_hash = store.read_config_hash().await.unwrap();
         assert_eq!(
-            stored_hash,
-            expected_in_progress,
-            "Removal must persist reset-in-progress before checkpoint clear so recreate cannot resume the old hash"
+            plugin.reset_marker("teardown-fail-query").await["in_progress"],
+            true,
+            "Removal must persist reset-in-progress before checkpoint clear"
         );
         let cp = store.read_checkpoint("teardown-fail-src").await.unwrap();
         assert!(
@@ -3097,7 +3190,6 @@ mod tests {
             "archive-fail-query",
             vec!["archive-fail-src".to_string()],
         );
-        let current_hash = crate::queries::compute_config_hash(&config);
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
             .start_query("archive-fail-query".to_string())
@@ -3129,11 +3221,10 @@ mod tests {
             "teardown_query should fail when archive clear fails"
         );
 
-        let stored_hash = store.read_config_hash().await.unwrap();
         assert_eq!(
-            stored_hash,
-            Some(!current_hash),
-            "archive-clear failure must leave reset-in-progress, not the old config hash"
+            plugin.reset_marker("archive-fail-query").await["in_progress"],
+            true,
+            "archive-clear failure must leave reset-in-progress"
         );
         let cp = store.read_checkpoint("archive-fail-src").await.unwrap();
         assert!(
@@ -3150,12 +3241,11 @@ mod tests {
 #[cfg(test)]
 mod orchestration_tests {
     use bytes::Bytes;
-    use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
-    use drasi_core::interface::CheckpointStore;
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    use super::tests::MockPersistentPlugin;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
     use crate::recovery::RecoveryPolicy;
@@ -3355,127 +3445,6 @@ mod orchestration_tests {
     }
 
     // ========================================================================
-    // Persistent Backend Plugin
-    // ========================================================================
-
-    struct PersistentInMemoryCheckpointStore {
-        inner: InMemoryCheckpointStore,
-    }
-
-    impl PersistentInMemoryCheckpointStore {
-        fn new() -> Self {
-            Self {
-                inner: InMemoryCheckpointStore::new(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CheckpointStore for PersistentInMemoryCheckpointStore {
-        fn is_persistent(&self) -> bool {
-            true
-        }
-        async fn stage_checkpoint(
-            &self,
-            source_id: &str,
-            sequence: u64,
-            source_position: Option<&Bytes>,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner
-                .stage_checkpoint(source_id, sequence, source_position)
-                .await
-        }
-        async fn read_checkpoint(
-            &self,
-            source_id: &str,
-        ) -> Result<
-            Option<drasi_core::interface::SourceCheckpoint>,
-            drasi_core::interface::IndexError,
-        > {
-            self.inner.read_checkpoint(source_id).await
-        }
-        async fn read_all_checkpoints(
-            &self,
-        ) -> Result<
-            std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
-            drasi_core::interface::IndexError,
-        > {
-            self.inner.read_all_checkpoints().await
-        }
-        async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
-            self.inner.read_config_hash().await
-        }
-        async fn write_config_hash(
-            &self,
-            hash: u64,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.write_config_hash(hash).await
-        }
-        async fn clear_checkpoints(&self) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.clear_checkpoints().await
-        }
-
-        async fn stage_result_sequence(
-            &self,
-            query_id: &str,
-            sequence: u64,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.stage_result_sequence(query_id, sequence).await
-        }
-    }
-
-    struct MockPersistentPlugin {
-        stores: RwLock<std::collections::HashMap<String, Arc<PersistentInMemoryCheckpointStore>>>,
-    }
-
-    impl MockPersistentPlugin {
-        fn new() -> Self {
-            Self {
-                stores: RwLock::new(std::collections::HashMap::new()),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::indexes::IndexBackendPlugin for MockPersistentPlugin {
-        async fn create_indexes(
-            &self,
-            query_id: &str,
-        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
-        {
-            use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
-            use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
-            use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-            use drasi_core::interface::{IndexSet, NoOpSessionControl};
-
-            let checkpoint_store = {
-                let mut stores = self.stores.write().await;
-                stores
-                    .entry(query_id.to_string())
-                    .or_insert_with(|| Arc::new(PersistentInMemoryCheckpointStore::new()))
-                    .clone()
-            };
-            let element_index = Arc::new(InMemoryElementIndex::new());
-            Ok(drasi_core::interface::CreatedIndexes {
-                set: IndexSet {
-                    element_index: element_index.clone(),
-                    archive_index: element_index,
-                    result_index: Arc::new(InMemoryResultIndex::new()),
-                    future_queue: Arc::new(InMemoryFutureQueue::new()),
-                    session_control: Arc::new(NoOpSessionControl),
-                },
-                checkpoint_store: Some(checkpoint_store),
-                live_results_writer: None,
-                outbox_writer: None,
-            })
-        }
-
-        fn is_volatile(&self) -> bool {
-            false
-        }
-    }
-
-    // ========================================================================
     // Helpers
     // ========================================================================
 
@@ -3497,7 +3466,6 @@ mod orchestration_tests {
             auto_start: false,
             joins: None,
             enable_bootstrap: false,
-            bootstrap_buffer_size: 100,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -3531,7 +3499,6 @@ mod orchestration_tests {
             auto_start: false,
             joins: None,
             enable_bootstrap: false,
-            bootstrap_buffer_size: 100,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,

@@ -314,6 +314,14 @@ struct CoreOpts {
 }
 
 async fn build_core(paths: &Paths, opts: CoreOpts) -> Result<(DrasiLib, ApplicationSourceHandle)> {
+    build_core_with_admission(paths, opts, false).await
+}
+
+async fn build_core_with_admission(
+    paths: &Paths,
+    opts: CoreOpts,
+    native: bool,
+) -> Result<(DrasiLib, ApplicationSourceHandle)> {
     let source_config = ApplicationSourceConfig {
         properties: HashMap::new(),
         durability: Some(DurabilityConfig {
@@ -327,7 +335,6 @@ async fn build_core(paths: &Paths, opts: CoreOpts) -> Result<(DrasiLib, Applicat
     let mut builder = DrasiLib::builder()
         .with_id("query-output-wipe")
         .with_source(source)
-        .with_query(query_config(opts.query_text))
         .with_wal_provider(wal)
         .with_index_provider(
             "rocks",
@@ -337,6 +344,9 @@ async fn build_core(paths: &Paths, opts: CoreOpts) -> Result<(DrasiLib, Applicat
                 QUERY_ID,
             )),
         );
+    if !native {
+        builder = builder.with_query(query_config(opts.query_text));
+    }
 
     if let Some(store) = opts.state {
         builder = builder.with_state_store_provider(store);
@@ -345,7 +355,32 @@ async fn build_core(paths: &Paths, opts: CoreOpts) -> Result<(DrasiLib, Applicat
         builder = builder.with_reaction(reaction);
     }
 
-    Ok((builder.build().await?, handle))
+    let core = builder.build().await?;
+    if native {
+        use drasi_lib::computation::v1::{SourcePluginHost, SourceSubscriptionOptions};
+        let pipeline = core
+            .computation_pipeline()?
+            .source(
+                SourcePluginHost::borrowed(
+                    core.source_manager()
+                        .get_source_instance(SOURCE_ID)
+                        .await
+                        .context("source must be created before native query admission")?,
+                ),
+                SourceSubscriptionOptions {
+                    borrowed_recovery: true,
+                    allow_broadcast_loss: true,
+                    ..Default::default()
+                },
+            )?
+            .query(query_config(opts.query_text));
+        let report = core.add_components(pipeline.build()?).await?;
+        anyhow::ensure!(
+            report.committed,
+            "native query was not accepted: {report:?}"
+        );
+    }
+    Ok((core, handle))
 }
 
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
@@ -510,8 +545,21 @@ async fn stop_reaction_and_wait(core: &DrasiLib) -> Result<()> {
 /// Update query text in-process: old output disappears without reusing result sequences.
 #[tokio::test]
 async fn update_query_text_wipes_output_in_process() -> Result<()> {
-    let paths = Paths::new("update-in-process")?;
-    let (core, source) = build_core(
+    update_query_text_in_process(false).await
+}
+
+#[tokio::test]
+async fn native_query_text_update_wipes_output_in_process() -> Result<()> {
+    update_query_text_in_process(true).await
+}
+
+async fn update_query_text_in_process(native: bool) -> Result<()> {
+    let paths = Paths::new(if native {
+        "update-native-query"
+    } else {
+        "update-in-process"
+    })?;
+    let (core, source) = build_core_with_admission(
         &paths,
         CoreOpts {
             query_text: QUERY_TEXT_V1,
@@ -519,6 +567,7 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
             state: None,
             reaction: None,
         },
+        native,
     )
     .await?;
     start_running(&core).await?;

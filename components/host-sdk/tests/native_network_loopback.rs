@@ -932,10 +932,6 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
                     ConfigurationValue::Literal(query.query.clone().into()),
                 ),
                 ("stream".into(), ConfigurationValue::Literal("q/out".into())),
-                (
-                    "runtime_compatibility".into(),
-                    ConfigurationValue::Literal(true.into()),
-                ),
             ]
             .into(),
             dependencies: [("indexes".into(), vec![indexes.clone()])].into(),

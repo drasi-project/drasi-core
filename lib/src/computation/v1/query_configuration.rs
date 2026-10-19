@@ -39,6 +39,7 @@ pub struct QueryExecutionSettings {
 pub struct QueryMiddlewareResource(pub Arc<MiddlewareTypeRegistry>);
 
 /// Ordinary API declaration metadata, not an execution or lifecycle owner.
+#[derive(Clone)]
 pub(crate) struct OrdinaryQueryDeclaration {
     pub(crate) id: super::ComponentId,
     pub(crate) failure: Option<Arc<super::GraphError>>,
@@ -48,6 +49,23 @@ pub(crate) struct OrdinaryQueryDeclaration {
 }
 
 impl QueryExecutionSettings {
+    pub(super) fn fingerprint_settings(&self) -> Self {
+        let mut settings = self.clone();
+        for source in &mut settings.sources {
+            source.nodes.sort();
+            source.nodes.dedup();
+            source.relations.sort();
+            source.relations.dedup();
+        }
+        settings.joins.sort_by(|left, right| left.id.cmp(&right.id));
+        for join in &mut settings.joins {
+            join.keys.sort_by(|left, right| {
+                (&left.label, &left.property).cmp(&(&right.label, &right.property))
+            });
+        }
+        settings
+    }
+
     pub(crate) fn query_configuration(
         &self,
         definition: &super::ContinuousQueryDefinition,

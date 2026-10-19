@@ -522,6 +522,177 @@ async fn explicit_rebinding_still_requires_a_new_binding_not_a_new_shared_provid
     assert_eq!(new_cleanup.load(Ordering::SeqCst), 1);
 }
 
+async fn verify_declared_resource_names_do_not_transfer_ownership() {
+    #[derive(Debug)]
+    enum Change {
+        Detach,
+        Remove,
+        Replace,
+    }
+
+    for ownership in [ResourceOwnership::Borrowed, ResourceOwnership::Graph] {
+        for change in [Change::Detach, Change::Remove, Change::Replace] {
+            let provider = Arc::new(19usize);
+            let cleanup = Arc::new(AtomicUsize::new(0));
+            let id = resource("attached/caller-chosen-name");
+            let mut graph = ComputationGraph::builder("declared-observation")
+                .service(Box::new(Idle(descriptor("observer"))))
+                .declare_resource(specification(
+                    id.as_str(),
+                    ResourceRole::StateStore,
+                    ownership,
+                ))
+                .unwrap()
+                .provide_resource(
+                    id.clone(),
+                    native(&provider).with_cleanup(Arc::new(CountCleanup(cleanup.clone()))),
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            let run = graph.run().unwrap();
+            let control = run.control();
+            let (result, ()) = tokio::join!(run, async {
+                control.deployment_report().await.unwrap();
+                let revision = control.desired_snapshot().revision.0;
+                report(
+                    &control,
+                    "observer",
+                    vec![binding("store", native(&provider))],
+                );
+                let desired = published(&control, revision + 1).await;
+                assert_eq!(
+                    desired.component_resources[&component("observer")],
+                    [id.clone()].into()
+                );
+                match change {
+                    Change::Detach => {
+                        report(&control, "observer", Vec::new());
+                        published(&control, desired.revision.0 + 1).await;
+                    }
+                    Change::Remove => remove(&control, "observer").await,
+                    Change::Replace => {
+                        let definition = desired
+                            .select(GraphSelection::All)
+                            .unwrap()
+                            .components
+                            .into_iter()
+                            .find(|node| node.descriptor.id() == &component("observer"))
+                            .unwrap();
+                        let ComponentConstruction::External { binding } = &definition.construction
+                        else {
+                            panic!("the observer is an explicitly supplied instance");
+                        };
+                        let mut bindings = TopologyBindings::default();
+                        bindings.components.insert(
+                            binding.clone(),
+                            ConstructedComponent::service(Box::new(Idle(descriptor("observer")))),
+                        );
+                        let preview = control
+                            .preview(
+                                desired.revision,
+                                vec![DesiredMutation::ReplaceComponent(definition)],
+                            )
+                            .await
+                            .unwrap();
+                        assert!(
+                            control
+                                .reconcile(preview, bindings)
+                                .await
+                                .unwrap()
+                                .committed
+                        );
+                    }
+                }
+                assert!(
+                    control.desired_snapshot().resources.contains_key(&id),
+                    "{ownership:?} resource disappeared after {change:?}"
+                );
+                assert_eq!(cleanup.load(Ordering::SeqCst), 0);
+                control.cancel();
+            });
+            assert!(matches!(result, Err(GraphError::Cancelled)));
+            graph.dispose().await.unwrap();
+            assert_eq!(
+                cleanup.load(Ordering::SeqCst),
+                usize::from(ownership == ResourceOwnership::Graph),
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn declared_resource_names_do_not_transfer_ownership_current_thread() {
+    verify_declared_resource_names_do_not_transfer_ownership().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declared_resource_names_do_not_transfer_ownership_multi_thread() {
+    verify_declared_resource_names_do_not_transfer_ownership().await;
+}
+
+#[tokio::test]
+async fn explicitly_rebound_observation_becomes_a_declared_resource() {
+    let provider = Arc::new(23usize);
+    let cleanup = Arc::new(AtomicUsize::new(0));
+    let mut graph = graph(&["observer"]);
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let revision = control.desired_snapshot().revision.0;
+        report(
+            &control,
+            "observer",
+            vec![binding("store", native(&provider))],
+        );
+        let desired = published(&control, revision + 1).await;
+        let id = desired.component_resources[&component("observer")]
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        let declaration = specification(
+            id.as_str(),
+            ResourceRole::StateStore,
+            ResourceOwnership::Graph,
+        );
+        let preview = control
+            .preview(
+                desired.revision,
+                vec![
+                    DesiredMutation::PutResource(declaration),
+                    DesiredMutation::RebindResource(id.clone()),
+                ],
+            )
+            .await
+            .unwrap();
+        let mut bindings = TopologyBindings::default();
+        bindings.components.insert(
+            desired.external_bindings[&component("observer")].to_string(),
+            ConstructedComponent::service(Box::new(Idle(descriptor("observer")))),
+        );
+        bindings.resources.insert(
+            id.clone(),
+            native(&provider).with_cleanup(Arc::new(CountCleanup(cleanup.clone()))),
+        );
+        assert!(
+            control
+                .reconcile(preview, bindings)
+                .await
+                .unwrap()
+                .committed
+        );
+        remove(&control, "observer").await;
+        assert!(control.desired_snapshot().resources.contains_key(&id));
+        assert_eq!(cleanup.load(Ordering::SeqCst), 0);
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    graph.dispose().await.unwrap();
+    assert_eq!(cleanup.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn invalid_reports_reject_ownership_transfer_roles_duplicates_and_obsolete_generations() {
     let provider = Arc::new(7usize);

@@ -2422,7 +2422,8 @@ async fn graph_admission_drains_on_stop_and_fences_only_forced_cancellation() ->
 }
 
 #[tokio::test]
-async fn graph_admission_rejects_missing_mixed_foreign_and_unbound_outputs() -> Result<()> {
+async fn graph_admission_waits_for_missing_outputs_and_rejects_incompatible_bindings() -> Result<()>
+{
     for fault in ["missing", "mixed", "foreign", "graph", "port", "stream"] {
         let directory = tempfile::tempdir()?;
         let desired = definition(true, RetentionPolicy::Backpressure, 2);
@@ -2482,7 +2483,31 @@ async fn graph_admission_rejects_missing_mixed_foreign_and_unbound_outputs() -> 
                 );
             }
         }
-        assert!(builder.build().is_err(), "{fault} output accepted");
+        if fault == "missing" {
+            let mut graph = builder.build()?;
+            let run = graph.start()?;
+            let control = run.control();
+            let (outcome, checked) = tokio::join!(run, async {
+                let report = control.startup_report().await?;
+                assert_ne!(report.summary, OperationSummary::Completed);
+                assert!(!admission.is_active()?);
+                let session = channel
+                    .register_producer(ComponentId::try_new("blocked-client")?)
+                    .await?;
+                assert!(matches!(
+                    admission.admit(&session, 1, &event(1)?).await,
+                    Err(PipeError::Closed)
+                ));
+                assert_eq!(channel.progress().await?.accepted, 0);
+                control.cancel();
+                Ok::<_, anyhow::Error>(())
+            });
+            checked?;
+            assert!(matches!(outcome, Err(GraphError::Cancelled)));
+            graph.dispose().await?;
+        } else {
+            assert!(builder.build().is_err(), "{fault} output accepted");
+        }
         assert!(!admission.is_active()?);
         assert_eq!(channel.progress().await?.accepted, 0);
         channel.shutdown().await?;

@@ -102,7 +102,6 @@ pub struct BootstrapSnapshot {
 /// Result rows are represented by
 /// [`QueryResultSnapshot`](crate::computation::v1::QueryResultSnapshot).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename = "QuerySnapshot")]
 pub struct QueryConfigurationSnapshot {
     /// Query component identifier
     pub id: String,
@@ -111,9 +110,6 @@ pub struct QueryConfigurationSnapshot {
     /// Lifecycle status at the time of snapshot
     pub status: ComponentStatus,
 }
-
-/// Compatibility name for [`QueryConfigurationSnapshot`].
-pub type QuerySnapshot = QueryConfigurationSnapshot;
 
 /// Snapshot of a reaction component's configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,18 +135,8 @@ pub struct ReactionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::TypeId;
-
     #[test]
-    fn query_configuration_snapshot_preserves_legacy_type_and_serialization() {
-        assert_eq!(
-            TypeId::of::<QueryConfigurationSnapshot>(),
-            TypeId::of::<QuerySnapshot>()
-        );
-        assert_eq!(
-            TypeId::of::<QueryConfigurationSnapshot>(),
-            TypeId::of::<crate::QuerySnapshot>()
-        );
+    fn query_configuration_snapshot_round_trips_settings_and_status() {
         let config = crate::Query::cypher("query")
             .query("MATCH (n:Item) RETURN n.name AS name")
             .from_source("source")
@@ -162,7 +148,6 @@ mod tests {
         });
         let snapshot: QueryConfigurationSnapshot =
             serde_json::from_value(expected.clone()).unwrap();
-        let legacy: QuerySnapshot = snapshot;
-        assert_eq!(serde_json::to_value(legacy).unwrap(), expected);
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), expected);
     }
 }

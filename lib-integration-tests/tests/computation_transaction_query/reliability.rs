@@ -7,7 +7,7 @@ use drasi_lib::config::{QueryJoinConfig, QueryJoinKeyConfig};
 async fn joined_query(
     root: &Path,
     progress: Arc<QuerySourceProgress>,
-) -> Result<TransactionTransformer> {
+) -> Result<ContinuousQueryTransformer> {
     let config = drasi_lib::Query::cypher("query")
         .query("MATCH (o:Order)-[:CUSTOMER]->(c:Customer) RETURN c.region AS region, sum(o.amount) AS total")
         .from_source("orders").from_source("customers")
@@ -18,7 +18,7 @@ async fn joined_query(
                 QueryJoinKeyConfig { label: "Customer".into(), property: "id".into() },
             ],
         }]).build();
-    let mut query = TransactionTransformer::query(
+    let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "mixed-source".into(),
             id: ComponentId::try_new("query")?,
@@ -33,6 +33,7 @@ async fn joined_query(
         None,
     )
     .await?
+    .with_delivery_tracking()
     .with_source_progress(progress)?;
     query.start().await?;
     Ok(query)
@@ -74,7 +75,7 @@ fn source_input(
 }
 
 fn assert_joined(
-    query: &TransactionTransformer,
+    query: &ContinuousQueryTransformer,
     orders: &BTreeMap<u64, i64>,
     customers: &BTreeMap<u64, String>,
 ) -> Result<()> {
@@ -85,13 +86,7 @@ fn assert_joined(
         }
     }
     let mut actual = BTreeMap::new();
-    for encoded in query
-        .query_results()
-        .context("results")?
-        .snapshot()?
-        .rows
-        .values()
-    {
+    for encoded in query.results().snapshot()?.rows.values() {
         let row = QueryChangeCodec::decode_row(encoded)?;
         let json = serde_json::to_value(row.values)?;
         let region = json["region"].as_str().context("region")?.to_owned();

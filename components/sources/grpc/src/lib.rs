@@ -118,7 +118,7 @@ use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::managers::{log_component_start, log_component_stop};
+use drasi_lib::observability::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;

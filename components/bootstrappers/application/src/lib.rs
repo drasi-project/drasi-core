@@ -46,6 +46,9 @@ pub mod descriptor;
 
 pub use application::{ApplicationBootstrapProvider, ApplicationBootstrapProviderBuilder};
 
+#[cfg(test)]
+mod native_tests;
+
 // Dynamic plugin entry point.
 // Core plugin — registered statically by the server, not exported for dynamic loading.
 

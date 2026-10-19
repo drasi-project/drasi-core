@@ -12,161 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration hashing for checkpoint validation.
-//!
-//! On query restart with a persistent index, we compare a hash of the query's
-//! identity-defining config against the hash stored alongside the index. A
-//! mismatch triggers an automatic wipe + re-bootstrap
-//! (see design doc 02 §3 — Reading Checkpoints on Startup).
-//!
-//! Source ordering ranks are part of the identity. Hashes written before ranks
-//! were included will mismatch once, triggering a full re-bootstrap on upgrade.
-//!
-//! We use `fnv` rather than `std::hash::DefaultHasher` because `DefaultHasher`
-//! is explicitly documented as unstable across Rust versions — upgrading the
-//! toolchain would silently invalidate every persistent query's config hash,
-//! causing spurious re-bootstraps. `fnv` is a fixed algorithm, already in the
-//! workspace (via the rocksdb and garnet index plugins), and deterministic
-//! across versions and platforms.
-
-use std::hash::{Hash, Hasher};
-
-use serde::Serialize;
-
-use crate::config::{
-    QueryConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage, SourceSubscriptionConfig,
-};
-use drasi_core::models::SourceMiddlewareConfig;
-
-/// Marks an unfinished wipe so a later start cannot resume partially cleared state.
-pub(crate) fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
-    !current_hash
-}
-
-/// Minimal projection of `QueryConfig` containing only identity-defining fields.
-///
-/// Fields included (changes trigger index wipe + re-bootstrap):
-///   - `query` text
-///   - `query_language`
-///   - `middleware` (order preserved — pipeline order matters)
-///   - `sources` (including declared list position, sorted by `source_id`;
-///     within each source, `nodes` and
-///     `relations` are sorted + deduped because they are consumed as `HashSet`s
-///     downstream in `SubscriptionSettingsBuilder`)
-///   - `joins` (sorted by `id`; within each join, `keys` are sorted because
-///     each key is one side of a synthetic edge and has no inherent order)
-///
-/// Fields excluded (operational tuning — changes MUST NOT wipe the index):
-///   - `id`, `auto_start`, `enable_bootstrap`, `bootstrap_buffer_size`,
-///     `priority_queue_capacity`, `dispatch_buffer_capacity`, `dispatch_mode`,
-///     `storage_backend`, `recovery_policy`.
-#[derive(Serialize)]
-struct QueryIdentity<'a> {
-    query: &'a str,
-    query_language: &'a QueryLanguage,
-    middleware: &'a [SourceMiddlewareConfig],
-    sources: Vec<SourceIdentity<'a>>,
-    joins: Option<Vec<JoinIdentity<'a>>>,
-}
-
-/// Canonical projection of a `SourceSubscriptionConfig`.
-///
-/// `nodes` and `relations` are sorted and deduped to match downstream set
-/// semantics. `pipeline` preserves insertion order (it is a middleware pipeline
-/// where order determines which transformation runs first).
-#[derive(Serialize)]
-struct SourceIdentity<'a> {
-    source_id: &'a str,
-    source_rank: u32,
-    nodes: Vec<&'a String>,
-    relations: Vec<&'a String>,
-    pipeline: &'a [String],
-}
-
-/// Canonical projection of a `QueryJoinConfig`.
-///
-/// `keys` are sorted by `(label, property)` because each key is an independent
-/// side of a synthetic edge definition and has no inherent order.
-#[derive(Serialize)]
-struct JoinIdentity<'a> {
-    id: &'a str,
-    keys: Vec<&'a QueryJoinKeyConfig>,
-}
-
-fn canonicalize_source(source: &SourceSubscriptionConfig, source_rank: u32) -> SourceIdentity<'_> {
-    let mut nodes: Vec<&String> = source.nodes.iter().collect();
-    nodes.sort();
-    nodes.dedup();
-
-    let mut relations: Vec<&String> = source.relations.iter().collect();
-    relations.sort();
-    relations.dedup();
-
-    SourceIdentity {
-        source_id: &source.source_id,
-        source_rank,
-        nodes,
-        relations,
-        pipeline: &source.pipeline,
-    }
-}
-
-fn canonicalize_join(join: &QueryJoinConfig) -> JoinIdentity<'_> {
-    let mut keys: Vec<&QueryJoinKeyConfig> = join.keys.iter().collect();
-    keys.sort_by(|a, b| (&a.label, &a.property).cmp(&(&b.label, &b.property)));
-
-    JoinIdentity { id: &join.id, keys }
-}
-
-/// Compute a deterministic hash of the identity-defining portion of a query config.
-///
-/// The hash is stable across processes, platforms, and Rust toolchain versions,
-/// and it is invariant under cosmetic reordering of `joins`, a source's
-/// `nodes` / `relations`, and a join's `keys`. Reordering `sources` changes
-/// the hash because their declared order determines same-timestamp tie-breaking.
-pub fn compute_config_hash(config: &QueryConfig) -> u64 {
-    // Declared position is the source rank used to break same-time ties.
-    let mut sources: Vec<SourceIdentity> = config
-        .sources
-        .iter()
-        .zip(0u32..)
-        .map(|(source, rank)| canonicalize_source(source, rank))
-        .collect();
-    sources.sort_by(|a, b| a.source_id.cmp(b.source_id));
-
-    let joins = config.joins.as_ref().map(|j| {
-        let mut v: Vec<JoinIdentity> = j.iter().map(canonicalize_join).collect();
-        v.sort_by(|a, b| a.id.cmp(b.id));
-        v
-    });
-
-    let identity = QueryIdentity {
-        query: &config.query,
-        query_language: &config.query_language,
-        middleware: &config.middleware,
-        sources,
-        joins,
-    };
-
-    // `Serialize` on all included types is infallible for the data shapes we
-    // use (no non-JSON-representable primitives), so the `unwrap` is safe.
-    let json =
-        serde_json::to_string(&identity).expect("QueryIdentity should always serialize to JSON");
-
-    let mut hasher = fnv::FnvHasher::default();
-    json.hash(&mut hasher);
-    hasher.finish()
-}
+//! Semantic fingerprint checks for the single native query configuration record.
+use super::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::channels::DispatchMode;
+    use crate::config::{QueryConfig, QueryJoinConfig, QueryLanguage};
     use crate::config::{QueryJoinKeyConfig, SourceSubscriptionConfig};
     use crate::recovery::RecoveryPolicy;
     use drasi_core::models::SourceMiddlewareConfig;
     use serde_json::{Map, Value};
     use std::sync::Arc;
+
+    fn compute_config_hash(config: &QueryConfig) -> u64 {
+        ContinuousQueryDefinition {
+            graph_id: "graph".into(),
+            id: ComponentId::try_new(config.id.as_str()).unwrap(),
+            query: config.query.clone(),
+            language: match config.query_language {
+                QueryLanguage::Cypher => ComputationQueryLanguage::Cypher,
+                QueryLanguage::GQL => ComputationQueryLanguage::Gql,
+            },
+            // Query identity is separate from its unchanged output binding.
+            output_stream: StreamId::try_new("output").unwrap(),
+            outbox_capacity: NonZeroUsize::new(config.outbox_capacity).unwrap(),
+        }
+        .configuration_hash(&QueryExecutionSettings::from_legacy_config(config))
+        .unwrap()
+    }
 
     fn base() -> QueryConfig {
         QueryConfig {
@@ -183,7 +58,6 @@ mod tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -318,14 +192,6 @@ mod tests {
         let a = base();
         let mut b = base();
         b.enable_bootstrap = !b.enable_bootstrap;
-        assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
-    }
-
-    #[test]
-    fn bootstrap_buffer_size_change_same_hash() {
-        let a = base();
-        let mut b = base();
-        b.bootstrap_buffer_size = 99999;
         assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
     }
 

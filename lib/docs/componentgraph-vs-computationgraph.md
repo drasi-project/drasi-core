@@ -68,16 +68,17 @@ during this consolidation is fixed: individual and bulk stop APIs still finish
 the helpers when the evaluator itself has already stopped. This was a
 ComputationGraph consolidation defect, not another old ComponentGraph defect.
 
-Server's existing `queries` configuration and query-creation APIs did not need
-a schema change. Failed query definitions still retain their original settings
-and errors for inspection and retry. Saved-state and producer identities retain
-the original `lib-query/<hex query ID>` scope, so moving execution into the main
-graph does not reset checkpoints, result rows or unconfirmed output.
+Server retains ordinary query-creation APIs, with breaking-release cleanup of
+obsolete settings. Query declarations retain their settings, dependency waits
+and actual failures for inspection. Saved-state and producer identities now
+use the actual instance, graph and query scope. The old `lib-query/<hex query ID>`
+namespace is not translated or deleted. Reopening the same current-release
+scope preserves checkpoints, result rows and unconfirmed output.
 
 The standard query factory now constructs `ContinuousQueryTransformer`
-directly with output-delivery tracking. `TransactionTransformer` keeps its
-compatible query constructors, which wrap the same processor; they are not a
-second query engine. Queries are still built in. Making the processor an
+directly with output-delivery tracking. The redundant query constructors on
+`TransactionTransformer` have been removed; direct callers use the query
+component and opt into delivery tracking. Queries are still built in. Making the processor an
 [optional dynamically loaded query plugin][optional-query-plugin] remains a
 separate, unfinished step.
 

@@ -333,7 +333,7 @@ the middleware's `QuerySourceProgressResource`.
 From the drasi-core repository root:
 
 ```bash
-cargo test --locked -p drasi-lib --features computation,middleware-all \
+cargo test --locked -p drasi-lib --features middleware-all \
   --test computation_middleware --test computation_middleware_factory
 
 cargo test --locked -p drasi-lib --features computation-rocksdb-tests,middleware-all \

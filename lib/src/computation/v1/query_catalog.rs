@@ -27,7 +27,6 @@ pub(super) struct CatalogQuery {
     pub results: QueryResults,
     pub progress: Option<Arc<QuerySourceProgress>>,
     pub incarnation: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
-    pub status: Option<watch::Receiver<crate::ComponentStatus>>,
     pub checkpoint: Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
     pub output_persistence: Arc<std::sync::RwLock<Option<bool>>>,
 }
@@ -65,9 +64,7 @@ struct CatalogState {
 struct DeliveryConfiguration {
     mode: crate::DispatchMode,
     capacity: usize,
-    hash: u64,
     metrics: Arc<crate::metrics::QueryOutputMetrics>,
-    status: Option<watch::Receiver<crate::ComponentStatus>>,
 }
 #[derive(Clone)]
 enum Subscriber {
@@ -87,8 +84,8 @@ pub(crate) struct CatalogSubscription {
 
 #[derive(Clone)]
 pub(crate) struct QuerySubscriptionHead {
-    pub(super) sequence: u64,
-    pub(super) generation: u64,
+    pub(crate) sequence: u64,
+    pub(crate) generation: u64,
     pub(super) config_hash: u64,
     pub(super) incarnation: Option<uuid::Uuid>,
     results: QueryResults,
@@ -254,41 +251,9 @@ impl QueryResultsCatalog {
     pub(crate) fn same_registry(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
-    pub(crate) fn configure_delivery(
-        &self,
-        id: &str,
-        mode: crate::DispatchMode,
-        capacity: usize,
-        hash: u64,
-        metrics: Arc<crate::metrics::QueryOutputMetrics>,
-        status: watch::Receiver<crate::ComponentStatus>,
-    ) -> anyhow::Result<()> {
-        if capacity == 0 {
-            anyhow::bail!("query delivery capacity must be nonzero");
-        }
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
-        let id = ComponentId::try_new(id)?;
-        state.delivery.insert(
-            id,
-            DeliveryConfiguration {
-                mode,
-                capacity,
-                hash,
-                metrics,
-                status: Some(status),
-            },
-        );
-        Ok(())
-    }
-
-    pub(super) fn configure_native_delivery(
+    pub(super) fn configure_delivery(
         &self,
         config: &crate::config::QueryConfig,
-        hash: u64,
         metrics: Arc<crate::metrics::QueryOutputMetrics>,
         default_capacity: usize,
     ) -> anyhow::Result<()> {
@@ -300,22 +265,14 @@ impl QueryResultsCatalog {
             .lock()
             .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
         let id = ComponentId::try_new(config.id.as_str())?;
-        if state
-            .delivery
-            .get(&id)
-            .map_or(true, |existing| existing.status.is_none())
-        {
-            state.delivery.insert(
-                id,
-                DeliveryConfiguration {
-                    mode: config.dispatch_mode.unwrap_or_default(),
-                    capacity,
-                    hash,
-                    metrics,
-                    status: None,
-                },
-            );
-        }
+        state.delivery.insert(
+            id,
+            DeliveryConfiguration {
+                mode: config.dispatch_mode.unwrap_or_default(),
+                capacity,
+                metrics,
+            },
+        );
         Ok(())
     }
     pub(super) fn transport_sequence(
@@ -387,15 +344,6 @@ impl QueryResultsCatalog {
         ready: bool,
     ) -> anyhow::Result<QuerySubscriptionHead> {
         anyhow::ensure!(ready, "query output is not ready for subscriptions");
-        if let Some(status) = &query.status {
-            anyhow::ensure!(
-                matches!(
-                    *status.borrow(),
-                    crate::ComponentStatus::Starting | crate::ComponentStatus::Running
-                ),
-                "query is not running"
-            );
-        }
         Ok(QuerySubscriptionHead {
             sequence,
             generation,
@@ -484,16 +432,6 @@ impl QueryResultsCatalog {
             .delivery
             .get(id)
             .map(|config| config.metrics.clone()))
-    }
-    pub(super) fn configured_hash(&self, id: &ComponentId) -> anyhow::Result<Option<u64>> {
-        Ok(self
-            .0
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
-            .delivery
-            .get(id)
-            .map(|config| config.hash))
     }
     pub(crate) fn checkpoint_store(
         &self,
@@ -681,14 +619,6 @@ impl QueryResultsCatalog {
         state.next_generation = generation
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("query reader generation exhausted"))?;
-        let config_hash = state
-            .delivery
-            .get(&id)
-            .map_or(config_hash, |config| config.hash);
-        let status = state
-            .delivery
-            .get(&id)
-            .and_then(|config| config.status.clone());
         state.entries.insert(
             id.clone(),
             CatalogQuery {
@@ -697,7 +627,6 @@ impl QueryResultsCatalog {
                 results,
                 progress,
                 incarnation,
-                status,
                 checkpoint,
                 output_persistence,
             },
@@ -789,9 +718,6 @@ impl QueryResultsCatalog {
             loop {
                 let entry = self.get(&id)?;
                 if let Some(entry) = entry {
-                    if entry.status.as_ref().is_some_and(|status| !matches!(*status.borrow(), crate::ComponentStatus::Starting | crate::ComponentStatus::Running)) {
-                        anyhow::bail!("query is not running");
-                    }
                     let wait = async {
                         if let Some(progress) = &entry.progress { progress.wait_ready().await?; }
                         entry.results.wait_ready().await?;
@@ -803,11 +729,6 @@ impl QueryResultsCatalog {
                             if self.get(&id)?.is_some_and(|current| current.generation == entry.generation) { return Ok(entry); }
                         }
                         result = changed.changed() => { result?; }
-                        _ = async {
-                            if let Some(mut status) = entry.status.clone() {
-                                let _ = status.wait_for(|status| !matches!(status, crate::ComponentStatus::Starting | crate::ComponentStatus::Running)).await;
-                            } else { std::future::pending::<()>().await; }
-                        } => anyhow::bail!("query stopped while waiting for output"),
                     }
                 } else { changed.changed().await?; }
             }
@@ -923,22 +844,45 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn native_delivery_replacement_refreshes_its_hash_without_overriding_runtime_configuration() {
+    #[tokio::test]
+    async fn query_replacement_refreshes_identity_and_delivery_without_resetting_transport() {
         let catalog = QueryResultsCatalog::new("delivery").unwrap();
-        let config = crate::Query::cypher("query").query("RETURN 1").build();
         let id = ComponentId::try_new("query").unwrap();
-        let first = Arc::new(crate::metrics::QueryOutputMetrics::new());
-        let replacement = Arc::new(crate::metrics::QueryOutputMetrics::new());
-        catalog
-            .configure_native_delivery(&config, 10, first, 1_000)
-            .unwrap();
         let stream = StreamId::try_new("query/out").unwrap();
+        let open = |text: &'static str, capacity| {
+            let catalog = catalog.clone();
+            let id = id.clone();
+            let stream = stream.clone();
+            async move {
+                let mut config = crate::Query::cypher(id.as_str())
+                    .query(text)
+                    .with_outbox_capacity(8)
+                    .build();
+                config.dispatch_buffer_capacity = Some(capacity);
+                ContinuousQueryTransformer::new(
+                    ContinuousQueryDefinition {
+                        graph_id: "delivery".into(),
+                        id,
+                        query: text.into(),
+                        language: ComputationQueryLanguage::Cypher,
+                        output_stream: stream,
+                        outbox_capacity: std::num::NonZeroUsize::new(8).unwrap(),
+                    },
+                    Arc::new(drasi_core::computation::InMemoryComputationProvider),
+                )
+                .await
+                .unwrap()
+                .with_query_configuration(config)
+                .unwrap()
+                .with_result_catalog(&catalog)
+                .unwrap()
+            }
+        };
+        let mut first = open("MATCH (n) RETURN n", 1).await;
+        let before = catalog.get(&id).unwrap().unwrap().config_hash;
         let sequence = catalog.transport_sequence(&stream).unwrap();
         sequence.store(41, std::sync::atomic::Ordering::Release);
-        catalog
-            .configure_native_delivery(&config, 20, replacement.clone(), 1_000)
-            .unwrap();
+        let mut replacement = open("MATCH (n) RETURN n.name", 8).await;
         assert_eq!(
             catalog
                 .transport_sequence(&stream)
@@ -946,30 +890,10 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             41
         );
-        assert_eq!(catalog.configured_hash(&id).unwrap(), Some(20));
-        assert!(Arc::ptr_eq(
-            &catalog.configured_metrics(&id).unwrap().unwrap(),
-            &replacement
-        ));
-        let runtime_metrics = Arc::new(crate::metrics::QueryOutputMetrics::new());
-        catalog
-            .configure_delivery(
-                "query",
-                crate::DispatchMode::Channel,
-                8,
-                30,
-                runtime_metrics.clone(),
-                watch::channel(crate::ComponentStatus::Added).1,
-            )
-            .unwrap();
-        catalog
-            .configure_native_delivery(&config, 40, replacement, 1_000)
-            .unwrap();
-        assert_eq!(catalog.configured_hash(&id).unwrap(), Some(30));
-        assert!(Arc::ptr_eq(
-            &catalog.configured_metrics(&id).unwrap().unwrap(),
-            &runtime_metrics
-        ));
+        assert_ne!(catalog.get(&id).unwrap().unwrap().config_hash, before);
+        assert_eq!(catalog.0.state.lock().unwrap().delivery[&id].capacity, 8);
+        first.stop().await.unwrap();
+        replacement.stop().await.unwrap();
     }
 
     #[tokio::test]

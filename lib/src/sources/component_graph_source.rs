@@ -44,11 +44,9 @@ use std::sync::Arc;
 use crate::bootstrap::{BootstrapProvider, ComponentGraphBootstrapProvider};
 use crate::channels::*;
 use crate::component_graph::ComponentGraphView;
-use crate::config::{
-    NodeSchema, PropertySchema, PropertyType, RelationSchema, SourceSchema,
-    SourceSubscriptionSettings,
-};
+use crate::config::SourceSubscriptionSettings;
 use crate::context::SourceRuntimeContext;
+use crate::schema::{NodeSchema, PropertySchema, PropertyType, RelationSchema, SourceSchema};
 use crate::sources::base::{SourceBase, SourceBaseParams};
 use crate::sources::graph_elements::{
     build_props, make_delete_metadata, make_node, make_relation, status_str,

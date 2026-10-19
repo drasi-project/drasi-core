@@ -69,8 +69,8 @@ enum Delivery {
 /// complete batch, use `ComponentBatch::builder().sink(Box::new(reaction))`;
 /// when connecting to an existing node, use the node-first API below.
 /// The schema is explicit; use `QueryChangeCodec::schema().descriptor().clone()`
-/// for query results. Ordinary query wrappers have no data ports: build a
-/// native query with `DrasiLib::computation_pipeline` or a native query factory.
+/// for query results. Queries use the same native transformer; connect their
+/// declared output and read initial rows through the query snapshot API.
 /// The external receiver/callback binding is deliberately not reconstructible
 /// from a configuration snapshot and never crosses a plugin ABI.
 ///

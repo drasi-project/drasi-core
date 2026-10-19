@@ -136,6 +136,8 @@
 
 pub mod config;
 pub use config::ApplicationSourceConfig;
+pub mod native;
+pub use native::ApplicationSource as NativeApplicationSource;
 
 mod property_builder;
 mod time;

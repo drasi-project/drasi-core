@@ -221,9 +221,10 @@ async fn output_replay_survives_real_process_exit_at_commit() -> Result<()> {
     Ok(())
 }
 
-async fn query(path: &Path) -> Result<TransactionTransformer> {
-    let mut query =
-        TransactionTransformer::from_query(unstarted_query(path, QueryOptions::default()).await?);
+async fn query(path: &Path) -> Result<ContinuousQueryTransformer> {
+    let mut query = unstarted_query(path, QueryOptions::default())
+        .await?
+        .with_delivery_tracking();
     query.start().await?;
     Ok(query)
 }
@@ -488,7 +489,7 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
         let mut producer: Box<dyn Transformer> = if corruption == "disabled-tracking" {
             Box::new(query)
         } else {
-            Box::new(TransactionTransformer::from_query(query))
+            Box::new(query.with_delivery_tracking())
         };
         if corruption != "disabled-tracking" {
             let error = producer

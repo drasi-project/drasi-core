@@ -140,60 +140,6 @@ fn spawn_log_worker(
     Ok(())
 }
 
-/// Initialize the tracing subscriber with component log routing.
-///
-/// This sets up:
-/// - `ComponentLogLayer` for routing logs to component-specific streams
-/// - `fmt::layer()` for console output
-/// - `EnvFilter` for level control via `RUST_LOG` environment variable
-/// - `tracing-log` bridge for `log` crate compatibility
-///
-/// # Arguments
-///
-/// * `log_registry` - The registry to route component logs to
-///
-/// # Example
-///
-/// ```ignore
-/// use drasi_lib::observability::ComponentLogRegistry;
-/// use std::sync::Arc;
-///
-/// let log_registry = Arc::new(ComponentLogRegistry::new());
-/// drasi_lib::init_tracing(log_registry.clone());
-///
-/// // Now both tracing::info!() and log::info!() work
-/// tracing::info!("Hello from tracing");
-/// log::info!("Hello from log crate");
-/// ```
-///
-/// # Note
-///
-/// If another `log` crate logger was initialized before calling this function,
-/// `log::info!()` calls will go to that logger instead. However, `tracing::info!()`
-/// calls will still be captured correctly.
-///
-/// # Deprecated
-///
-/// Prefer using `get_or_init_global_registry()` which handles initialization automatically.
-/// This function is kept for backward compatibility.
-#[deprecated(
-    since = "0.4.0",
-    note = "Use get_or_init_global_registry() instead, which handles initialization automatically"
-)]
-pub fn init_tracing(log_registry: Arc<ComponentLogRegistry>) {
-    // Ensure global registry is initialized (which sets up the channel worker)
-    let _ = get_or_init_global_registry();
-
-    // If caller provided a different registry, warn them
-    // (can't actually use it since tracing subscriber is already set)
-    if !Arc::ptr_eq(&log_registry, &get_or_init_global_registry()) {
-        tracing::warn!(
-            "init_tracing called with custom registry, but global registry already initialized. \
-             The provided registry will be ignored. Use get_or_init_global_registry() instead."
-        );
-    }
-}
-
 /// Internal initialization - sets up tracing subscriber without channel/worker.
 fn init_tracing_internal(log_registry: Arc<ComponentLogRegistry>) {
     use tracing_subscriber::prelude::*;
@@ -215,38 +161,6 @@ fn init_tracing_internal(log_registry: Arc<ComponentLogRegistry>) {
     // Try to set as the global subscriber
     // Use try_init to handle case where subscriber is already set
     let _ = tracing::subscriber::set_global_default(subscriber);
-}
-
-/// Try to initialize tracing, returning whether initialization succeeded.
-///
-/// Unlike `init_tracing()`, this returns `false` if a subscriber is already set,
-/// allowing callers to handle this case.
-///
-/// # Deprecated
-///
-/// Prefer using `get_or_init_global_registry()` which handles initialization automatically.
-#[deprecated(
-    since = "0.4.0",
-    note = "Use get_or_init_global_registry() instead, which handles initialization automatically"
-)]
-pub fn try_init_tracing(log_registry: Arc<ComponentLogRegistry>) -> bool {
-    // Check if already initialized
-    if GLOBAL_LOG_REGISTRY.get().is_some() {
-        return false;
-    }
-
-    // Initialize via the standard path
-    let _ = get_or_init_global_registry();
-
-    // Warn if caller's registry differs
-    if !Arc::ptr_eq(&log_registry, &get_or_init_global_registry()) {
-        tracing::warn!(
-            "try_init_tracing called with custom registry, but initialization uses global registry. \
-             The provided registry will be ignored."
-        );
-    }
-
-    true
 }
 
 /// Tracing layer that routes log events to component-specific streams.

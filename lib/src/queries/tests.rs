@@ -54,7 +54,6 @@ mod manager_tests {
             auto_start,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -84,7 +83,6 @@ mod manager_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -345,55 +343,36 @@ mod manager_tests {
     }
 
     #[tokio::test]
-    async fn test_partial_subscription_failure_cleans_up_tasks() {
+    async fn test_missing_subscription_waits_without_leaking_tasks() {
         let (manager, source_manager, graph) = create_test_manager().await;
 
-        // Subscribe to graph events BEFORE starting the query
-        let mut event_rx = graph.subscribe().unwrap();
-
-        // Add only source1 - source2 will be missing to trigger failure
         let source1 = create_test_mock_source("source1".to_string());
         add_source(&source_manager, &graph, source1).await.unwrap();
 
-        // Create query that subscribes to TWO sources - source2 is missing
         let config = create_test_query_config(
             "test-query",
             vec!["source1".to_string(), "source2".to_string()],
         );
         add_query(&manager, &graph, config).await.unwrap();
 
-        // Starting should fail because source2 doesn't exist
         let result = manager.start_query("test-query".to_string()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("source2"));
-
-        // Wait for query to reach Error state via graph update
-        wait_for_component_status(
-            &mut event_rx,
-            "test-query",
-            ComponentStatus::Error,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
         let status = manager
             .get_query_status("test-query".to_string())
             .await
             .unwrap();
-        assert!(
-            matches!(status, ComponentStatus::Error),
-            "Expected Error status after failed start"
-        );
-
-        // Crucially: subscription tasks from source1 should have been cleaned up
+        assert_ne!(status, ComponentStatus::Error);
         let query = manager.get_query_instance("test-query").await.unwrap();
-
-        // The forwarder task for source1 was spawned before source2 subscription failed,
-        // so the rollback code should have aborted it
         assert_eq!(
             query.subscription_count().await,
             0,
-            "Subscription tasks should be cleaned up after partial failure"
+            "Waiting for another source must not leak partially started subscriptions"
         );
+        delete_query(&manager, &graph, "test-query").await.unwrap();
+        let source2 = create_test_mock_source("source2".to_string());
+        add_source(&source_manager, &graph, source2).await.unwrap();
+        assert!(manager.list_queries().await.is_empty());
     }
 
     #[tokio::test]
@@ -838,7 +817,6 @@ mod query_core_tests {
                 auto_start: false,
                 joins: None,
                 enable_bootstrap: true,
-                bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
@@ -864,7 +842,6 @@ mod query_core_tests {
             auto_start: false,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -915,7 +892,6 @@ mod output_state_integration_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -1143,7 +1119,6 @@ mod output_state_integration_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -1354,7 +1329,6 @@ mod output_state_integration_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,

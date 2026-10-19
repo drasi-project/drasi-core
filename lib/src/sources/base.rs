@@ -2580,7 +2580,6 @@ mod tests {
     /// an already-processed replay and drops it. With serialized dispatch,
     /// delivery order matches sequence order, so nothing is dropped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[allow(deprecated)]
     async fn concurrent_dispatch_preserves_sequence_order() {
         const EVENTS_PER_TRIAL: u64 = 50;
         const TRIALS: usize = 20;
@@ -2617,27 +2616,18 @@ mod tests {
                 handle.await.unwrap();
             }
 
-            // Drain the subscriber in delivery order and run the events through a
-            // legacy checkpoint model, not the current query implementation.
-            let mut dedup = crate::queries::SequenceDedup::default();
             let mut delivered_sequences = Vec::new();
             let mut delivered_timestamps = Vec::new();
-            let mut dropped = 0usize;
             for _ in 0..EVENTS_PER_TRIAL {
                 let event = receiver.recv().await.unwrap();
-                let seq = event.sequence;
-                if dedup.should_skip("concurrent-src", seq) {
-                    dropped += 1;
-                    continue;
-                }
-                dedup.advance("concurrent-src", seq);
-                delivered_sequences.push(seq);
+                delivered_sequences.push(event.sequence);
                 delivered_timestamps.push(event.timestamp);
             }
 
             assert_eq!(
-                dropped, 0,
-                "trial {trial}: SequenceDedup dropped {dropped} concurrently dispatched event(s)"
+                delivered_sequences,
+                (1..=EVENTS_PER_TRIAL).collect::<Vec<_>>(),
+                "trial {trial}: dispatch must deliver every allocated sequence in order"
             );
             assert_eq!(
                 delivered_sequences.len() as u64,
@@ -2669,7 +2659,6 @@ mod tests {
     /// strictly increasing sequence order with nothing dropped by
     /// the checkpoint comparison model used by this source-level test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[allow(deprecated)]
     async fn concurrent_batch_dispatch_preserves_sequence_order() {
         const BATCHES_PER_TRIAL: u64 = 20;
         const EVENTS_PER_BATCH: u64 = 3;
@@ -2723,23 +2712,16 @@ mod tests {
             }
 
             let total = BATCHES_PER_TRIAL * EVENTS_PER_BATCH;
-            let mut dedup = crate::queries::SequenceDedup::default();
             let mut delivered = Vec::new();
-            let mut dropped = 0usize;
             for _ in 0..total {
                 let event = receiver.recv().await.unwrap();
-                let seq = event.sequence;
-                if dedup.should_skip("concurrent-batch-src", seq) {
-                    dropped += 1;
-                    continue;
-                }
-                dedup.advance("concurrent-batch-src", seq);
-                delivered.push(seq);
+                delivered.push(event.sequence);
             }
 
             assert_eq!(
-                dropped, 0,
-                "trial {trial}: SequenceDedup dropped {dropped} batched event(s)"
+                delivered,
+                (1..=total).collect::<Vec<_>>(),
+                "trial {trial}: batch dispatch must deliver every allocated sequence in order"
             );
             assert_eq!(
                 delivered.len() as u64,
@@ -3716,10 +3698,9 @@ mod tests {
 
     /// Source-level regression for #827: after a restart resume, the sequences
     /// SourceBase *fills in* for a source that omits them must land strictly above
-    /// the supplied query checkpoint. The legacy comparison helper is only a
-    /// test model here; full query recovery is checked by the runtime suites.
+    /// the supplied query checkpoint. Full query recovery is checked by the
+    /// runtime suites; this test independently checks the assigned sequence.
     #[tokio::test]
-    #[allow(deprecated)]
     async fn test_filled_sequences_survive_dedup_after_restart() {
         let source_id = "dedup-restart";
         // Query checkpointed sequence 500 before restart.
@@ -3739,13 +3720,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Seed the source-level checkpoint comparison model.
-        let dedup = crate::queries::SequenceDedup::new(
-            std::iter::once((source_id.to_string(), checkpoint)).collect(),
-        );
-
         // The source omits its own sequence; SourceBase fills one in on dispatch.
-        for _ in 0..3 {
+        for offset in 1..=3 {
             base.dispatch_event(make_event(&base, Some(&[0x01])))
                 .await
                 .unwrap();
@@ -3755,10 +3731,7 @@ mod tests {
                 seq > checkpoint,
                 "filled-in sequence {seq} must exceed checkpoint {checkpoint}"
             );
-            assert!(
-                !dedup.should_skip(source_id, ev.sequence),
-                "post-restart event (seq {seq}) must NOT be dropped by dedup (checkpoint {checkpoint})"
-            );
+            assert_eq!(seq, checkpoint + offset);
         }
     }
 }
