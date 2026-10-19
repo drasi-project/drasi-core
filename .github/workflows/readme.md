@@ -148,10 +148,24 @@ prepared lock hashes, toolchain, mode, versions, and expected eight-target plugi
 inventory. Nightly snapshots the tree **after** release-plz prepares versions and
 changelogs. Production snapshots the release tree before crate publication.
 Standalone plugin dispatch snapshots once and accepts only refs from trusted
-main history. Nightly, production publication, and repair must run from the
+main history. It first checks out the official repository at the triggering
+workflow SHA, resolves the requested branch, tag, or full commit SHA without
+checking it out, and validates ancestry against the exact
+`refs/remotes/origin/main` reference. Only the validated immutable commit is then
+checked out (detached) and frozen. This avoids branch/tag names shadowing the
+trusted-main reference, mutable-ref races, and untrusted source checkout before
+validation. An empty `ref` keeps the triggering commit; older main-history
+revisions remain supported. Nightly, production publication, and repair must run from the
 official repository's main; there is no branch-testing exception.
 
 Each target restores the same bundle and validates its hashes before building.
+Restore exports the candidate's recorded `source_commit` as a step output.
+Plugin builds pass it to the SDK as `DRASI_BUILD_GIT_SHA`, including explicit
+manylinux container forwarding and cross environment passthrough. Local crate
+package verification receives the same value. The SDK embeds this full SHA in
+`PluginMetadata.git_commit` instead of discovering a potentially newer tooling
+checkout or depending on `.git` being mounted. The candidate hash still identifies
+the prepared manifests/changelogs on top of that source commit.
 Metadata, outer xtask invocations, nested Cargo/cross builds, and manylinux builds
 use `--locked`. Source/lock checks also run after the work. Missing or inconsistent
 locks fail; targets never regenerate them. Different targets still compile their

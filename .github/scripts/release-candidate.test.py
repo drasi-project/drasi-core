@@ -90,6 +90,45 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual("# First release\n", (restored / "plugin/CHANGELOG.md").read_text())
         self.assertFalse((restored / "unrelated-secret.txt").exists())
 
+    def test_restore_exports_candidate_commit_instead_of_parent_checkout(self):
+        self.command("git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "--allow-empty", "-qm", "newer tooling checkout")
+        self.assertNotEqual(self.data["source_commit"],
+                            self.command("git", "rev-parse", "HEAD").stdout.strip())
+        for destination in (self.root / "restored", self.base / "without-git"):
+            with self.subTest(destination=destination):
+                outputs = self.base / "restore-outputs"
+                outputs.write_text("")
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / ".github/scripts/release-candidate.py"),
+                     "restore", "--bundle", str(self.bundle), "--sha256", self.expected,
+                     "--root", str(destination)],
+                    env=os.environ | {"GITHUB_OUTPUT": str(outputs)},
+                    capture_output=True, text=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual({"source_commit": self.data["source_commit"]},
+                                 dict(line.split("=", 1) for line in outputs.read_text().splitlines()))
+
+    def test_standalone_freeze_uses_validated_older_main_commit(self):
+        self.command("git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "--allow-empty", "-qm", "newer main")
+        self.command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
+        selected = candidate.select_source(self.root, self.data["source_commit"])
+        bundle = self.base / "standalone"
+        candidate.freeze(self.root, bundle)
+        result = candidate.load(bundle, candidate.sha(bundle / "candidate.json"))
+        self.assertEqual(self.data["source_commit"], selected)
+        self.assertEqual(selected, result["source_commit"])
+        self.assertEqual(self.data["lock_sha256"], result["lock_sha256"])
+
+    def test_invalid_candidate_commit_is_rejected(self):
+        for value in ("main", "a" * 7, "g" * 40, "a" * 40 + "\nother=value", None):
+            with self.subTest(value=value):
+                candidate.write_json(self.bundle / "candidate.json",
+                                     self.data | {"source_commit": value})
+                with self.assertRaisesRegex(ValueError, "source commit"):
+                    candidate.load(self.bundle, candidate.sha(self.bundle / "candidate.json"))
+
     def test_real_multi_package_verification_of_unpublished_versions(self):
         report = self.base / "packages.json"
         nested = self.root / "prepared"
@@ -97,6 +136,13 @@ class CandidateTests(unittest.TestCase):
         candidate.package(self.bundle, self.expected, nested, report)
         self.assertEqual(2, len(json.loads(report.read_text())["archives"]))
         self.assertEqual(candidate.sha(self.root / "Cargo.lock"), candidate.sha(self.prepared / "Cargo.lock"))
+
+    def test_packaging_receives_candidate_commit(self):
+        report = self.base / "packages.json"
+        with patch.object(candidate.subprocess, "run", wraps=subprocess.run) as run:
+            candidate.package(self.bundle, self.expected, self.prepared, report)
+        self.assertEqual(self.data["source_commit"],
+                         run.call_args.kwargs["env"]["DRASI_BUILD_GIT_SHA"])
 
     def test_packaged_source_failure_is_not_skipped(self):
         # This crate builds in the workspace, but Cargo's package excludes a required file.
@@ -274,6 +320,182 @@ class CandidateTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "3"}):
             with self.assertRaisesRegex(ValueError, "run and attempt"):
                 candidate.handoff(self.bundle, self.expected, reports, packages, self.base / "ready.json")
+
+
+class SourceSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.command("git", "init", "-q")
+        self.command("git", "config", "user.name", "Fixture")
+        self.command("git", "config", "user.email", "fixture@example.invalid")
+        marker = self.root / "source.txt"
+        marker.write_text("older main")
+        self.command("git", "add", ".")
+        self.command("git", "commit", "-qm", "older main")
+        self.older = self.head()
+        marker.write_text("current main")
+        self.command("git", "commit", "-qam", "current main")
+        self.main = self.head()
+        self.command("git", "branch", "-M", "main")
+        self.command("git", "update-ref", "refs/remotes/origin/main", self.main)
+        self.command("git", "update-ref", "refs/remotes/origin/release/old", self.older)
+        self.command("git", "tag", "v-old", self.older)
+        self.command("git", "tag", "-a", "-m", "old release", "annotated-old", self.older)
+        self.command("git", "checkout", "--detach", self.older)
+        marker.write_text("not merged into main")
+        self.command("git", "commit", "-qam", "unmerged branch")
+        self.untrusted = self.head()
+        self.command("git", "update-ref", "refs/remotes/origin/topic", self.untrusted)
+        self.command("git", "checkout", "--detach", self.main)
+
+    def command(self, *args):
+        result = subprocess.run(args, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result.stdout.strip()
+
+    def head(self):
+        return self.command("git", "rev-parse", "HEAD")
+
+    def test_supported_refs_resolve_to_detached_main_history_commits(self):
+        for ref, expected in (
+            ("", self.older), ("main", self.main), ("refs/heads/main", self.main),
+            ("release/old", self.older), ("refs/heads/release/old", self.older),
+            ("v-old", self.older), ("refs/tags/v-old", self.older),
+            ("annotated-old", self.older), (self.older, self.older),
+        ):
+            with self.subTest(ref=ref):
+                self.command("git", "checkout", "--detach", self.older)
+                self.assertEqual(expected, candidate.select_source(self.root, ref))
+                self.assertEqual(expected, self.head())
+                self.assertEqual(1, subprocess.run(
+                    ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=self.root).returncode)
+
+    def test_shadowing_branches_and_tags_cannot_bypass_main_ancestry(self):
+        self.command("git", "branch", "origin/main", self.untrusted)
+        self.command("git", "update-ref", "refs/remotes/origin/origin/main", self.untrusted)
+        self.command("git", "tag", "origin/main", self.untrusted)
+        self.command("git", "tag", "refs/remotes/origin/main", self.untrusted)
+        # The former ambiguous guard incorrectly accepts the unmerged commit.
+        self.command("git", "merge-base", "--is-ancestor", self.untrusted, "origin/main")
+        for ref in ("origin/main", "refs/heads/origin/main", "refs/tags/origin/main", self.untrusted):
+            with self.subTest(ref=ref), patch.object(candidate, "run", wraps=candidate.run) as calls:
+                with self.assertRaisesRegex(ValueError, "trusted main history"):
+                    candidate.select_source(self.root, ref)
+                self.assertEqual(self.main, self.head())
+                self.assertFalse(any(call.args[:2] == ("git", "checkout") for call in calls.call_args_list))
+        self.assertEqual(self.main, candidate.select_source(self.root, "main"))
+
+    def test_invalid_and_untrusted_refs_never_reach_checkout(self):
+        for ref in (
+            "topic", "refs/heads/topic", "missing", "0" * 40,
+            "--help", "main:refs/remotes/origin/main", "../main", "main\nother",
+            "main^{tree}", "refs/pull/1/head", "refs/heads/*",
+        ):
+            with self.subTest(ref=ref), patch.object(candidate, "run", wraps=candidate.run) as calls:
+                with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                    candidate.select_source(self.root, ref)
+                self.assertEqual(self.main, self.head())
+                self.assertEqual(self.main, self.command(
+                    "git", "show-ref", "--verify", "--hash", "refs/remotes/origin/main"))
+                self.assertFalse(any(call.args[:2] == ("git", "checkout") for call in calls.call_args_list))
+
+    def test_mutable_ref_is_not_resolved_again_after_validation(self):
+        original_run = candidate.run
+
+        def move_ref_before_checkout(*args, **kwargs):
+            if args[:2] == ("git", "checkout"):
+                self.command("git", "update-ref", "refs/remotes/origin/release/old", self.untrusted)
+            return original_run(*args, **kwargs)
+
+        with patch.object(candidate, "run", side_effect=move_ref_before_checkout):
+            self.assertEqual(self.older, candidate.select_source(self.root, "release/old"))
+        self.assertEqual(self.older, self.head())
+        self.assertEqual("older main", (self.root / "source.txt").read_text())
+
+    def test_cli_rejection_leaves_trusted_checkout_unchanged(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / ".github/scripts/release-candidate.py"), "select-source",
+             "--root", str(self.root), "--ref", "topic"], capture_output=True, text=True)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("Publication ref must belong to trusted main history", result.stderr)
+        self.assertEqual(self.main, self.head())
+
+    def test_selection_rejects_inheriting_a_parent_tooling_checkout(self):
+        nested = self.root / "not-a-checkout"
+        nested.mkdir()
+        with self.assertRaisesRegex(ValueError, "own trusted checkout"):
+            candidate.select_source(nested, self.older)
+
+
+class SdkProvenanceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.root = self.base / "sdk-probe"
+        (self.root / "src").mkdir(parents=True)
+        chrono_version = next(
+            package["version"] for package in
+            candidate.tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
+            if package["name"] == "chrono")
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname="sdk-provenance-probe"\nversion="0.0.0"\nedition="2021"\n'
+            f'[build-dependencies]\nchrono="={chrono_version}"\n[workspace]\n')
+        (self.root / "build.rs").write_bytes((ROOT / "components/plugin-sdk/build.rs").read_bytes())
+        (self.root / "rust-toolchain.toml").write_bytes((ROOT / "rust-toolchain.toml").read_bytes())
+        (self.root / "src/main.rs").write_text(
+            'fn main() { println!("{}", env!("GIT_COMMIT_SHA")); }\n')
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith("GIT_") and key not in (
+                        "DRASI_BUILD_GIT_SHA", "DRASI_EMBED_GIT_SHA", "DRASI_EMBED_BUILD_TIMESTAMP",
+                        "CARGO_TARGET_DIR")}
+        self.env["GIT_CEILING_DIRECTORIES"] = str(self.base.parent)
+        self.command("cargo", "generate-lockfile")
+
+    def command(self, *args, env=None, cwd=None, success=True):
+        result = subprocess.run(
+            args, cwd=cwd or self.root, env=self.env | (env or {}),
+            capture_output=True, text=True)
+        self.assertEqual(success, result.returncode == 0, result.stdout + result.stderr)
+        return result
+
+    def test_explicit_commit_overrides_debug_placeholder_and_invalidates_cache(self):
+        self.assertEqual("dev", self.command("cargo", "run", "--locked", "--quiet").stdout.strip())
+        for commit in ("a" * 40, "b" * 40):
+            with self.subTest(commit=commit):
+                result = self.command("cargo", "run", "--locked", "--quiet",
+                                      env={"DRASI_BUILD_GIT_SHA": commit})
+                self.assertEqual(commit, result.stdout.strip())
+        self.assertEqual("dev", self.command("cargo", "run", "--locked", "--quiet").stdout.strip())
+
+    def test_release_provenance_survives_newer_parent_checkout_and_no_git(self):
+        self.command("git", "init", "-q", cwd=self.base)
+        self.command("git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "--allow-empty", "-qm", "candidate", cwd=self.base)
+        commit = self.command("git", "rev-parse", "HEAD", cwd=self.base).stdout.strip()
+        self.command("git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "--allow-empty", "-qm", "tooling", cwd=self.base)
+        tooling = self.command("git", "rev-parse", "--short", "HEAD", cwd=self.root).stdout.strip()
+        self.assertFalse(commit.startswith(tooling))
+        args = ("cargo", "run", "--locked", "--quiet", "--release")
+        self.assertEqual(tooling, self.command(*args).stdout.strip())
+        self.assertEqual(tooling, self.command("cargo", "run", "--locked", "--quiet",
+                                             env={"DRASI_EMBED_GIT_SHA": "1"}).stdout.strip())
+        self.assertEqual(commit, self.command(*args, env={"DRASI_BUILD_GIT_SHA": commit}).stdout.strip())
+        (self.base / ".git").rename(self.base / "saved-git")
+        self.command("cargo", "clean", "--package", "sdk-provenance-probe")
+        self.assertEqual(commit, self.command(*args, env={"DRASI_BUILD_GIT_SHA": commit}).stdout.strip())
+        self.assertEqual("unknown", self.command(*args).stdout.strip())
+
+    def test_invalid_explicit_commit_fails_without_git_fallback(self):
+        for value in ("", "abc1234", "g" * 40, "a" * 40 + "\nother=value"):
+            with self.subTest(value=value):
+                result = self.command(
+                    "cargo", "run", "--locked", "--quiet",
+                    env={"DRASI_BUILD_GIT_SHA": value}, success=False)
+                self.assertIn("DRASI_BUILD_GIT_SHA must be a full 40-character hexadecimal", result.stderr)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -546,6 +768,42 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual("", publish["env"]["COSIGN_REPOSITORY"])
         self.assertEqual("${{ needs.select-mode.outputs.certificate_identity }}",
                          publish["env"]["COSIGN_VERIFY_CERTIFICATE_IDENTITY"])
+
+    def test_candidate_commit_reaches_native_manylinux_and_cross_builds(self):
+        document = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
+        steps = document["jobs"]["build-and-publish"]["steps"]
+        restore = next(step for step in steps if step.get("name") == "Restore and validate prepared source")
+        self.assertEqual("restore", restore["id"])
+        build = next(step for step in steps if step.get("name") == "Build plugins")
+        self.assertLess(steps.index(restore), steps.index(build))
+        self.assertEqual("${{ steps.restore.outputs.source_commit }}",
+                         build["env"]["DRASI_BUILD_GIT_SHA"])
+        self.assertIn("--env DRASI_BUILD_GIT_SHA", build["run"])
+        cross = candidate.tomllib.loads((ROOT / "Cross.toml").read_text())
+        self.assertIn("DRASI_BUILD_GIT_SHA", cross["build"]["env"]["passthrough"])
+
+    def test_standalone_ref_is_validated_before_checkout_and_freeze(self):
+        document = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
+        job = document["jobs"]["prepare-candidate"]
+        steps = job["steps"]
+        checkout = next(step for step in steps if step.get("with", {}).get("path") == "selected-source")
+        self.assertEqual({
+            "repository": "drasi-project/drasi-core", "ref": "${{ github.sha }}",
+            "path": "selected-source", "fetch-depth": 0, "persist-credentials": False,
+        }, checkout["with"])
+        self.assertEqual("${{ inputs.candidate_artifact == '' }}", checkout["if"])
+        freeze = next(step for step in steps if step.get("id") == "freeze")
+        self.assertEqual(checkout["if"], freeze["if"])
+        self.assertEqual({"INPUT_REF": "${{ inputs.ref }}"}, freeze["env"])
+        self.assertLess(steps.index(checkout), steps.index(freeze))
+        self.assertIn('select-source --root selected-source --ref "$INPUT_REF"', freeze["run"])
+        self.assertLess(freeze["run"].index(" select-source "), freeze["run"].index(" freeze "))
+        self.assertNotIn("${{ inputs.ref }}", freeze["run"])
+        self.assertEqual({"contents": "read"}, job["permissions"])
+        for workflow_job in document["jobs"].values():
+            for step in workflow_job.get("steps", []):
+                if step.get("uses", "").startswith("actions/checkout@"):
+                    self.assertNotIn("inputs.ref", json.dumps(step.get("with", {})))
 
 
 if __name__ == "__main__":

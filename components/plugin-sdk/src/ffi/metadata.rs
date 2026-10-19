@@ -55,7 +55,7 @@ pub const FFI_SDK_VERSION: &str = "0.14.0";
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
 
-/// Git commit SHA the plugin was built from (short hash, e.g. "a1b2c3d").
+/// Git commit SHA the plugin was built from (full candidate SHA or local short hash).
 pub const GIT_COMMIT_SHA: &str = env!("GIT_COMMIT_SHA");
 
 /// Build timestamp in RFC 3339 format (e.g. "2026-03-03T17:00:00Z").
@@ -75,7 +75,7 @@ pub struct PluginMetadata {
     pub plugin_version: FfiStr,
     /// Target triple (e.g., "x86_64-unknown-linux-gnu").
     pub target_triple: FfiStr,
-    /// Git commit SHA the plugin was built from (short hash).
+    /// Git commit SHA the plugin was built from (full candidate SHA or local short hash).
     pub git_commit: FfiStr,
     /// Build timestamp in RFC 3339 format.
     pub build_timestamp: FfiStr,

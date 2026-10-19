@@ -152,6 +152,7 @@ jobs:
       - name: Checkout trusted tooling
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Validate candidate input pair
@@ -168,23 +169,23 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Checkout standalone publication source
+      - name: Checkout trusted standalone source
         if: ${{ inputs.candidate_artifact == '' }}
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ inputs.ref }}
+          repository: drasi-project/drasi-core
+          ref: ${{ github.sha }}
           path: selected-source
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Freeze standalone candidate from trusted history
+      - name: Select and freeze validated standalone source
         if: ${{ inputs.candidate_artifact == '' }}
         id: freeze
+        env:
+          INPUT_REF: ${{ inputs.ref }}
         run: |
-          git -C selected-source merge-base --is-ancestor HEAD origin/main || {
-            echo "::error::Publication ref must belong to trusted main history."
-            exit 1
-          }
+          python3 .github/scripts/release-candidate.py select-source --root selected-source --ref "$INPUT_REF"
           python3 .github/scripts/release-candidate.py freeze --root selected-source --output candidate
 
       - name: Retain standalone candidate
@@ -428,6 +429,7 @@ jobs:
           python-version: '3.12'
 
       - name: Restore and validate prepared source
+        id: restore
         shell: bash
         working-directory: .
         run: python .github/scripts/release-candidate.py restore --bundle candidate --sha256 "$CANDIDATE_SHA256" --root prepared
@@ -498,9 +500,12 @@ jobs:
 
       - name: Build plugins
         shell: bash
+        env:
+          DRASI_BUILD_GIT_SHA: ${{ steps.restore.outputs.source_commit }}
         run: |
           if [ "${{ matrix.manylinux }}" = "true" ]; then
             docker run --rm \
+              --env DRASI_BUILD_GIT_SHA \
               --env HOST_UID="$(id -u)" \
               --env HOST_GID="$(id -g)" \
               --volume "${PWD}:/workspace" \

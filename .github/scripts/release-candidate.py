@@ -68,6 +68,56 @@ def candidate_identity(candidate):
     return IDENTITY
 
 
+def select_source(root, requested_ref):
+    root = root.resolve()
+    require(Path(run("git", "rev-parse", "--show-toplevel", cwd=root)).resolve() == root,
+            "Standalone source must have its own trusted checkout")
+    main_commit = run("git", "show-ref", "--verify", "--hash",
+                      "refs/remotes/origin/main", cwd=root)
+    require(re.fullmatch(r"[0-9a-f]{40}", main_commit),
+            "Cannot resolve the official remote-main commit")
+    require(isinstance(requested_ref, str) and not requested_ref.startswith("-"),
+            "Publication ref must be a branch, tag, or full commit SHA")
+
+    if not requested_ref:
+        selected_ref = "HEAD"
+    elif re.fullmatch(r"[0-9a-fA-F]{40}", requested_ref):
+        selected_ref = requested_ref
+    else:
+        if requested_ref.startswith("refs/heads/"):
+            refs = ["refs/remotes/origin/" + requested_ref.removeprefix("refs/heads/")]
+        elif requested_ref.startswith("refs/tags/"):
+            refs = [requested_ref]
+        else:
+            require(not requested_ref.startswith("refs/"),
+                    "Publication ref must use a branch or tag, not another ref namespace")
+            refs = [f"refs/remotes/origin/{requested_ref}", f"refs/tags/{requested_ref}"]
+        selected_ref = None
+        for ref in refs:
+            valid = subprocess.run(["git", "check-ref-format", ref], cwd=root, check=False)
+            require(valid.returncode == 0, "Invalid publication ref name")
+            exists = subprocess.run(["git", "show-ref", "--verify", "--quiet", ref],
+                                    cwd=root, check=False)
+            require(exists.returncode in (0, 1), "Cannot inspect publication ref")
+            if exists.returncode == 0:
+                selected_ref = run("git", "show-ref", "--verify", "--hash", ref, cwd=root)
+                break
+        require(selected_ref is not None,
+                "Publication ref was not found in the official repository checkout")
+
+    commit = run("git", "rev-parse", "--verify", "--end-of-options",
+                 selected_ref + "^{commit}", cwd=root)
+    require(re.fullmatch(r"[0-9a-f]{40}", commit), "Publication ref must resolve to a commit")
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", commit, main_commit],
+                             cwd=root, check=False)
+    require(ancestor.returncode == 0, "Publication ref must belong to trusted main history")
+    # Both arguments above are immutable object IDs; never check out the mutable input name.
+    run("git", "checkout", "--detach", commit, cwd=root)
+    require(run("git", "rev-parse", "HEAD", cwd=root) == commit,
+            "Standalone source checkout does not match the validated commit")
+    return commit
+
+
 def metadata(root):
     require((root / "Cargo.lock").is_file(),
             "Missing required Cargo.lock; restore the committed candidate lockfile")
@@ -152,6 +202,9 @@ def load(bundle, expected):
     candidate = json.loads((bundle / "candidate.json").read_text())
     require(candidate["schema_version"] == 1, "Unsupported candidate schema")
     require(candidate["repository"] == "drasi-project/drasi-core", "Unexpected producer repository")
+    require(isinstance(candidate["source_commit"], str)
+            and re.fullmatch(r"[0-9a-f]{40}", candidate["source_commit"]),
+            "Candidate source commit must be a full Git SHA")
     require(sha(bundle / "source.tar") == candidate["source_sha256"], "Candidate source hash mismatch")
     return candidate
 
@@ -163,6 +216,7 @@ def restore(bundle, expected, root):
     with tarfile.open(bundle / "source.tar") as archive:
         archive.extractall(root, filter="data")
     check(bundle, expected, root)
+    output("source_commit", candidate["source_commit"])
     return candidate
 
 
@@ -193,7 +247,8 @@ def package(bundle, expected, root, destination):
             "--target-dir", str((root / "target").resolve())]
     for crate in candidate["crates"]:
         args.extend(["--package", crate["name"]])
-    subprocess.run(args, cwd=root, check=True)
+    subprocess.run(args, cwd=root, check=True,
+                   env=os.environ | {"DRASI_BUILD_GIT_SHA": candidate["source_commit"]})
     archives = []
     for crate in candidate["crates"]:
         filename = f"{crate['name']}-{crate['version']}.crate"
@@ -292,7 +347,7 @@ def handoff(bundle, expected, reports_dir, packages, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["freeze", "restore", "check", "package", "packages",
+    parser.add_argument("command", choices=["select-source", "freeze", "restore", "check", "package", "packages",
                                              "target-report", "handoff", "publication-context"])
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--bundle", type=Path)
@@ -303,10 +358,13 @@ def main():
     parser.add_argument("--target")
     parser.add_argument("--reports", type=Path)
     parser.add_argument("--packages", type=Path)
+    parser.add_argument("--ref", default="")
     args = parser.parse_args()
     try:
         if args.command == "publication-context":
             output("certificate_identity", publication_context(os.environ))
+        elif args.command == "select-source":
+            print(f"Selected trusted main-history commit {select_source(args.root, args.ref)}")
         elif args.command == "freeze":
             freeze(args.root.resolve(), args.output.resolve())
         elif args.command == "restore":
