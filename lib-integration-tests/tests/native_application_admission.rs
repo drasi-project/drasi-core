@@ -312,6 +312,161 @@ async fn reopen_contract() -> Result<()> {
     Ok(())
 }
 
+async fn removal_contract() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let channel = channel(directory.path()).await?;
+    let original = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+    let mut accepted = None;
+    for remove in [true, false] {
+        let admission = if remove {
+            original.clone()
+        } else {
+            SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?
+        };
+        let (mut graph, mut delivered) = graph(&admission, false)?;
+        let run = graph.run()?;
+        let control = run.control();
+        let work = async {
+            let result = async {
+                control.deployment_report().await?;
+                let started = control
+                    .start_components(control.desired_snapshot().revision, GraphSelection::All)
+                    .await?;
+                assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
+                active(&admission).await?;
+                let session = admission
+                    .register_producer(ComponentId::try_new("client")?)
+                    .await?;
+                if remove {
+                    control
+                        .component_handle(&ComponentId::try_new("capture")?)?
+                        .stop()
+                        .await
+                        .context("pausing the consumer before admitting input")?;
+                }
+                let receipt = admit(&admission, &session, 1, &event(1)?).await?;
+                if remove {
+                    accepted = Some((session.clone(), receipt.clone()));
+                    assert!(matches!(
+                        admission.retire_producer(&session).await,
+                        Err(PipeError::Backend(error))
+                            if error.downcast_ref::<AdmissionRejection>()
+                                == Some(&AdmissionRejection::PendingObligations)
+                    ));
+                    let source = control.component_handle(&ComponentId::try_new("input")?)?;
+                    source
+                        .stop()
+                        .await
+                        .context("stopping the admitted source")?;
+                    let preview = control
+                        .preview(
+                            control.desired_snapshot().revision,
+                            vec![DesiredMutation::RemoveComponents {
+                                selection: GraphSelection::All,
+                                policy: RemovalPolicy::Reject,
+                            }],
+                        )
+                        .await?;
+                    let pending = control
+                        .reconcile(preview, TopologyBindings::default())
+                        .await?;
+                    assert!(!pending.committed, "{pending:?}");
+                    assert!(pending.failures.iter().any(|failure| matches!(
+                        failure.cause.as_ref(),
+                        GraphError::ReconciliationTimeout
+                    )));
+                    assert_eq!(control.observed().components.len(), 2);
+                    source.observed()?;
+                    assert!(!admission.is_active()?);
+                    assert!(matches!(
+                        admission.admit(&session, 2, &event(2)?).await,
+                        Err(PipeError::Closed)
+                    ));
+                    let progress = channel.progress().await?;
+                    assert_eq!(progress.accepted, 1);
+                    assert_eq!(progress.processed["capture"], 0);
+                    assert!(progress.retired.is_empty());
+                    assert_eq!(
+                        channel.admission_receipt(&session, 1).await?,
+                        Some(receipt.clone())
+                    );
+                    let consumer = control.component_handle(&ComponentId::try_new("capture")?)?;
+                    consumer.start().await?;
+                    receive(&mut delivered, "1").await?;
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while channel.progress().await?.processed["capture"] != 1 {
+                            tokio::task::yield_now().await;
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await??;
+                    consumer.stop().await?;
+                    let preview = control
+                        .preview(
+                            control.desired_snapshot().revision,
+                            vec![DesiredMutation::RemoveComponents {
+                                selection: GraphSelection::All,
+                                policy: RemovalPolicy::Reject,
+                            }],
+                        )
+                        .await?;
+                    let removed = control
+                        .reconcile(preview, TopologyBindings::default())
+                        .await?;
+                    assert!(removed.committed, "{removed:?}");
+                    assert!(control.observed().components.is_empty());
+                    assert!(matches!(
+                        source.observed(),
+                        Err(GraphError::StaleGeneration)
+                    ));
+                    assert_eq!(channel.admission_receipt(&session, 1).await?, Some(receipt));
+                } else {
+                    assert_eq!(accepted.as_ref(), Some(&(session.clone(), receipt.clone())));
+                    assert!(!original.is_active()?);
+                    assert!(matches!(
+                        original.admit(&session, 2, &event(2)?).await,
+                        Err(PipeError::Closed)
+                    ));
+                    assert_eq!(channel.progress().await?.processed["capture"], 1);
+                    assert_eq!(channel.progress().await?.accepted, 1);
+                    admission.retire_producer(&session).await?;
+                    assert!(matches!(
+                        admission.admission_receipt(&session, 1).await,
+                        Err(PipeError::Backend(error))
+                            if error.downcast_ref::<AdmissionRejection>()
+                                == Some(&AdmissionRejection::SessionExpired)
+                    ));
+                    let replacement = admission
+                        .register_producer(ComponentId::try_new("client")?)
+                        .await?;
+                    assert_ne!(replacement, session);
+                    admit(&admission, &replacement, 1, &event(2)?).await?;
+                    receive(&mut delivered, "2").await?;
+                    assert_eq!(channel.progress().await?.accepted, 2);
+                    assert!(delivered.try_recv().is_err());
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            control.cancel();
+            result
+        };
+        let (run, work) =
+            tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(run, work) })
+                .await?;
+        let cleanup = graph.shutdown().await;
+        work?;
+        assert!(matches!(run, Err(GraphError::Cancelled)), "{run:?}");
+        cleanup?;
+        assert_eq!(
+            channel.progress().await?.accepted,
+            if remove { 1 } else { 2 }
+        );
+    }
+    channel.shutdown().await?;
+    Ok(())
+}
+
 fn both_runtimes<F, Fut>(scenario: F) -> Result<()>
 where
     F: Fn() -> Fut,
@@ -339,6 +494,12 @@ fn native_application_admission_preserves_receipts_and_rejects_stopped_sends() -
 fn native_application_reopen_replays_unhandled_input_without_accepting_retries_twice() -> Result<()>
 {
     both_runtimes(reopen_contract)
+}
+
+#[test]
+fn native_application_removal_preserves_borrowed_journal_obligations_and_fences_old_handles(
+) -> Result<()> {
+    both_runtimes(removal_contract)
 }
 
 async fn query_contract() -> Result<()> {

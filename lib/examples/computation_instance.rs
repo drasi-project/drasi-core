@@ -12,72 +12,76 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Two DrasiLib instances sharing a host-owned source subscription.
+//! Independent native query pipelines sharing one source in a DrasiLib instance.
 //! Run: cargo run -p drasi-lib --example computation_instance
 
-use drasi_lib::{
-    computation::v1::{ReactionPluginHost, ReactionPluginOptions, SourceSubscriptionOptions},
-    DrasiLib,
-};
-use drasi_reaction_application::ApplicationReaction;
-use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
-use std::time::Duration;
+use anyhow::{Context, Result};
+use drasi_lib::{computation::v1::*, error::OperationFailures, DrasiLib, Query};
+use drasi_source_application::{NativeApplicationSource, PropertyMapBuilder};
+use futures::StreamExt;
+use std::{num::NonZeroUsize, time::Duration};
+
+const INSTANCE: &str = "parallel-example";
 
 #[tokio::main]
+async fn main() -> Result<()> {
+    let drasi = DrasiLib::builder().with_id(INSTANCE).build().await?;
+    let result = run(&drasi).await;
+    let cleanup = drasi.shutdown().await;
+    let failures: Vec<_> = result
+        .err()
+        .into_iter()
+        .chain(cleanup.err().map(Into::into))
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(OperationFailures::new("native pipeline example failed", failures).into())
+    }
+}
+
 #[allow(clippy::print_stdout)]
-async fn main() -> anyhow::Result<()> {
-    let (source, input) = ApplicationSource::new(
+async fn run(drasi: &DrasiLib) -> Result<()> {
+    let stream = StreamId::try_new("orders/out")?;
+    let (source, input) = NativeApplicationSource::channel(
+        INSTANCE,
+        drasi
+            .computation_control()?
+            .desired_snapshot()
+            .id
+            .to_string(),
         "orders",
-        ApplicationSourceConfig {
-            properties: Default::default(),
-            durability: None,
-        },
+        stream.clone(),
+        NonZeroUsize::new(16).context("source capacity")?,
     )?;
-    let query = drasi_lib::Query::cypher("orders-query")
-        .query("MATCH (o:Order) RETURN o.name AS name")
-        .from_source("orders")
-        .enable_bootstrap(false)
-        .build();
-    let (ordinary_reaction, ordinary_handle) =
-        ApplicationReaction::new("ordinary-output", vec![query.id.clone()]);
-    let mut ordinary_output = ordinary_handle
-        .take_receiver()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("ordinary receiver already taken"))?;
-    let drasi = DrasiLib::builder()
-        .with_id("parallel-example")
-        .with_source(source)
-        .with_query(query.clone())
-        .with_reaction(ordinary_reaction)
-        .build()
+    let output = source.output();
+    let added = drasi
+        .add_components(
+            ComponentBatch::builder()
+                .source(Box::new(source))
+                .bind_stream(output.clone(), stream)
+                .build()?,
+        )
         .await?;
-
-    let observer = DrasiLib::builder().with_id("observer").build().await?;
-    let pipeline = observer.computation_pipeline()?;
-    let (additional_reaction, additional_handle) =
-        ApplicationReaction::new("additional-output", vec![query.id.clone()]);
-    let mut additional_output = additional_handle
-        .take_receiver()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("additional receiver already taken"))?;
-    let reaction = ReactionPluginHost::owned(
-        Box::new(additional_reaction),
-        pipeline.services(),
-        pipeline.catalog(),
-        ReactionPluginOptions::default(),
-    )?;
-    let graph = pipeline
-        .source(
-            drasi.borrow_computation_source("orders").await?,
-            SourceSubscriptionOptions::default(),
-        )?
-        .query(query)
-        .reaction(reaction, true)
+    anyhow::ensure!(added.committed, "source declaration failed: {added:?}");
+    let query = |id| {
+        Query::cypher(id)
+            .query("MATCH (o:Order) RETURN o.name AS name")
+            .from_source("orders")
+            .enable_bootstrap(false)
+            .build()
+    };
+    let pipeline = drasi
+        .computation_pipeline()?
+        .native_source(output)?
+        .query(query("primary"))
+        .query(query("observer"))
         .build()?;
-    observer.add_components(graph).await?;
-
+    let added = drasi.add_components(pipeline).await?;
+    anyhow::ensure!(added.committed, "query declarations failed: {added:?}");
     drasi.start().await?;
-    observer.start().await?;
+    let mut primary = drasi.subscribe_query_results("primary").await?.stream;
+    let mut observer = drasi.subscribe_query_results("observer").await?.stream;
     input
         .send_node_insert(
             "one",
@@ -87,39 +91,41 @@ async fn main() -> anyhow::Result<()> {
                 .build(),
         )
         .await?;
-    let (ordinary, additional) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(ordinary_output.recv(), additional_output.recv())
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(primary.next(), observer.next())
     })
     .await?;
-    let ordinary = ordinary.ok_or_else(|| anyhow::anyhow!("ordinary output closed"))?;
-    let additional = additional.ok_or_else(|| anyhow::anyhow!("additional output closed"))?;
-    anyhow::ensure!(
-        ordinary.results == additional.results,
-        "query results differ"
-    );
-    println!("Both instances produced: {:?}", additional.results);
+    let first = first.context("primary reader closed")??;
+    let second = second.context("observer reader closed")??;
+    anyhow::ensure!(first.results == second.results, "query results differ");
+    println!("Both native queries produced: {:?}", second.results);
     println!(
-        "Observer computation revision: {:?}",
-        observer.computation_info().await?.revision
+        "Instance computation revision: {:?}",
+        drasi.computation_info().await?.revision
     );
 
-    observer.stop().await?;
+    drasi.stop_query("observer").await?;
     input
         .send_node_insert(
             "two",
             vec!["Order"],
             PropertyMapBuilder::new()
-                .with_string("name", "Ordinary pipeline still running")
+                .with_string("name", "Primary pipeline still running")
                 .build(),
         )
         .await?;
-    let result = tokio::time::timeout(Duration::from_secs(5), ordinary_output.recv())
+    let result = tokio::time::timeout(Duration::from_secs(5), primary.next())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("ordinary output stopped"))?;
-    println!("After stopping the observer instance: {:?}", result.results);
-    // This transient source has no replay: events sent while the observer is stopped
-    // are intentionally not recoverable by that subscriber.
-    observer.shutdown().await?;
-    drasi.shutdown().await?;
+        .context("primary reader stopped")??;
+    println!("With the observer query stopped: {:?}", result.results);
+    drasi.start_query("observer").await?;
+    let resumed = tokio::time::timeout(Duration::from_secs(5), observer.next())
+        .await?
+        .context("observer reader stopped")??;
+    anyhow::ensure!(
+        result.results == resumed.results,
+        "buffered update was not preserved"
+    );
+    println!("After restarting the observer query: {:?}", resumed.results);
     Ok(())
 }

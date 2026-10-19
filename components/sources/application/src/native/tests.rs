@@ -71,6 +71,7 @@ fn construction_validates_identity_and_real_channel_capacity() {
     assert_eq!(
         source.configuration().unwrap(),
         serde_json::json!({
+            "kind":"application",
             "constructionScope":"test-instance","graphId":"native-application-input",
             "stream":"input/out","durable":false,"capacity":7,"properties":{"name":"example"}
         })

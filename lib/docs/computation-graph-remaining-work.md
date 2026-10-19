@@ -1464,9 +1464,24 @@ application reaction is reused. Both-runtime integrations cover snapshot/live
 changes, durable stop/restart and retry receipts, unhandled-input reopen, and
 durable input through a persistent query to a native application consumer.
 The user explicitly chose to reject durable sends while stopped, unlike volatile
-channel buffering. No second WAL or admission runtime was added. Host/API cutover,
-permanent-removal/shared-journal ownership and complete assertion mapping remain;
-the old application interfaces have not been retired.
+channel buffering. No second WAL or admission runtime was added. Application
+bootstrap is now native-only: its count-only callback, descriptor and unsupported
+legacy configuration have been removed. Server's unused application registrations
+and normal application dependencies are gone, as is the reaction's unusable
+descriptor. Native application nodes now run inside DrasiLib in a reference
+example and both-runtime relationship/aggregation tests. Removal/drain, borrowed
+journal lifetime and producer-session retirement are covered. The old Rust
+Source/Reaction interfaces still have active test/performance consumers; their
+cutover and complete assertion mapping remain. The embedded test host now uses
+native source/query/reaction nodes, preserves its result/profiling projections,
+and retains startup/shutdown ownership. Its old SDK/FFI and unused bootstrap
+dependency closure is removed. Native query input updates, bootstrap preservation,
+late dependency binding, stop intent, source ownership and both-runtime behavior
+have focused coverage; the library and complete test-host library suites pass.
+The cross-instance
+borrowed-source example is ComputationGraph-branch adapter code, not a capability
+demonstrated by current main. Its existence does not add a requirement for a new
+native shared-input service; see the provenance correction in the cleanup plan.
 
 **Remaining work:** implement the required component/provider set and packaging
 against the new interfaces, and update the applications that use them.
@@ -1480,6 +1495,19 @@ PostgreSQL source, reaction and bootstrap; gRPC source/reaction; and Kafka/
 Kubernetes/SQLite source/bootstrap. Reuse the existing implementation logic where
 applicable and retain equivalent test coverage. New Kafka/SQLite reactions and
 functional gRPC bootstrap are explicitly outside this first-release scope.
+SQLite now has native explicit/physical-rowid keys, REST using the owned SQL
+worker, and ordinary read-only file bootstrap in addition to its coordinated
+persistent snapshot. Source capture and both native snapshots share the
+`drasi-sqlite-common` mapper. The file provider is independently packaged as
+`drasi-computation-bootstrap-sqlite`, using the native bootstrap extension with
+no dummy processing component. Its real-library checks cover discovery,
+lifecycle, two-query live SQL integration, and Server catalogue/resource recipes
+with memory-backed queries. The 96 SQLite-family cases, both-runtime hosted
+checks, existing Host/Server native suites and strict scoped lints pass.
+Ordinary file bootstrap still requires caller-controlled live-write ordering;
+it does not invent a replay checkpoint. Live-source/coordinated-snapshot native
+packaging, a complete native-only SQLite Server deployment and legacy-interface
+retirement remain open.
 See the stage-6 scope in the
 [cleanup plan](computation-graph-cleanup-plan.md).
 Concrete gaps include payload/header/routing templates, fixed/adaptive batching,
@@ -1544,11 +1572,12 @@ is native-only component/provider hosting and its current workflows, not another
 Server layout or a first-instance route.
 
 Remove old registry categories and statically wired ordinary helpers as their
-required functionality is provided by the chosen new components. In particular,
-Server's ordinary application/bootstrap registrations still have consumers;
-they cannot simply be deleted before those consumers are updated. CW-44 owns
-the actual connector/SDK replacement. Keep necessary operations working under
-the new API rather than maintaining two APIs for compatibility.
+required functionality is provided by the chosen new components. Server's
+application registrations are now removed: native query viewing no longer needs
+a temporary reaction, and in-process application data/receivers are supplied as
+native Rust objects rather than empty Server factories. Other selected connector
+and provider registrations remain part of CW-44. Keep necessary operations working
+under the new API rather than maintaining two APIs for compatibility.
 
 The user selected a snapshot followed by updates on each SSE connection, including
 reconnects. The UI now replaces rows on that initial event, without a separate

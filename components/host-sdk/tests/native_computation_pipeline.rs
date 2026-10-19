@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Build the components separately before running:
-//! make build-native-standard-plugins
+//! make build-native-standard-plugins build-native-sqlite-plugins
 //! CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test --offline -p drasi-host-sdk --test native_computation_pipeline
 //!
 //! There is deliberately no Rust dependency on these component crates here.
@@ -48,6 +48,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "native_computation_pipeline/shared.rs"]
 mod shared;
+#[path = "native_computation_pipeline/sqlite_bootstrap.rs"]
+mod sqlite_bootstrap;
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -63,6 +65,7 @@ fn plugin_package(name: &str) -> &'static str {
         MIDDLEWARE => "drasi-computation-transformer-middleware",
         CAPTURE => "drasi-computation-sink-capture",
         ARITHMETIC => "drasi-computation-transformer-arithmetic",
+        "drasi.sqlite/file-bootstrap" => "drasi-computation-bootstrap-sqlite",
         _ => panic!("unknown test factory {name}"),
     }
 }

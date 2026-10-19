@@ -19,6 +19,14 @@ impl Default for SqliteSourceFactory {
                 configuration: ConfigurationSchema {
                     fields: BTreeMap::from([
                         (
+                            Arc::from("rest_api"),
+                            ConfigurationField {
+                                value_type: ConfigurationType::Object,
+                                required: false,
+                                secret: false,
+                            },
+                        ),
+                        (
                             Arc::from("coordinated_snapshot"),
                             ConfigurationField {
                                 value_type: ConfigurationType::Boolean,
@@ -82,6 +90,11 @@ impl ComponentFactory for SqliteSourceFactory {
         &self.descriptor
     }
     fn validate(&self, specification: &ComponentSpecification) -> Result<()> {
+        if let Some(ConfigurationValue::Literal(value)) =
+            specification.configuration.get("rest_api")
+        {
+            serde_json::from_value::<crate::RestApiConfig>(value.clone())?.validate()?;
+        }
         let coordinated = match specification.configuration.get("coordinated_snapshot") {
             Some(ConfigurationValue::Reference { .. }) => None,
             Some(ConfigurationValue::Literal(value)) => Some(
@@ -223,6 +236,9 @@ impl ComponentFactory for SqliteSourceFactory {
                     config,
                 )?,
             };
+            if let Some(rest) = context.configuration().get("rest_api") {
+                source = source.with_rest_api(serde_json::from_value(rest.clone())?)?;
+            }
             let coordinated = context
                 .configuration()
                 .get("coordinated_snapshot")

@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unexpected_cfgs)]
-
-//! Application reaction plugin for Drasi
+//! Application reactions for in-process Drasi hosts.
 //!
 //! This plugin implements Application reactions for Drasi.
 //! Use [`NativeApplicationReaction`] for direct ComputationGraph envelope
@@ -39,7 +37,6 @@
 
 pub mod application;
 pub mod config;
-pub mod descriptor;
 pub mod native;
 pub mod subscription;
 
@@ -133,5 +130,3 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
     }
 }
-
-// Core plugin — registered statically by the server, not exported for dynamic loading.

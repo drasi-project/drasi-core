@@ -335,7 +335,7 @@ impl Runtime {
             members,
             changes,
             bindings: batch.bindings,
-            running: is_active(&publication.observed.components[&query]),
+            running: super::native_query::query_activation_requested(publication, &query),
         })
     }
 

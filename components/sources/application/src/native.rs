@@ -168,6 +168,7 @@ impl ComputationComponent for ApplicationSource {
 
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({
+            "kind": "application",
             "constructionScope": self.identity.construction_scope(),
             "graphId": self.identity.graph_id(),
             "stream": self.identity.stream(),

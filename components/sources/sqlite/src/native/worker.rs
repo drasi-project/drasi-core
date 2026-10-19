@@ -3,25 +3,37 @@
 
 use super::{
     handle::{Command, TransactionCommand},
-    *,
+    journal::Handover,
+    SqliteConfig, SqliteOutput, SqliteParam, SqliteRow,
 };
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+use drasi_computation_contracts::{
+    ChangeEnvelope, ComponentId, GraphChangeCodec, OutputEnvelope, PortId,
+    PreparedSourceTransaction, SourceProgressSnapshot, SourceProgressView,
+    SourceTransactionBuilder, SourceTransactionLimits, StreamId,
 };
+use drasi_core_types::models::SourceChange;
+use drasi_sqlite_common::{row_element as element, value_to_json as json, TableSchema as Table};
 use rusqlite::{
     hooks::{AuthAction, AuthContext, Authorization, PreUpdateCase, TransactionOperation},
     limits::Limit,
-    types::{Value, ValueRef},
+    types::Value,
     Batch, Connection, Statement,
 };
 use std::{
     cell::Cell,
     collections::BTreeMap,
-    sync::{atomic::Ordering, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
-use tokio::time::Instant;
+use tokio::{
+    sync::{mpsc, oneshot, watch},
+    time::Instant,
+};
 
 #[derive(Clone, Debug)]
 struct Failure(Arc<anyhow::Error>);
@@ -34,12 +46,6 @@ impl std::error::Error for Failure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.0.as_ref().as_ref())
     }
-}
-
-#[derive(Clone)]
-struct Table {
-    columns: Vec<String>,
-    keys: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -137,6 +143,7 @@ impl Capture {
                     name,
                     &table,
                     time,
+                    Some(row.get_new_row_id()),
                     row.get_column_count(),
                     |i| row.get_new_column_value(i),
                 )?);
@@ -147,6 +154,7 @@ impl Capture {
                     name,
                     &table,
                     time,
+                    Some(row.get_old_row_id()),
                     row.get_column_count(),
                     |i| row.get_old_column_value(i),
                 )?);
@@ -160,6 +168,7 @@ impl Capture {
                     name,
                     &table,
                     time,
+                    Some(before.get_old_row_id()),
                     before.get_column_count(),
                     |i| before.get_old_column_value(i),
                 )?);
@@ -168,6 +177,7 @@ impl Capture {
                     name,
                     &table,
                     time,
+                    Some(after.get_new_row_id()),
                     after.get_column_count(),
                     |i| after.get_new_column_value(i),
                 )?);
@@ -193,66 +203,6 @@ impl Capture {
         }
         Ok(())
     }
-}
-
-fn json(value: ValueRef<'_>) -> Result<serde_json::Value> {
-    use base64::Engine;
-    Ok(match value {
-        ValueRef::Null => serde_json::Value::Null,
-        ValueRef::Integer(value) => value.into(),
-        ValueRef::Real(value) => serde_json::Number::from_f64(value)
-            .context("non-finite SQLite real")?
-            .into(),
-        ValueRef::Text(value) => std::str::from_utf8(value)?.into(),
-        ValueRef::Blob(value) => base64::engine::general_purpose::STANDARD
-            .encode(value)
-            .into(),
-    })
-}
-
-fn element<'a>(
-    source: &str,
-    table_name: &str,
-    table: &Table,
-    time: u64,
-    count: i32,
-    mut value: impl FnMut(i32) -> rusqlite::Result<ValueRef<'a>>,
-) -> Result<Element> {
-    anyhow::ensure!(
-        usize::try_from(count)? == table.columns.len(),
-        "SQLite capture schema changed"
-    );
-    anyhow::ensure!(
-        !table.keys.is_empty(),
-        "native SQLite rows require a primary key"
-    );
-    let mut properties = ElementPropertyMap::new();
-    let mut keys = BTreeMap::new();
-    for (index, name) in table.columns.iter().enumerate() {
-        let raw = value(i32::try_from(index)?)?;
-        let kind = match raw {
-            ValueRef::Null => "null",
-            ValueRef::Integer(_) => "integer",
-            ValueRef::Real(_) => "real",
-            ValueRef::Text(_) => "text",
-            ValueRef::Blob(_) => "blob",
-        };
-        let value = json(raw)?;
-        if table.keys.contains(name) {
-            anyhow::ensure!(!value.is_null(), "native SQLite primary key cannot be null");
-            keys.insert(name, (kind, value.clone()));
-        }
-        properties.insert(name, crate::convert::json_value_to_element_value(&value));
-    }
-    let id = format!("sqlite:v1:{}", serde_json::to_string(&(table_name, keys))?);
-    Ok(Element::Node {
-        metadata: ElementMetadata {
-            reference: ElementReference::new(source, &id),
-            labels: Arc::from([Arc::from(table_name)]),
-            effective_from: time,
-        },
-        properties,
-    })
 }
 
 struct Database {
@@ -513,38 +463,13 @@ impl Database {
             return Ok(());
         }
         let tables = self.internal(|connection| {
-            let mut tables = BTreeMap::new();
-            let mut listing = connection.prepare("SELECT name, type FROM pragma_table_list WHERE schema='main' AND lower(substr(name,1,7)) != 'sqlite_' AND lower(substr(name,1,8)) != '__drasi_' ORDER BY name")?;
-            let mut rows = listing.query([])?;
-            let mut bytes = 0usize;
-            while let Some(row) = rows.next()? {
-                let name: String = row.get(0)?;
-                if !self.config.tables.is_empty() && !self.config.tables.contains(&name) { continue; }
-                let kind: String = row.get(1)?;
-                if kind == "view" { continue; }
-                anyhow::ensure!(kind == "table", "native SQLite capture requires ordinary tables");
-                let mut foreign_keys = connection.prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")?;
-                let mut targets = foreign_keys.query([&name])?;
-                while let Some(target) = targets.next()? {
-                    anyhow::ensure!(!target.get::<_, String>(0)?.to_ascii_lowercase().starts_with("__drasi_"),
-                        "native SQLite application tables cannot reference journal tables");
-                }
-                let mut info = connection.prepare("SELECT name, pk, hidden FROM pragma_table_xinfo(?1) ORDER BY cid")?;
-                let mut columns = info.query([&name])?;
-                let mut table = Table { columns: Vec::new(), keys: Vec::new() };
-                while let Some(column) = columns.next()? {
-                    let column_name: String = column.get(0)?;
-                    let hidden: i64 = column.get(2)?;
-                    anyhow::ensure!(hidden == 0, "native SQLite capture does not support generated/hidden columns");
-                    bytes = bytes.checked_add(name.len() + column_name.len()).context("SQLite schema byte overflow")?;
-                    anyhow::ensure!(bytes <= self.config.transactions.max_bytes.get(), "SQLite schema exceeds byte limit");
-                    if column.get::<_, i64>(1)? > 0 { table.keys.push(column_name.clone()); }
-                    table.columns.push(column_name);
-                }
-                anyhow::ensure!(tables.len() < self.config.transactions.max_changes.get(), "SQLite schema table count exceeds limit");
-                tables.insert(name, table);
-            }
-            Ok(tables)
+            drasi_sqlite_common::read_table_schemas(
+                connection,
+                &self.config.tables,
+                &self.config.table_keys,
+                self.config.transactions.max_changes.get(),
+                self.config.transactions.max_bytes.get(),
+            )
         })?;
         self.capture
             .lock()
@@ -981,9 +906,18 @@ fn scoped(
     }
 }
 
-pub(super) fn snapshot(
-    mut work: super::snapshot::SnapshotWork,
-) -> Result<Option<super::snapshot::Handover>> {
+pub(super) struct SnapshotWork {
+    pub source: ComponentId,
+    pub stream: StreamId,
+    pub config: SqliteConfig,
+    pub owner: SourceProgressView,
+    pub progress: Arc<SourceProgressSnapshot>,
+    pub handover: Handover,
+    pub outputs: mpsc::Sender<ChangeEnvelope>,
+    pub shutdown: watch::Receiver<bool>,
+}
+
+pub(super) fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
     let database = Database::open(work.config, work.source.clone(), work.shutdown.clone())?;
     if *work.shutdown.borrow() {
         return Ok(None);
@@ -1018,39 +952,29 @@ pub(super) fn snapshot(
     let runtime = tokio::runtime::Handle::current();
     let mut ordinal = 0u64;
     for (name, table) in tables {
-        let mut statement = database
-            .connection
-            .prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))?;
-        let count = i32::try_from(statement.column_count())?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            if *work.shutdown.borrow() {
-                drop(rows);
-                drop(statement);
-                database.rollback()?;
-                return Ok(None);
-            }
-            database.check_capture()?;
-            let element = element(
-                work.source.as_str(),
-                &name,
-                &table,
-                timestamp,
-                count,
-                |index| row.get_ref(index as usize),
-            )?;
-            let change = SourceChange::Insert { element };
-            anyhow::ensure!(
-                bincode::serialized_size(&change)?
-                    <= database.config.transactions.max_bytes.get() as u64,
-                "native SQLite snapshot row exceeds byte limit"
-            );
-            ordinal = ordinal
-                .checked_add(1)
-                .context("SQLite snapshot ordinal exhausted")?;
-            let change =
-                GraphChangeCodec::encode_change(change, work.stream.clone(), ordinal, None)?;
-            let sent = runtime.block_on(async {
+        let outcome = drasi_sqlite_common::read_table(
+            &database.connection,
+            work.source.as_str(),
+            &name,
+            &table,
+            timestamp,
+            |element| {
+                if *work.shutdown.borrow() {
+                    return Ok(std::ops::ControlFlow::Break(()));
+                }
+                database.check_capture()?;
+                let change = SourceChange::Insert { element };
+                anyhow::ensure!(
+                    bincode::serialized_size(&change)?
+                        <= database.config.transactions.max_bytes.get() as u64,
+                    "native SQLite snapshot row exceeds byte limit"
+                );
+                ordinal = ordinal
+                    .checked_add(1)
+                    .context("SQLite snapshot ordinal exhausted")?;
+                let change =
+                    GraphChangeCodec::encode_change(change, work.stream.clone(), ordinal, None)?;
+                let sent = runtime.block_on(async {
                 tokio::time::timeout_at(deadline, async {
                     tokio::select! {
                         biased;
@@ -1059,12 +983,15 @@ pub(super) fn snapshot(
                     }
                 }).await.context("native SQLite snapshot deadline exceeded")?
             })?;
-            if !sent {
-                drop(rows);
-                drop(statement);
-                database.rollback()?;
-                return Ok(None);
-            }
+                if !sent {
+                    return Ok(std::ops::ControlFlow::Break(()));
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )?;
+        if outcome.is_break() {
+            database.rollback()?;
+            return Ok(None);
         }
     }
     database.check_capture()?;
@@ -1087,7 +1014,7 @@ pub(super) fn run(
     mut shutdown: watch::Receiver<bool>,
     ready: oneshot::Sender<()>,
     progress: Option<(
-        SourceProgressReader,
+        SourceProgressView,
         Arc<SourceProgressSnapshot>,
         Option<uuid::Uuid>,
     )>,
@@ -1157,6 +1084,23 @@ pub(super) fn run(
             Wake::Command(Some(command)) => command,
         };
         match command {
+            Command::KeyColumns { table, response } => {
+                let result = (|| -> Result<Vec<String>> {
+                    let capture = database
+                        .capture
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("SQLite capture poisoned"))?;
+                    let table = capture
+                        .tables
+                        .get(&table)
+                        .context("native SQLite table is not captured by this source")?;
+                    Ok(match table.rowid_alias {
+                        Some(alias) => vec![alias.into()],
+                        None => table.keys.clone(),
+                    })
+                })();
+                let _ = response.send(result);
+            }
             Command::Query {
                 sql,
                 params,
@@ -1221,7 +1165,7 @@ pub(super) fn run(
                     }
                     if let Err(cleanup) = database.rollback() {
                         let error = match result {
-                            Err(error) => drasi_lib::error::OperationFailures::new(
+                            Err(error) => drasi_computation_contracts::OperationFailures::new(
                                 "native SQLite rollback failed",
                                 vec![error, cleanup],
                             )

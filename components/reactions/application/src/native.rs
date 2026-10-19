@@ -8,9 +8,11 @@
 //! delivery is acceptance-only; callbacks complete at their returned future.
 //! Neither boundary establishes durable or exactly-once external effects.
 
-use std::{any::Any, future::Future, num::NonZeroUsize, panic::AssertUnwindSafe};
+use std::{
+    any::Any, collections::HashMap, future::Future, num::NonZeroUsize, panic::AssertUnwindSafe,
+};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_lib::computation::v1::{
     ComponentDescriptor, ComponentId, ComponentSemanticKind, ComputationComponent, Endpoint,
@@ -107,6 +109,7 @@ pub struct ApplicationReaction {
     descriptor: ComponentDescriptor,
     delivery: Delivery,
     state: State,
+    properties: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl ApplicationReaction {
@@ -135,6 +138,7 @@ impl ApplicationReaction {
                 descriptor,
                 delivery: Delivery::Channel(sender),
                 state: State::Stopped,
+                properties: None,
             },
             receiver,
         ))
@@ -166,7 +170,14 @@ impl ApplicationReaction {
                 poisoned: false,
             })),
             state: State::Stopped,
+            properties: None,
         })
+    }
+
+    /// Expose explicit application metadata, not a serializable receiver or callback.
+    pub fn with_properties(mut self, properties: HashMap<String, serde_json::Value>) -> Self {
+        self.properties = Some(properties);
+        self
     }
 
     pub fn input(&self) -> Endpoint {
@@ -223,6 +234,17 @@ async fn finish_callback(callback: &mut Callback) -> Result<()> {
 
 #[async_trait]
 impl ComputationComponent for ApplicationReaction {
+    fn configuration(&self) -> Result<serde_json::Value> {
+        let properties = self
+            .properties
+            .as_ref()
+            .context("application reaction has no declared configuration metadata")?;
+        Ok(serde_json::json!({
+            "kind": "application",
+            "properties": properties,
+        }))
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

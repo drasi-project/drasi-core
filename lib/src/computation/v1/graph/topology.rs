@@ -90,7 +90,8 @@ pub struct DesiredTopology {
     pub requirements: PipeRequirements,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_requirements: Vec<crate::computation::v1::RecoveryRequirement>,
-    /// Desired links crossing an exact/subset selection boundary are explicit.
+    /// Unbound links are explicit. Required links wait for endpoint declarations;
+    /// optional orphan links remain disconnected until explicitly rebound.
     pub boundary_relationships: Vec<DesiredRelationship>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_connections: Vec<(ComponentId, ComponentId)>,
@@ -273,6 +274,31 @@ impl TopologyBindings {
 }
 
 impl DesiredPipe {
+    pub(super) fn capabilities(&self) -> GraphResult<PipeCapabilities> {
+        match self {
+            Self::External {
+                capabilities,
+                capacity,
+                ..
+            } => {
+                let capacity = capacity
+                    .map(|capacity| {
+                        NonZeroUsize::new(capacity)
+                            .ok_or_else(|| topology("invalid external pipe capacity"))
+                    })
+                    .transpose()?;
+                Ok(PipeCapabilities::try_new(
+                    capabilities.iter().copied(),
+                    capacity,
+                )?)
+            }
+            _ => self
+                .resolve(&mut TopologyBindings::default())?
+                .capabilities()
+                .map_err(|source| GraphError::Pipe { edge: 0, source }),
+        }
+    }
+
     pub(crate) fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
         match self {
             Self::Retained(config) => config.resource_dependencies(),
@@ -346,6 +372,37 @@ impl DesiredPipe {
 }
 
 impl DesiredTopology {
+    pub(crate) fn resolve_required_relationships(&mut self) {
+        let known: BTreeSet<_> = self
+            .components
+            .iter()
+            .map(|component| component.descriptor.id().clone())
+            .collect();
+        let (bound, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut self.relationships)
+            .into_iter()
+            .partition(|edge| {
+                !edge.policy.required_for_binding
+                    || edge.policy.orphan_permitted
+                    || known.contains(&edge.definition.from.component)
+                        && known.contains(&edge.definition.to.component)
+            });
+        self.relationships = bound;
+        self.boundary_relationships.extend(pending);
+        let mut waiting = Vec::new();
+        for edge in std::mem::take(&mut self.boundary_relationships) {
+            if edge.policy.required_for_binding
+                && !edge.policy.orphan_permitted
+                && known.contains(&edge.definition.from.component)
+                && known.contains(&edge.definition.to.component)
+            {
+                self.relationships.push(edge);
+            } else {
+                waiting.push(edge);
+            }
+        }
+        self.boundary_relationships = waiting;
+    }
+
     pub(crate) fn component_resource_users(&self, resource: &ResourceId) -> BTreeSet<ComponentId> {
         let mut affected = BTreeSet::from([resource.clone()]);
         self.include_resource_dependents(&mut affected);
@@ -383,7 +440,9 @@ impl DesiredTopology {
     /// factories/resources to be available. Component-specific creation failures
     /// remain runtime outcomes.
     pub fn validate_structure(&self) -> GraphResult<()> {
-        super::controller::reconcile::validate_definition(self)
+        let mut definition = self.clone();
+        definition.resolve_required_relationships();
+        super::controller::reconcile::validate_definition(&definition)
     }
 
     pub fn to_json(&self) -> GraphResult<String> {
@@ -399,7 +458,13 @@ impl DesiredTopology {
         validate_identifier("graph", &topology.graph_id)?;
         Ok(topology)
     }
-    pub fn build(&self, mut bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
+    pub fn build(&self, bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
+        let mut definition = self.clone();
+        definition.resolve_required_relationships();
+        definition.build_resolved(bindings)
+    }
+
+    fn build_resolved(&self, mut bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
         if self.version != 1 {
             return Err(topology("unsupported desired topology version"));
         }

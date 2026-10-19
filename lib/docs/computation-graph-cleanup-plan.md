@@ -643,17 +643,136 @@ input acceptance for the configured failure scope, not downstream completion.
 
 Current component checks cover 79 tests and 21 documentation examples, with
 26 existing documentation examples ignored, plus all-target component lint.
-Four integration cases exercise both Tokio flavors: the volatile native trio,
-durable lifecycle/receipts/binding validation, unhandled-input reopen/retry, and
-durable input through a persistent query to the existing native application
-reaction. The 15 existing admission cases also cover reused capacity, corruption,
+Seven application integration cases exercise both Tokio flavors: the volatile
+native trio, durable lifecycle/receipts/binding validation, unhandled-input
+reopen/retry, safe removal/producer retirement, durable input through a persistent
+query, and relationship direction/aggregation inside DrasiLib. The 15 existing
+admission cases also cover reused capacity, corruption,
 cancellation and process-restart services. The old application WAL tests remain
 baseline evidence only; native durability is exercised through admission, not
 inferred from those tests.
 
-Application host/API cutover, permanent-removal/shared-journal ownership coverage
-and the complete old-to-native assertion mapping remain open before retiring the
-old application interfaces.
+**Application helper retirement:** the application bootstrap provider now uses
+only `ComputationBootstrapProvider`. Removed its count-only callback, descriptor,
+empty legacy configuration variant and unused database/serialization/plugin-SDK
+dependencies. The two tests of that unsupported empty configuration were retired;
+the real builder, data, filtering, failure and native snapshot assertions remain.
+Its README now describes actual application-owned data rather than nonexistent
+automatic Source caching.
+
+Server's unused application bootstrap/reaction registrations and normal application
+dependencies are removed. The reaction descriptor that discarded its receiver is
+also removed; Server metadata tests use an explicit metadata-only fixture. The
+application source/reaction packages shed unused copied dependencies, and the test
+host no longer depends on application bootstrap without using it.
+
+`computation_runtime` now demonstrates native application source/query/reaction
+nodes inside the DrasiLib-owned graph, with cleanup even on failure. The new
+`native_application_host` cases retain the existing relationship-direction and
+aggregation assertions, exercise late query creation and bootstrap, and run on both
+runtimes. The reverse-direction assertion now receives populated snapshot data
+rather than merely observing an unseeded query.
+
+The removal contract is intentionally strict: an attempted live removal with
+unhandled journal input does not commit. After the consumer handles the pending
+input, removal succeeds, old component/admission handles are fenced, and a borrowed
+journal and its receipts remain usable. Producer retirement rejects pending
+obligations; re-registering a retired name does not revive the old session.
+No drain safeguard was weakened.
+
+Qualified after these removals: all 79 application package tests and 21 doctests,
+the native application integrations, the original two application-source E2E
+cases, 11 remaining library bootstrap tests, 21 Server factory/runtime tests,
+33 selected Server integration tests, package/Server Clippy, and the embedded
+test-host build. The latter retains one existing unused `ProfilerSummary` warning.
+The lockfile refresh added the already-required local `drasi-core-types` and
+`drasi-computation-contracts` packages without changing registry package versions.
+
+The old Rust application Source/Reaction interfaces still have active test and
+performance-example users. Those consumers and their required behavior must move before the remaining application interfaces can be deleted;
+the application slice and stage 6 are not complete.
+
+**Source-sharing provenance correction:** the former `computation_instance.rs` used an
+ApplicationSource named `orders`, owned by its first DrasiLib instance. The second
+instance borrowed its `SourcePluginHost` through `borrow_computation_source`.
+The example was added by ComputationGraph-branch commit `61343ccf`; neither that
+example nor the borrow API exists in current `main` (`207ef6f3`). It is not an
+independently running source or evidence of a pre-existing main-branch sharing
+contract. Review this branch-specific adapter example during adapter retirement;
+do not make a new native sharing service or a bridge decision a cleanup prerequisite
+on its account. Ordinary one-source/many-queries use within an instance remains
+required and is a separate capability.
+
+**Native input and embedded-host cutover:** the shared query pipeline builder now
+accepts actual native source endpoints and explicit native bootstrap providers.
+It preserves the common evaluator, ranked input, middleware, indexes, scheduling
+and result outlet without Source-plugin reader nodes. Query updates retain native
+endpoints/bootstrap and fence source generations without taking source ownership.
+Invalid native bootstrap declarations, explicit Source-plugin selectors and
+custom input rewiring are rejected rather than ignored.
+
+Required native connection declarations now survive a missing endpoint, including
+static construction and desired-topology reconstruction. The existing
+revision/event-driven dependency binder resolves them after node-first addition;
+no new polling worker or retry runtime was added. Malformed pipes/known endpoints
+remain errors. Reconstructible pipe recipes survive live query replacement.
+Update planning reads actual activation deferrals from the coherent graph
+publication, preserving both pending starts and explicit stops. An explicit
+`start_query` still reports missing readiness; accepted configuration updates can
+retain dependency waiting without falsely claiming a running query.
+
+The embedded test host's initial/programmatic application sources, queries and
+reactions now use native nodes. Its channel/callback observers share one owned
+worker, preserve their respective JSON/profiling shapes, retain paused input and
+backpressure full output. Startup registration precedes asynchronous work;
+failed/cancelled shutdown retains ownership and can be awaited again. The host
+also preserves application metadata, real auto-start values and one-time receiver
+ownership. Removing unused bootstrap dependencies eliminated its old SDK/FFI
+dependency closure without updating registry package versions.
+
+Qualified so far for this follow-up: 15 focused native source/reaction cases;
+7 both-runtime native hosted cases, including six late-source/update/stop-intent
+combinations; 71 existing/new topology, addition, dependency, reconciliation and
+pipeline cases; the library suite (1101 passed, 2 existing ignored); and the entire
+test-host library suite (127 passed). Real native input was compared against
+channel, batch and profiling projections with bounded output and pause/resume.
+The test host retains its existing unused `ProfilerSummary` warning. Evidence:
+`cleanup-stage6-native-input-intent-and-host.log`,
+`cleanup-stage6-native-dependency-convergence.log` (including the explicit-start
+contract failure subsequently fixed), and
+`cleanup-stage6-native-host-full-regressions.log`.
+
+The `computation_instance` example now demonstrates native one-source/multiple-query
+use in one instance instead of branch-only cross-instance adapter sharing. Its
+actual run verifies equal results, continued primary-query delivery while the
+observer query is stopped, and delivery of the buffered change after restart.
+Core/application/integration all-target Clippy passes with warnings denied.
+The test-service consumer compiles. Test-host Clippy also exposes existing
+warnings in unrelated code (including its `test-data-store` dependency); those
+are not a clean whole-workspace lint claim. The broader component/SDK retirement
+and integrated qualification remain open.
+
+**Input dispatcher follow-up:** the embedded producer no longer keeps the
+test-run registry read guard while forwarding. It uses the shared owned-worker
+primitives and graceful join; cancelled close and a blocked queued-input flush
+retain their work for retry. Conversion validates whole batches before acceptance,
+uses shared graph value types, supports relation updates/nested properties and
+CDC deletes, and preserves logical source time in core units. Native-channel
+failure is retained and surfaced on later calls, not logged as successful
+delivery. Seven focused cases cover these contracts, including a real native
+source/query/reaction delivery while the host registry remains writable.
+The expanded test-host library suite now passes all 134 cases and test-service
+still compiles. Package-scoped Clippy reports only the previously identified
+unrelated warnings after fixing the new handler's constructor naming.
+Evidence: `cleanup-stage6-native-input-dispatcher.log` and
+`cleanup-stage6-test-host-native-final.log`.
+
+Relevant evidence includes `cleanup-stage6-application-retirement-contract.log`,
+`cleanup-stage6-native-application-host.log`,
+`cleanup-stage6-native-bootstrap-retirement.log`,
+`cleanup-stage6-application-sdk-removal.log`,
+`cleanup-stage6-server-application-retirement-after.log` and
+`cleanup-stage6-test-host-bootstrap-dependency.log`.
 
 **Query-reader cutover:** `DrasiLib::subscribe_query_results` now reads the existing
 native result catalogue directly. Server SSE attachment no longer creates a
@@ -673,7 +792,7 @@ missing/stopped queries, removal, shutdown and concurrent snapshot/live handoff.
 The 35 existing Server API,
 creation and attachment cases pass with exact result delivery and no temporary
 reaction/node assertions. This removes one application consumer; it does not
-complete the application-source/bootstrap registrations or the whole slice.
+complete every application Source/Reaction user or the whole slice.
 The follow-up quality run passed 121 existing runtime/reaction cases, eight
 runtime-flavor cases, 17 Server catalogue/OpenAPI cases, the application/reader
 integrations, and Core/Server all-target plus integration lint.
@@ -724,6 +843,89 @@ For each required connector/provider, implement the selected new interface,
 update its consumers, demonstrate the complete path, then remove the old
 implementation that no longer has users. Keep the sequence small and explicit;
 do not delete the entire old SDK while required integrations still depend on it.
+
+**SQLite identity prerequisites:** the existing native source and paired snapshot
+now share explicit key overrides and physical-rowid fallback. Invalid/duplicate
+key declarations, missing columns and null configured keys fail explicitly.
+Changes to an element key or rowid emit delete-plus-insert, and snapshots choose
+an unshadowed physical-rowid alias rather than a same-named application column.
+Tables shadowing all rowid aliases require explicit keys. Existing primary-key
+encoding and default current-version journal bindings remain unchanged; custom
+key bindings fence incompatible reuse without dropping retained records.
+
+The SQLite source/bootstrap suites grew from 69 to 78 passing cases, including
+custom/keyless snapshot-live/reopen checks and both-runtime capture cases.
+Source/bootstrap all-target Clippy passes. The Stockroom persistence example
+needed one empty `table_keys` initializer; its actual sources compile through a
+temporary validation manifest with corrected checkout paths, leaving the book's
+standalone-layout manifest and lockfile untouched. Evidence:
+`cleanup-stage6-sqlite-baseline.log`, `cleanup-stage6-native-sqlite-keys.log`,
+`cleanup-stage6-native-sqlite-rowids.log`, and
+`cleanup-stage6-stockroom-native-keys-check-after.log`.
+
+**Native SQLite REST:** the native source now reuses the existing routes and SQL
+generation with its actual SQL worker, including CRUD, atomic batches, configured
+keys/table filters and physical rowids. Journal tables stay private. Bind failures
+precede database admission; generation-bound REST clients cannot target a
+replacement worker. Stop first drains accepted HTTP requests, then stops the
+database, retaining both owners after cancellation/timeout. Factory-created
+configuration exposes the actual endpoint. The source/bootstrap suites reached
+85 passing cases and strict all-target Clippy passed; evidence:
+`cleanup-stage6-native-sqlite-rest-final.log`.
+
+**Ordinary native SQLite file bootstrap:** a query-scoped, read-only provider now
+streams a consistent transaction without requiring a replay journal or persistent
+query storage. The new `drasi-sqlite-common` data library owns key/schema/type/rowid
+mapping used by live capture and both native snapshot paths. Existing native
+identities and default journal bindings are unchanged. File bootstrap has explicit
+table/schema/row/channel/deadline bounds, retained cleanup ownership, stale-reader
+fencing, and real errors for missing files/tables, incompatible schema and
+oversized rows. It returns no fabricated source watermark or handover state.
+Applications must keep live writers (including REST ingress) quiescent until
+startup finishes; coordinated persistent initialization retains its existing
+stronger contract.
+
+All 94 SQLite source/bootstrap cases pass, plus a hosted integration covering six
+identity/empty-data scenarios with two ordinary in-memory queries sharing one
+source on each Tokio runtime flavor. The integration verifies initial rows, live
+rekeys/deletes, independent query removal and absence of an invented source
+journal. Shared-library/source/bootstrap strict all-target Clippy passes.
+Evidence: `cleanup-stage6-sqlite-shared-mapping.log` and
+`cleanup-stage6-native-sqlite-file-bootstrap-qualified.log`.
+Native-ABI packaging/Server wiring and full old-interface retirement remain open.
+
+**Standalone SQLite bootstrap ABI:** the implementation now lives in the
+independent `drasi-computation-bootstrap-sqlite` package; the direct Rust graph
+binding delegates to it without Source-plugin event conversion. SDK/Host
+catalogue handling accepts an actual bootstrap-only library instead of requiring
+a dummy processing component. Empty operational catalogues still fail; ABI 1.0
+and wire 2 are unchanged, and metadata-only scans still do not call plugin entry.
+The independently rebuilt library passed discovery/registration, missing-file
+error, drop/stop/replacement fencing, and two-query initial-load/live-rekey/delete
+checks on both Tokio flavors, including continued delivery after one query is
+removed. Its dependency closure contains shared contracts and values, not the
+query runtime or old SDK. The native package has 11 passing cases, and the native
+SDK has 29. Evidence: `cleanup-stage6-native-bootstrap-sdk.log` and
+`cleanup-stage6-sqlite-bootstrap-native-abi-final.log`.
+
+Server's existing native-bootstrap resource resolver also accepts the real
+library without special SQLite production code: the catalogue exposes the
+bootstrap-only factory, JSON/YAML recipes round-trip, memory-backed queries load
+actual file rows, another instance reads fresh data, and configuration snapshots
+retain the recipe without a source-progress dependency. Final qualification:
+96 SQLite-family cases; the hosted six-scenario test on both runtimes; 189 Host
+unit and 17 native-pipeline passes (two existing ignored); and 48 Server native
+passes (two existing ignored). Native SDK/Host/SQLite and Server all-target
+Clippy, isolated native dependencies, plugin discovery, publish-dependency
+ordering and the protected requirement ledger pass. Evidence:
+`cleanup-stage6-bootstrap-packaging-regressions.log`,
+`cleanup-stage6-bootstrap-packaging-quality.log`,
+`cleanup-stage6-server-sqlite-bootstrap.log`, and
+`cleanup-stage6-server-bootstrap-final.log`.
+
+This closes the standalone bootstrap implementation, packaging and Server-recipe
+sub-slice, not native live SQLite source/coordinated-snapshot packaging, complete
+SQLite Server deployment or old-interface retirement.
 
 Inventory all users of ordinary source/reaction/bootstrap hosts, factory
 registrations, `Legacy*Resource` wrappers and old message conversions. Include

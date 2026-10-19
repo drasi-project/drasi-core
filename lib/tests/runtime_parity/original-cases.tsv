@@ -1,6 +1,8 @@
 # Breaking release: retired QueryBase/SequenceDedup/cache-only cases were removed;
 # current graph recovery and snapshot/stream behavior remain required.
 # Tests only asserting the removed no-op bootstrap-buffer setting were also retired.
+# Empty application-bootstrap callback configuration cases are retired; native
+# application snapshot data and constructors are covered in the component crate.
 # Current main reviewed at c2d80aa7e4de874302b301584a6c7134c3609ed7.
 # Union of all 970 main library cases and the earlier 01813156 corpus (9 older names).
 # Every case requires execution or an explicit mapping; only listed diagnostics may be ignored.
@@ -11,8 +13,6 @@ lib	bootstrap::component_graph::tests::test_bootstrap_emitted_labels_match_compo
 lib	bootstrap::component_graph::tests::test_bootstrap_empty_graph	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
 lib	bootstrap::component_graph::tests::test_bootstrap_with_sources_and_queries	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
 lib	bootstrap::component_graph::tests::test_new_creates_provider_with_graph_reference	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
-lib	bootstrap::tests::test_application_bootstrap_config_defaults	shared	Unchanged bootstrap configuration values and serialization.
-lib	bootstrap::tests::test_application_bootstrap_config_serialization	shared	Unchanged bootstrap configuration values and serialization.
 lib	bootstrap::tests::test_backward_compatibility_yaml	shared	Unchanged bootstrap configuration values and serialization.
 lib	bootstrap::tests::test_bootstrap_config_equality	shared	Unchanged bootstrap configuration values and serialization.
 lib	bootstrap::tests::test_noop_bootstrap_config	shared	Unchanged bootstrap configuration values and serialization.

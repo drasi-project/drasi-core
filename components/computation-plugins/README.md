@@ -1,11 +1,11 @@
 # Native ComputationGraph components
 
-Components are organized by role, with **one component per crate**. Build and load
+Components are organized by role, with **one component or bootstrap provider per crate**. Build and load
 only the components your solution uses; there is no standard or network bundle.
 Each dynamic library owns its configuration, factory, implementation and export.
 Shared crates contain helpers, not additional registered components.
 
-The nine dynamic plugins use the lightweight `drasi-computation-contracts` and
+The ten dynamic plugins use the lightweight `drasi-computation-contracts` and
 `drasi-core-types` packages, not `drasi-lib` or the query engine. The SDK exposes
 only supported plugin operations and borrowed host services. A query-result
 message does not require query execution. `make check-native-dependencies`
@@ -13,6 +13,7 @@ checks every native library independently, including its build dependencies.
 
 | Role | Crate | Component kind | Hosting |
 |---|---|---|---|
+| Bootstrap | [drasi-computation-bootstrap-sqlite](bootstrappers/sqlite) | `drasi.sqlite/file-bootstrap` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-counter](sources/counter) | `drasi.standard/volatile-counter` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-http](sources/http) | `drasi.network/http-source` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-grpc](sources/grpc) | `drasi.network/grpc-source` | Dynamic or Rust SDK |
@@ -46,9 +47,12 @@ the C entrypoint. The two bridge endpoint crates retain their existing static
 hosting contract: register the chosen crate's `factory()` in a normal
 `FactoryRegistry`. They do not export a dynamic ABI.
 
-For contributors, `make build-native-plugins` builds the nine separate libraries;
+For contributors, `make build-native-plugins` builds the ten separate libraries;
 `make build-native-standard-plugins` and `make build-native-network-plugins` build
-the corresponding test selections. These are build conveniences, not bundles.
+the corresponding test selections. `make build-native-sqlite-plugins` builds the
+SQLite file bootstrap library. These are build conveniences, not bundles.
+Bootstrap-only libraries expose factories through the bootstrap extension, not
+a dummy entry in the processing-component list.
 
 ## Inspect configuration
 

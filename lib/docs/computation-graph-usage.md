@@ -17,12 +17,13 @@ cargo run --locked -p drasi-lib --example computation_runtime
 ```
 
 The [example source](../examples/computation_runtime.rs) is a complete Rust
-program. It creates an application source, runs a query over `Order` nodes,
-connects an application reaction, inserts one order and shuts down. It requires
+program. It adds a native application source, query and application reaction to
+DrasiLib's existing graph, connects their declared ports, inserts one order and
+shuts down. It uses no application Source/Reaction plugin adapters and requires
 no external database.
 
-The output identifies `ComputationGraph` and includes an added result whose
-`name` is `First order`. It also prints the current query rows and query metrics.
+The output identifies `ComputationGraph`, reports one result change, and prints
+the current row with `name` equal to `First order`, followed by query metrics.
 
 ## Use the library in an application
 
@@ -58,6 +59,45 @@ drasi.start().await?;
 ```
 
 The add, update, remove, status and result APIs use the instance's ComputationGraph.
+
+### Assemble queries from native inputs
+
+For a native source already owned by the instance graph, bind its actual output
+endpoint to the shared query builder:
+
+```rust,ignore
+use drasi_lib::{Query, computation::v1::*};
+
+let source_output = Endpoint::new(
+    ComponentId::try_new("orders")?,
+    PortId::try_new("out")?,
+);
+let batch = drasi.computation_pipeline()?
+    .native_source(source_output)?
+    .query(Query::cypher("order-names")
+        .query("MATCH (o:Order) RETURN o.name AS name")
+        .from_source("orders")
+        .build())
+    .build()?;
+let report = drasi.add_components(batch).await?;
+anyhow::ensure!(report.committed, "{report:?}");
+```
+
+This reuses the existing query evaluator, ranked input, indexes, middleware,
+scheduling and result outlet. It does not create a Source-plugin reader, and
+query stop, replacement and removal do not own the native source. Multiple
+queries can bind the same output. The source may be declared later: the required
+connection remains visible and resolves through the existing graph controller.
+Disabled auto-start and explicit stops remain effective, including when a waiting
+query is updated before its source arrives.
+
+Use `query_bootstrap(query_id, provider)` for an explicit application-owned
+snapshot. This requires enabled bootstrap and native inputs; no snapshot is
+invented from the live channel. Explicit Source-plugin `nodes`/`relations`
+subscription selectors are rejected on native bindings rather than ignored;
+normal labels in the query text still work. These inputs use bounded graph
+pipes. A durable admitted source instead requires its actual QoS connections,
+as shown in the [admission documentation](computation-graph-qos.md).
 
 ### Read live query results without a reaction
 
@@ -308,8 +348,11 @@ cargo run --locked -p drasi-lib --example computation_instance
 ```
 
 The first [example](../examples/computation_graph.rs) builds direct processing
-chains. The second [example](../examples/computation_instance.rs) uses two DrasiLib
-instances to process subscriptions to a shared application source.
+chains. The second [example](../examples/computation_instance.rs) runs two native
+queries from one native application source within one DrasiLib instance. Stopping
+one query leaves the source and the other query running; restarting it consumes
+the buffered change. It needs no borrowed Source-plugin host or cross-instance
+transport.
 
 A standalone `GraphRun` must be awaited by its caller. Within DrasiLib, submit
 component batches to its owned ComputationGraph:

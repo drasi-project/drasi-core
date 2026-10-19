@@ -161,19 +161,7 @@ impl NativePlugin {
                 Ok(table)
             })
             .transpose()?;
-        let bootstrap = bootstrap
-            .map(|entry| -> anyhow::Result<_> {
-                let table = *unsafe { checked_table(entry())? };
-                anyhow::ensure!(
-                    table.version == abi::bootstrap::VERSION
-                        && table.reserved == 0
-                        && table.factories.is_some()
-                        && table.create.is_some(),
-                    "incompatible or incomplete native bootstrap extension"
-                );
-                Ok(table)
-            })
-            .transpose()?;
+        let bootstrap = unsafe { read_bootstrap(bootstrap)? };
         let recovery = recovery
             .map(|entry| -> anyhow::Result<_> {
                 let table = *unsafe { checked_table(entry())? };
@@ -343,6 +331,10 @@ impl NativePlugin {
                 )));
             }
         }
+        anyhow::ensure!(
+            !factories.is_empty() || !bootstrap_factories.is_empty(),
+            "native plugin has no component or bootstrap factories"
+        );
         Ok(Arc::new(Self {
             metadata: manifest,
             factories,
@@ -468,7 +460,26 @@ unsafe fn read_configuration(
         .collect())
 }
 
-/// Inspect the native family without creating plugin factory handles.
+unsafe fn read_bootstrap(
+    entry: Option<abi::bootstrap::BootstrapFn>,
+) -> anyhow::Result<Option<abi::bootstrap::PluginBootstrapV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry())? };
+            anyhow::ensure!(
+                table.version == abi::bootstrap::VERSION
+                    && table.reserved == 0
+                    && table.factories.is_some()
+                    && table.create.is_some(),
+                "incompatible or incomplete native bootstrap extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+/// Inspect without calling the plugin entry or creating factory handles.
+/// Extension factory catalogues are validated when the plugin is loaded.
 pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<PluginMetadata>> {
     let metadata = unsafe { library.get::<abi::MetadataFn>(abi::METADATA_SYMBOL) }
         .ok()
@@ -478,8 +489,9 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::services::ServicesFn>(abi::services::SYMBOL) }.is_ok();
     let has_recovery =
         unsafe { library.get::<abi::recovery::RecoveryFn>(abi::recovery::SYMBOL) }.is_ok();
-    let has_bootstrap =
-        unsafe { library.get::<abi::bootstrap::BootstrapFn>(abi::bootstrap::SYMBOL) }.is_ok();
+    let bootstrap = unsafe { library.get::<abi::bootstrap::BootstrapFn>(abi::bootstrap::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
     let has_consumer =
         unsafe { library.get::<abi::consumer::ConsumerFn>(abi::consumer::SYMBOL) }.is_ok();
     let configuration =
@@ -490,7 +502,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && !has_entry
         && !has_services
         && !has_recovery
-        && !has_bootstrap
+        && bootstrap.is_none()
         && !has_consumer
         && configuration.is_none()
     {
@@ -502,6 +514,11 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         metadata.ok_or_else(|| anyhow::anyhow!("native computation metadata symbol is missing"))?;
     let manifest = unsafe { read_metadata(metadata)? };
     unsafe { read_configuration(configuration, &manifest)? };
+    let bootstrap = unsafe { read_bootstrap(bootstrap)? };
+    anyhow::ensure!(
+        !manifest.factories.is_empty() || bootstrap.is_some(),
+        "native plugin has no component factories or bootstrap extension"
+    );
     Ok(Some(manifest))
 }
 

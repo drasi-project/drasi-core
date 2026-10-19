@@ -60,15 +60,7 @@ pub enum SqliteCommand {
     Shutdown,
 }
 
-/// A parameter value for parameterized SQL execution.
-#[derive(Debug, Clone)]
-pub enum SqliteParam {
-    Null,
-    Integer(i64),
-    Real(f64),
-    Text(String),
-    Bool(bool),
-}
+pub use drasi_sqlite_common::SqliteParam;
 
 #[derive(Debug, Clone)]
 pub struct ChangeEvent {

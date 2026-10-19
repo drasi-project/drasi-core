@@ -1,0 +1,20 @@
+[package]
+name = "drasi-sqlite-common"
+description = "Shared SQLite schema and native graph identity mapping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+drasi-core-types.workspace = true
+anyhow = "1"
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

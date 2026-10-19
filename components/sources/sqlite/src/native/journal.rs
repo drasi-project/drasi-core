@@ -1,11 +1,26 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use super::*;
+use super::{SqliteConfig, SqliteReplayConfig};
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use drasi_computation_contracts::{
+    ComponentId, SourceProgressKey, SourceProgressSnapshot, SourceProgressView, SourceTransaction,
+    SourceTransactionCodec, SourceTransactionLimits, StreamId,
+};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Handover {
+    pub version: u32,
+    pub epoch: Uuid,
+    pub binding: String,
+    pub completed: bool,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,12 +42,12 @@ pub(super) fn binding(
     config: &SqliteConfig,
     source: &ComponentId,
     stream: &StreamId,
-    owner: &SourceProgressReader,
+    owner: &SourceProgressView,
     coordinated: bool,
 ) -> Result<String> {
     let mut tables = config.tables.clone();
     tables.sort();
-    let binding = serde_json::to_string(&(
+    let mut binding = serde_json::to_string(&(
         1u32,
         source.as_str(),
         stream.as_str(),
@@ -40,6 +55,11 @@ pub(super) fn binding(
         owner.component_id().as_str(),
         tables,
     ))?;
+    if !config.table_keys.is_empty() {
+        let mut keys = config.table_keys.clone();
+        keys.sort_by(|left, right| left.table.cmp(&right.table));
+        binding = serde_json::to_string(&("keys-v1", binding, keys))?;
+    }
     Ok(if coordinated {
         serde_json::to_string(&("coordinated-v1", binding))?
     } else {
@@ -91,7 +111,7 @@ impl Journal {
         config: &SqliteConfig,
         source: ComponentId,
         stream: &StreamId,
-        progress: (&SourceProgressReader, &SourceProgressSnapshot),
+        progress: (&SourceProgressView, &SourceProgressSnapshot),
         schema: String,
         bootstrap: Option<Uuid>,
     ) -> Result<Self> {

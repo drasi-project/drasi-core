@@ -24,6 +24,7 @@ pub(crate) struct GraphRegistrySnapshot {
     resources: BTreeMap<ResourceId, specification::WeakResourceHandle>,
     configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
     query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
+    deferred_activation: BTreeSet<ComponentId>,
 }
 
 impl GraphRegistrySnapshot {
@@ -33,12 +34,14 @@ impl GraphRegistrySnapshot {
         resources: &BTreeMap<ResourceId, ResourceHandle>,
         configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
         query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
+        deferred_activation: BTreeSet<ComponentId>,
     ) -> Self {
         Self {
             desired: Arc::new(desired.clone()),
             observed,
             configurations,
             query_apis,
+            deferred_activation,
             resources: resources
                 .iter()
                 .map(|(id, handle)| (id.clone(), handle.downgrade()))
@@ -78,6 +81,10 @@ impl GraphRegistrySnapshot {
     ) -> Option<Arc<crate::computation::v1::QueryApi>> {
         self.query_apis.get(id).and_then(std::sync::Weak::upgrade)
     }
+
+    pub(crate) fn activation_is_deferred(&self, id: &ComponentId) -> bool {
+        self.deferred_activation.contains(id)
+    }
 }
 
 pub(super) fn publish(graph: &ComputationGraph) {
@@ -101,6 +108,7 @@ pub(super) fn publish(graph: &ComputationGraph) {
                         .map(|api| (id.clone(), api))
                 })
                 .collect(),
+            graph.deferred_activation.clone(),
         )));
 }
 

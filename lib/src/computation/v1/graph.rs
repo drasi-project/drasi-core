@@ -593,11 +593,11 @@ impl Component {
 
 /// Entire topology is validated by `build` before any provider creation or start.
 ///
-/// Policy: nonempty DAG; unique component IDs within this graph, port IDs within
-/// each component, edges and output stream IDs within the graph. Every port must
-/// be connected and every output port must bind exactly one stream. Sources have
-/// only outputs, sinks only inputs, transformers both. Disconnected *complete*
-/// pipelines are permitted; isolated nodes/unconnected ports are not. Graph IDs
+/// Policy: DAG; unique component IDs within this graph, port IDs within each
+/// component, edges and output stream IDs within the graph. Unconnected ports
+/// and required reconstructible connections to undeclared components wait for
+/// their bindings. Outputs require a stream before connection. Sources have
+/// only outputs, sinks only inputs, transformers both. Graph IDs
 /// are local descriptive IDs (there is no process-wide graph registry).
 /// One producer output cannot route to multiple input ports of the same component:
 /// independent queues would not preserve component-wide FIFO for that stream.
@@ -788,7 +788,7 @@ impl ComputationGraphBuilder {
         self
     }
 
-    pub fn build(self) -> GraphResult<ComputationGraph> {
+    pub fn build(mut self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
         if self
             .resource_constructors
@@ -885,6 +885,51 @@ impl ComputationGraphBuilder {
                     .unwrap_or_default(),
             });
         }
+        let mut bound = Vec::new();
+        for (edge, provider) in std::mem::take(&mut self.edges) {
+            if ids.contains_key(&edge.from.component) && ids.contains_key(&edge.to.component) {
+                bound.push((edge, provider));
+                continue;
+            }
+            let policy = self.relationship_policies.remove(&edge).unwrap_or_default();
+            if !policy.required_for_binding || policy.orphan_permitted {
+                return Err(topology(
+                    "a connection to an undeclared endpoint must require binding",
+                ));
+            }
+            let pipe = provider
+                .specification()
+                .ok_or_else(|| topology("declare endpoints before binding an external pipe"))?;
+            if pipe.resource_dependencies() != provider.resource_dependencies() {
+                return Err(topology(
+                    "pipe recipe omits its declared resource dependencies",
+                ));
+            }
+            self.unbound_relationships.push(DesiredRelationship {
+                definition: edge,
+                policy,
+                pipe,
+            });
+        }
+        self.edges = bound;
+        let mut unbound = Vec::new();
+        for relationship in std::mem::take(&mut self.unbound_relationships) {
+            if relationship.policy.required_for_binding
+                && !relationship.policy.orphan_permitted
+                && ids.contains_key(&relationship.definition.from.component)
+                && ids.contains_key(&relationship.definition.to.component)
+            {
+                let provider = relationship
+                    .pipe
+                    .resolve(&mut TopologyBindings::default())?;
+                self.relationship_policies
+                    .insert(relationship.definition.clone(), relationship.policy);
+                self.edges.push((relationship.definition, provider));
+            } else {
+                unbound.push(relationship);
+            }
+        }
+        self.unbound_relationships = unbound;
         let mut streams = BTreeSet::new();
         for (endpoint, stream) in self.streams {
             let (index, port) = resolve(&ids, &nodes, &endpoint)?;
@@ -900,8 +945,23 @@ impl ComputationGraphBuilder {
                 return Err(topology("duplicate stream identity or output binding"));
             }
         }
+        let mut pending_edges = BTreeSet::new();
+        let mut stream_destinations = BTreeSet::new();
         for relationship in &self.unbound_relationships {
-            validate_orphan(relationship, &ids, &nodes)?;
+            if !pending_edges.insert(relationship.definition.clone()) {
+                return Err(topology("duplicate unbound relationship"));
+            }
+            if relationship.policy.required_for_binding
+                && !stream_destinations.insert((
+                    relationship.definition.from.clone(),
+                    relationship.definition.to.component.clone(),
+                ))
+            {
+                return Err(topology(
+                    "one producer output cannot feed multiple input ports on the same component",
+                ));
+            }
+            validate_unbound_relationship(relationship, &ids, &nodes)?;
             for (id, role) in relationship.pipe.resource_dependencies() {
                 if self.resources.get(&id).map(|resource| resource.role) != Some(role) {
                     return Err(topology(
@@ -911,7 +971,6 @@ impl ComputationGraphBuilder {
             }
         }
         let mut unique_edges = BTreeSet::new();
-        let mut stream_destinations = BTreeSet::new();
         let mut edges = Vec::new();
         let mut used_resources = BTreeMap::new();
         let mut multicast_outputs = BTreeMap::new();
@@ -958,7 +1017,7 @@ impl ComputationGraphBuilder {
                     edge: edge_index,
                     source,
                 })?;
-            if !unique_edges.insert(edge.clone()) {
+            if !unique_edges.insert(edge.clone()) || pending_edges.contains(edge) {
                 return Err(topology("duplicate edge"));
             }
             let (from, output) = resolve(&ids, &nodes, &edge.from)?;
@@ -1140,6 +1199,7 @@ impl ComputationGraphBuilder {
                     components[*index].query_api().map(|api| (id.clone(), api))
                 })
                 .collect(),
+            BTreeSet::new(),
         )))
         .0;
         let graph = ComputationGraph {
@@ -1202,20 +1262,30 @@ fn topology(reason: impl Into<String>) -> GraphError {
     }
 }
 
-fn validate_orphan(
+fn validate_unbound_relationship(
     relationship: &DesiredRelationship,
     ids: &BTreeMap<ComponentId, usize>,
     nodes: &[NodeSnapshot],
 ) -> GraphResult<()> {
-    if !relationship.policy.orphan_permitted
-        || relationship.policy.required_for_creation
-        || relationship.policy.required_for_binding
-        || relationship.policy.activation != super::ActivationCoupling::Independent
-        || relationship.policy.propagate_failure
-        || relationship.policy.fence_producer_on_failure
+    relationship.pipe.capabilities()?;
+    if relationship.policy.required_for_binding
+        && matches!(relationship.pipe, super::DesiredPipe::External { .. })
     {
         return Err(topology(
-            "unbound relationship does not permit an unsatisfied dependency",
+            "deferred connections require a reconstructible pipe; declare endpoints before binding an external pipe",
+        ));
+    }
+    let waiting = relationship.policy.required_for_binding && !relationship.policy.orphan_permitted;
+    if !waiting
+        && (!relationship.policy.orphan_permitted
+            || relationship.policy.required_for_binding
+            || relationship.policy.required_for_creation
+            || relationship.policy.activation != super::ActivationCoupling::Independent
+            || relationship.policy.propagate_failure
+            || relationship.policy.fence_producer_on_failure)
+    {
+        return Err(topology(
+            "unbound relationship must explicitly wait for binding or permit orphaning",
         ));
     }
     let mut present = false;

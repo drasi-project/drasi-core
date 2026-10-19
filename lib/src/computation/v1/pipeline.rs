@@ -191,6 +191,8 @@ pub struct ComputationPipelineBuilder {
     input_capacity: usize,
     output_capacity: usize,
     sources: BTreeMap<String, (Option<Arc<SourcePluginHost>>, SourceSubscriptionOptions)>,
+    native_sources: BTreeMap<String, Endpoint>,
+    bootstraps: BTreeMap<String, Arc<dyn ComputationBootstrapProvider>>,
     queries: Vec<QueryConfig>,
     reactions: Vec<(Arc<ReactionPluginHost>, bool)>,
     overrides: BTreeMap<String, (Arc<dyn ComputationIndexProvider>, QueryPublicationMode)>,
@@ -233,6 +235,8 @@ impl ComputationPipelineBuilder {
             input_capacity,
             output_capacity,
             sources: BTreeMap::new(),
+            native_sources: BTreeMap::new(),
+            bootstraps: BTreeMap::new(),
             queries: Vec::new(),
             reactions: Vec::new(),
             overrides: BTreeMap::new(),
@@ -268,6 +272,39 @@ impl ComputationPipelineBuilder {
         let id = host.id().to_owned();
         self.source_binding(&id, Some(host), options)
     }
+
+    /// Connect a native graph-change output using bounded, ranked query input.
+    ///
+    /// The source remains owned by the surrounding graph, not by this query.
+    /// Source-plugin label selectors are not used on this path. Supply initial
+    /// data explicitly with `query_bootstrap`. Admitted durable sources require
+    /// their actual QoS connections instead of these bounded input pipes.
+    pub fn native_source(mut self, output: Endpoint) -> GraphResult<Self> {
+        let id = output.component.as_str().to_owned();
+        if self.sources.contains_key(&id) || self.native_sources.contains_key(&id) {
+            return Err(GraphError::Topology {
+                reason: "duplicate source".into(),
+            });
+        }
+        self.native_sources.insert(id, output);
+        Ok(self)
+    }
+
+    /// Supply an application-owned snapshot for a query with native inputs.
+    pub fn query_bootstrap(
+        mut self,
+        query: &str,
+        bootstrap: Arc<dyn ComputationBootstrapProvider>,
+    ) -> GraphResult<Self> {
+        super::data::validate_identifier("query", query)?;
+        if self.bootstraps.insert(query.into(), bootstrap).is_some() {
+            return Err(GraphError::Topology {
+                reason: "duplicate query bootstrap".into(),
+            });
+        }
+        Ok(self)
+    }
+
     pub(crate) fn source_binding(
         mut self,
         id: &str,
@@ -275,6 +312,11 @@ impl ComputationPipelineBuilder {
         options: SourceSubscriptionOptions,
     ) -> GraphResult<Self> {
         super::data::validate_identifier("source", id)?;
+        if self.native_sources.contains_key(id) {
+            return Err(GraphError::Topology {
+                reason: "duplicate source".into(),
+            });
+        }
         if host.as_ref().is_some_and(|host| host.id() != id) {
             return Err(GraphError::Topology {
                 reason: "source binding has a different identity".into(),
@@ -321,14 +363,8 @@ impl ComputationPipelineBuilder {
         Ok(self)
     }
     pub fn build(self) -> GraphResult<ComponentBatch> {
-        self.build_with_subscriptions()?.0.into_component_batch()
-    }
-
-    pub(crate) fn build_with_subscriptions(
-        self,
-    ) -> GraphResult<(ComputationGraph, Vec<Arc<LegacySourceSubscription>>)> {
         let invalid = |reason: String| GraphError::Topology { reason };
-        let mut all_subscriptions = Vec::new();
+        let mut native_inputs = Vec::new();
         let mut query_ids = BTreeSet::new();
         let mut prepared = Vec::new();
         let mut declared_sources = BTreeSet::new();
@@ -356,6 +392,18 @@ impl ComputationPipelineBuilder {
                     .map_err(|error| invalid(format!("{error:#}")))?
             };
             for setting in &settings {
+                if self.native_sources.contains_key(&setting.source_id) {
+                    let configured = query
+                        .sources
+                        .iter()
+                        .find(|source| source.source_id == setting.source_id)
+                        .expect("subscription belongs to this query");
+                    if !configured.nodes.is_empty() || !configured.relations.is_empty() {
+                        return Err(invalid(
+                            "native input label selection belongs in the graph, not Source-plugin subscription settings".into(),
+                        ));
+                    }
+                }
                 declared_sources.insert(setting.source_id.clone());
                 if query.auto_start {
                     *subscribers.entry(setting.source_id.clone()).or_default() += 1;
@@ -373,6 +421,24 @@ impl ComputationPipelineBuilder {
                 return Err(invalid(format!(
                     "provider override names unknown query {id}"
                 )));
+            }
+        }
+        for id in self.bootstraps.keys() {
+            let query = self
+                .queries
+                .iter()
+                .find(|query| &query.id == id)
+                .ok_or_else(|| invalid(format!("bootstrap names unknown query {id}")))?;
+            if !query.enable_bootstrap
+                || query
+                    .sources
+                    .iter()
+                    .any(|source| !self.native_sources.contains_key(&source.source_id))
+            {
+                return Err(invalid(
+                    "explicit query bootstrap requires enabled bootstrap and native input bindings"
+                        .into(),
+                ));
             }
         }
         let mut reaction_ids = BTreeSet::new();
@@ -462,10 +528,9 @@ impl ComputationPipelineBuilder {
                     .provide_resource(id, bootstrap)?;
             }
         }
-        for name in declared_sources
-            .iter()
-            .filter(|name| !self.sources.contains_key(*name))
-        {
+        for name in declared_sources.iter().filter(|name| {
+            !self.sources.contains_key(*name) && !self.native_sources.contains_key(*name)
+        }) {
             builder = builder.declare_resource(ResourceSpecification {
                 id: Self::source_resource_id(name)?,
                 role: ResourceRole::LegacySource,
@@ -566,6 +631,24 @@ impl ComputationPipelineBuilder {
             let mut subscriptions = Vec::new();
             let mut subscription_ids = Vec::new();
             for (source_rank, setting) in settings.into_iter().enumerate() {
+                if let Some(output) = self.native_sources.get(&setting.source_id) {
+                    native_inputs.push(DesiredRelationship {
+                        definition: EdgeDefinition::new(
+                            output.clone(),
+                            endpoint(query_id.clone(), "in"),
+                        ),
+                        policy: RelationshipPolicy::default(),
+                        pipe: DesiredPipe::Ranked(RankedInputPipeConfig {
+                            queue: input_queue_id.clone(),
+                            capacity: input_capacity,
+                            source_rank,
+                            source_id: None,
+                            source_dispatch: None,
+                            drop_when_full: false,
+                        }),
+                    });
+                    continue;
+                }
                 let declaration = self.sources.get(&setting.source_id);
                 let supplied = declaration.and_then(|(host, _)| host.as_ref());
                 let options = declaration
@@ -615,7 +698,6 @@ impl ComputationPipelineBuilder {
                         ResourceRole::Checkpoint,
                     )?;
                 if let Some(subscription) = &subscription {
-                    all_subscriptions.push(subscription.clone());
                     builder = builder.provide_resource(
                         subscription_id.clone(),
                         ResourceHandle::new(ResourceRole::SourceSubscription, subscription.clone())
@@ -801,35 +883,53 @@ impl ComputationPipelineBuilder {
                         ..Default::default()
                     },
                 );
-            let bootstrap_id = resource("query-bootstrap", &config.id)?;
-            builder = builder.declare_resource(ResourceSpecification {
-                id: bootstrap_id.clone(),
-                role: ResourceRole::Bootstrap,
-                ownership: ResourceOwnership::Graph,
-                binding: Arc::from(format!("query-bootstrap:{}", config.id)),
-            })?;
+            let bootstrap = self.bootstraps.get(&config.id);
+            let bootstrap_id = if bootstrap.is_some() || !subscription_ids.is_empty() {
+                let id = resource("query-bootstrap", &config.id)?;
+                builder = builder.declare_resource(ResourceSpecification {
+                    id: id.clone(),
+                    role: ResourceRole::Bootstrap,
+                    ownership: ResourceOwnership::Graph,
+                    binding: Arc::from(format!("query-bootstrap:{}", config.id)),
+                })?;
+                Some(id)
+            } else {
+                None
+            };
             for subscription in &subscription_ids {
                 builder = builder.resource_dependency(
-                    bootstrap_id.clone(),
+                    bootstrap_id
+                        .clone()
+                        .expect("subscription bootstrap resource"),
                     subscription.clone(),
                     ResourceRole::SourceSubscription,
                 )?;
             }
-            if subscriptions.len() == subscription_ids.len() {
+            if let Some(bootstrap) = bootstrap {
                 builder = builder.provide_resource(
-                    bootstrap_id.clone(),
+                    bootstrap_id.clone().expect("explicit bootstrap resource"),
                     ResourceHandle::new(
                         ResourceRole::Bootstrap,
-                        Arc::new(QueryBootstrapResource(LegacySourceBootstrap::new(
-                            subscriptions,
-                        ))),
+                        Arc::new(QueryBootstrapResource(bootstrap.clone())),
                     ),
                 )?;
-            } else {
-                builder = builder.construct_resource(
-                    bootstrap_id.clone(),
-                    Arc::new(BootstrapRecipe(subscription_ids)),
-                )?;
+            } else if let Some(bootstrap_id) = &bootstrap_id {
+                if subscriptions.len() == subscription_ids.len() {
+                    builder = builder.provide_resource(
+                        bootstrap_id.clone(),
+                        ResourceHandle::new(
+                            ResourceRole::Bootstrap,
+                            Arc::new(QueryBootstrapResource(LegacySourceBootstrap::new(
+                                subscriptions,
+                            ))),
+                        ),
+                    )?;
+                } else {
+                    builder = builder.construct_resource(
+                        bootstrap_id.clone(),
+                        Arc::new(BootstrapRecipe(subscription_ids)),
+                    )?;
+                }
             }
             let indexes_id = Self::index_resource_id(&config.id)?;
             let (handle, publication, ownership) =
@@ -986,14 +1086,16 @@ impl ComputationPipelineBuilder {
                                 ),
                             ),
                         ]),
-                        dependencies: BTreeMap::from([
+                        dependencies: [
                             (Arc::from("indexes"), vec![indexes_id]),
                             (Arc::from("scheduling"), vec![scheduling_id]),
-                            (Arc::from("bootstrap"), vec![bootstrap_id]),
                             (Arc::from("source_progress"), vec![progress_id]),
                             (Arc::from("middleware"), vec![middleware_id.clone()]),
                             (Arc::from("catalog"), vec![catalog_id.clone()]),
-                        ]),
+                        ]
+                        .into_iter()
+                        .chain(bootstrap_id.map(|id| (Arc::from("bootstrap"), vec![id])))
+                        .collect(),
                     },
                     query_factory.clone(),
                 )
@@ -1101,6 +1203,11 @@ impl ComputationPipelineBuilder {
                 host.expected_subscriptions(count.max(1));
             }
         }
-        Ok((graph, all_subscriptions))
+        let mut batch = graph.into_component_batch()?;
+        batch
+            .definition
+            .boundary_relationships
+            .extend(native_inputs);
+        Ok(batch)
     }
 }

@@ -21,6 +21,125 @@ fn paired(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn physical_rowids_match_snapshot_live_rekeys_and_recovery() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    seed(directory.path(),
+        "CREATE TABLE items(id INTEGER,rowid TEXT,_rowid_ TEXT,value TEXT);
+         INSERT INTO items(oid,id,rowid,_rowid_,value) VALUES(7,1,'user-rowid','user-alias','before');")?;
+    let settings = config(directory.path());
+    let owner = progress();
+    let (mut producer, snapshot) = paired(settings.clone(), owner.clone())?;
+    let mut consumer = query(directory.path(), owner)
+        .await?
+        .with_bootstrap(snapshot);
+    consumer.start().await?;
+    assert_eq!(
+        rows(&consumer),
+        [serde_json::json!({"id":1,"value":"before"})]
+    );
+    producer.start().await?;
+    producer
+        .handle()
+        .execute("UPDATE items SET oid=9,value='after'")
+        .await?;
+    apply(&mut consumer, next(&mut producer).await?).await?;
+    assert_eq!(
+        rows(&consumer),
+        [serde_json::json!({"id":1,"value":"after"})]
+    );
+    producer.stop().await?;
+    consumer.stop().await?;
+    drop(producer);
+    drop(consumer);
+    let owner = progress();
+    let (mut producer, snapshot) = paired(settings, owner.clone())?;
+    let mut consumer = query(directory.path(), owner)
+        .await?
+        .with_bootstrap(snapshot);
+    consumer.start().await?;
+    producer.start().await?;
+    assert_eq!(
+        rows(&consumer),
+        [serde_json::json!({"id":1,"value":"after"})]
+    );
+    producer
+        .handle()
+        .execute("DELETE FROM items WHERE oid=9")
+        .await?;
+    apply(&mut consumer, next(&mut producer).await?).await?;
+    assert!(
+        rows(&consumer).is_empty(),
+        "snapshot and live rowids must name the same element"
+    );
+    producer.stop().await?;
+    consumer.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_snapshot_keys_match_live_rekeys_and_reopen() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    seed(
+        directory.path(),
+        "CREATE TABLE items(id INTEGER PRIMARY KEY, code TEXT UNIQUE, value TEXT);
+         INSERT INTO items VALUES(1,'initial:key','before');",
+    )?;
+    let mut settings = config(directory.path());
+    settings.table_keys = vec![drasi_source_sqlite::TableKeyConfig {
+        table: "items".into(),
+        key_columns: vec!["code".into()],
+    }];
+    let owner = progress();
+    let (mut producer, snapshot) = paired(settings.clone(), owner.clone())?;
+    let mut consumer = query(directory.path(), owner)
+        .await?
+        .with_bootstrap(snapshot);
+    consumer.start().await?;
+    assert_eq!(
+        rows(&consumer),
+        [serde_json::json!({"id":1,"value":"before"})]
+    );
+    producer.start().await?;
+    producer
+        .handle()
+        .execute("UPDATE items SET code='changed:key',value='after'")
+        .await?;
+    apply(&mut consumer, next(&mut producer).await?).await?;
+    assert_eq!(
+        rows(&consumer),
+        [serde_json::json!({"id":1,"value":"after"})]
+    );
+    producer.stop().await?;
+    consumer.stop().await?;
+    drop(producer);
+    drop(consumer);
+
+    let owner = progress();
+    let (mut producer, snapshot) = paired(settings, owner.clone())?;
+    let mut consumer = query(directory.path(), owner)
+        .await?
+        .with_bootstrap(snapshot);
+    consumer.start().await?;
+    producer.start().await?;
+    assert_eq!(
+        rows(&consumer),
+        [serde_json::json!({"id":1,"value":"after"})]
+    );
+    producer
+        .handle()
+        .execute("UPDATE items SET code='final:key',value='reopened'")
+        .await?;
+    apply(&mut consumer, next(&mut producer).await?).await?;
+    assert_eq!(
+        rows(&consumer),
+        [serde_json::json!({"id":1,"value":"reopened"})]
+    );
+    producer.stop().await?;
+    consumer.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn empty_snapshot_commits_a_real_zero_boundary_before_the_first_live_transaction(
 ) -> Result<()> {
     let directory = tempfile::tempdir()?;

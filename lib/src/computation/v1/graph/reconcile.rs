@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use super::super::{
-    recovery, resolve, validate_orphan, ComponentConstruction, ComponentSpecification,
-    ConstructedComponent, DesiredComponent, DesiredPipe, DesiredRelationship, DesiredTopology,
-    EdgeDefinition, EdgeSnapshot, Endpoint, FlowProgress, ImplementationIdentity, ResourceHandle,
-    ResourceSpecification, TopologyBindings,
+    recovery, resolve, validate_unbound_relationship, ComponentConstruction,
+    ComponentSpecification, ConstructedComponent, DesiredComponent, DesiredPipe,
+    DesiredRelationship, DesiredTopology, EdgeDefinition, EdgeSnapshot, Endpoint, FlowProgress,
+    ImplementationIdentity, ResourceHandle, ResourceSpecification, TopologyBindings,
 };
 use super::*;
 use crate::computation::v1::{
@@ -548,22 +548,35 @@ pub(super) fn preview(
                 }
             }
             DesiredMutation::Unbind { edge, policy } => {
-                let index = desired
+                let removed = if let Some(index) = desired
                     .relationships
                     .iter()
                     .position(|prior| &prior.definition == edge)
-                    .ok_or_else(|| topology("cannot unbind an undeclared relationship"))?;
-                let removed = desired.relationships.remove(index);
+                {
+                    desired.relationships.remove(index)
+                } else if let Some(index) = desired
+                    .boundary_relationships
+                    .iter()
+                    .position(|prior| &prior.definition == edge)
+                {
+                    desired.boundary_relationships.remove(index)
+                } else {
+                    return Err(topology("cannot unbind an undeclared relationship"));
+                };
+                let consumer_declared = desired
+                    .components
+                    .iter()
+                    .any(|node| node.descriptor.id() == &edge.to.component);
                 if *policy == RemovalPolicy::Orphan {
                     desired.boundary_relationships.push(removed);
-                } else if *policy == RemovalPolicy::Cascade {
+                } else if *policy == RemovalPolicy::Cascade && consumer_declared {
                     remove_components(
                         &mut desired,
                         BTreeSet::from([edge.to.component.clone()]),
                         *policy,
                         &observation_resources,
                     )?;
-                } else if *policy == RemovalPolicy::Drain {
+                } else if *policy == RemovalPolicy::Drain && consumer_declared {
                     drain.insert(edge.to.component.clone());
                 }
             }
@@ -712,6 +725,7 @@ pub(super) fn preview(
             }
         }
     }
+    desired.resolve_required_relationships();
     if old.recovery_requirements.iter().any(|requirement| {
         !desired.recovery_requirements.iter().any(|replacement| {
             replacement.consumer == requirement.consumer
@@ -1023,33 +1037,6 @@ pub(super) fn preview(
     })
 }
 
-fn desired_capabilities(pipe: &DesiredPipe) -> GraphResult<PipeCapabilities> {
-    match pipe {
-        DesiredPipe::External {
-            capabilities,
-            capacity,
-            ..
-        } => {
-            let capacity = capacity
-                .map(|capacity| {
-                    NonZeroUsize::new(capacity)
-                        .ok_or_else(|| topology("invalid external pipe capacity"))
-                })
-                .transpose()?;
-            Ok(PipeCapabilities::try_new(
-                capabilities.iter().copied(),
-                capacity,
-            )?)
-        }
-        _ => {
-            let provider = pipe.resolve(&mut TopologyBindings::default())?;
-            provider
-                .capabilities()
-                .map_err(|source| GraphError::Pipe { edge: 0, source })
-        }
-    }
-}
-
 fn describe(
     desired: &DesiredTopology,
 ) -> GraphResult<(Vec<NodeSnapshot>, Vec<EdgeSnapshot>, Vec<usize>)> {
@@ -1147,7 +1134,7 @@ fn describe(
                 "connect an output only after binding its producer stream",
             ));
         }
-        let capabilities = desired_capabilities(&edge.pipe)?;
+        let capabilities = edge.pipe.capabilities()?;
         super::super::validate_edge_contract(
             output,
             input,
@@ -1179,7 +1166,17 @@ fn describe(
         if !unique.insert(edge.definition.clone()) {
             return Err(topology("duplicate bound/unbound relationship"));
         }
-        validate_orphan(edge, &ids, &nodes)?;
+        if edge.policy.required_for_binding
+            && !destinations.insert((
+                edge.definition.from.clone(),
+                edge.definition.to.component.clone(),
+            ))
+        {
+            return Err(topology(
+                "one producer output cannot feed multiple ports on the same component",
+            ));
+        }
+        validate_unbound_relationship(edge, &ids, &nodes)?;
         for (id, role) in edge.pipe.resource_dependencies() {
             if !desired
                 .resources

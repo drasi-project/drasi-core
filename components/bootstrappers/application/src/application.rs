@@ -17,12 +17,9 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::models::{Element, SourceChange};
-use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use drasi_lib::bootstrap::BootstrapRequest;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapResult};
 use drasi_lib::computation::v1::{
     ComputationBootstrapProvider, ComputationBootstrapSnapshot, GraphChangeCodec, StreamId,
 };
@@ -116,7 +113,7 @@ impl ApplicationBootstrapProviderBuilder {
 
     /// Set shared bootstrap data
     ///
-    /// Use this when you want the provider to share bootstrap data with an ApplicationSource.
+    /// The application maintains this independently of live source input.
     pub fn with_shared_data(mut self, data: Arc<RwLock<Vec<SourceChange>>>) -> Self {
         self.shared_data = Some(data);
         self
@@ -139,7 +136,7 @@ impl Default for ApplicationBootstrapProviderBuilder {
 
 impl ApplicationBootstrapProvider {
     /// Store an insert event for future bootstrap replay
-    /// This would be called by the application source when it receives insert events
+    /// Application code explicitly maintains this data; live input does not update it.
     pub async fn store_insert_event(&self, change: SourceChange) {
         if matches!(change, SourceChange::Insert { .. }) {
             self.bootstrap_data.write().await.push(change);
@@ -229,60 +226,6 @@ impl ComputationBootstrapProvider for ApplicationBootstrapProvider {
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(tokio_stream::iter(changes)),
             watermarks: Vec::new(),
-        })
-    }
-}
-
-#[async_trait]
-impl BootstrapProvider for ApplicationBootstrapProvider {
-    async fn bootstrap(
-        &self,
-        request: BootstrapRequest,
-        _context: &BootstrapContext,
-        _event_tx: drasi_lib::channels::BootstrapEventSender,
-        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<BootstrapResult> {
-        info!(
-            "ApplicationBootstrapProvider processing bootstrap request for query '{}' with {} node labels and {} relation labels",
-            request.query_id,
-            request.node_labels.len(),
-            request.relation_labels.len()
-        );
-
-        let bootstrap_data = self.bootstrap_data.read().await;
-        let mut count = 0;
-
-        if bootstrap_data.is_empty() {
-            info!(
-                "ApplicationBootstrapProvider: No stored events to replay for query '{}'",
-                request.query_id
-            );
-            return Ok(BootstrapResult::default());
-        }
-
-        info!(
-            "ApplicationBootstrapProvider: Replaying {} stored events for query '{}'",
-            bootstrap_data.len(),
-            request.query_id
-        );
-
-        for change in bootstrap_data.iter() {
-            // Filter by requested labels
-            if Self::matches_labels(change, &request.node_labels, &request.relation_labels) {
-                // Note: Sequence numbering and profiling metadata are handled by
-                // ApplicationSource.subscribe() which sends bootstrap events through
-                // dedicated channels. This provider only counts matching events.
-                count += 1;
-            }
-        }
-
-        info!(
-            "ApplicationBootstrapProvider matched {} bootstrap events for query '{}'",
-            count, request.query_id
-        );
-        Ok(BootstrapResult {
-            event_count: count,
-            source_position: None,
         })
     }
 }

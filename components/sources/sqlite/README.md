@@ -58,8 +58,10 @@ handle.transaction(|tx| async move {
 
 Create `NativeSqliteSource::new(id, stream, settings)` for volatile delivery, or
 `NativeSqliteSource::new_replayable(id, stream, settings, progress)` for durable
-transaction replay. Use `NativeSqliteSource::coordinated` for initial loading
-of an existing database before live writes. `progress` must be the **actual** `Arc<QuerySourceProgress>`
+transaction replay. Use `NativeSqliteSource::coordinated` for persistent,
+coordinated initial loading before live writes. Ordinary file snapshots for
+in-memory queries use the [standalone native bootstrap provider](../../bootstrappers/sqlite/README.md#native-file-snapshots)
+with caller-controlled initialization/write ordering. `progress` must be the **actual** `Arc<QuerySourceProgress>`
 of the one persistent atomic query consuming this source. The graph validates
 that ownership; another query's resource or a same-named substitute is not enough.
 
@@ -67,8 +69,9 @@ The replay/paired constructors also accept a `SourceProgressReader` for a
 read-only host boundary. Local readers retain the actual ownership check;
 external readers do not claim local ownership. Snapshot pairing requires the
 same reader handle, and revoked reads stop processing without retiring retained
-input. This Rust interface does not yet expose SQLite through the native plugin
+input. This Rust interface does not yet expose the live SQLite source through the native plugin
 ABI; see [W7](../../../lib/docs/computation-graph-reliability-plan.md#w7-preserve-errors-and-expose-shared-services-through-plugins).
+The standalone file bootstrap has its own independently built native library.
 
 | Settings | Output and guarantee |
 |----------|----------------------|
@@ -128,6 +131,7 @@ transaction-size defaults.
 |----------------------|---------|
 | `path` | `None` for memory, or a SQLite path. Durable mode verifies that SQLite actually opened a persistent file, rejecting memory/temporary database aliases. |
 | `tables` | Selected main-database table names; empty selects all ordinary tables. |
+| `table_keys` | Optional `TableKeyConfig` entries selecting non-null element-key columns; otherwise use the primary key, or physical rowid when no primary key exists. Capture, standalone native file snapshots and coordinated snapshots use the same identity. A key change emits deletion of the old identity and insertion of the new one. |
 | `output` | `SqliteOutput::Changes` or `SqliteOutput::Transactions`. |
 | `replay` | `None`, or `SqliteReplayConfig { max_transactions, max_bytes }` bounding retained transaction records. A full journal rejects a new write and rolls it back. |
 | `transactions` | `SourceTransactionLimits { max_changes, max_bytes, max_duration_ms }`. These bound captured groups; row/byte bounds also bound read results and schema metadata. Savepoint count is bounded by `max_changes`. |
@@ -140,6 +144,50 @@ Oversized or timed-out transactions are rolled back without successful
 acknowledgement. Increase limits and retry only after a **confirmed rollback**.
 Lower replay limits cannot discard retained data. Execution deadlines also cover
 idle transaction callbacks and long-running SQLite virtual-machine work.
+
+Explicit key columns are validated against the actual table schema. Empty,
+duplicate, missing or null keys fail rather than falling back to another
+identity. Tables without a declared primary key use their physical rowid unless
+overridden. If every rowid alias is shadowed by user columns, explicit keys are
+required rather than inventing a snapshot identity. Replay and snapshot bindings
+include custom key declarations, so changing them cannot silently reinterpret
+retained input or existing query rows. Omitting overrides preserves the existing
+current-version primary-key identity and binding.
+
+The shared schema and row mapper live in `drasi-sqlite-common`, with no query
+runtime or plugin SDK dependency. The source and both native snapshot paths use
+that implementation rather than keeping separate ID/type conversions.
+
+### Native REST API
+
+The native source reuses the existing REST routes and SQL generation:
+
+```rust,ignore
+let source = NativeSqliteSource::new(id, stream, settings)?
+    .with_rest_api(RestApiConfig {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })?;
+```
+
+After startup, `bound_rest_address()` reports the listener address, including the
+assigned port when configured with port zero. The native factory accepts the
+same optional `rest_api` object beside `stream` and `settings`. Transport settings
+do not change source replay identity.
+
+Table listing/filtering, row CRUD and transactional batches use the source's one
+native SQL worker. Key lookup uses its actual captured schema (including explicit
+keys and rowid fallback), not application PRAGMA statements. Internal journal
+tables are not exposed by REST. Route IDs remain key values, separated by `:` for
+composite keys, rather than the native graph's full versioned element references.
+
+Stop rejects new HTTP/ordinary SQL admission, lets already accepted HTTP requests
+finish through their generation-bound SQL client, and then stops the database.
+Cancelled/timed-out cleanup retains both worker ownership and the client lease;
+restart remains blocked until cleanup finishes. An old REST client cannot follow
+the shared client resource into a replacement worker. Bind/startup and unexpected
+REST-worker failures remain explicit. Successful HTTP writes confirm local SQL
+completion, not downstream query processing or external effects.
 
 ### Coordinated native initial loading
 
@@ -197,9 +245,11 @@ externally between runs. Replay-only construction may adopt empty tables, but
 rejects pre-existing rows; use coordinated initialization to load them. Neither
 mode silently marks existing data as consumed.
 
-Captured rows require non-null database primary keys. Native IDs use a versioned
-encoding of table and sorted, typed key values, avoiding delimiter and BLOB/text
-collisions. A key-changing update emits deletion of the old identity followed by
+Captured rows use non-null configured/database keys or physical rowids. Native
+key IDs use a versioned encoding of table and sorted, typed key values, avoiding
+delimiter and BLOB/text collisions. Rowid IDs use a distinct `sqlite:rowid:v1`
+encoding, and snapshots select an unshadowed rowid alias rather than a same-named
+user column. A key-changing update emits deletion of the old identity followed by
 insertion of the new one in the same transaction. IDs intentionally differ from
 legacy SQLite IDs. Ordinary tables, including composite keys and `WITHOUT ROWID`,
 are supported; generated columns and virtual tables are rejected. DDL is not

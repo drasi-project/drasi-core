@@ -319,45 +319,7 @@ impl std::error::Error for RetainedError {
     }
 }
 
-/// Multiple operation failures, all retained in encounter order.
-///
-/// The standard source chain follows the first failure. Inspect [`Self::failures`]
-/// to recover other causes or ownership-bearing cleanup errors.
-#[derive(Debug)]
-pub struct OperationFailures {
-    message: String,
-    failures: Vec<anyhow::Error>,
-}
-
-impl OperationFailures {
-    /// Retains the individual causes of an operation and its required cleanup.
-    pub fn new(message: impl Into<String>, failures: Vec<anyhow::Error>) -> Self {
-        Self {
-            message: message.into(),
-            failures,
-        }
-    }
-
-    pub fn failures(&self) -> &[anyhow::Error] {
-        &self.failures
-    }
-}
-
-impl std::fmt::Display for OperationFailures {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)?;
-        for (index, error) in self.failures.iter().enumerate() {
-            write!(f, "{}{error:#}", if index == 0 { ": " } else { "; " })?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for OperationFailures {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.failures.first().map(|error| error.as_ref())
-    }
-}
+pub use drasi_computation_contracts::OperationFailures;
 
 // ============================================================================
 // Tests

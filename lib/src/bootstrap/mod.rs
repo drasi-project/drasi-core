@@ -215,24 +215,6 @@ pub struct PostgresBootstrapConfig {
     // Include this struct for consistency and future extensibility
 }
 
-/// Application bootstrap provider configuration
-///
-/// This provider bootstraps data from in-memory storage maintained by
-/// application sources. It replays stored insert events to provide initial
-/// data. No additional configuration is required as it uses shared state
-/// from the application source.
-///
-/// # Example
-/// ```yaml
-/// bootstrap_provider:
-///   type: application
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct ApplicationBootstrapConfig {
-    // No config needed - uses shared state
-    // Include for consistency and future extensibility
-}
-
 /// Script file bootstrap provider configuration
 ///
 /// This provider reads bootstrap data from JSONL (JSON Lines) files containing
@@ -298,8 +280,6 @@ impl Default for PlatformBootstrapConfig {
 pub enum BootstrapProviderConfig {
     /// PostgreSQL bootstrap provider
     Postgres(PostgresBootstrapConfig),
-    /// Application-based bootstrap provider
-    Application(ApplicationBootstrapConfig),
     /// Script file bootstrap provider
     ScriptFile(ScriptFileBootstrapConfig),
     /// Platform bootstrap provider for remote Drasi sources
@@ -325,19 +305,12 @@ impl BootstrapProviderFactory {
     /// - PostgreSQL: Use `drasi_bootstrap_postgres::PostgresBootstrapProvider::builder().with_host(...).build()`
     /// - Platform: Use `drasi_bootstrap_platform::PlatformBootstrapProvider::builder().with_query_api_url(...).build()`
     /// - ScriptFile: Use `drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider::builder().with_file(...).build()`
-    /// - Application: Use `drasi_bootstrap_application::ApplicationBootstrapProvider::builder().build()`
     pub fn create_provider(config: &BootstrapProviderConfig) -> Result<Box<dyn BootstrapProvider>> {
         match config {
             BootstrapProviderConfig::Postgres(_) => {
                 Err(anyhow::anyhow!(
                     "PostgreSQL bootstrap provider is available in the drasi-bootstrap-postgres crate. \
                      Use PostgresBootstrapProvider::builder().with_host(...).build() to create it."
-                ))
-            }
-            BootstrapProviderConfig::Application(_) => {
-                Err(anyhow::anyhow!(
-                    "Application bootstrap provider is available in the drasi-bootstrap-application crate. \
-                     Use ApplicationBootstrapProvider::builder().build() to create it."
                 ))
             }
             BootstrapProviderConfig::ScriptFile(config) => {
@@ -384,13 +357,6 @@ mod tests {
         let config = PostgresBootstrapConfig::default();
         // Should be empty struct for now
         assert_eq!(config, PostgresBootstrapConfig {});
-    }
-
-    #[test]
-    fn test_application_bootstrap_config_defaults() {
-        let config = ApplicationBootstrapConfig::default();
-        // Should be empty struct for now
-        assert_eq!(config, ApplicationBootstrapConfig {});
     }
 
     #[test]
@@ -459,20 +425,6 @@ mod tests {
 
         let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
         assert!(matches!(deserialized, BootstrapProviderConfig::Postgres(_)));
-    }
-
-    #[test]
-    fn test_application_bootstrap_config_serialization() {
-        let config = BootstrapProviderConfig::Application(ApplicationBootstrapConfig::default());
-
-        let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("\"type\":\"application\""));
-
-        let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            deserialized,
-            BootstrapProviderConfig::Application(_)
-        ));
     }
 
     #[test]

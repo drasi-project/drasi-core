@@ -45,7 +45,7 @@ pub use component_data::*;
 pub use data::*;
 pub use drasi_core_types::{profiling, schema};
 pub use envelope::*;
-pub use error::{ContractError, Result};
+pub use error::{ContractError, OperationFailures, Result};
 pub use graph_codec::*;
 pub use identity::*;
 pub use ports::*;

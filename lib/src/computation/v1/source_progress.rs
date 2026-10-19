@@ -26,6 +26,7 @@ use tokio::sync::watch;
 
 pub use drasi_computation_contracts::{
     SourceProgressKey, SourceProgressProvider, SourceProgressSnapshot, SourceProgressUpdates,
+    SourceProgressView,
 };
 
 /// Separates readable progress from proof of the actual local transaction owner.
@@ -45,6 +46,14 @@ impl From<Arc<QuerySourceProgress>> for SourceProgressReader {
 }
 
 impl SourceProgressReader {
+    /// A data-only view of this exact provider, without local ownership proof.
+    pub fn read_only(&self) -> SourceProgressView {
+        match self {
+            Self::Local(owner) => SourceProgressView::new(owner.clone()),
+            Self::External(provider) => SourceProgressView::new(provider.clone()),
+        }
+    }
+
     pub fn graph_id(&self) -> &str {
         match self {
             Self::Local(owner) => owner.graph_id(),
@@ -121,6 +130,24 @@ pub struct QuerySourceProgress {
     query_id: ComponentId,
     state: watch::Sender<Arc<SourceProgressSnapshot>>,
     replay_only: AtomicBool,
+}
+
+impl SourceProgressProvider for QuerySourceProgress {
+    fn graph_id(&self) -> &str {
+        QuerySourceProgress::graph_id(self)
+    }
+
+    fn component_id(&self) -> &ComponentId {
+        QuerySourceProgress::component_id(self)
+    }
+
+    fn snapshot(&self) -> anyhow::Result<Arc<SourceProgressSnapshot>> {
+        Ok(QuerySourceProgress::snapshot(self))
+    }
+
+    fn subscribe(&self) -> anyhow::Result<Box<dyn SourceProgressUpdates>> {
+        Ok(Box::new(QuerySourceProgress::subscribe(self)))
+    }
 }
 
 impl std::fmt::Debug for QuerySourceProgress {
@@ -280,6 +307,20 @@ mod tests {
         assert!(!local.same_owner(&SourceProgressReader::from(Arc::new(
             QuerySourceProgress::new(owner.graph_id(), owner.component_id().clone()).unwrap()
         ))));
+        assert!(local.read_only().same_owner(&local.clone().read_only()));
+        assert!(external
+            .read_only()
+            .same_owner(&external.clone().read_only()));
+        assert!(!local.read_only().same_owner(&external.read_only()));
+        assert!(!local.read_only().same_owner(
+            &SourceProgressReader::from(Arc::new(
+                QuerySourceProgress::new(owner.graph_id(), owner.component_id().clone()).unwrap()
+            ))
+            .read_only()
+        ));
+        let projected = SourceProgressReader::External(Arc::new(local.read_only()));
+        assert!(projected.local_owner().is_none());
+        assert!(!projected.same_owner(&local));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -291,7 +332,8 @@ mod tests {
         ] {
             owner.pending();
             let mut left = reader.subscribe().unwrap();
-            let mut right = reader.subscribe().unwrap();
+            let view = reader.read_only();
+            let mut right = view.subscribe().unwrap();
             left.snapshot().unwrap();
             right.snapshot().unwrap();
             owner.publish(SourceProgressSnapshot {
@@ -320,6 +362,12 @@ mod tests {
             left.changed().await.unwrap();
             let snapshot = left.snapshot().unwrap();
             assert!(Arc::ptr_eq(&snapshot, &reader.snapshot().unwrap()));
+            assert!(Arc::ptr_eq(&snapshot, &view.snapshot().unwrap()));
+            assert!(Arc::ptr_eq(&snapshot, &view.wait_ready().await.unwrap()));
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &view.wait_recovered().await.unwrap()
+            ));
             assert!(Arc::ptr_eq(&snapshot, &reader.wait_ready().await.unwrap()));
             assert!(Arc::ptr_eq(
                 &snapshot,
@@ -429,9 +477,20 @@ mod tests {
                 error.downcast_ref::<std::io::Error>().unwrap().to_string(),
                 "revoked progress"
             );
+            let view = reader.read_only();
+            assert_eq!(
+                view.snapshot()
+                    .unwrap_err()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .to_string(),
+                "revoked progress"
+            );
             for error in [
                 reader.wait_ready().await.unwrap_err(),
                 reader.wait_recovered().await.unwrap_err(),
+                view.wait_ready().await.unwrap_err(),
+                view.wait_recovered().await.unwrap_err(),
             ] {
                 assert_eq!(
                     error.downcast_ref::<std::io::Error>().unwrap().to_string(),

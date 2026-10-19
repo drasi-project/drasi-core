@@ -1240,6 +1240,16 @@ fn creation_dependencies(
         .chain(
             graph
                 .snapshot
+                .unbound_relationships
+                .iter()
+                .filter(|edge| {
+                    edge.policy.required_for_creation && &edge.definition.to.component == id
+                })
+                .map(|edge| &edge.definition.from.component),
+        )
+        .chain(
+            graph
+                .snapshot
                 .subscriptions
                 .iter()
                 .filter(|(_, to)| to == id)
@@ -1295,6 +1305,30 @@ fn binding_waits(graph: &ComputationGraph, id: &ComponentId) -> Vec<super::super
         if port.direction() == PortDirection::Output && !node.output_streams.contains_key(port.id())
         {
             waiting.push(DependencyWait::Stream { endpoint });
+        }
+    }
+    for edge in graph
+        .snapshot
+        .unbound_relationships
+        .iter()
+        .filter(|edge| edge.policy.required_for_binding)
+    {
+        let dependency = if &edge.definition.to.component == id {
+            Some(&edge.definition.from.component)
+        } else if &edge.definition.from.component == id {
+            Some(&edge.definition.to.component)
+        } else {
+            None
+        };
+        if let Some(dependency) =
+            dependency.filter(|dependency| !observed.components.contains_key(*dependency))
+        {
+            let missing = DependencyWait::Component {
+                id: dependency.clone(),
+            };
+            if !waiting.contains(&missing) {
+                waiting.push(missing);
+            }
         }
     }
     waiting
@@ -4859,38 +4893,54 @@ async fn bind_ready_dependencies(
     let mut changes = Vec::new();
     let mut bindings = super::TopologyBindings::default();
     let mut selected_edges = Vec::new();
-    for (index, edge) in &graph.edges {
-        let state = &observed.relationships[&edge.definition];
+    let edges = graph
+        .edges
+        .iter()
+        .map(|(index, edge)| (Some(*index), &edge.definition, &edge.policy, &edge.pipe))
+        .chain(
+            graph
+                .snapshot
+                .unbound_relationships
+                .iter()
+                .filter(|edge| edge.policy.required_for_binding)
+                .map(|edge| (None, &edge.definition, &edge.policy, &edge.pipe)),
+        );
+    for (index, definition, policy, pipe) in edges {
+        let state = &observed.relationships[definition];
         if state.binding != BindingState::Declared
             || state.failure.is_some()
-            || edge
-                .resources
+            || pipe
+                .resource_dependencies()
                 .keys()
                 .any(|id| !graph.resource_handles.contains_key(id))
         {
             continue;
         }
-        let endpoints = [
-            graph.ids[&edge.definition.from.component],
-            graph.ids[&edge.definition.to.component],
-        ];
-        if endpoints.iter().any(|index| {
-            observed.components[graph.nodes[*index].descriptor.id()]
+        let (Some(from), Some(to)) = (
+            graph.ids.get(&definition.from.component),
+            graph.ids.get(&definition.to.component),
+        ) else {
+            continue;
+        };
+        let endpoints = [*from, *to];
+        if endpoints.iter().any(|endpoint| {
+            observed.components[graph.nodes[*endpoint].descriptor.id()]
                 .failure
                 .is_some()
-                || operations.pending_creation.contains_key(index)
+                || index.is_some() && operations.pending_creation.contains_key(endpoint)
                 || operations
                     .active
-                    .get(index)
+                    .get(endpoint)
                     .is_some_and(|active| active.operation != Operation::Process)
         }) || operations.conflicts(&endpoints.into_iter().collect(), true)
         {
             continue;
         }
         let mut constructed = true;
-        for index in endpoints {
-            if !operations.active.contains_key(&index)
-                && !graph.components[index].is_constructed()?
+        for endpoint in endpoints {
+            if index.is_some()
+                && !operations.active.contains_key(&endpoint)
+                && !graph.components[endpoint].is_constructed()?
             {
                 constructed = false;
             }
@@ -4898,17 +4948,17 @@ async fn bind_ready_dependencies(
         if !constructed {
             continue;
         }
-        if let super::DesiredPipe::External { binding, .. } = &edge.pipe {
+        if let (Some(index), super::DesiredPipe::External { binding, .. }) = (index, pipe) {
             bindings
                 .pipes
-                .insert(binding.clone(), Box::new(graph.providers[index].clone()));
+                .insert(binding.clone(), Box::new(graph.providers[&index].clone()));
         }
-        selected_edges.push(edge.definition.clone());
+        selected_edges.push(definition.clone());
         changes.push(reconcile::DesiredMutation::Bind(
             super::DesiredRelationship {
-                definition: edge.definition.clone(),
-                policy: edge.policy.clone(),
-                pipe: edge.pipe.clone(),
+                definition: definition.clone(),
+                policy: policy.clone(),
+                pipe: pipe.clone(),
             },
         ));
     }

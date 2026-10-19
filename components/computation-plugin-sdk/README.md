@@ -405,7 +405,13 @@ The same test-only library also supplies the synthetic bootstrap fixtures below.
 ## Optional query-owned bootstrap
 
 The independent `drasi_computation_plugin_bootstrap_v1` entry point exposes
-`PluginDefinition::with_bootstrap_factories`. It adds no component role and does
+`PluginDefinition::with_bootstrap_factories`. Bootstrap-only libraries use
+`PluginDefinition::new_with_bootstrap(id, version, Vec::new(), bootstrappers, schemas)`
+instead of registering a dummy processing component. Empty libraries still
+reject, and the host validates the complete factory catalogue at load time.
+Metadata-only inspection validates the advertised extension table without
+calling the plugin entry point; catalogue discovery happens during loading.
+This adds no component role and does
 not change base metadata, ABI **1.0.0**, wire **2**, or existing optional tables.
 The Host SDK exposes the negotiated `NativePlugin::bootstrap_factories()`.
 Plugin-side factories return `NativeBootstrapProvider`; only the host-side
@@ -450,8 +456,14 @@ remains unusable even after worker cleanup; replace that provider. The shared
 plugin I/O drivers service timers/I/O, but the host polls all bootstrap operations.
 Current-thread Host tests include a separately built fixture, real RocksDB
 snapshot/handover commits, reconstruction without resnapshotting, and preserved
-initialization intent after cancelled startup. These are framework fixtures,
-not migrated production database plugins.
+initialization intent after cancelled startup. These coordinated-recovery cases
+are framework fixtures, not a migrated production live database source.
+The independent
+[`drasi-computation-bootstrap-sqlite`](../computation-plugins/bootstrappers/sqlite)
+library now provides ordinary read-only file snapshots and is exercised through
+real native C entry points, including errors, stream replacement and two hosted
+queries on both runtime flavors. It deliberately has no durable handover or
+source-progress binding.
 
 ## Remaining native limitations
 

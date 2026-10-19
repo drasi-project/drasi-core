@@ -244,6 +244,8 @@ pub struct PluginMetadata {
 }
 
 impl PluginMetadata {
+    /// Validate the base manifest. Export/load must also validate extension
+    /// factories before accepting a plugin with no processing components.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.abi_version == abi::ABI_VERSION && self.wire_version == abi::WIRE_VERSION,
@@ -251,7 +253,6 @@ impl PluginMetadata {
         );
         ComponentId::try_new(self.plugin.id.as_ref())?;
         ComponentId::try_new(self.plugin.version.as_ref())?;
-        anyhow::ensure!(!self.factories.is_empty(), "native plugin has no factories");
         let mut schema_ids = BTreeSet::new();
         for schema in &self.schemas {
             anyhow::ensure!(

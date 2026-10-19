@@ -594,8 +594,9 @@ impl std::fmt::Debug for ComponentHandle {
 }
 
 impl GraphControl {
-    /// Connect declared ports. Pipe creation failures remain on the connection
-    /// in the returned reconciliation report.
+    /// Declare a connection. Required reconstructible pipes wait for missing
+    /// endpoints; opaque external pipes require both endpoints to be declared.
+    /// Pipe creation failures remain in the returned reconciliation report.
     pub async fn connect(
         &self,
         edge: EdgeDefinition,
@@ -607,6 +608,10 @@ impl GraphControl {
             .edges
             .iter()
             .any(|existing| existing.definition == edge)
+            || desired
+                .unbound_relationships
+                .iter()
+                .any(|existing| existing.definition == edge)
         {
             return Err(topology("duplicate connection"));
         }
@@ -628,12 +633,23 @@ impl GraphControl {
             edge.to.port.as_str().len(),
             edge.to.port
         );
-        let pipe = super::DesiredPipe::External {
-            binding: binding.clone(),
-            capabilities: capabilities.supported().iter().copied().collect(),
-            capacity: capabilities.capacity().map(std::num::NonZeroUsize::get),
-            resources: provider.resource_dependencies(),
-            exclusive_resources: provider.exclusive_resources(),
+        let pipe = provider
+            .specification()
+            .unwrap_or_else(|| super::DesiredPipe::External {
+                binding: binding.clone(),
+                capabilities: capabilities.supported().iter().copied().collect(),
+                capacity: capabilities.capacity().map(std::num::NonZeroUsize::get),
+                resources: provider.resource_dependencies(),
+                exclusive_resources: provider.exclusive_resources(),
+            });
+        if pipe.resource_dependencies() != provider.resource_dependencies() {
+            return Err(topology(
+                "pipe recipe omits its declared resource dependencies",
+            ));
+        }
+        let external = match &pipe {
+            super::DesiredPipe::External { binding, .. } => Some(binding.clone()),
+            _ => None,
         };
         let preview = self
             .preview(
@@ -646,7 +662,9 @@ impl GraphControl {
             )
             .await?;
         let mut bindings = TopologyBindings::default();
-        bindings.pipes.insert(binding, provider);
+        if let Some(binding) = external {
+            bindings.pipes.insert(binding, provider);
+        }
         self.reconcile(preview, bindings).await
     }
 
@@ -911,6 +929,17 @@ pub(super) fn insert(
                 "an implementation identity cannot change its factory",
             ));
         }
+    }
+    if graph.snapshot.unbound_relationships.iter().any(|edge| {
+        edge.policy.required_for_binding
+            && (edge.definition.from.component == id || edge.definition.to.component == id)
+    }) {
+        let mut candidate = graph.snapshot.select(super::super::GraphSelection::All)?;
+        candidate.components.push(addition.definition.clone());
+        candidate
+            .resources
+            .extend(addition.resources.iter().cloned());
+        candidate.validate_structure()?;
     }
     let mut addition = pending.take().expect("validated addition");
     graph

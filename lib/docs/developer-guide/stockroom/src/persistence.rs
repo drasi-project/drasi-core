@@ -240,6 +240,7 @@ impl PersistentStockroom {
             SqliteConfig {
                 path: Some(directory.join("inventory.sqlite")),
                 tables: vec!["Product".into()],
+                table_keys: Vec::new(),
                 output: SqliteOutput::Transactions,
                 replay: Some(SqliteReplayConfig {
                     max_transactions: size(128),

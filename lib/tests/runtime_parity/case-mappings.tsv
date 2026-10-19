@@ -1,6 +1,9 @@
 # Breaking release: retired QueryBase/SequenceDedup/cache-only cases were removed;
 # current graph recovery and snapshot/stream behavior remain required.
 # Tests only asserting the removed no-op bootstrap-buffer setting were also retired.
+# Empty ApplicationBootstrapConfig default/serialization cases were retired with
+# the unused callback descriptor; native snapshot behavior is covered in the
+# application bootstrap package and native_application_host integration tests.
 # binary	original-case	replacement-binary	replacement-case	reason
 # Every removed or renamed original name requires an executing replacement.
 # The former graph file contained 106 functions, not 106 automatic retirements.

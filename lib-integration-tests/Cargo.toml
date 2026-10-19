@@ -20,6 +20,8 @@ drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true
 drasi-bootstrap-application.workspace = true
+drasi-source-sqlite.workspace = true
+drasi-bootstrap-sqlite.workspace = true
 drasi-reaction-http.workspace = true
 drasi-reaction-grpc.workspace = true
 drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
@@ -41,6 +43,7 @@ anyhow = "1.0"
 tracing = "0.1"
 serial_test = "3"
 tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 bytes = "1"
 rmp-serde = "1"
 futures = "0.3"

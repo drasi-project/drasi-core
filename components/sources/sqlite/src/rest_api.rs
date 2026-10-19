@@ -28,9 +28,67 @@ use tokio::sync::watch;
 use crate::thread::SqliteParam;
 use crate::{SqliteSourceHandle, TableKeyConfig};
 
+#[async_trait::async_trait]
+pub(crate) trait SqliteRestClient: Send + Sync {
+    async fn query(
+        &self,
+        sql: String,
+        params: Vec<SqliteParam>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>>;
+    async fn execute(&self, sql: String, params: Vec<SqliteParam>) -> Result<usize>;
+    async fn execute_transaction(&self, statements: Vec<(String, Vec<SqliteParam>)>) -> Result<()>;
+    async fn key_columns(&self, table: &str) -> Result<Vec<String>>;
+}
+
+#[async_trait::async_trait]
+impl SqliteRestClient for SqliteSourceHandle {
+    async fn query(
+        &self,
+        sql: String,
+        params: Vec<SqliteParam>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>> {
+        self.query_parameterized(sql, params).await
+    }
+    async fn execute(&self, sql: String, params: Vec<SqliteParam>) -> Result<usize> {
+        self.execute_parameterized(sql, params).await
+    }
+    async fn execute_transaction(&self, statements: Vec<(String, Vec<SqliteParam>)>) -> Result<()> {
+        self.execute_parameterized_in_transaction(statements).await
+    }
+    async fn key_columns(&self, table: &str) -> Result<Vec<String>> {
+        detect_primary_keys(self, table).await
+    }
+}
+
+#[async_trait::async_trait]
+impl SqliteRestClient for crate::native::SqliteHandle {
+    async fn query(
+        &self,
+        sql: String,
+        params: Vec<SqliteParam>,
+    ) -> Result<Vec<serde_json::Map<String, Value>>> {
+        self.query_parameterized(sql, params).await
+    }
+    async fn execute(&self, sql: String, params: Vec<SqliteParam>) -> Result<usize> {
+        self.execute_parameterized(sql, params).await
+    }
+    async fn execute_transaction(&self, statements: Vec<(String, Vec<SqliteParam>)>) -> Result<()> {
+        self.transaction(|transaction| async move {
+            for (sql, params) in statements {
+                transaction.execute_parameterized(sql, params).await?;
+            }
+            Ok(())
+        })
+        .await
+    }
+    async fn key_columns(&self, table: &str) -> Result<Vec<String>> {
+        crate::native::SqliteHandle::key_columns(self, table).await
+    }
+}
+
 #[derive(Clone)]
 struct RestApiState {
-    handle: SqliteSourceHandle,
+    handle: Arc<dyn SqliteRestClient>,
     allowed_tables: Option<HashSet<String>>,
     table_keys: Vec<TableKeyConfig>,
 }
@@ -58,16 +116,16 @@ pub enum BatchOperation {
     },
 }
 
-pub async fn run_rest_api(
+pub(crate) async fn run_rest_api(
     listener: tokio::net::TcpListener,
-    handle: SqliteSourceHandle,
+    handle: impl SqliteRestClient + 'static,
     tables: Option<Vec<String>>,
     table_keys: Vec<TableKeyConfig>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     let allowed_tables = tables.map(|items| items.into_iter().collect::<HashSet<_>>());
     let state = Arc::new(RestApiState {
-        handle,
+        handle: Arc::new(handle),
         allowed_tables,
         table_keys,
     });
@@ -114,7 +172,8 @@ async fn list_tables(State(state): State<Arc<RestApiState>>) -> Result<Json<Valu
     let rows = state
         .handle
         .query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            "SELECT name FROM sqlite_master WHERE type='table' AND lower(substr(name,1,7))!='sqlite_' AND lower(substr(name,1,8))!='__drasi_' ORDER BY name".into(),
+            Vec::new(),
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -146,7 +205,7 @@ async fn list_rows(
     let sql = format!("SELECT * FROM {}", quote_ident(&table));
     let rows = state
         .handle
-        .query(sql)
+        .query(sql, Vec::new())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!(rows)))
@@ -167,7 +226,7 @@ async fn get_row(
     );
     let mut rows = state
         .handle
-        .query_parameterized(sql, params)
+        .query(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -199,7 +258,7 @@ async fn insert_row(
 
     state
         .handle
-        .execute_parameterized(sql, params)
+        .execute(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -235,7 +294,7 @@ async fn update_row(
 
     state
         .handle
-        .execute_parameterized(sql, params)
+        .execute(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -254,7 +313,7 @@ async fn delete_row(
     let sql = format!("DELETE FROM {} WHERE {}", quote_ident(&table), where_clause);
     state
         .handle
-        .execute_parameterized(sql, params)
+        .execute(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -275,7 +334,7 @@ async fn batch_operations(
 
     state
         .handle
-        .execute_parameterized_in_transaction(statements)
+        .execute_transaction(statements)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -351,7 +410,7 @@ async fn build_where_by_id_ref(
     let key_columns = if let Some(found) = state.table_keys.iter().find(|k| k.table == table) {
         found.key_columns.clone()
     } else {
-        detect_primary_keys(&state.handle, table).await?
+        state.handle.key_columns(table).await?
     };
 
     if key_columns.is_empty() {
@@ -400,7 +459,7 @@ fn validate_table(state: &RestApiState, table: &str) -> Result<()> {
 }
 
 fn validate_table_ref(state: &RestApiState, table: &str) -> Result<()> {
-    if !is_identifier(table) {
+    if !is_identifier(table) || table.to_ascii_lowercase().starts_with("__drasi_") {
         return Err(anyhow!("invalid table name"));
     }
 

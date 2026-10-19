@@ -113,11 +113,29 @@ async fn channel_backpressure_cancellation_and_three_restarts_preserve_envelopes
         );
         reaction.stop().await.unwrap();
     }
+
     receiver.close();
     assert!(matches!(
         reaction.start().await.unwrap_err().downcast_ref(),
         Some(ApplicationReactionError::ReceiverClosed)
     ));
+}
+
+#[test]
+fn explicit_properties_are_metadata_without_serializing_the_application_binding() {
+    let properties = HashMap::from([("owner".into(), serde_json::json!("test-host"))]);
+    let (channel, _receiver) =
+        ApplicationReaction::channel("channel", schema(), NonZeroUsize::new(1).unwrap()).unwrap();
+    let callback =
+        ApplicationReaction::callback("callback", schema(), |_| async { Ok(()) }).unwrap();
+    for reaction in [channel, callback] {
+        let reaction = reaction.with_properties(properties.clone());
+        assert_eq!(
+            reaction.configuration().unwrap(),
+            serde_json::json!({"kind":"application","properties":{"owner":"test-host"}}),
+        );
+        assert_eq!(reaction.recovery_contract(), ComponentRecovery::default());
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

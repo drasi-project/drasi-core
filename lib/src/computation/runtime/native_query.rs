@@ -83,11 +83,52 @@ pub(super) fn query_needs_stop(publication: &GraphRegistrySnapshot, id: &Compone
         .any(|member| member_needs_stop(&publication.observed.components[member]))
 }
 
+pub(super) fn query_activation_requested(
+    publication: &GraphRegistrySnapshot,
+    id: &ComponentId,
+) -> bool {
+    let state = &publication.observed.components[id];
+    super::is_active(state)
+        || !publication.activation_is_deferred(id)
+            && state.failure.is_none()
+            && !state.waiting_for.is_empty()
+            && (state.lifecycle_requested || publication.desired.lifecycle_policies[id].auto_start)
+}
+
 pub(super) async fn start_query(
     control: &GraphControl,
     id: &ComponentId,
     expected: Option<ComponentGeneration>,
 ) -> anyhow::Result<()> {
+    if let Some(report) = request_query_start(control, id, expected).await? {
+        if report.summary != OperationSummary::Completed {
+            let observed = control.observed();
+            let waiting: BTreeSet<_> = report
+                .components
+                .keys()
+                .filter_map(|id| {
+                    observed
+                        .components
+                        .get(id)
+                        .and_then(ObservedComponent::waiting_reason)
+                })
+                .collect();
+            anyhow::ensure!(
+                waiting.is_empty(),
+                "Query '{id}' is not ready: {}",
+                waiting.into_iter().collect::<Vec<_>>().join("; ")
+            );
+            return Err(LifecycleReportError::Start(report).into());
+        }
+    }
+    Ok(())
+}
+
+async fn request_query_start(
+    control: &GraphControl,
+    id: &ComponentId,
+    expected: Option<ComponentGeneration>,
+) -> anyhow::Result<Option<StartReport>> {
     let publication = control.registry_snapshot();
     let state = publication
         .observed
@@ -178,29 +219,11 @@ pub(super) async fn start_query(
             result = subscribed => {
                 result?;
                 // Only the reply waiter is dropped; the graph still owns startup and cleanup.
-                return Ok(());
+                return Ok(None);
             }
         }
     };
-    if report.summary != OperationSummary::Completed {
-        let observed = control.observed();
-        let waiting: BTreeSet<_> = members
-            .keys()
-            .filter_map(|id| {
-                observed
-                    .components
-                    .get(id)
-                    .and_then(ObservedComponent::waiting_reason)
-            })
-            .collect();
-        anyhow::ensure!(
-            waiting.is_empty(),
-            "Query '{id}' is not ready: {}",
-            waiting.into_iter().collect::<Vec<_>>().join("; ")
-        );
-        anyhow::bail!("query startup is incomplete: {report:?}");
-    }
-    Ok(())
+    Ok(Some(report))
 }
 
 pub(super) async fn stop_query(
@@ -554,7 +577,11 @@ impl Runtime {
             "query replacement is incomplete: {report:?}"
         );
         if plan.running {
-            start_query(&control, &ComponentId::try_new(id)?, None).await?;
+            if let Some(started) =
+                request_query_start(&control, &ComponentId::try_new(id)?, None).await?
+            {
+                super::accept_waiting_start(started, &control.observed())?;
+            }
         }
         self.resume_records(resume).await
     }
@@ -630,17 +657,61 @@ impl Runtime {
             .implementation
             .clone();
         let mut sources = BTreeMap::new();
-        for edge in publication
+        let mut native_sources = BTreeMap::new();
+        let input_queue = publication.desired.edges.iter().find_map(|edge| {
+            let specification = publication
+                .desired
+                .specifications
+                .get(&edge.definition.from.component)?;
+            match &edge.pipe {
+                DesiredPipe::Ranked(pipe)
+                    if edge.definition.to.component == query_id
+                        && specification.implementation == timer =>
+                {
+                    Some(pipe.queue.clone())
+                }
+                _ => None,
+            }
+        });
+        for (edge, pipe, policy) in publication
             .desired
             .edges
             .iter()
-            .filter(|edge| edge.definition.to.component == query_id)
+            .map(|edge| (&edge.definition, &edge.pipe, &edge.policy))
+            .chain(
+                publication
+                    .desired
+                    .unbound_relationships
+                    .iter()
+                    .map(|edge| (&edge.definition, &edge.pipe, &edge.policy)),
+            )
+            .filter(|(edge, _, _)| edge.to.component == query_id)
         {
-            let spec = publication.desired.specifications.get(&edge.definition.from.component)
-                .ok_or_else(|| anyhow::anyhow!("query '{id}' has an externally supplied input; use computation topology operations"))?;
-            if spec.implementation == timer {
+            let spec = publication.desired.specifications.get(&edge.from.component);
+            if spec.is_some_and(|spec| spec.implementation == timer) {
                 continue;
             }
+            let native_rank = original_config
+                .sources
+                .iter()
+                .position(|source| source.source_id == edge.from.component.as_str());
+            if let (Some(rank), DesiredPipe::Ranked(pipe)) = (native_rank, pipe) {
+                if pipe.source_id.is_none()
+                    && pipe.source_dispatch.is_none()
+                    && !pipe.drop_when_full
+                    && pipe.source_rank == rank
+                    && input_queue.as_ref() == Some(&pipe.queue)
+                    && *policy == RelationshipPolicy::default()
+                {
+                    native_sources.insert(edge.from.component.to_string(), edge.from.clone());
+                    continue;
+                }
+            }
+            let spec = spec.ok_or_else(|| {
+                anyhow::anyhow!(
+                "query '{id}' has an externally supplied input; use computation topology operations"
+            )
+            })?;
             anyhow::ensure!(
                 spec.implementation == reader,
                 "query '{id}' has custom input connections; use computation topology operations"
@@ -653,7 +724,30 @@ impl Runtime {
                 (subscription.host().clone(), subscription.options()),
             );
         }
+        let native_only =
+            !native_sources.is_empty() && native_sources.len() == original_config.sources.len();
+        let mut native_members: BTreeSet<_> = native_sources
+            .values()
+            .map(|output| output.component.clone())
+            .collect();
         for source in &config.sources {
+            if let Some(output) = native_sources.remove(&source.source_id) {
+                builder = builder.native_source(output)?;
+                continue;
+            }
+            let native_output = publication.desired.nodes.iter().any(|node| {
+                node.descriptor.id().as_str() == source.source_id
+                    && node.descriptor.ports().iter().any(|port| {
+                        port.id().as_str() == "out" && port.direction() == PortDirection::Output
+                    })
+            });
+            if native_output || native_only {
+                builder = builder.native_source(Endpoint::new(
+                    ComponentId::try_new(source.source_id.as_str())?,
+                    PortId::try_new("out")?,
+                ))?;
+                continue;
+            }
             let (mut host, options) = match sources.remove(&source.source_id) {
                 Some(existing) => existing,
                 None => (
@@ -674,6 +768,18 @@ impl Runtime {
                 host = self.source_host(&source.source_id).await?;
             }
             builder = builder.source(host, options)?;
+        }
+        if native_only && config.enable_bootstrap {
+            if let Some(bootstrap) = original
+                .dependencies
+                .get("bootstrap")
+                .and_then(|ids| ids.first())
+            {
+                let bootstrap = publication
+                    .resource(bootstrap)?
+                    .get::<QueryBootstrapResource>()?;
+                builder = builder.query_bootstrap(id, bootstrap.0.clone())?;
+            }
         }
         let indexes_id = dependency(original, "indexes")?;
         if original_config.storage_backend == config.storage_backend
@@ -754,6 +860,21 @@ impl Runtime {
             .select(GraphSelection::Exact(selected.iter().cloned().collect()))?
             .resources;
         let mut changes = Vec::new();
+        target.boundary_relationships.retain(|edge| {
+            let affected = selected.contains(&edge.definition.from.component)
+                || selected.contains(&edge.definition.to.component);
+            let preserved_output = edge.definition.from.component == query_id
+                && !selected.contains(&edge.definition.to.component);
+            if affected && !preserved_output {
+                changes.push(DesiredMutation::Unbind {
+                    edge: edge.definition.clone(),
+                    policy: RemovalPolicy::Reject,
+                });
+                false
+            } else {
+                true
+            }
+        });
         target.relationships.retain(|edge| {
             let affected = selected.contains(&edge.definition.from.component)
                 || selected.contains(&edge.definition.to.component);
@@ -802,11 +923,15 @@ impl Runtime {
         target
             .relationships
             .extend(batch.definition.relationships.iter().cloned());
+        target
+            .boundary_relationships
+            .extend(batch.definition.boundary_relationships.iter().cloned());
         changes.extend(
             batch
                 .definition
                 .relationships
                 .iter()
+                .chain(batch.definition.boundary_relationships.iter())
                 .cloned()
                 .map(DesiredMutation::Bind),
         );
@@ -833,20 +958,27 @@ impl Runtime {
             candidates,
             &BTreeSet::new(),
         )?);
-        let was_running = publication
-            .observed
-            .components
-            .get(&query_id)
-            .is_some_and(|node| {
-                matches!(
-                    node.lifecycle,
-                    ComponentLifecycle::Running | ComponentLifecycle::Starting
-                )
-            });
+        let was_running = query_activation_requested(&publication, &query_id);
         batch.bindings.defer_activation = true;
         for (source, _) in &batch.definition.subscriptions {
             if let Some(observed) = publication.observed.components.get(source) {
                 members.insert(source.clone(), observed.generation);
+            }
+        }
+        native_members.extend(
+            batch
+                .definition
+                .boundary_relationships
+                .iter()
+                .filter(|edge| {
+                    edge.definition.to.component == query_id
+                        && !replacement_ids.contains(&edge.definition.from.component)
+                })
+                .map(|edge| edge.definition.from.component.clone()),
+        );
+        for source in native_members {
+            if let Some(observed) = publication.observed.components.get(&source) {
+                members.insert(source, observed.generation);
             }
         }
         Ok(NativeQueryUpdate {

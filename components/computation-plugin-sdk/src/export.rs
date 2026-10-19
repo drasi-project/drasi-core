@@ -147,6 +147,22 @@ impl PluginDefinition {
         factories: Vec<Arc<dyn Factory>>,
         schemas: Vec<Arc<Schema>>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_bootstrap(id, version, factories, Vec::new(), schemas)
+    }
+
+    /// Construct a complete library, including bootstrap-only libraries without
+    /// a dummy processing component.
+    pub fn new_with_bootstrap(
+        id: impl Into<Arc<str>>,
+        version: impl Into<Arc<str>>,
+        factories: Vec<Arc<dyn Factory>>,
+        bootstrap_factories: Vec<Arc<dyn crate::BootstrapFactory>>,
+        schemas: Vec<Arc<Schema>>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !factories.is_empty() || !bootstrap_factories.is_empty(),
+            "native plugin has no component or bootstrap factories"
+        );
         let plugin = PluginIdentity {
             id: id.into(),
             version: version.into(),
@@ -193,19 +209,24 @@ impl PluginDefinition {
                 .collect(),
         };
         configurations.validate(&metadata)?;
-        Ok(Self {
+        Self {
             metadata,
             factories,
             schemas,
             bootstrap_factories: Vec::new(),
             bootstrap_metadata: Vec::new(),
             configurations,
-        })
+        }
+        .with_bootstrap_factories(bootstrap_factories)
     }
     pub fn with_bootstrap_factories(
         mut self,
         factories: Vec<Arc<dyn crate::BootstrapFactory>>,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !self.factories.is_empty() || !factories.is_empty(),
+            "native plugin has no component or bootstrap factories"
+        );
         let mut identities = std::collections::BTreeSet::new();
         let metadata = factories
             .iter()
@@ -1439,4 +1460,67 @@ async fn execute(
         _ => anyhow::bail!("unsupported native operation"),
     }
     Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod definition_tests {
+    use super::*;
+    use drasi_computation_contracts::{GraphChangeCodec, ImplementationIdentity};
+
+    struct SnapshotFactory;
+
+    impl crate::BootstrapFactory for SnapshotFactory {
+        fn metadata(&self) -> crate::BootstrapFactoryMetadata {
+            crate::BootstrapFactoryMetadata {
+                implementation: ImplementationIdentity::try_new("test/snapshot", "1")
+                    .expect("constant identity"),
+                configuration_version: 1,
+                configuration: crate::ConfigSchema::default(),
+                source_progress: false,
+            }
+        }
+
+        fn create(
+            &self,
+            _: &CreateRequest,
+            _: Option<crate::NativeSourceProgress>,
+        ) -> anyhow::Result<Arc<dyn crate::NativeBootstrapProvider>> {
+            anyhow::bail!("discovery must not construct a snapshot provider")
+        }
+    }
+
+    fn bootstrap_only() -> anyhow::Result<PluginDefinition> {
+        PluginDefinition::new_with_bootstrap(
+            "test/bootstrap-only",
+            "1",
+            Vec::new(),
+            vec![Arc::new(SnapshotFactory)],
+            vec![GraphChangeCodec::schema()],
+        )
+    }
+
+    #[test]
+    fn bootstrap_only_definitions_keep_real_factory_validation() -> anyhow::Result<()> {
+        assert!(PluginDefinition::new("test/empty", "1", Vec::new(), Vec::new()).is_err());
+        assert!(PluginDefinition::new_with_bootstrap(
+            "test/empty",
+            "1",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .is_err());
+        let definition = bootstrap_only()?;
+        assert!(definition.metadata.factories.is_empty());
+        assert_eq!(definition.bootstrap_metadata.len(), 1);
+        definition.bootstrap_metadata[0].validate(&definition.metadata.plugin)?;
+        ExportedPlugin::new(definition)?;
+        assert!(bootstrap_only()?
+            .with_bootstrap_factories(Vec::new())
+            .is_err());
+        assert!(bootstrap_only()?
+            .with_bootstrap_factories(vec![Arc::new(SnapshotFactory), Arc::new(SnapshotFactory),])
+            .is_err());
+        Ok(())
+    }
 }

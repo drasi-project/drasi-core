@@ -63,10 +63,11 @@
 //!
 //! # Bootstrap Support
 //!
-//! The application source supports pluggable bootstrap providers via the `BootstrapProvider`
-//! trait. Configure a bootstrap provider using `set_bootstrap_provider()` or through the
-//! builder pattern. Common options include `ApplicationBootstrapProvider` for replaying
-//! stored events, or any other `BootstrapProvider` implementation.
+//! Native application input uses query-owned bootstrap: attach an
+//! `ApplicationBootstrapProvider` through `ContinuousQueryTransformer::with_bootstrap`.
+//! Application code owns its snapshot data; live input does not maintain it.
+//! The existing Source-plugin implementation still accepts its separate
+//! `BootstrapProvider` interface, not the native application snapshot provider.
 //!
 //! # Example Configuration (YAML)
 //!

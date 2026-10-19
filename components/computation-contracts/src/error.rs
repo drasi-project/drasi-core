@@ -81,3 +81,80 @@ pub enum ContractError {
 
 /// Result of validated construction or compatibility negotiation.
 pub type Result<T> = std::result::Result<T, ContractError>;
+
+/// Multiple operation failures, all retained in encounter order.
+///
+/// The standard source chain follows the first failure. Inspect [`Self::failures`]
+/// to recover other causes or ownership-bearing cleanup errors.
+#[derive(Debug)]
+pub struct OperationFailures {
+    message: String,
+    failures: Vec<anyhow::Error>,
+}
+
+impl OperationFailures {
+    /// Retains the individual causes of an operation and its required cleanup.
+    pub fn new(message: impl Into<String>, failures: Vec<anyhow::Error>) -> Self {
+        Self {
+            message: message.into(),
+            failures,
+        }
+    }
+
+    pub fn failures(&self) -> &[anyhow::Error] {
+        &self.failures
+    }
+}
+
+impl std::fmt::Display for OperationFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)?;
+        for (index, error) in self.failures.iter().enumerate() {
+            write!(f, "{}{error:#}", if index == 0 { ": " } else { "; " })?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for OperationFailures {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.failures.first().map(|error| error.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OperationFailures;
+    use std::{error::Error, io};
+
+    #[test]
+    fn operation_failures_preserve_all_typed_causes_and_display_order() {
+        let failures = OperationFailures::new(
+            "operation and cleanup failed",
+            vec![
+                io::Error::new(io::ErrorKind::InvalidData, "operation").into(),
+                io::Error::new(io::ErrorKind::PermissionDenied, "cleanup").into(),
+            ],
+        );
+        assert_eq!(
+            failures.to_string(),
+            "operation and cleanup failed: operation; cleanup"
+        );
+        assert_eq!(failures.failures().len(), 2);
+        assert_eq!(
+            failures
+                .source()
+                .and_then(|error| error.downcast_ref::<io::Error>())
+                .expect("primary cause")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            failures.failures()[1]
+                .downcast_ref::<io::Error>()
+                .expect("cleanup cause")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+}

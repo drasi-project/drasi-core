@@ -1,10 +1,19 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use super::*;
-use std::{future::Future, sync::Mutex};
+use super::{SqliteConfig, SqliteParam, SqliteRow};
+use anyhow::{Context, Result};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 pub(super) enum Command {
+    KeyColumns {
+        table: String,
+        response: oneshot::Sender<Result<Vec<String>>>,
+    },
     Transaction {
         commands: mpsc::Receiver<TransactionCommand>,
         ready: oneshot::Sender<Result<()>>,
@@ -63,6 +72,29 @@ impl SqliteHandle {
             .await
             .clone()
             .context("native SQLite source is not running")
+    }
+
+    pub(super) async fn bind_to_current_worker(&self) -> Result<Self> {
+        Ok(Self {
+            commands: Arc::new(RwLock::new(Some(self.sender().await?))),
+            capacity: self.capacity,
+            max_sql_bytes: self.max_sql_bytes,
+        })
+    }
+
+    pub(crate) async fn key_columns(&self, table: &str) -> Result<Vec<String>> {
+        validate_sql(table, &[], self.max_sql_bytes)?;
+        let (response, result) = oneshot::channel();
+        self.sender()
+            .await?
+            .send(Command::KeyColumns {
+                table: table.into(),
+                response,
+            })
+            .await?;
+        result
+            .await
+            .context("native SQLite key metadata response closed")?
     }
 
     pub async fn execute(&self, sql: impl Into<String>) -> Result<usize> {
@@ -158,7 +190,7 @@ impl SqliteHandle {
         match (result, cleanup) {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-            (Err(error), Err(cleanup)) => Err(drasi_lib::error::OperationFailures::new(
+            (Err(error), Err(cleanup)) => Err(drasi_computation_contracts::OperationFailures::new(
                 "native SQLite transaction failed",
                 vec![error, cleanup],
             )

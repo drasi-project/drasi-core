@@ -19,6 +19,7 @@ members = [
   "components/kubernetes-common",
   "components/oracle-common",
   "components/postgres-common",
+  "components/sqlite-common",
   "components/sources/mapping",
 
   # Bootstrap Plugins
@@ -121,6 +122,7 @@ members = [
   "components/computation-plugin-sdk",
 
   # Native ComputationGraph plugins
+  "components/computation-plugins/bootstrappers/sqlite",
   "components/computation-plugins/common/bridge",
   "components/computation-plugins/common/network",
   "components/computation-plugins/sources/bridge",
@@ -187,6 +189,7 @@ drasi-plugin-sdk = { version = "0.11.3", path = "components/plugin-sdk" }
 drasi-computation-plugin-abi = { version = "0.11.3", path = "components/computation-plugin-abi" }
 drasi-computation-contracts = { version = "0.11.3", path = "components/computation-contracts" }
 drasi-computation-plugin-sdk = { version = "0.11.3", path = "components/computation-plugin-sdk" }
+drasi-computation-bootstrap-sqlite = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/sqlite" }
 drasi-computation-bridge-common = { version = "0.11.3", path = "components/computation-plugins/common/bridge" }
 drasi-computation-network-common = { version = "0.11.3", path = "components/computation-plugins/common/network" }
 drasi-computation-source-bridge = { version = "0.11.3", path = "components/computation-plugins/sources/bridge" }
@@ -246,6 +249,7 @@ drasi-source-oracle = { version = "0.1.10", path = "components/sources/oracle" }
 drasi-bootstrap-oracle = { version = "0.1.10", path = "components/bootstrappers/oracle" }
 drasi-oracle-common = { version = "0.1.9", path = "components/oracle-common" }
 drasi-postgres-common = { version = "0.1.2", path = "components/postgres-common" }
+drasi-sqlite-common = { version = "0.11.3", path = "components/sqlite-common" }
 drasi-source-mapping = { version = "0.1.7", path = "components/sources/mapping" }
 drasi-source-kafka = { version = "0.1.9", path = "components/sources/kafka" }
 drasi-source-websocket = { version = "0.1.1", path = "components/sources/websocket" }
@@ -259,6 +263,7 @@ drasi-source-neo4j = { version = "0.1.8", path = "components/sources/neo4j" }
 drasi-bootstrap-neo4j = { version = "0.1.8", path = "components/bootstrappers/neo4j" }
 drasi-neo4j-common = { version = "0.1.6", path = "components/neo4j-common" }
 drasi-bootstrap-sqlite = { version = "0.1.13", path = "components/bootstrappers/sqlite" }
+drasi-source-sqlite = { version = "0.1.10", path = "components/sources/sqlite" }
 
 [workspace.lints.rust]
 warnings = "deny"

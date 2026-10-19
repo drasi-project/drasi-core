@@ -8,6 +8,7 @@ fn config(output: SqliteOutput) -> SqliteConfig {
     SqliteConfig {
         path: None,
         tables: Vec::new(),
+        table_keys: Vec::new(),
         output,
         replay: None,
         transactions: SourceTransactionLimits {
@@ -94,7 +95,14 @@ async fn native_configuration_and_factory_reject_incompatible_bounds_and_resourc
         )]),
     };
     factory.validate(&specification)?;
-    for invalid in ["schema", "progress", "snapshot", "flag"] {
+    for invalid in [
+        "schema",
+        "progress",
+        "snapshot",
+        "flag",
+        "rest-shape",
+        "rest-host",
+    ] {
         let mut specification = specification.clone();
         match invalid {
             "schema" => {
@@ -117,6 +125,18 @@ async fn native_configuration_and_factory_reject_incompatible_bounds_and_resourc
                 specification.configuration.insert(
                     Arc::from("coordinated_snapshot"),
                     ConfigurationValue::Literal("true".into()),
+                );
+            }
+            "rest-shape" => {
+                specification.configuration.insert(
+                    Arc::from("rest_api"),
+                    ConfigurationValue::Literal("not-an-object".into()),
+                );
+            }
+            "rest-host" => {
+                specification.configuration.insert(
+                    Arc::from("rest_api"),
+                    ConfigurationValue::Literal(serde_json::json!({"host":"","port":0})),
                 );
             }
             _ => unreachable!(),
@@ -184,6 +204,348 @@ async fn paired_snapshot_requires_the_actual_source_configuration_and_progress_o
     drop(bound);
     make(settings, progress)?.with_client_resource(client)?;
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rest_sql_handles_are_fenced_to_their_original_database_worker() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut settings = config(SqliteOutput::Changes);
+    settings.path = Some(directory.path().join("source.db"));
+    let mut source = source(settings)?;
+    source.start().await?;
+    let live = source.handle();
+    let bound = live.bind_to_current_worker().await?;
+    bound
+        .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
+        .await?;
+    source.stop().await?;
+    source.start().await?;
+    assert!(bound.execute("INSERT INTO items VALUES(1)").await.is_err());
+    live.execute("INSERT INTO items VALUES(2)").await?;
+    assert_eq!(
+        serde_json::to_value(live.query("SELECT id FROM items").await?)?,
+        serde_json::json!([{"id":2}])
+    );
+    let output = next(&mut source).await?;
+    assert_eq!(GraphChangeCodec::decode_changes(&output.envelope)?.len(), 1);
+    source.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unexpected_rest_worker_failure_is_a_native_source_failure() -> Result<()> {
+    let mut source =
+        source(config(SqliteOutput::Changes))?.with_rest_api(crate::RestApiConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+        })?;
+    source.start().await?;
+    source
+        .rest_worker
+        .get_mut()
+        .as_ref()
+        .context("REST owner")?
+        .abort();
+    let error = source
+        .next()
+        .await
+        .expect_err("REST failure must not leave a healthy idle source");
+    assert!(format!("{error:#}").contains("REST worker"), "{error:#}");
+    assert!(source.bound_rest_address().is_none());
+    assert!(source.start().await.is_err());
+    source.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_key_configuration_is_validated_without_changing_default_bindings() -> Result<()> {
+    let settings = config(SqliteOutput::Changes);
+    let serialized = serde_json::to_value(&settings)?;
+    assert!(serialized.get("table_keys").is_none());
+    assert_eq!(
+        serde_json::from_value::<SqliteConfig>(serialized)?,
+        settings
+    );
+    let source_id = ComponentId::try_new("sqlite")?;
+    let output = StreamId::try_new("changes")?;
+    let owner: SourceProgressReader = Arc::new(QuerySourceProgress::new(
+        "test",
+        ComponentId::try_new("query")?,
+    )?)
+    .into();
+    let owner = owner.read_only();
+    let original = serde_json::to_string(&(
+        1u32,
+        "sqlite",
+        "changes",
+        "test",
+        "query",
+        Vec::<String>::new(),
+    ))?;
+    assert_eq!(
+        journal::binding(&settings, &source_id, &output, &owner, false)?,
+        original
+    );
+    assert_eq!(
+        journal::binding(&settings, &source_id, &output, &owner, true)?,
+        serde_json::to_string(&("coordinated-v1", &original))?,
+    );
+    let mut keyed = settings.clone();
+    keyed.table_keys = vec![crate::TableKeyConfig {
+        table: "items".into(),
+        key_columns: vec!["code".into()],
+    }];
+    keyed.validate()?;
+    assert_ne!(
+        journal::binding(&keyed, &source_id, &output, &owner, false)?,
+        original
+    );
+    for invalid in [
+        "empty-table",
+        "reserved-table",
+        "duplicate-table",
+        "empty-key",
+        "duplicate-key",
+        "unselected",
+    ] {
+        let mut config = keyed.clone();
+        match invalid {
+            "empty-table" => config.table_keys[0].table.clear(),
+            "reserved-table" => config.table_keys[0].table = "__drasi_reserved".into(),
+            "duplicate-table" => config.table_keys.push(config.table_keys[0].clone()),
+            "empty-key" => config.table_keys[0].key_columns.clear(),
+            "duplicate-key" => config.table_keys[0].key_columns.push("CODE".into()),
+            "unselected" => config.tables = vec!["other".into()],
+            _ => unreachable!(),
+        }
+        assert!(config.validate().is_err(), "{invalid}");
+        assert!(source(config).is_err(), "{invalid}");
+    }
+    Ok(())
+}
+
+async fn configured_keys() -> Result<()> {
+    use drasi_core::models::SourceChange;
+    for mode in [SqliteOutput::Changes, SqliteOutput::Transactions] {
+        for primary_key in [false, true] {
+            let mut settings = config(mode);
+            settings.table_keys = vec![crate::TableKeyConfig {
+                table: "items".into(),
+                key_columns: vec!["CODE".into()],
+            }];
+            let limits = settings.transactions;
+            let mut source = source(settings)?;
+            source.start().await?;
+            let handle = source.handle();
+            let result = async {
+                let primary_key = if primary_key { "PRIMARY KEY" } else { "" };
+                handle
+                    .execute_batch(format!(
+                    "CREATE TABLE items(id INTEGER {primary_key}, code TEXT UNIQUE, value TEXT);
+                     INSERT INTO items VALUES(1,'first:key','one');"
+                ))
+                    .await?;
+                let decode = |output: OutputEnvelope| -> Result<Vec<SourceChange>> {
+                    match mode {
+                        SqliteOutput::Changes => {
+                            Ok(GraphChangeCodec::decode_changes(&output.envelope)?)
+                        }
+                        SqliteOutput::Transactions => {
+                            Ok(SourceTransactionCodec::decode(&output.envelope, limits)?
+                                .into_changes())
+                        }
+                    }
+                };
+                let inserted = decode(next(&mut source).await?)?;
+                assert_eq!(inserted.len(), 1);
+                let reference = inserted[0].get_reference().clone();
+                let key: serde_json::Value = serde_json::from_str(
+                    reference
+                        .element_id
+                        .strip_prefix("sqlite:v1:")
+                        .context("typed SQLite identity")?,
+                )?;
+                assert_eq!(
+                    key,
+                    serde_json::json!(["items", {"code":["text","first:key"]}])
+                );
+                handle.execute("UPDATE items SET id=2").await?;
+                let updated = decode(next(&mut source).await?)?;
+                assert!(matches!(&updated[..],
+                    [SourceChange::Update { element }] if element.get_reference() == &reference));
+                handle.execute("UPDATE items SET code='second:key'").await?;
+                let changed = decode(next(&mut source).await?)?;
+                assert!(matches!(&changed[..], [
+                    SourceChange::Delete { metadata },
+                    SourceChange::Insert { element },
+                ] if metadata.reference == reference && element.get_reference() != &reference));
+                assert!(handle
+                    .execute("UPDATE items SET code=NULL, value='lost'")
+                    .await
+                    .is_err());
+                assert_eq!(
+                    serde_json::to_value(handle.query("SELECT code,value FROM items").await?)?,
+                    serde_json::json!([{"code":"second:key","value":"one"}])
+                );
+                no_output(&mut source).await;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            let cleanup = source.stop().await;
+            result?;
+            cleanup?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn all_shadowed_rowid_aliases_require_explicit_keys() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("shadowed.db");
+    rusqlite::Connection::open(&path)?
+        .execute_batch("CREATE TABLE items(id INTEGER, rowid TEXT, _rowid_ TEXT, oid TEXT);")?;
+    let mut settings = config(SqliteOutput::Changes);
+    settings.path = Some(path);
+    let mut rejected = source(settings.clone())?;
+    let error = rejected
+        .start()
+        .await
+        .expect_err("rowid must not be confused with a user column");
+    assert!(
+        format!("{error:#}").contains("configure explicit key columns"),
+        "{error:#}"
+    );
+    rejected.stop().await?;
+    settings.table_keys = vec![crate::TableKeyConfig {
+        table: "items".into(),
+        key_columns: vec!["id".into()],
+    }];
+    let mut source = source(settings)?;
+    source.start().await?;
+    source
+        .handle()
+        .execute("INSERT INTO items VALUES(1,'rowid','_rowid_','oid')")
+        .await?;
+    let changes = GraphChangeCodec::decode_changes(&next(&mut source).await?.envelope)?;
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0]
+        .get_reference()
+        .element_id
+        .starts_with("sqlite:v1:"));
+    source.stop().await?;
+    Ok(())
+}
+
+async fn keyless_rowids() -> Result<()> {
+    use drasi_core::models::{Element, SourceChange};
+    for mode in [SqliteOutput::Changes, SqliteOutput::Transactions] {
+        let settings = config(mode);
+        let limits = settings.transactions;
+        let mut source = source(settings)?;
+        source.start().await?;
+        let handle = source.handle();
+        let result = async {
+            handle.execute_batch(
+                "CREATE TABLE items(id INTEGER, rowid TEXT, _rowid_ TEXT, value TEXT);
+                 INSERT INTO items(oid,id,rowid,_rowid_,value) VALUES(-7,1,'user-rowid','user-alias','before');",
+            ).await?;
+            let decode = |output: OutputEnvelope| -> Result<Vec<SourceChange>> {
+                match mode {
+                    SqliteOutput::Changes => Ok(GraphChangeCodec::decode_changes(&output.envelope)?),
+                    SqliteOutput::Transactions => Ok(SourceTransactionCodec::decode(&output.envelope, limits)?.into_changes()),
+                }
+            };
+            let inserted = decode(next(&mut source).await?)?;
+            let [SourceChange::Insert { element: Element::Node { metadata, properties } }] = &inserted[..] else {
+                anyhow::bail!("expected one native rowid insert");
+            };
+            assert_eq!(metadata.reference.element_id.as_ref(), "sqlite:rowid:v1:[\"items\",-7]");
+            assert_eq!(properties.get("rowid").map(serde_json::Value::from), Some("user-rowid".into()));
+            assert_eq!(properties.get("_rowid_").map(serde_json::Value::from), Some("user-alias".into()));
+            assert!(properties.get("oid").is_none(), "physical rowid must not become a synthetic property");
+            let first = metadata.reference.clone();
+            handle.execute("UPDATE items SET id=2,value='after'").await?;
+            let updated = decode(next(&mut source).await?)?;
+            assert!(matches!(&updated[..], [SourceChange::Update { element }] if element.get_reference() == &first));
+            handle.execute("UPDATE items SET oid=42").await?;
+            let moved = decode(next(&mut source).await?)?;
+            assert!(matches!(&moved[..], [
+                SourceChange::Delete { metadata },
+                SourceChange::Insert { element },
+            ] if metadata.reference == first && element.get_reference().element_id.as_ref() == "sqlite:rowid:v1:[\"items\",42]"));
+            handle.execute("DELETE FROM items").await?;
+            let deleted = decode(next(&mut source).await?)?;
+            assert!(matches!(&deleted[..], [SourceChange::Delete { metadata }]
+                if metadata.reference.element_id.as_ref() == "sqlite:rowid:v1:[\"items\",42]"));
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let cleanup = source.stop().await;
+        result?;
+        cleanup?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_rowids_preserve_keyless_rows_and_shadowed_properties_current_thread() -> Result<()>
+{
+    keyless_rowids().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_rowids_preserve_keyless_rows_and_shadowed_properties_multi_thread() -> Result<()> {
+    keyless_rowids().await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn configured_keys_validate_actual_columns_before_admission() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("input.db");
+    let database = rusqlite::Connection::open(&path)?;
+    database.execute_batch(
+        "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT);
+        INSERT INTO items VALUES(1,'retained');",
+    )?;
+    drop(database);
+    let mut settings = config(SqliteOutput::Changes);
+    settings.path = Some(path.clone());
+    settings.table_keys = vec![crate::TableKeyConfig {
+        table: "items".into(),
+        key_columns: vec!["missing".into()],
+    }];
+    let mut source = source(settings)?;
+    let error = source
+        .start()
+        .await
+        .expect_err("unknown key column cannot be ignored");
+    assert!(
+        format!("{error:#}").contains("key column 'missing'"),
+        "{error:#}"
+    );
+    assert!(source
+        .handle()
+        .execute("UPDATE items SET value='lost'")
+        .await
+        .is_err());
+    source.stop().await?;
+    let retained: String = rusqlite::Connection::open(&path)?.query_row(
+        "SELECT value FROM items WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(retained, "retained");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_keys_drive_live_identity_and_key_changes_current_thread() -> Result<()> {
+    configured_keys().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_keys_drive_live_identity_and_key_changes_multi_thread() -> Result<()> {
+    configured_keys().await
 }
 
 #[tokio::test(flavor = "current_thread")]

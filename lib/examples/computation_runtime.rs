@@ -12,65 +12,117 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The ordinary DrasiLib API backed by ComputationGraph.
+//! Native application components in the DrasiLib-owned ComputationGraph.
 //! Run: cargo run -p drasi-lib --example computation_runtime
 
-use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_application::ApplicationReaction;
-use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
-use std::time::Duration;
+use drasi_core::computation::InMemoryComputationProvider;
+use drasi_lib::{computation::v1::*, DrasiLib};
+use drasi_reaction_application::NativeApplicationReaction;
+use drasi_source_application::{NativeApplicationSource, PropertyMapBuilder};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 #[tokio::main]
 #[allow(clippy::print_stdout)]
 async fn main() -> anyhow::Result<()> {
-    let (source, input) = ApplicationSource::new(
-        "orders",
-        ApplicationSourceConfig {
-            properties: Default::default(),
-            durability: None,
-        },
-    )?;
-    let (reaction, output) = ApplicationReaction::new("output", vec!["orders-query".into()]);
-    let mut receiver = output
-        .take_receiver()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("output receiver already taken"))?;
-    let drasi = DrasiLib::builder()
-        .with_id("native-runtime-example")
-        .with_source(source)
-        .with_query(
-            Query::cypher("orders-query")
-                .query("MATCH (o:Order) RETURN o.name AS name")
-                .from_source("orders")
-                .enable_bootstrap(false)
-                .build(),
+    const INSTANCE: &str = "native-runtime-example";
+    let drasi = DrasiLib::builder().with_id(INSTANCE).build().await?;
+    let result = async {
+        drasi.start().await?;
+        let control = drasi.computation_control()?;
+        let graph_id = control.desired_snapshot().id.to_string();
+        let capacity = NonZeroUsize::new(16).expect("nonzero capacity");
+        let source_stream = StreamId::try_new("orders/out")?;
+        let query_stream = StreamId::try_new("orders-query/out")?;
+        let (source, input) = NativeApplicationSource::channel(
+            INSTANCE,
+            graph_id.clone(),
+            "orders",
+            source_stream.clone(),
+            capacity,
+        )?;
+        let source_output = source.output();
+        let query_id = ComponentId::try_new("orders-query")?;
+        let query = ContinuousQueryTransformer::new(
+            ContinuousQueryDefinition {
+                graph_id,
+                id: query_id.clone(),
+                query: "MATCH (o:Order) RETURN o.name AS name".into(),
+                language: ComputationQueryLanguage::Cypher,
+                output_stream: query_stream.clone(),
+                outbox_capacity: capacity,
+            },
+            Arc::new(InMemoryComputationProvider),
         )
-        .with_reaction(reaction)
-        .build()
-        .await?;
-
-    drasi.start().await?;
-    input
-        .send_node_insert(
-            "one",
-            vec!["Order"],
-            PropertyMapBuilder::new()
-                .with_string("name", "First order")
-                .build(),
-        )
-        .await?;
-    let result = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("output closed"))?;
-    println!("ComputationGraph produced {:?}", result.results);
-    println!(
-        "Current rows: {:?}",
-        drasi.get_query_results("orders-query").await?
-    );
-    println!(
-        "Query metrics: {:?}",
-        drasi.get_query_output_metrics("orders-query").await?
-    );
-    drasi.shutdown().await?;
+        .with_recovery_scope(INSTANCE)?;
+        let (reaction, mut receiver) = NativeApplicationReaction::channel(
+            "output",
+            QueryChangeCodec::schema().descriptor().clone(),
+            capacity,
+        )?;
+        let reaction_input = reaction.input();
+        let query_input = Endpoint::new(query_id.clone(), PortId::try_new("in")?);
+        let query_output = Endpoint::new(query_id, PortId::try_new("out")?);
+        let mut members = Vec::new();
+        for addition in [
+            ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
+                .bind_stream(PortId::try_new("out")?, source_stream),
+            ComponentAddition::new(ConstructedComponent::query(Box::new(query)))
+                .bind_stream(PortId::try_new("out")?, query_stream),
+            ComponentAddition::new(ConstructedComponent::sink(Box::new(reaction))),
+        ] {
+            members.push(addition.definition.descriptor.id().clone());
+            control.add_component(addition.defer_activation()).await?;
+        }
+        for (from, to) in [(source_output, query_input), (query_output, reaction_input)] {
+            let connected = control
+                .connect(
+                    EdgeDefinition::new(from, to),
+                    Box::new(BoundedPipeConfig { capacity: 16 }),
+                    RelationshipPolicy::default(),
+                )
+                .await?;
+            anyhow::ensure!(connected.committed, "{connected:?}");
+        }
+        let started = control
+            .start_components(
+                control.desired_snapshot().revision,
+                GraphSelection::Exact(members),
+            )
+            .await?;
+        anyhow::ensure!(
+            started.summary == OperationSummary::Completed,
+            "{started:?}"
+        );
+        input
+            .send_node_insert(
+                "one",
+                vec!["Order"],
+                PropertyMapBuilder::new()
+                    .with_string("name", "First order")
+                    .build(),
+            )
+            .await?;
+        let result = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("output closed"))?;
+        println!(
+            "ComputationGraph emitted {} result changes",
+            result.envelope.changes().operations().len()
+        );
+        println!(
+            "Current rows: {:?}",
+            drasi.get_query_results("orders-query").await?
+        );
+        println!(
+            "Query metrics: {:?}",
+            drasi.get_query_output_metrics("orders-query").await?
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let shutdown = drasi.shutdown().await;
+    result?;
+    shutdown?;
     Ok(())
 }

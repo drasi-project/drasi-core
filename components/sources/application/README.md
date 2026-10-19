@@ -80,6 +80,14 @@ Receipts prove input acceptance for the channel's configured failure scope, not
 query completion or an application's external side effect. Durable callers use
 the admission service; `get_handle()` returns `None` in this mode.
 
+Live graph removal does not bypass queued-work drain. An attempted removal with
+unhandled input retains the nodes, journal and subscriber obligations; drain the
+input before retrying. Removing stopped, drained components does not shut down a
+borrowed journal or erase its producer receipts. A new admission binding can reuse
+that journal, while the old component/admission handles remain inactive.
+Producer retirement is separate: it rejects pending subscriber obligations and
+invalidates the old session even if the producer name is registered again.
+
 The native source, bootstrap and reaction implementations are available, but
 their host/API cutover is still in progress. Existing `ApplicationSource` callers
 below have not yet been retired.

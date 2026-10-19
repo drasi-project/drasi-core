@@ -5,6 +5,16 @@ The application reaction delivers changes to Rust code in-process. Choose
 `ApplicationReaction` for the legacy `QueryResult` interface. Both run under
 ComputationGraph; the legacy implementation is unchanged.
 
+Application reactions are host-linked Rust objects whose receiver or callback
+belongs to the application. The old Server descriptor, which discarded the
+receiver it created, has been removed along with this crate's old plugin-SDK
+dependency. No YAML factory can supply an application-owned callback.
+
+Native reactions may expose explicitly supplied application metadata with
+`with_properties`. This makes the properties inspectable; it does not serialize
+or make the receiver/callback reconstructible. Without supplied metadata,
+configuration remains unavailable.
+
 ## Native application delivery
 
 `NativeApplicationReaction` implements `ComputationComponent` and `EnvelopeSink`
@@ -59,17 +69,16 @@ Ordinary `.with_query(...)` declarations and explicit native query pipelines
 both create query components in the instance graph with declared `out` ports.
 Connect using the actual query component ID and its port, not a private graph.
 The following example explicitly assembles a native query pipeline on an
-initialized, not-yet-started instance with an ordinary source named `source`:
+initialized, not-yet-started instance with a native source named `source`:
 
 ```rust,ignore
 use drasi_lib::{Query, computation::v1::*};
 
-drasi.computation_component("source")?.wait_created().await?;
 let pipeline = drasi.computation_pipeline()?
-    .source(
-        drasi.borrow_computation_source("source").await?,
-        SourceSubscriptionOptions::default(),
-    )?
+    .native_source(Endpoint::new(
+        ComponentId::try_new("source")?,
+        PortId::try_new("out")?,
+    ))?
     .query(Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
         .from_source("source")

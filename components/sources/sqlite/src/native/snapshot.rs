@@ -1,20 +1,12 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use super::journal::Handover;
 use super::*;
 use bytes::Bytes;
 use drasi_core::interface::FailureMode;
 use std::sync::{Mutex, Weak};
 use uuid::Uuid;
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Handover {
-    pub version: u32,
-    pub epoch: Uuid,
-    pub binding: String,
-    pub completed: bool,
-}
 
 #[derive(Default)]
 struct Binding {
@@ -175,17 +167,6 @@ impl SqliteSnapshot {
     }
 }
 
-pub(super) struct SnapshotWork {
-    pub source: ComponentId,
-    pub stream: StreamId,
-    pub config: SqliteConfig,
-    pub owner: SourceProgressReader,
-    pub progress: Arc<SourceProgressSnapshot>,
-    pub handover: Handover,
-    pub outputs: mpsc::Sender<ChangeEnvelope>,
-    pub shutdown: watch::Receiver<bool>,
-}
-
 struct Reader {
     receiver: mpsc::Receiver<ChangeEnvelope>,
     shared: Arc<Shared>,
@@ -225,7 +206,7 @@ impl ComputationBootstrapProvider for SqliteSnapshot {
                             &self.config,
                             &self.source,
                             &self.stream,
-                            &self.progress,
+                            &self.progress.read_only(),
                             true
                         )?,
                 "native SQLite snapshot binding changed"
@@ -306,7 +287,7 @@ impl ComputationBootstrapProvider for SqliteSnapshot {
                     &self.config,
                     &self.source,
                     &self.stream,
-                    &self.progress,
+                    &self.progress.read_only(),
                     true,
                 )?,
                 completed: false,
@@ -329,11 +310,11 @@ impl ComputationBootstrapProvider for SqliteSnapshot {
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite snapshot run poisoned"))? = Some(run.clone());
         let (outputs, receiver) = mpsc::channel(self.config.output_capacity.get());
-        let work = SnapshotWork {
+        let work = worker::SnapshotWork {
             source: self.source.clone(),
             stream: self.stream.clone(),
             config: self.config.clone(),
-            owner: self.progress.clone(),
+            owner: self.progress.read_only(),
             progress: self.progress.snapshot()?,
             handover,
             outputs,

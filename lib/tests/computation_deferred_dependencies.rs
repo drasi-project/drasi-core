@@ -639,3 +639,216 @@ async fn unconnected_nodes_wait_and_start_when_connected_current_thread() {
 async fn unconnected_nodes_wait_and_start_when_connected_multi_thread() {
     verify_late_connection().await;
 }
+
+async fn verify_declared_connection_before_producer() {
+    use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
+    for rebuild in [false, true] {
+        let input = PortId::try_new("in").expect("input port");
+        let output = PortId::try_new("out").expect("output port");
+        let stream = StreamId::try_new("producer/out").expect("producer stream");
+        let edge = EdgeDefinition::new(
+            Endpoint::new(component("producer"), output.clone()),
+            Endpoint::new(component("consumer"), input.clone()),
+        );
+        let policy = RelationshipPolicy {
+            required_for_creation: true,
+            activation: ActivationCoupling::RequiresRunning,
+            ..Default::default()
+        };
+        let descriptor = ComponentDescriptor::try_new(
+            component("consumer"),
+            vec![PortDescriptor::new(
+                input,
+                PortDirection::Input,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )
+        .expect("consumer descriptor");
+        let (send, mut receive) = tokio::sync::mpsc::channel(1);
+        let mut graph = ComputationGraph::builder("declared-connection")
+            .sink(Box::new(Consumer {
+                descriptor: descriptor.clone(),
+                output: send.clone(),
+            }))
+            .connect(edge.clone(), Box::new(BoundedPipeConfig { capacity: 2 }))
+            .relationship_policy(edge.clone(), policy.clone())
+            .build()
+            .expect("a required connection may precede its producer");
+        assert_eq!(graph.snapshot().unbound_relationships.len(), 1);
+        let definition = graph
+            .snapshot()
+            .select(GraphSelection::All)
+            .expect("desired topology");
+        definition
+            .validate_structure()
+            .expect("pending connection is structurally valid");
+        let mut invalid = definition.clone();
+        invalid.boundary_relationships[0].pipe = DesiredPipe::Bounded { capacity: 0 };
+        assert!(invalid.validate_structure().is_err());
+        invalid = definition.clone();
+        invalid.boundary_relationships[0].definition.to.port =
+            PortId::try_new("wrong").expect("test port");
+        assert!(invalid.validate_structure().is_err());
+        if rebuild {
+            let restored =
+                DesiredTopology::from_json(&definition.to_json().expect("serialize topology"))
+                    .expect("restore topology");
+            assert_eq!(restored, definition);
+            let ComponentConstruction::External { binding } = &restored.components[0].construction
+            else {
+                panic!("test consumer requires its actual external binding");
+            };
+            let mut bindings = TopologyBindings::default();
+            bindings.components.insert(
+                binding.clone(),
+                ConstructedComponent::sink(Box::new(Consumer {
+                    descriptor,
+                    output: send,
+                })),
+            );
+            graph.dispose().await.expect("dispose initial graph");
+            graph = restored
+                .build(bindings)
+                .expect("rebuild retains the required declaration");
+        }
+        let run = graph.start().expect("start graph");
+        let control = run.control();
+        let change = SourceChange::Delete {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("producer", "exact-row"),
+                labels: Arc::from([Arc::from("Item")]),
+                effective_from: 17,
+            },
+        };
+        let (outcome, ()) = tokio::join!(run, async {
+            control.startup_report().await.expect("startup report");
+            let consumer = control
+                .component_handle(&component("consumer"))
+                .expect("consumer handle");
+            assert!(consumer
+                .observed()
+                .expect("consumer state")
+                .waiting_for
+                .contains(&DependencyWait::Component {
+                    id: component("producer"),
+                }));
+            assert!(
+                control
+                    .connect(
+                        edge.clone(),
+                        Box::new(BoundedPipeConfig { capacity: 2 }),
+                        policy,
+                    )
+                    .await
+                    .is_err(),
+                "a pending connection is still a duplicate"
+            );
+            let incompatible = Producer {
+                descriptor: ComponentDescriptor::try_new(
+                    component("producer"),
+                    vec![PortDescriptor::new(
+                        output.clone(),
+                        PortDirection::Output,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .expect("incompatible producer descriptor"),
+                output: None,
+            };
+            assert!(
+                control
+                    .add_component(
+                        ComponentAddition::new(ConstructedComponent::source(Box::new(
+                            incompatible
+                        )))
+                        .bind_stream(output.clone(), stream.clone()),
+                    )
+                    .await
+                    .is_err(),
+                "incompatible late endpoints cannot poison the desired graph"
+            );
+            assert!(!control
+                .observed()
+                .components
+                .contains_key(&component("producer")));
+            let healthy = control
+                .add_component(ComponentAddition::new(ConstructedComponent::service(
+                    Box::new(Service {
+                        descriptor: ComponentDescriptor::try_new(component("independent"), vec![])
+                            .expect("independent service descriptor"),
+                        starts: Arc::new(AtomicUsize::new(0)),
+                    }),
+                )))
+                .await
+                .expect("independent service addition");
+            tokio::time::timeout(Duration::from_secs(3), healthy.wait_started())
+                .await
+                .expect("independent startup deadline")
+                .expect("independent startup");
+            let source = Producer {
+                descriptor: ComponentDescriptor::try_new(
+                    component("producer"),
+                    vec![PortDescriptor::new(
+                        output.clone(),
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .expect("producer descriptor"),
+                output: Some(OutputEnvelope {
+                    port: output.clone(),
+                    envelope: GraphChangeCodec::encode_change(
+                        change.clone(),
+                        stream.clone(),
+                        1,
+                        None,
+                    )
+                    .expect("encode change"),
+                }),
+            };
+            control
+                .add_component(
+                    ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
+                        .bind_stream(output, stream),
+                )
+                .await
+                .expect("producer addition");
+            let envelope = tokio::time::timeout(Duration::from_secs(3), receive.recv())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "delivery failed ({error}, rebuild={rebuild}): {:?}",
+                        control.observed(),
+                    )
+                })
+                .expect("automatically bound input");
+            assert_eq!(
+                GraphChangeCodec::decode_changes(&envelope).expect("decode change"),
+                [change]
+            );
+            consumer.wait_started().await.expect("consumer startup");
+            assert!(control.desired_snapshot().unbound_relationships.is_empty());
+            assert!(consumer
+                .observed()
+                .expect("consumer state")
+                .waiting_for
+                .is_empty());
+            control.cancel();
+        });
+        assert!(matches!(outcome, Err(GraphError::Cancelled)));
+        graph.dispose().await.expect("dispose graph");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn required_connections_wait_for_later_producers_and_roundtrip_current_thread() {
+    verify_declared_connection_before_producer().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn required_connections_wait_for_later_producers_and_roundtrip_multi_thread() {
+    verify_declared_connection_before_producer().await;
+}

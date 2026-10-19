@@ -35,6 +35,9 @@ dynamic-plugin = []
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-core-types.workspace = true
+drasi-computation-contracts.workspace = true
+drasi-sqlite-common.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"

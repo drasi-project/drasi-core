@@ -21,6 +21,8 @@ use tokio::time::timeout;
 
 #[path = "native/progress.rs"]
 mod progress;
+#[path = "native/rest.rs"]
+mod rest;
 #[path = "native/snapshot.rs"]
 mod snapshot;
 
@@ -44,6 +46,7 @@ fn config(path: &Path) -> SqliteConfig {
     SqliteConfig {
         path: Some(path.join("source.db")),
         tables: Vec::new(),
+        table_keys: Vec::new(),
         output: SqliteOutput::Transactions,
         replay: Some(SqliteReplayConfig {
             max_transactions: size(8),
@@ -351,7 +354,7 @@ async fn replay_requires_real_file_storage_and_never_adopts_existing_data() -> R
 #[tokio::test(flavor = "current_thread")]
 async fn durable_start_refuses_rebinding_missing_history_and_external_schema_changes() -> Result<()>
 {
-    for fault in ["binding", "missing", "schema", "disable"] {
+    for fault in ["binding", "keys", "missing", "schema", "disable"] {
         let directory = tempfile::tempdir()?;
         let progress = progress();
         let mut query = query(directory.path(), progress.clone()).await?;
@@ -385,6 +388,12 @@ async fn durable_start_refuses_rebinding_missing_history_and_external_schema_cha
             SqliteSource::new(id("source"), stream("changes"), next_settings)?
         } else if fault == "binding" {
             next_settings.tables = vec!["items".into()];
+            source(next_settings, progress)?
+        } else if fault == "keys" {
+            next_settings.table_keys = vec![drasi_source_sqlite::TableKeyConfig {
+                table: "items".into(),
+                key_columns: vec!["value".into()],
+            }];
             source(next_settings, progress)?
         } else {
             source(next_settings, progress)?
@@ -598,6 +607,12 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
                     configuration_version: 1,
                     configuration: std::collections::BTreeMap::from([
                         (
+                            Arc::from("rest_api"),
+                            ConfigurationValue::Literal(serde_json::json!({
+                                "host":"127.0.0.1", "port":0,
+                            })),
+                        ),
+                        (
                             Arc::from("coordinated_snapshot"),
                             ConfigurationValue::Literal(coordinated.into()),
                         ),
@@ -641,6 +656,14 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
                         report.summary == OperationSummary::Completed,
                         "graph startup: {report:?}"
                     );
+                    if factory_created {
+                        let snapshot = control.configuration_snapshot()?;
+                        let CapturedComponentConfiguration::Available { values } =
+                            &snapshot.configurations[&id("source")] else {
+                                anyhow::bail!("factory-created SQLite configuration is unavailable");
+                            };
+                        assert_eq!(values["rest_api"], serde_json::json!({"host":"127.0.0.1","port":0}));
+                    }
                     assert_eq!(results.snapshot()?.rows.len(), usize::from(coordinated));
                     if !coordinated {
                         handle.execute("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)").await?;
