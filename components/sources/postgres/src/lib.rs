@@ -175,17 +175,26 @@
 //! # }
 //! ```
 
-pub mod config;
-pub mod connection;
-pub mod decoder;
+pub use drasi_postgres_common::{config, connection, decoder, protocol, scram, types};
 pub mod descriptor;
 pub mod native;
-pub mod protocol;
-pub mod scram;
 pub mod stream;
-pub mod types;
 
 pub use native::PostgresTransactionSource as NativePostgresSource;
+
+#[cfg(test)]
+mod position_contract {
+    #[test]
+    fn snapshot_boundary_matches_commit_position_encoding() {
+        for lsn in [0u64, 1, 0x0152_00b0, u64::MAX] {
+            assert_eq!(
+                drasi_bootstrap_postgres::postgres::snapshot_position_bytes(lsn),
+                super::connection::commit_position_bytes(lsn, u64::MAX),
+                "bootstrap snapshot boundary diverged from CDC position encoding for lsn={lsn:#x}"
+            );
+        }
+    }
+}
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
@@ -424,18 +433,7 @@ pub(crate) async fn query_table_primary_keys(
     })))
 }
 
-pub(crate) const PRIMARY_KEY_QUERY: &str = "SELECT \
-            n.nspname AS schema_name, \
-            c.relname AS table_name, \
-            a.attname AS column_name \
-         FROM pg_constraint con \
-         JOIN pg_class c ON con.conrelid = c.oid \
-         JOIN pg_namespace n ON c.relnamespace = n.oid \
-         JOIN pg_attribute a ON a.attrelid = c.oid \
-         WHERE con.contype = 'p' \
-             AND a.attnum = ANY(con.conkey) \
-             AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
-         ORDER BY n.nspname, c.relname, array_position(con.conkey, a.attnum)";
+pub(crate) use drasi_postgres_common::PRIMARY_KEY_QUERY;
 
 /// Build the table-name → primary-key-columns map from catalog rows of
 /// `(schema_name, table_name, column_name)`, ordered by primary-key position.

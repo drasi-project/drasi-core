@@ -45,6 +45,10 @@ const HTTP_SINK: &str = "drasi.network/http-sink";
 const GRPC_SINK: &str = "drasi.network/grpc-sink";
 #[path = "native_network/durable.rs"]
 mod durable_tests;
+#[path = "native_network/grpc_family.rs"]
+mod grpc_family;
+#[path = "native_network/http_family.rs"]
+mod http_family;
 #[path = "native_network/sse.rs"]
 mod sse_tests;
 fn workspace() -> PathBuf {
@@ -139,22 +143,29 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
         );
         let schema = factory.configuration_schema();
         if kind == HTTP_SOURCE || kind == GRPC_SOURCE {
-            assert_eq!(
-                schema["properties"]["adaptiveEnabled"]["enum"],
-                json!([false])
-            );
             assert_eq!(schema["properties"]["timeoutMs"]["default"], 60000);
             assert_eq!(schema["properties"]["port"]["maximum"], 65535);
-            assert!(factory
-                .specification(
-                    ComponentId::try_new("metadata")?,
-                    json!({"stream":"metadata/out","adaptiveEnabled":true})
-                )
-                .is_err());
+            let adaptive = factory.specification(
+                ComponentId::try_new("metadata")?,
+                json!({"stream":"metadata/out","adaptiveEnabled":true}),
+            );
+            if kind == GRPC_SOURCE {
+                assert_eq!(
+                    schema["properties"]["adaptiveEnabled"]["enum"],
+                    json!([false])
+                );
+                assert!(adaptive.is_err());
+            } else {
+                assert!(schema["properties"]["adaptiveEnabled"]
+                    .get("enum")
+                    .is_none());
+                assert!(adaptive.is_ok());
+            }
         }
         if kind == GRPC_SINK {
-            assert_eq!(schema["properties"]["batchSize"]["enum"], json!([1]));
-            assert_eq!(
+            assert_eq!(schema["properties"]["batchSize"]["minimum"], 1);
+            assert_eq!(schema["properties"]["batchSize"]["maximum"], 65536);
+            assert_ne!(
                 schema["properties"]["batchFlushTimeoutMs"]["deprecated"],
                 true
             );
@@ -164,7 +175,7 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
                     ComponentId::try_new("metadata")?,
                     json!({"queryId":"q","batchSize":2})
                 )
-                .is_err());
+                .is_ok());
         }
         if kind == drasi_computation_sink_sse::SSE_SINK {
             assert_eq!(
@@ -401,7 +412,7 @@ async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Resul
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn grpc_source_unary_stream_delta_accounting_and_stop_own_open_streams() -> Result<()> {
+async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_streams() -> Result<()> {
     let port = free_port()?;
     let mut source = component(
         GRPC_SOURCE,
@@ -461,8 +472,8 @@ async fn grpc_source_unary_stream_delta_accounting_and_stop_own_open_streams() -
         let mut total = 0;
         while let Some(response) = response.message().await? {
             assert!(response.success, "{}", response.error);
-            assert_eq!(response.events_processed, 1);
-            total += response.events_processed;
+            assert_eq!(response.events_processed, total + 1);
+            total = response.events_processed;
         }
         Result::<_>::Ok(total)
     };
@@ -500,7 +511,7 @@ async fn grpc_source_unary_stream_delta_accounting_and_stop_own_open_streams() -
         .await?
         .context("failed stream event")?;
     assert!(!second.success && !second.error.is_empty());
-    assert_eq!(second.events_processed, 0);
+    assert_eq!(second.events_processed, 1);
     assert!(
         failed_stream.message().await?.is_none(),
         "failure must not be followed by final success"
@@ -575,17 +586,25 @@ async fn grpc_source_unary_stream_delta_accounting_and_stop_own_open_streams() -
 }
 
 fn result_input(sequence: u64) -> Result<InputEnvelope> {
-    let after = [("value".into(), VariableValue::Integer(42.into()))].into();
+    result_inputs(sequence, &[42])
+}
+
+fn result_inputs(sequence: u64, values: &[i64]) -> Result<InputEnvelope> {
+    let changes = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| QueryPartEvaluationContext::Adding {
+            after: [("value".into(), VariableValue::Integer((*value).into()))].into(),
+            row_signature: index as u64 + 11,
+        })
+        .collect::<Vec<_>>();
     Ok(InputEnvelope {
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
             &ComponentId::try_new("q")?,
             SystemMetadata::new(stream("q/out"), sequence),
-            &[QueryPartEvaluationContext::Adding {
-                after,
-                row_signature: 11,
-            }],
+            &changes,
             QueryOutputMetadata {
                 query_id: "q".into(),
                 source_id: Some("facilities-db".into()),
@@ -710,6 +729,11 @@ impl reaction::reaction_service_server::ReactionService for ReactionReceiver {
         &self,
         request: tonic::Request<reaction::ProcessResultsRequest>,
     ) -> std::result::Result<tonic::Response<reaction::ProcessResultsResponse>, tonic::Status> {
+        let items_processed = request
+            .get_ref()
+            .results
+            .as_ref()
+            .map_or(0, |results| results.results.len());
         let headers = request.metadata().clone();
         self.0
             .grpc
@@ -726,7 +750,13 @@ impl reaction::reaction_service_server::ReactionService for ReactionReceiver {
             } else {
                 String::new()
             },
-            items_processed: if fail { 0 } else { 1 },
+            items_processed: if fail {
+                0
+            } else {
+                items_processed
+                    .try_into()
+                    .map_err(|_| tonic::Status::out_of_range("too many result items"))?
+            },
         }))
     }
 }
@@ -776,7 +806,8 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
         assert_eq!(
             delivered[0].1,
             json!({"operation":"ADD","queryId":"q","sequenceId":1,
-            "timestamp":"2023-11-14T22:13:20.000000123+00:00","after":{"value":42},"metadata":{"source":"facilities-db"}})
+            "timestamp":"2023-11-14T22:13:20.000000123+00:00","after":{"value":42},
+            "metadata":{"source":"facilities-db","source_id":"facilities-db","processed_by":"drasi-core","result_count":1}})
         );
     }
     receiver.state.failures.store(10, Ordering::Release);

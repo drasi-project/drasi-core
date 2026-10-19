@@ -62,6 +62,7 @@ struct Instance {
     component: Component,
     sequences: BTreeMap<PortId, u64>,
     inputs: Vec<Incoming>,
+    sink_batch: Option<Box<super::sink_batching::SinkBatchState>>,
     outputs: Vec<Outgoing>,
     attempted: bool,
 }
@@ -99,6 +100,7 @@ impl InstanceSlot {
                 component,
                 sequences: BTreeMap::new(),
                 inputs: Vec::new(),
+                sink_batch: None,
                 outputs: Vec::new(),
                 attempted: false,
             })),
@@ -3519,6 +3521,7 @@ impl Operations {
                         sequences,
                         inputs,
                         outputs,
+                        sink_batch,
                         ..
                     } = &mut *lease;
                     super::bind_output_destinations(
@@ -3544,6 +3547,7 @@ impl Operations {
                                 transitive_recovery,
                             },
                             &budget,
+                            sink_batch,
                         ))
                         .await
                 }
@@ -5908,6 +5912,7 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
             };
             if let Err(error) = identity.call(|| {
                 lease.inputs.clear();
+                lease.sink_batch = None;
                 lease.outputs.clear();
                 Ok(())
             }) {
@@ -5950,7 +5955,14 @@ pub(super) fn needs_cleanup(graph: &ComputationGraph) -> GraphResult<bool> {
     for &index in graph.ids.values() {
         let slot = &graph.components[index];
         let lease = slot.take()?;
-        if lease.attempted || !lease.inputs.is_empty() || !lease.outputs.is_empty() {
+        if lease.attempted
+            || !lease.inputs.is_empty()
+            || !lease.outputs.is_empty()
+            || lease
+                .sink_batch
+                .as_ref()
+                .is_some_and(|batch| !batch.is_empty())
+        {
             return Ok(true);
         }
     }

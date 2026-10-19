@@ -38,6 +38,8 @@ message StreamEventResponse {
     bool success = 1;
     string message = 2;
     string error = 3;
+    // Cumulative accepted event count for this stream, not a per-response delta.
+    // Clients require monotonic counts and the exact final total at clean EOF.
     uint64 events_processed = 4;
 }
 

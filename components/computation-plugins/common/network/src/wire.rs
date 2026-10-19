@@ -25,6 +25,7 @@ use drasi_core_types::models::{
 pub use drasi_http_common::{HttpElement, HttpSourceChange};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 #[cfg(feature = "grpc-source")]
 use std::sync::Arc;
 
@@ -251,6 +252,43 @@ pub struct Notification {
     pub metadata: Option<Value>,
     #[serde(skip)]
     pub row_signature: u64,
+}
+
+/// Reuse the published query-result projection only at the network serializer;
+/// this DTO owns no legacy execution, queues or checkpoint state.
+pub fn query_result(
+    input: &InputEnvelope,
+    query_id: &str,
+    stream: &StreamId,
+    query_streams: &BTreeMap<String, StreamId>,
+) -> Result<drasi_computation_contracts::exchange::QueryResult> {
+    let envelope = &input.envelope;
+    let metadata = QueryChangeCodec::result_metadata(envelope)?;
+    let expected = if query_streams.is_empty() {
+        (metadata.query_id == query_id).then_some(stream)
+    } else {
+        query_streams.get(&metadata.query_id)
+    };
+    ensure!(
+        input.port.as_str() == "in" && expected == Some(envelope.system().stream()),
+        "unexpected sink input query/port/stream"
+    );
+    ensure!(
+        envelope.changes().schema() == QueryChangeCodec::schema().descriptor()
+            && !QueryChangeCodec::is_snapshot(envelope)
+            && !QueryChangeCodec::is_progress_only(envelope),
+        "network sink expects query rows, not snapshot/recovery control"
+    );
+    if envelope.changes().operations().is_empty() {
+        return Ok(drasi_computation_contracts::exchange::QueryResult::new(
+            metadata.query_id,
+            QueryChangeCodec::query_sequence(envelope)?,
+            metadata.timestamp,
+            Vec::new(),
+            metadata.metadata,
+        ));
+    }
+    Ok(QueryChangeCodec::to_legacy_result(envelope)?)
 }
 
 fn row(record: &Record, query_id: &str) -> Result<drasi_computation_contracts::DecodedQueryRow> {

@@ -36,6 +36,9 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for HttpSinkFactory {
+    fn supports_sink_batching(&self) -> bool {
+        true
+    }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(HttpSinkConfig::definition().details())
     }

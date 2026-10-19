@@ -73,6 +73,8 @@ pub struct NativeFactory {
         drasi_computation_plugin_sdk::ConsumerMode,
         abi::consumer::PluginConsumerV1,
     )>,
+    batching: Option<abi::batching::PluginBatchingV1>,
+    query_snapshots: Option<abi::query_snapshots::PluginQuerySnapshotsV1>,
 }
 unsafe impl Send for NativeFactory {}
 unsafe impl Sync for NativeFactory {}
@@ -120,6 +122,8 @@ impl NativeFactory {
             admission,
             recovery,
             consumer: None,
+            batching: None,
+            query_snapshots: None,
         })
     }
     pub fn metadata(&self) -> &FactoryMetadata {
@@ -170,6 +174,39 @@ impl NativeFactory {
     pub fn consumer_mode(&self) -> Option<drasi_computation_plugin_sdk::ConsumerMode> {
         self.consumer.map(|(mode, _)| mode)
     }
+    pub(super) fn with_batching(
+        mut self,
+        batching: Option<abi::batching::PluginBatchingV1>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            batching.is_none()
+                || (self.metadata.role == ComponentRole::Sink && self.consumer.is_none()),
+            "native batching requires a sink without an independent consumer wrapper"
+        );
+        self.batching = batching;
+        Ok(self)
+    }
+    pub(super) fn with_query_snapshots(
+        mut self,
+        snapshots: Option<abi::query_snapshots::PluginQuerySnapshotsV1>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            snapshots.is_none()
+                || (self.metadata.role == ComponentRole::Sink && self.consumer.is_none()),
+            "native query-snapshot reads require a sink without an independent consumer wrapper"
+        );
+        if snapshots.is_some() {
+            let mut requirement = ResourceRequirement::exactly_one::<
+                super::NativeQuerySnapshotsResource,
+            >(ResourceRole::QueryCatalog);
+            requirement.minimum = 0;
+            self.descriptor
+                .dependencies
+                .insert("query_snapshots".into(), requirement);
+        }
+        self.query_snapshots = snapshots;
+        Ok(self)
+    }
     pub async fn create_consumer(
         &self,
         id: ComponentId,
@@ -192,6 +229,7 @@ impl NativeFactory {
             None,
             None,
             true,
+            None,
         )?;
         let response = unsafe {
             drasi_computation_plugin_sdk::transport::take_reply(extension
@@ -238,6 +276,28 @@ impl NativeFactory {
         )
     }
 
+    pub fn create_component_with_query_snapshots(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        snapshots: Arc<super::NativeQuerySnapshotsResource>,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        self.construct_bound(
+            CreateRequest {
+                id,
+                implementation: self.metadata.implementation.clone(),
+                configuration_version: self.metadata.configuration_version,
+                configuration,
+                scope: Some(scope),
+            },
+            None,
+            None,
+            false,
+            Some(snapshots),
+        )
+    }
+
     /// Original, literal construction recipe; the graph retains this for pending
     /// and failed construction. Live configuration is read from the component,
     /// not from a second mutable configuration registry.
@@ -275,7 +335,7 @@ impl NativeFactory {
         admission: Option<Arc<SourceAdmission>>,
         progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<NativeComponentProxy> {
-        self.construct_bound(request, admission, progress, false)
+        self.construct_bound(request, admission, progress, false, None)
     }
     fn construct_bound(
         &self,
@@ -283,6 +343,7 @@ impl NativeFactory {
         admission: Option<Arc<SourceAdmission>>,
         progress: Option<Arc<QuerySourceProgress>>,
         consumer: bool,
+        query_snapshots: Option<Arc<super::NativeQuerySnapshotsResource>>,
     ) -> anyhow::Result<NativeComponentProxy> {
         anyhow::ensure!(
             consumer == self.consumer.is_some(),
@@ -292,6 +353,25 @@ impl NativeFactory {
         let bytes = wire::encode(&request)?;
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
+        let query_snapshots = query_snapshots
+            .map(|resource| -> anyhow::Result<_> {
+                anyhow::ensure!(
+                    self.query_snapshots.is_some()
+                        && !consumer
+                        && admission.is_none()
+                        && progress.is_none(),
+                    "native query snapshots require their negotiated read service"
+                );
+                anyhow::ensure!(
+                    request
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.graph_id == resource.graph_id()),
+                    "query-snapshot resource belongs to another graph"
+                );
+                Ok(super::query_snapshots::QuerySnapshotsBinding::new(resource))
+            })
+            .transpose()?;
         let binding = admission.as_ref().map(|admission| {
             super::admission::AdmissionBinding::new(admission, self.codec.clone())
         });
@@ -312,7 +392,18 @@ impl NativeFactory {
             })
             .transpose()?;
         unsafe {
-            if consumer {
+            if let Some(binding) = &query_snapshots {
+                take_status(self
+                    .query_snapshots
+                    .expect("validated")
+                    .create
+                    .expect("validated")(
+                    self.raw.state,
+                    abi::BorrowedBytes::new(&bytes),
+                    &binding.table(),
+                    &mut component,
+                ))?;
+            } else if consumer {
                 let (_, extension) = self.consumer.expect("validated");
                 take_status(extension.create.expect("validated")(
                     self.raw.state,
@@ -344,7 +435,7 @@ impl NativeFactory {
                 ))?;
             }
         };
-        unsafe {
+        let component = unsafe {
             NativeComponentProxy::new(
                 component,
                 self.metadata.clone(),
@@ -356,8 +447,13 @@ impl NativeFactory {
                     admission: admission.zip(binding),
                     progress,
                 },
-            )
-        }
+            )?
+        };
+        let component = match self.batching {
+            Some(extension) => component.with_batching(extension),
+            None => Ok(component),
+        }?;
+        Ok(component.with_query_snapshots(query_snapshots))
     }
 }
 impl Drop for NativeFactory {
@@ -396,6 +492,7 @@ impl ComponentFactory for NativeFactory {
                         "admission" => self.admission.is_some(),
                         "source_progress" => self.recovery.is_some(),
                         "consumer" => self.consumer.is_some() && resources.len() == 1,
+                        "query_snapshots" => self.query_snapshots.is_some(),
                         _ => false,
                     }
             }),
@@ -538,8 +635,21 @@ impl ComponentFactory for NativeFactory {
                 .map(|(name, value)| (name.to_string(), value.clone()))
                 .collect(),
         );
+        let snapshots = if context
+            .specification
+            .dependencies
+            .contains_key("query_snapshots")
+        {
+            context
+                .resources::<super::NativeQuerySnapshotsResource>("query_snapshots")
+                .map_err(ComponentCreationError::terminal)?
+                .into_iter()
+                .next()
+        } else {
+            None
+        };
         let proxy = self
-            .construct(
+            .construct_bound(
                 CreateRequest {
                     id: context.component_id,
                     implementation: context.specification.implementation.clone(),
@@ -553,6 +663,8 @@ impl ComponentFactory for NativeFactory {
                 },
                 admission,
                 progress,
+                false,
+                snapshots,
             )
             .map_err(|error| {
                 if error

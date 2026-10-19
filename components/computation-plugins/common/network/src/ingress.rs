@@ -10,8 +10,11 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use drasi_core_types::models::SourceChange;
+use drasi_http_common::adaptive_batcher::{AdaptiveBatchConfig, ThroughputMonitor};
 use futures_util::FutureExt;
-use std::{future::Future, net::SocketAddr, panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    collections::VecDeque, future::Future, net::SocketAddr, panic::AssertUnwindSafe, sync::Arc,
+};
 use tokio::{
     net::TcpListener,
     sync::{mpsc, Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
@@ -108,6 +111,44 @@ struct Running {
     cancel: CancellationToken,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     listener: RwLock<Option<JoinHandle<Result<()>>>>,
+    adaptive: Option<AdaptiveRead>,
+}
+
+struct AdaptiveRead {
+    config: AdaptiveBatchConfig,
+    monitor: ThroughputMonitor,
+    pending: VecDeque<OutputEnvelope>,
+    deadline: Option<Instant>,
+    target: usize,
+}
+
+async fn receive_volatile(
+    receiver: &mut mpsc::Receiver<OutputEnvelope>,
+    adaptive: &mut Option<AdaptiveRead>,
+) -> Option<OutputEnvelope> {
+    let Some(batch) = adaptive else {
+        return receiver.recv().await;
+    };
+    if batch.deadline.is_none() {
+        if let Some(ready) = batch.pending.pop_front() {
+            return Some(ready);
+        }
+        batch.pending.push_back(receiver.recv().await?);
+        let (target, wait) = batch
+            .config
+            .parameters(batch.monitor.get_throughput_level());
+        batch.target = target;
+        batch.deadline = Some(Instant::now() + wait);
+    }
+    while batch.pending.len() < batch.target {
+        match tokio::time::timeout_at(batch.deadline.expect("collecting"), receiver.recv()).await {
+            Ok(Some(envelope)) => batch.pending.push_back(envelope),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    batch.monitor.record_batch(batch.pending.len());
+    batch.deadline = None;
+    batch.pending.pop_front()
 }
 impl Running {
     async fn join(&mut self) -> Result<()> {
@@ -139,6 +180,7 @@ pub struct SourceRuntime {
     pub config: IngressConfig,
     mode: AdmissionMode,
     running: Option<Running>,
+    adaptive: Option<AdaptiveBatchConfig>,
 }
 impl SourceRuntime {
     pub fn new(
@@ -175,7 +217,29 @@ impl SourceRuntime {
             config,
             mode,
             running: None,
+            adaptive: None,
         })
+    }
+    pub fn with_adaptive(mut self, config: Option<AdaptiveBatchConfig>) -> Result<Self> {
+        anyhow::ensure!(
+            config.is_none() || matches!(self.mode, AdmissionMode::Volatile { .. }),
+            "adaptive prefetch is a volatile ingress option; durable admission is scheduled by the host"
+        );
+        if let Some(config) = &config {
+            anyhow::ensure!(
+                config.min_batch_size > 0
+                    && config.min_batch_size <= config.max_batch_size
+                    && config.max_batch_size <= self.config.ingress_capacity
+                    && !config.min_wait_time.is_zero()
+                    && config.min_wait_time <= config.max_wait_time
+                    && config.max_wait_time <= std::time::Duration::from_secs(60)
+                    && !config.throughput_window.is_zero()
+                    && config.throughput_window <= std::time::Duration::from_secs(3600),
+                "invalid bounded adaptive ingress settings"
+            );
+        }
+        self.adaptive = config;
+        Ok(self)
     }
     pub async fn start<F, Work>(&mut self, serve: F) -> Result<()>
     where
@@ -217,6 +281,13 @@ impl SourceRuntime {
             cancel,
             receiver,
             listener: RwLock::new(None),
+            adaptive: self.adaptive.clone().map(|config| AdaptiveRead {
+                monitor: ThroughputMonitor::new(config.throughput_window),
+                config,
+                pending: VecDeque::new(),
+                deadline: None,
+                target: 1,
+            }),
         });
         spawn_owned_worker(
             &self.running.as_ref().expect("installed owner").listener,
@@ -279,7 +350,7 @@ impl SourceRuntime {
                 running.join().await?;
                 anyhow::bail!("native source listener closed");
             }
-            envelope = receiver.recv() => match envelope {
+            envelope = receive_volatile(receiver, &mut running.adaptive) => match envelope {
                 Some(envelope) => Ok(Some(envelope)),
                 None => {
                     running.join().await?;
@@ -297,7 +368,11 @@ impl SourceRuntime {
             // Keep the handle on self until join completes: a cancelled stop
             // retains cleanup responsibility for the next stop invocation.
             running.join().await?;
-            let mut discarded = 0;
+            let mut discarded = running.adaptive.as_mut().map_or(0, |batch| {
+                let count = batch.pending.len();
+                batch.pending.clear();
+                count
+            });
             if let Some(receiver) = &mut running.receiver {
                 while receiver.try_recv().is_ok() {
                     discarded += 1;

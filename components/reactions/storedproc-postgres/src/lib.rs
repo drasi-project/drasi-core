@@ -45,7 +45,7 @@
 //! [Handlebars]: https://crates.io/crates/handlebars
 
 pub mod config;
-pub mod delivery;
+pub use drasi_postgres_common::delivery;
 pub mod descriptor;
 pub mod executor;
 pub mod reaction;

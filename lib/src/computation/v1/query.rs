@@ -85,6 +85,9 @@ mod fingerprint_tests;
 mod hosting_tests;
 #[path = "query_recovery.rs"]
 mod recovery;
+#[cfg(test)]
+#[path = "query_volatile_progress_tests.rs"]
+mod volatile_progress_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ComputationQueryLanguage {
@@ -649,6 +652,7 @@ impl ContinuousQueryTransformer {
             }
         } else {
             let previous = progress.snapshot();
+            let same_generation = previous.reset_generation == self.results.snapshot()?.generation;
             for (key, sequence) in self
                 .watermarks
                 .lock()
@@ -662,6 +666,9 @@ impl ContinuousQueryTransformer {
                     .filter(|saved| saved.sequence == *sequence)
                     .and_then(|saved| saved.source_position.clone());
                 checkpoints.insert(key, SourceCheckpoint::new(*sequence, position));
+            }
+            if same_generation && !checkpoints.is_empty() {
+                transport_sequences = previous.transport_sequences.clone();
             }
         }
         progress.publish(SourceProgressSnapshot {
@@ -1233,6 +1240,12 @@ impl ContinuousQueryTransformer {
                         .await?;
                     self.publish_source_progress(true).await?;
                 }
+            } else if let Some(owner) = &self.source_progress {
+                let mut snapshot = (*owner.snapshot()).clone();
+                progress
+                    .graph
+                    .record_transport(&mut snapshot.transport_sequences);
+                owner.publish(snapshot);
             }
             return Ok(Vec::new());
         }

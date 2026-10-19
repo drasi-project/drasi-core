@@ -23,11 +23,14 @@ kind = "sink-http"
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-network-common = { workspace = true, features = ["http-sink"] }
 drasi-computation-contracts = { workspace = true }
+drasi-http-common = { workspace = true, features = ["reaction"] }
+drasi-reaction-common = { workspace = true }
 drasi-lib = { workspace = true, optional = true }
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.7"
 futures-util = "0.3"
+handlebars = "5.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

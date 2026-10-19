@@ -37,7 +37,7 @@ crate-type = ["lib", "cdylib"]
 # drasi-core. Switch to published crates before treating this as the standalone
 # plugin dependency model.
 drasi-lib.workspace = true
-drasi-grpc-common = { workspace = true, features = ["reaction"] }
+drasi-grpc-common = { workspace = true, features = ["output"] }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"

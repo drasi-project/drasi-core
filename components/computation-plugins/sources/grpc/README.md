@@ -25,3 +25,11 @@ separate session/sequence protocol. See
 [source configuration](../../NETWORK.md#source-configuration) and
 [durable admission](../../NETWORK.md#optional-durable-admission).
 No HTTP source or gRPC sink component is loaded.
+
+`SourceService.StreamEvents` reports **cumulative accepted counts**, matching
+the published source protocol and both test-run-host dispatchers. The native
+listener emits a progress response for every accepted input; clients retain
+the latest total rather than summing responses. Invalid input returns a failed
+response with the accepted prefix count and closes that stream. Transport,
+timeout and admission errors remain errors even if earlier responses succeeded.
+The separate durable admission service returns receipts, not these counters.

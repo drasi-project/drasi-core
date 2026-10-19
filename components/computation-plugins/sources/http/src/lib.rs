@@ -4,6 +4,7 @@
 mod component;
 pub mod config;
 mod durable_http;
+mod webhook;
 
 use drasi_computation_contracts::{
     ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,

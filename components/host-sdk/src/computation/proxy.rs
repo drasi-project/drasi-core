@@ -197,6 +197,8 @@ pub struct NativeComponentProxy {
     schemas: Vec<Arc<Schema>>,
     pending: bool,
     bindings: SourceBindings,
+    batching: Option<abi::batching::PluginBatchingV1>,
+    query_snapshots: Option<super::query_snapshots::QuerySnapshotsBinding>,
 }
 
 #[derive(Default)]
@@ -253,7 +255,35 @@ impl NativeComponentProxy {
             schemas,
             pending: false,
             bindings,
+            batching: None,
+            query_snapshots: None,
         })
+    }
+    pub(super) fn with_query_snapshots(
+        mut self,
+        snapshots: Option<super::query_snapshots::QuerySnapshotsBinding>,
+    ) -> Self {
+        self.query_snapshots = snapshots;
+        self
+    }
+    pub(super) fn with_batching(
+        mut self,
+        extension: abi::batching::PluginBatchingV1,
+    ) -> anyhow::Result<Self> {
+        extension
+            .header
+            .validate::<abi::batching::PluginBatchingV1>()?;
+        anyhow::ensure!(
+            extension.version == abi::batching::VERSION
+                && extension.reserved == 0
+                && extension.factory.is_some()
+                && extension.policy.is_some()
+                && self.metadata.role == ComponentRole::Sink,
+            "invalid native sink batching extension"
+        );
+        self.batching = Some(extension);
+        self.batching()?;
+        Ok(self)
     }
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
@@ -319,6 +349,7 @@ impl NativeComponentProxy {
 }
 impl Drop for NativeComponentProxy {
     fn drop(&mut self) {
+        self.query_snapshots.take();
         self.bindings.admission.take();
         self.bindings.progress.take();
         self.inner.revoke_control();
@@ -373,10 +404,26 @@ impl ComputationComponent for NativeComponentProxy {
                 return Err(operation_failure(error.clone()));
             }
         }
-        self.inner.unit(abi::operation::START, &[]).await
+        if let Some(binding) = &self.query_snapshots {
+            binding.activate()?;
+        }
+        let result = self.inner.unit(abi::operation::START, &[]).await;
+        if result.is_err() {
+            if let Some(binding) = &self.query_snapshots {
+                binding.deactivate();
+            }
+        }
+        result
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
-        self.inner.unit(abi::operation::STOP, &[]).await
+        if let Some(binding) = &self.query_snapshots {
+            binding.deactivate();
+        }
+        self.inner.unit(abi::operation::STOP, &[]).await?;
+        if let Some(binding) = &self.query_snapshots {
+            binding.ensure_quiesced()?;
+        }
+        Ok(())
     }
 }
 #[async_trait]
@@ -443,6 +490,41 @@ impl Transformer for NativeComponentProxy {
 }
 #[async_trait]
 impl EnvelopeSink for NativeComponentProxy {
+    fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {
+        let Some(extension) = &self.batching else {
+            return Ok(None);
+        };
+        let bytes = unsafe {
+            take_reply(extension.policy.expect("validated")(self.inner.state()))
+                .map_err(operation_failure)?
+        };
+        let policy: Option<SinkBatching> = wire::decode(&bytes)?;
+        if let Some(policy) = policy {
+            policy.validate()?;
+        }
+        Ok(policy)
+    }
+    async fn handle_batch(&mut self, inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
+        let policy = self
+            .batching()?
+            .ok_or_else(|| anyhow::anyhow!("native batching is disabled"))?;
+        policy.validate_inputs(&inputs)?;
+        let batch = inputs
+            .iter()
+            .map(|input| {
+                wire::check_port(
+                    &self.descriptor,
+                    &input.port,
+                    &input.envelope,
+                    PortDirection::Input,
+                )?;
+                wire::Envelope::input(input, &self.codec)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.inner
+            .unit(abi::operation::HANDLE_BATCH, &wire::encode(&batch)?)
+            .await
+    }
     fn supports_snapshot(&self) -> bool {
         self.metadata.capabilities.snapshot
     }

@@ -1,7 +1,7 @@
 # Native HTTP/gRPC/SSE network components
 
-The five [independent network component crates](README.md) provide native
-ComputationGraph HTTP/gRPC transport and browser SSE delivery. Each library
+The six [independent network component crates](README.md) provide native
+ComputationGraph HTTP/gRPC transport, HTTP bootstrap and browser SSE delivery. Each library
 registers only its own factory and uses its package name as its plugin identity.
 Native ABI is **1.0.0**, independently of the workspace package version.
 Native wire version is **2**, using binary computation envelopes
@@ -17,9 +17,11 @@ is independently versioned.
 | `drasi.network/http-sink` | `EnvelopeSink` | `in`, `QueryChangeCodec::schema()` |
 | `drasi.network/grpc-sink` | `EnvelopeSink` | `in`, `QueryChangeCodec::schema()` |
 | `drasi.network/sse-sink` | `EnvelopeSink` (`Accepted`) | `in`, `QueryChangeCodec::schema()` |
+| `drasi.network/http-bootstrap` | `NativeBootstrapProvider` | query-scoped snapshot, `GraphChangeCodec::schema()` |
 
-Only existing HTTP DTO/conversion helpers and generated gRPC service/protobuf
-types are reused from the transport crates. Native execution constructs no legacy
+HTTP webhook/auth/mapping, REST bootstrap, HTTP/gRPC rendering and protocol
+helpers are extracted from the existing implementations into shared crates.
+Native execution constructs no legacy
 `Source`, `Reaction`, `SourceBase`, `ReactionBase`, `SourceEventWrapper`,
 adapter or subscription queue. HTTP/gRPC sinks project typed query rows at
 the actual network boundary, using the same core JSON value projection as the
@@ -49,8 +51,10 @@ defaults shown above. Each query ID must match its envelope metadata and the
 configured stream. Connect every query's output to the sink's `in` port.
 The untemplated `queryId`/`results`/`timestamp` data frames, row signatures,
 before/after images and heartbeat data frames remain compatible with the
-existing SSE browser adapter. Read snapshots through the Server query-results
-API; this transport does not own a second result cache or snapshot endpoint.
+existing SSE browser adapter. The optional `query_snapshots` dependency exposes `/snapshot/:query_id` by
+reading the existing host-owned query catalogue. It adds no result cache or
+query executor. The Server query-results and snapshot-first subscription APIs
+remain available separately.
 
 Delivery is explicitly **volatile, Accepted**, not handled by a browser.
 No connected listener is required; disconnected clients receive no history.
@@ -60,9 +64,12 @@ fresh snapshot. Stop cancels active streams and joins the HTTP server, retaining
 ownership after cancelled or timed-out cleanup. Restart requires that cleanup.
 Construction binds no socket or worker.
 
-This focused native factory supports the untemplated protocol used by the
-examples, not legacy templates/dynamic paths or recovery snapshot/progress
-control envelopes; unsupported configuration rejects. GET/OPTIONS permit
+The native sink also reuses the legacy SSE renderer for per-query/default
+templates and static/dynamic paths, with explicit path-count bounds.
+Query-scoped snapshot readers have bounded admission, cancellation and host
+runtime ownership. See the [SSE guide](sinks/sse/README.md) for configuration and
+the snapshot resource recipe. Incoming recovery snapshot/progress control
+envelopes remain unsupported; configuration does not pretend otherwise. GET/OPTIONS permit
 cross-origin reads, as the existing SSE transport does. Configure an
 authenticated reverse proxy before exposing private results.
 
@@ -172,13 +179,24 @@ submissions are serialized during admission. Success responses contain
 A timeout/stop after a partially admitted batch reports failure and its accepted
 prefix count. Retrying that batch can duplicate already accepted events.
 
+HTTP also supports the published webhook configuration: custom routes, HMAC and
+bearer checks, JSON/XML/YAML/text parsing, conditions, node/relation mappings,
+explicit timestamps and CORS. Its canonical camelCase DTO is converted through
+the existing mapping engine, not a legacy source adapter. In volatile mode,
+`adaptiveEnabled` enables bounded, cancellation-safe prefetch using the legacy
+throughput tiers; each prefetched event remains a separate graph envelope.
+See the [HTTP source guide](sources/http/README.md) for configuration, bounds
+and durable webhook producer headers. Durable admission stays host-scheduled
+and does not allocate an adaptive local queue.
+
 gRPC uses the unchanged `drasi.v1.SourceService` definition from
 `drasi-source-grpc`. It implements `SubmitEvent`, bidirectional `StreamEvents`
 and `HealthCheck`; `RequestBootstrap` explicitly returns `Unimplemented`.
-Each accepted streamed input yields `success=true, events_processed=1`:
-counts are **deltas**, matching both test-run-host dispatchers' summation.
-There is no cumulative final count to accidentally double-count events.
-Invalid streamed input yields a failed response and terminates the stream;
+Each accepted streamed input yields `success=true` and a **cumulative**
+`events_processed` total. This preserves the legacy SourceService contract and
+both test-run-host dispatchers' exact-final-total checks. Clients must not sum
+these counts. Invalid streamed input yields a failed response with the accepted
+prefix count and terminates the stream;
 admission/transport failures are gRPC errors, not successful EOF.
 
 The gRPC mapping preserves nanosecond-to-millisecond effective timestamps, scalar
@@ -311,17 +329,21 @@ is not a successful graceful drain or proof that the write rolled back.
 }
 ```
 
-`queryId` and the complete `url` are required. `stream` defaults to
-`{queryId}/out`. Headers default to `application/json` and
-`x-query-sequence=queryId`; explicit conflicting values reject. Invalid/duplicate
+Supply `queryId` or a `queryStreams` map, and `url` or `baseUrl`. `stream` defaults
+to `{queryId}/out`; `baseUrl` alone selects `/changes/{queryId}`. Headers default to
+`application/json` and `x-query-sequence=queryId`; conflicting query identities reject. Invalid/duplicate
 case-insensitive header names/values reject. Redirects are disabled.
 
 Each result change produces the existing default HTTP notification, not a bare
 query row: `operation` (`ADD`/`UPDATE`/`DELETE`), `queryId`, `sequenceId`,
 RFC3339 `timestamp`, optional `before`/`after`, and optional query `metadata`.
 Aggregation output maps to `UPDATE`, including absent `before` on its first
-emission. Noop/empty changes produce no request. No template rendering or adaptive
-batching is claimed; `outputTemplates`, batching and other unknown keys reject.
+emission. Noop/empty changes produce no request. `token` and `outputTemplates`
+reuse the legacy body/URL/method/header renderer, full-name/last-segment/default
+routing, and logged canonical fallbacks. `adaptive` plus `batchEndpoint` enables
+the legacy `{"batch":[...]}` protocol with host-owned collection and timers.
+`maxBatchBytes` bounds collected inputs; `maxRequestBytes` splits rendered
+requests. See the [HTTP sink guide](sinks/http/README.md).
 
 ## gRPC sink configuration
 
@@ -342,20 +364,22 @@ batching is claimed; `outputTemplates`, batching and other unknown keys reject.
 }
 ```
 
-Only `queryId` is required; other defaults are shown, with `stream` derived from
+Supply `queryId` or `queryStreams`; other defaults are shown, with `stream` derived from
 `queryId` and default metadata `x-query-sequence=queryId`. Endpoint schemes
 `grpc://` and plaintext `http://` are supported. TLS is not advertised.
 
-One unchanged `drasi.v1.ReactionService/ProcessResults` request is sent per result
-change. `batchSize=1` is the only supported value. `batchFlushTimeoutMs` is inert
-for immediate single-item delivery, not a hidden batching timer. Fixed multi-item
-and adaptive batching configurations reject explicitly.
+The unchanged `drasi.v1.ReactionService/ProcessResults` protocol supports fixed
+and adaptive batches. Use the flat `batchSize`/`batchFlushTimeoutMs` settings or
+the legacy `batching` object. Count, byte and timeout limits flush real batches;
+query or rendered-metadata changes split RPCs without reordering items.
 
 Items preserve operation, row signature, before/after, original query sequence,
-timestamp and query metadata. The outer query ID/timestamp match that item.
+timestamp and query metadata. The outer timestamp is the latest item timestamp.
 Configured metadata is sent in both the request body and actual gRPC headers.
 `canonicalJson` includes the existing canonical `payload` with `rowSignature`;
-`proto` omits it. Noop results produce no RPC. No output template support is claimed.
+`proto` omits it unless a body template is configured. `outputTemplates` reuses
+the legacy renderer and metadata templates without changing typed row images.
+Noop results produce no RPC. See the [gRPC sink guide](sinks/grpc/README.md).
 
 Startup actually attempts the connection, with up to `connectionRetryAttempts`
 total attempts and `initialConnectionTimeoutMs` per attempt; errors are not
@@ -369,16 +393,17 @@ they do not implement snapshot/recovery replacement.
 
 `Handled` means network delivery completed successfully, or a failed delivery was
 deliberately skipped under the explicitly configured policy. There is no early
-`Accepted` queue. `maxRetries` counts additional attempts after the first; backoff
+`Accepted` queue. A gRPC success must also acknowledge the exact requested item
+count; partial or excessive counts fail. `maxRetries` counts additional attempts after the first; backoff
 starts at 100 ms and caps at 5 s. Retries send the same sequence and payload in
 order. One multi-change envelope can already have partially delivered before a
 later change fails. Retries/cancellation can duplicate external effects.
 
 `failurePolicy="strict"` propagates failure (default). `"skip"` reports every
 exhausted delivery to stderr with component/query/sequence/error and deliberately
-continues. This is the observer-endpoint-closure behavior required for the
-performance comparison; it is not an implementation of the full legacy
-`auto_skip_gap` recovery policy. Healthy paired runs should not measure failed
+continues. It is not an implementation of the full legacy `auto_skip_gap`
+recovery policy. The native HTTP strict path does not silently drop permanent
+poison outcomes as the legacy checkpoint loop did. Healthy paired runs should not measure failed
 request/retry timings.
 
 Client requests live in host-polled operation futures, not background sink
@@ -387,11 +412,31 @@ client/channel handles after the host drains/cancels operations. The plugin's I/
 runtime and library remain process-pinned according to ABI 1.0. Cancellation is
 not rollback or exactly-once delivery.
 
+The optional batching extension leaves frozen native metadata/base layouts
+unchanged. The graph retains collected inputs, local work ownership and the
+actual acknowledgement future across interruption. Retained/QoS receivers keep
+partially collected leases on the graph-owned receiver and prohibit retirement
+or another delivery while those leases remain outstanding. Successful batches
+advance acknowledgements in order, never past an incomplete prefix. Byte limits
+include the native MessagePack framing; a larger single input uses direct
+handling instead of becoming an unsendable multi-input request.
+
+## HTTP bootstrap
+
+The [native HTTP bootstrap](bootstrappers/http/README.md) is a bootstrap-only
+library using the shared legacy REST reader, authentication/OAuth, pagination,
+parsing and response mapping. Bind a provider to a query in the hosting DrasiLib
+graph, with the same source/element identity as its live source. Bounded output,
+response and duration limits, owned cancellation and explicit incomplete-snapshot
+failures apply to static and dynamic loading. REST bootstrap establishes no
+atomic snapshot/live replay boundary and returns no invented source watermark.
+No gRPC bootstrap is claimed or implemented.
+
 ## Validation and separate-library tests
 
 From `drasi-core`:
 
-`make test-native-network` builds the five separate libraries, runs shared/SSE
+`make test-native-network` builds the six separate libraries, runs shared/SSE
 unit tests and runs the Host SDK wire/loopback tests. The workspace and
 cross-platform FFI workflows build these prerequisites explicitly; a clean
 checkout must not depend on stale local libraries.
@@ -415,10 +460,14 @@ tests validate correctness; the parent paired runner owns 100k-event performance
 measurement and its scheduling/queue-path interpretation.
 
 Tests cover legacy DTO/protobuf mapping, numeric/temporal/query metadata,
-aggregation and Noop semantics, actual loopback HTTP/gRPC, streamed delta counts,
+aggregation and Noop semantics, actual loopback HTTP/gRPC, cumulative stream counts,
 individual batch evaluation, backpressure, errors, retries/skips, independent
 health, cancelled operations, awaited listener stop/rebind, and the unchanged
 host continuous-query evaluator between native endpoints.
+The HTTP/gRPC family modules additionally run static and dynamic DrasiLib
+hosting, webhook/auth/CORS and adaptive ingress cancellation, HTTP bootstrap
+followed by live updates, template and metadata routing, real multi-item
+delivery, exact acknowledgements, byte splitting and snapshot cleanup.
 
 The durable cases also cover receipt conflicts/expiry, partial-batch prefixes,
 retirement, stopped consumers, abrupt process exit without a saved client receipt,
@@ -427,5 +476,5 @@ Separate cases prove graceful commit completion and deadline/retry behavior,
 including retry on both runtime flavors. Every interruption case retains exact
 acceptance and downstream-delivery checks after reconstruction.
 
-Query-role hosting, arbitrary native resource injection, adaptive transports,
+Query-role plugin hosting, arbitrary native resource injection,
 snapshot/live handover, in-place reconfiguration and hot unloading remain unsupported.

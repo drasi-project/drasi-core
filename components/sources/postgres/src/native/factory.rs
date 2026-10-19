@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use anyhow::Context;
 use drasi_lib::computation::v1::{
     ComponentCreationError, ComponentFactory, ComponentRole, ComponentSpecification,
     ConfigurationField, ConfigurationSchema, ConfigurationType, ConfigurationValue,
@@ -20,6 +21,7 @@ use drasi_lib::computation::v1::{
     QuerySourceProgressResource, ResourceHandle, ResourceId, ResourceRequirement, ResourceRole,
     ResourceSpecification,
 };
+use std::collections::BTreeMap;
 
 pub struct PostgresTransactionSourceFactory {
     descriptor: FactoryDescriptor,
@@ -190,8 +192,7 @@ impl ComponentFactory for PostgresTransactionSourceFactory {
                 "PostgreSQL snapshot configuration/resource mismatch"
             );
             if let Some(snapshot) = snapshot {
-                snapshot.validate_source(&source)?;
-                source.snapshot = Some(snapshot);
+                source.attach_snapshot(snapshot)?;
             }
             Ok(ConstructedComponent::source(Box::new(source)))
         };

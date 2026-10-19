@@ -8,11 +8,11 @@ readme = "README.md"
 
 [features]
 default = []
-ingress = []
+ingress = ["dep:drasi-http-common", "drasi-http-common/adaptive"]
 http-source = ["ingress", "dep:drasi-http-common"]
 grpc-source = ["ingress", "dep:drasi-grpc-common", "drasi-grpc-common/source", "dep:prost-types"]
-http-sink = ["dep:reqwest"]
-grpc-sink = ["dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:reqwest"]
+http-sink = ["dep:reqwest", "dep:drasi-http-common", "drasi-http-common/adaptive"]
+grpc-sink = ["dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:reqwest", "dep:drasi-http-common", "drasi-http-common/adaptive"]
 
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use super::{ChangeEnvelope, ComponentDescriptor, PortId};
 
 pub use drasi_computation_contracts::{
-    InputEnvelope, OutputEnvelope, SinkCompletion, WakeupSource,
+    InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, WakeupSource,
 };
 
 /// Host-owned component lifecycle, independent of legacy Source/Reaction contexts.
@@ -182,6 +182,14 @@ pub trait Transformer: ComputationComponent {
 /// A consumer beside legacy Reaction. Its descriptor has input ports only.
 #[async_trait]
 pub trait EnvelopeSink: ComputationComponent {
+    /// Read only at an operation boundary. The graph owns bounded collection,
+    /// timers and delivery receipts; no success is reported merely for buffering.
+    fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {
+        Ok(None)
+    }
+    async fn handle_batch(&mut self, _inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
+        anyhow::bail!("this sink does not implement host-owned batching")
+    }
     fn supports_snapshot(&self) -> bool {
         false
     }

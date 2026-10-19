@@ -41,6 +41,7 @@ mod resources;
 mod retirement;
 pub(crate) use registry::GraphRegistrySnapshot;
 pub(crate) use retirement::RecoveryFreeze;
+mod sink_batching;
 mod specification;
 mod topology;
 pub use controller::reconcile::{DesiredMutation, ReconciliationPreview, ReconciliationReport};
@@ -2418,6 +2419,7 @@ async fn run_admitted_source(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_node(
     component: &mut Component,
     node: &NodeSnapshot,
@@ -2427,6 +2429,7 @@ async fn run_node(
     quiesce: &mut watch::Receiver<bool>,
     routing: SourceRouting<'_>,
     budget: &NodeWorkBudget,
+    sink_batch: &mut Option<Box<sink_batching::SinkBatchState>>,
 ) -> GraphResult<()> {
     validate_source_progress(
         component,
@@ -2434,6 +2437,17 @@ async fn run_node(
         routing.downstream,
         routing.transitive_recovery,
     )?;
+    if let Component::Sink(sink) = component {
+        let batching = sink
+            .batching()
+            .map_err(|error| component_error(node, "sink batch policy", error))?;
+        if batching.is_some() || sink_batch.is_some() {
+            return Box::pin(sink_batching::run(
+                component, node, inputs, quiesce, budget, sink_batch,
+            ))
+            .await;
+        }
+    }
     if let Component::Service(service) = component {
         tokio::select! {
             biased;

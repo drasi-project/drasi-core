@@ -4,6 +4,81 @@
 use super::*;
 use crate::computation::{NativeBootstrapFactories, NativeBootstrapFactory};
 
+fn snapshot_timeout_ms() -> u64 {
+    300_000
+}
+
+fn snapshot_max_readers() -> usize {
+    16
+}
+
+/// A read-only view of named queries in one actual catalogue resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeQuerySnapshotsConfig {
+    pub catalog: ResourceId,
+    pub queries: Vec<String>,
+    #[serde(default = "snapshot_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "snapshot_max_readers")]
+    pub max_readers: usize,
+}
+
+impl NativeQuerySnapshotsConfig {
+    pub fn validate(
+        &self,
+        specification: &ResourceSpecification,
+        dependencies: &BTreeMap<ResourceId, ResourceRole>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            specification.role == ResourceRole::QueryCatalog && specification.id != self.catalog,
+            "native query snapshots require a separate query-catalogue resource"
+        );
+        anyhow::ensure!(
+            *dependencies == BTreeMap::from([(self.catalog.clone(), ResourceRole::QueryCatalog)]),
+            "native query snapshots must declare exactly their catalogue dependency"
+        );
+        crate::computation::NativeQuerySnapshotsResource::validate_settings(
+            self.queries.iter().cloned(),
+            std::time::Duration::from_millis(self.timeout_ms),
+            self.max_readers,
+        )?;
+        Ok(())
+    }
+
+    pub fn resolve(
+        &self,
+        graph: &str,
+        specification: &ResourceSpecification,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<ResourceHandle> {
+        self.validate(
+            specification,
+            &dependencies
+                .iter()
+                .map(|(id, handle)| (id.clone(), handle.role()))
+                .collect(),
+        )?;
+        let catalog = dependencies
+            .get(&self.catalog)
+            .context("native query-snapshot catalogue is unavailable")?
+            .get::<QueryResultsCatalog>()?;
+        anyhow::ensure!(
+            catalog.graph_id() == graph,
+            "query-snapshot catalogue belongs to another graph"
+        );
+        Ok(ResourceHandle::new(
+            ResourceRole::QueryCatalog,
+            Arc::new(crate::computation::NativeQuerySnapshotsResource::new(
+                catalog.as_ref().clone(),
+                self.queries.iter().cloned(),
+                std::time::Duration::from_millis(self.timeout_ms),
+                self.max_readers,
+            )?),
+        ))
+    }
+}
+
 pub(super) fn consumer_provider(
     instance: &str,
     graph: &str,

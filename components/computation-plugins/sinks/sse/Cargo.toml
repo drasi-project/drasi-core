@@ -22,6 +22,7 @@ kind = "sink-sse"
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-network-common = { workspace = true }
 drasi-computation-contracts = { workspace = true }
+drasi-reaction-common = { workspace = true, features = ["sse"] }
 anyhow = "1"
 async-trait = "0.1"
 async-stream = "0.3"

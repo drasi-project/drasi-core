@@ -42,6 +42,10 @@ use testcontainers::{
 use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls};
 
+#[path = "native_transactions/libraries.rs"]
+mod libraries;
+#[path = "native_transactions/ordinary.rs"]
+mod ordinary;
 #[path = "native_transactions/snapshot.rs"]
 mod snapshot;
 #[path = "native_transactions/tls.rs"]
@@ -201,7 +205,7 @@ async fn query_with_recovery(
     ));
     ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
-            graph_id: "native-postgres".into(),
+            graph_id: progress.graph_id().into(),
             id: ComponentId::try_new("query")?,
             query: "MATCH (n:person) RETURN n.id AS id, n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,

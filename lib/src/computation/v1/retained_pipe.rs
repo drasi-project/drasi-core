@@ -329,11 +329,210 @@ impl Drop for Ack {
 struct Receiver {
     shared: Arc<Shared>,
     gap_policy: ReplayGapPolicy,
+    batch: Option<BatchCollection>,
+}
+
+struct BatchCollection {
+    buffer: super::pipe::batching::BatchBuffer,
+    lease: Arc<BatchLease>,
+}
+
+struct BatchLease {
+    shared: Arc<Shared>,
+    cursor: tokio::sync::Mutex<BatchCursor>,
+}
+struct BatchCursor {
+    next: Option<u64>,
+    interrupted: bool,
+}
+impl Drop for BatchLease {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.lock().unwrap_or_else(|error| {
+            log::error!("Releasing retained batch in poisoned state: {error}");
+            error.into_inner()
+        });
+        state.delivery_pending = false;
+        drop(state);
+        self.shared.store.notify().notify_waiters();
+    }
+}
+struct BatchAck {
+    lease: Arc<BatchLease>,
+    position: u64,
+}
+#[async_trait]
+impl Acknowledgement for BatchAck {
+    async fn complete(self: Box<Self>, outcome: HandlingOutcome) -> Result<(), PipeError> {
+        if self.lease.shared.lock()?.cancelled || !self.lease.shared.current() {
+            return Err(PipeError::Closed);
+        }
+        let mut cursor = self.lease.cursor.lock().await;
+        if cursor.interrupted || Some(self.position) != cursor.next {
+            return Err(PipeError::Backend(anyhow::anyhow!(
+                "retained batch acknowledgement would skip uncompleted work"
+            )));
+        }
+        match outcome {
+            HandlingOutcome::Handled => {
+                // Cancellation during persistence must fence the remaining lease.
+                cursor.interrupted = true;
+                self.lease
+                    .shared
+                    .store
+                    .acknowledge(self.lease.shared.generation, self.position)
+                    .await?;
+                cursor.next = self.position.checked_add(1);
+                cursor.interrupted = false;
+                Ok(())
+            }
+            HandlingOutcome::Failed { reason } => {
+                log::warn!(
+                    "Retained batch delivery {} remains unacknowledged: {reason}",
+                    self.position
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl EnvelopeReceiver for Receiver {
+    fn supports_batch_receive(&self) -> bool {
+        true
+    }
+    fn take_pending_batch(&mut self) -> Result<Vec<Delivery>, PipeError> {
+        if self.shared.lock()?.cancelled || !self.shared.current() {
+            return Err(PipeError::Closed);
+        }
+        Ok(self
+            .batch
+            .take()
+            .map(|batch| batch.buffer.deliveries.into_iter().collect())
+            .unwrap_or_default())
+    }
+
+    async fn receive_batch(
+        &mut self,
+        limits: super::SinkBatching,
+        port: &super::PortId,
+    ) -> Result<Vec<Delivery>, PipeError> {
+        limits.validate().map_err(PipeError::Backend)?;
+        let shared = self.shared.clone();
+        loop {
+            if self.shared.lock()?.cancelled || !self.shared.current() {
+                return Err(PipeError::Closed);
+            }
+            if self.batch.as_ref().is_some_and(|batch| batch.buffer.full()) {
+                return self.take_pending_batch();
+            }
+            let notified = shared.store.notify().notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let pending = {
+                let state = self.shared.lock()?;
+                if state.cancelled || !self.shared.current() {
+                    return Err(PipeError::Closed);
+                }
+                state.delivery_pending && self.batch.is_none()
+            };
+            if pending {
+                notified.await;
+                continue;
+            }
+            let after = match &self.batch {
+                Some(batch) => batch.buffer.after,
+                None => self.shared.store.progress(self.shared.generation).await?,
+            };
+            match self.shared.store.next(self.shared.generation, after).await {
+                Ok(Some(stored)) => {
+                    let bytes = match &self.batch {
+                        Some(batch) => batch.buffer.size(&stored.envelope)?,
+                        None => super::SinkBatching::input_size(&super::InputEnvelope {
+                            port: port.clone(),
+                            envelope: stored.envelope.clone(),
+                        })
+                        .map_err(PipeError::Backend)?,
+                    };
+                    if self.batch.is_none() {
+                        let buffer = super::pipe::batching::BatchBuffer::new(limits, port.clone())?;
+                        let mut state = self.shared.lock()?;
+                        if state.cancelled || !self.shared.current() {
+                            return Err(PipeError::Closed);
+                        }
+                        state.delivery_pending = true;
+                        self.batch = Some(BatchCollection {
+                            buffer,
+                            lease: Arc::new(BatchLease {
+                                shared: self.shared.clone(),
+                                cursor: tokio::sync::Mutex::new(BatchCursor {
+                                    next: Some(stored.position),
+                                    interrupted: false,
+                                }),
+                            }),
+                        });
+                    }
+                    let batch = self.batch.as_mut().expect("batch lease");
+                    if !batch.buffer.can_push(&stored.envelope, bytes) {
+                        return self.take_pending_batch();
+                    }
+                    let delivery = Delivery::new(
+                        stored.envelope,
+                        Some(Box::new(BatchAck {
+                            lease: batch.lease.clone(),
+                            position: stored.position,
+                        })),
+                    );
+                    batch.buffer.push(stored.position, delivery, bytes);
+                }
+                Err(PipeError::PositionUnavailable { .. }) if self.batch.is_some() => {
+                    return self.take_pending_batch()
+                }
+                Err(PipeError::PositionUnavailable { requested, oldest })
+                    if self.gap_policy == ReplayGapPolicy::SkipWithNotification =>
+                {
+                    log::warn!("Retained pipe explicitly skips gap after {requested} to {oldest}");
+                    self.shared
+                        .store
+                        .acknowledge(self.shared.generation, oldest.saturating_sub(1))
+                        .await?;
+                }
+                Err(error) => return Err(error),
+                Ok(None) => {
+                    let closed = {
+                        let state = self.shared.lock()?;
+                        state.closed && state.sends == 0
+                    };
+                    if closed {
+                        return self.take_pending_batch();
+                    }
+                    if let Some(batch) = &self.batch {
+                        tokio::select! {
+                            _ = notified => {},
+                            _ = tokio::time::sleep_until(batch.buffer.deadline) => return self.take_pending_batch(),
+                        }
+                    } else {
+                        notified.await;
+                    }
+                }
+            }
+        }
+    }
+
     async fn receive(&mut self) -> Result<Option<Delivery>, PipeError> {
+        if let Some(batch) = &mut self.batch {
+            if self.shared.lock()?.cancelled || !self.shared.current() {
+                return Ok(None);
+            }
+            batch.buffer.finished = true;
+            let delivery = batch.buffer.deliveries.pop_front();
+            if batch.buffer.deliveries.is_empty() {
+                self.batch = None;
+            }
+            if delivery.is_some() {
+                return Ok(delivery);
+            }
+        }
         loop {
             let notified = self.shared.store.notify().notified();
             tokio::pin!(notified);
@@ -425,7 +624,11 @@ impl RetainedPipe {
         Ok(Self {
             capabilities,
             sender: Arc::new(Sender(shared.clone())),
-            receiver: Some(Receiver { shared, gap_policy }),
+            receiver: Some(Receiver {
+                shared,
+                gap_policy,
+                batch: None,
+            }),
         })
     }
     pub fn control(&self) -> Arc<dyn PipeControl> {

@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, InputEnvelope, OutputEnvelope, SinkCompletion,
+    ComponentDescriptor, ComponentId, InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion,
     SourceProgressView, WakeupSource,
 };
 use drasi_core_types::interface::StorageDurability;
@@ -63,6 +63,12 @@ pub trait NativeTransformer: NativeComponent {
 
 #[async_trait]
 pub trait NativeSink: NativeComponent {
+    fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {
+        Ok(None)
+    }
+    async fn handle_batch(&mut self, _inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
+        anyhow::bail!("this sink does not implement host-owned batching")
+    }
     fn supports_snapshot(&self) -> bool {
         false
     }

@@ -35,8 +35,21 @@ impl HttpSource {
         scope: Option<&Scope>,
         admission: Option<NativeAdmission>,
     ) -> Result<Self> {
+        if admission.is_some() {
+            if let Some(webhooks) = &config.webhooks {
+                anyhow::ensure!(
+                    webhooks
+                        .routes
+                        .iter()
+                        .flat_map(|route| &route.mappings)
+                        .all(|mapping| mapping.effective_from.is_some()),
+                    "durable webhook mappings require explicit effective_from timestamps"
+                );
+            }
+        }
         Ok(Self {
-            runtime: SourceRuntime::new(descriptor, config.ingress(), scope, admission)?,
+            runtime: SourceRuntime::new(descriptor, config.ingress(), scope, admission)?
+                .with_adaptive(config.adaptive_settings()?)?,
             config,
         })
     }
@@ -54,6 +67,11 @@ impl NativeComponent for HttpSource {
             .config
             .max_batch_events
             .expect("validated HTTP batch limit");
+        let webhooks = self
+            .config
+            .webhooks
+            .clone()
+            .map(crate::webhook::Webhooks::new);
         self.runtime
             .start(move |listener, ingress| {
                 serve(
@@ -61,6 +79,7 @@ impl NativeComponent for HttpSource {
                     Arc::new(Ingress {
                         shared: ingress,
                         max_batch_events,
+                        webhooks,
                     }),
                 )
             })
@@ -80,6 +99,7 @@ impl NativeSource for HttpSource {
 pub(crate) struct Ingress {
     shared: Arc<SharedIngress>,
     pub max_batch_events: usize,
+    pub(crate) webhooks: Option<crate::webhook::Webhooks>,
 }
 
 impl std::ops::Deref for Ingress {
@@ -91,14 +111,14 @@ impl std::ops::Deref for Ingress {
 }
 
 #[derive(Serialize)]
-struct EventResponse {
-    success: bool,
-    message: String,
+pub(crate) struct EventResponse {
+    pub success: bool,
+    pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    events_processed: usize,
+    pub error: Option<String>,
+    pub events_processed: usize,
 }
-fn failure(status: StatusCode, error: impl ToString, accepted: usize) -> Response {
+pub(crate) fn failure(status: StatusCode, error: impl ToString, accepted: usize) -> Response {
     let error = error.to_string();
     eprintln!("drasi.network HTTP admission failed: accepted={accepted} error={error}");
     (
@@ -177,7 +197,7 @@ async fn health(State(ingress): State<Arc<Ingress>>) -> Response {
         return failure(StatusCode::SERVICE_UNAVAILABLE, "source stopped", 0);
     }
     Json(
-        serde_json::json!({"status":"healthy","service":"http-source","features":["batch-endpoint"],
+        serde_json::json!({"status":"healthy","service":"http-source","features":["batch-endpoint", "webhooks"],
         "volatile":ingress.durable().is_none()}),
     )
     .into_response()
@@ -215,17 +235,33 @@ async fn request_scope(
 }
 async fn serve(listener: TcpListener, ingress: Arc<Ingress>) -> Result<()> {
     let cancel = ingress.cancel.clone();
-    let routes = Router::new()
-        .route("/sources/:source/events", post(submit))
-        .route("/sources/:source/events/batch", post(batch))
+    let mut routes = Router::new()
         .route("/health", get(health))
-        .merge(crate::durable_http::routes())
+        .merge(crate::durable_http::routes());
+    routes = if ingress.webhooks.is_some() {
+        routes.fallback(crate::webhook::handle)
+    } else {
+        routes
+            .route("/sources/:source/events", post(submit))
+            .route("/sources/:source/events/batch", post(batch))
+    };
+    let routes = routes
         .layer(DefaultBodyLimit::max(ingress.config.max_message_bytes))
         .layer(middleware::from_fn_with_state(
             ingress.clone(),
             request_scope,
         ))
-        .with_state(ingress);
+        .with_state(ingress.clone());
+    let routes = if let Some(cors) = ingress
+        .webhooks
+        .as_ref()
+        .and_then(|webhooks| webhooks.config.cors.as_ref())
+        .filter(|cors| cors.enabled)
+    {
+        routes.layer(drasi_http_common::webhook::cors::build_cors_layer(cors)?)
+    } else {
+        routes
+    };
     axum::serve(listener, routes)
         .with_graceful_shutdown(cancel.cancelled_owned())
         .await?;

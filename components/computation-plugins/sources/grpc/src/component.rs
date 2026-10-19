@@ -125,6 +125,7 @@ impl source::source_service_server::SourceService for SourceService {
         let mut input = request.into_inner();
         let output = async_stream::try_stream! {
             let _permit = permit;
+            let mut events_processed = 0u64;
             loop {
                 let event = tokio::select! {
                     biased;
@@ -138,16 +139,20 @@ impl source::source_service_server::SourceService for SourceService {
                     Err(error) => {
                         eprintln!("drasi.network gRPC stream invalid event: {error:#}");
                         yield source::StreamEventResponse {
-                            success:false, message:"Invalid event data".into(), error:error.to_string(), events_processed:0,
+                            success:false, message:"Invalid event data".into(), error:error.to_string(), events_processed,
                         };
                         break;
                     }
                 };
+                let next = events_processed.checked_add(1)
+                    .ok_or_else(|| Status::resource_exhausted("gRPC stream event count exhausted"))?;
                 ingress.admit(vec![change]).await.map_err(|error| Status::unavailable(format!(
                     "admission failed after {} events: {:#}", error.accepted, error.error)))?;
-                // Delta counts: test-run-host sums responses in both dispatchers.
+                events_processed = next;
+                // The published SourceService reports a cumulative accepted
+                // prefix. Consumers validate the final total; they do not sum it.
                 yield source::StreamEventResponse {
-                    success:true, message:"Event processed successfully".into(), error:String::new(), events_processed:1,
+                    success:true, message:"Event processed successfully".into(), error:String::new(), events_processed,
                 };
             }
         };

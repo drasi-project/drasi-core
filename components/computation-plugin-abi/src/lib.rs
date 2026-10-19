@@ -32,9 +32,11 @@ pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
+pub mod batching;
 pub mod bootstrap;
 pub mod configuration;
 pub mod consumer;
+pub mod query_snapshots;
 pub mod recovery;
 pub mod services;
 
@@ -259,6 +261,8 @@ pub mod operation {
     pub const SNAPSHOT: u32 = 13;
     pub const CONTROL: u32 = 14;
     pub const TRANSACT: u32 = 15;
+    /// Available only after negotiating `batching::PluginBatchingV1`.
+    pub const HANDLE_BATCH: u32 = 16;
 }
 
 pub const POLL_PENDING: u32 = 0;

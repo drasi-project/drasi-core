@@ -354,6 +354,52 @@ fn plugin() -> Arc<NativePlugin> {
     .unwrap()
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn statically_linked_components_retain_their_definition_after_registration(
+) -> anyhow::Result<()> {
+    let plugin = NativePlugin::from_definition(definition()?)?;
+    assert_eq!(plugin.factories().len(), 8);
+    assert_eq!(plugin.bootstrap_factories().len(), 2);
+    let factory = plugin.factories()[0].clone();
+    drop(plugin);
+    let mut source =
+        factory.create_component(ComponentId::try_new("linked")?, json!({"count": 2}))?;
+    drop(factory);
+    source.start().await?;
+    for sequence in [1, 2] {
+        let output = source.next().await?.expect("configured source output");
+        assert_eq!(output.envelope.system().sequence(), sequence);
+    }
+    assert!(source.next().await?.is_none());
+    source.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn statically_linked_bootstrap_uses_the_existing_native_factory_contract(
+) -> anyhow::Result<()> {
+    use tokio_stream::StreamExt;
+
+    let plugin = NativePlugin::from_definition(definition()?)?;
+    let bootstrap = plugin.bootstrap_factories()[0].create_provider(
+        ComponentId::try_new("linked-bootstrap")?,
+        json!({"mode": "no-snapshot", "count": 2}),
+        None,
+        None,
+    )?;
+    drop(plugin);
+    bootstrap.prepare().await?;
+    let mut snapshot = bootstrap.snapshot().await?;
+    let mut count = 0;
+    while let Some(envelope) = snapshot.changes.next().await {
+        assert_eq!(envelope?.changes().operations().len(), 1);
+        count += 1;
+    }
+    assert_eq!(count, 2);
+    bootstrap.stop().await?;
+    Ok(())
+}
+
 fn panic_code(error: &anyhow::Error) -> u32 {
     error
         .chain()

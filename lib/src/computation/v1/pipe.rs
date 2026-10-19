@@ -185,6 +185,30 @@ pub trait EnvelopeSender: Send + Sync {
 /// sequence, never wall-clock timestamps.
 #[async_trait]
 pub trait EnvelopeReceiver: Send + Sync {
+    fn supports_batch_receive(&self) -> bool {
+        false
+    }
+
+    /// Optional bounded lease collection. Providers retain any partially
+    /// collected deliveries on the receiver across cancellation. Empty means
+    /// closed and drained, never a temporarily empty queue.
+    async fn receive_batch(
+        &mut self,
+        _limits: super::SinkBatching,
+        _port: &super::PortId,
+    ) -> std::result::Result<Vec<Delivery>, PipeError> {
+        Err(PipeError::Backend(anyhow::anyhow!(
+            "receiver does not support batch leases"
+        )))
+    }
+
+    /// Drain an interrupted collection without waiting, for host quiescence.
+    fn take_pending_batch(&mut self) -> std::result::Result<Vec<Delivery>, PipeError> {
+        Err(PipeError::Backend(anyhow::anyhow!(
+            "receiver does not support batch leases"
+        )))
+    }
+
     /// None means closed and drained, not temporarily empty. Cancellation must
     /// not silently acknowledge or discard an event removed from a volatile queue;
     /// durable providers retain responsibility until their negotiated completion.
@@ -192,6 +216,8 @@ pub trait EnvelopeReceiver: Send + Sync {
     /// drain accepted events before returning None on a graceful close.
     async fn receive(&mut self) -> std::result::Result<Option<Delivery>, PipeError>;
 }
+
+pub(crate) mod batching;
 
 /// In-process pipe interface. The graph validates capabilities/requirements
 /// before starting components; [`super::BoundedPipe`] supplies volatile delivery.

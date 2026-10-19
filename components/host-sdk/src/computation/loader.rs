@@ -23,6 +23,29 @@ pub struct NativePlugin {
     bootstrap_factories: Vec<Arc<NativeBootstrapFactory>>,
 }
 impl NativePlugin {
+    /// Link an in-process SDK plugin through the same validated catalogue and
+    /// operation tables used for a separately loaded native library.
+    pub fn from_definition(
+        definition: drasi_computation_plugin_sdk::PluginDefinition,
+    ) -> anyhow::Result<Arc<Self>> {
+        let exported = drasi_computation_plugin_sdk::ExportedPlugin::new(definition)?;
+        // Exported handles retain the definition; metadata is copied before the
+        // temporary export backing is released. Statically linked code cannot unload.
+        unsafe {
+            Self::from_exports(
+                || exported.metadata(),
+                |out| exported.entry(out),
+                || Some(exported.services()),
+                || Some(exported.recovery()),
+                || Some(exported.bootstrap()),
+                || Some(exported.consumer()),
+                || Some(exported.configuration()),
+                || Some(exported.batching()),
+                || Some(exported.query_snapshots()),
+            )
+        }
+    }
+
     pub fn metadata(&self) -> &PluginMetadata {
         &self.metadata
     }
@@ -143,11 +166,42 @@ impl NativePlugin {
         consumer: Option<abi::consumer::ConsumerFn>,
         configuration: Option<abi::configuration::ConfigurationFn>,
     ) -> anyhow::Result<Arc<Self>> {
-        let manifest = unsafe { read_metadata(metadata)? };
-        let mut configurations = unsafe { read_configuration(configuration, &manifest)? };
-        let consumer = consumer
+        unsafe {
+            Self::from_exports(
+                || metadata(),
+                |out| take_status(entry(out)),
+                || services.map(|entry| entry()),
+                || recovery.map(|entry| entry()),
+                || bootstrap.map(|entry| entry()),
+                || consumer.map(|entry| entry()),
+                || configuration.map(|entry| entry()),
+                || None,
+                || None,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn from_exports(
+        metadata: impl FnOnce() -> *const abi::Metadata,
+        entry: impl FnOnce(
+            *mut abi::PluginHandle,
+        ) -> Result<(), drasi_computation_plugin_sdk::transport::Failure>,
+        services: impl FnOnce() -> Option<*const abi::services::PluginServicesV1>,
+        recovery: impl FnOnce() -> Option<*const abi::recovery::PluginRecoveryV1>,
+        bootstrap: impl FnOnce() -> Option<*const abi::bootstrap::PluginBootstrapV1>,
+        consumer: impl FnOnce() -> Option<*const abi::consumer::PluginConsumerV1>,
+        configuration: impl FnOnce() -> Option<*const abi::configuration::ConfigurationMetadataV1>,
+        batching: impl FnOnce() -> Option<*const abi::batching::PluginBatchingV1>,
+        query_snapshots: impl FnOnce() -> Option<*const abi::query_snapshots::PluginQuerySnapshotsV1>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let manifest = unsafe { read_metadata(metadata())? };
+        let mut configurations = unsafe { read_configuration(configuration(), &manifest)? };
+        let batching = unsafe { read_batching(batching())? };
+        let query_snapshots = unsafe { read_query_snapshots(query_snapshots())? };
+        let consumer = consumer()
             .map(|entry| -> anyhow::Result<_> {
-                let table = *unsafe { checked_table(entry())? };
+                let table = *unsafe { checked_table(entry)? };
                 anyhow::ensure!(
                     table.version == abi::consumer::VERSION
                         && table.reserved == 0
@@ -161,10 +215,10 @@ impl NativePlugin {
                 Ok(table)
             })
             .transpose()?;
-        let bootstrap = unsafe { read_bootstrap(bootstrap)? };
-        let recovery = recovery
+        let bootstrap = unsafe { read_bootstrap(bootstrap())? };
+        let recovery = recovery()
             .map(|entry| -> anyhow::Result<_> {
-                let table = *unsafe { checked_table(entry())? };
+                let table = *unsafe { checked_table(entry)? };
                 anyhow::ensure!(
                     table.version == abi::recovery::VERSION
                         && table.reserved == 0
@@ -176,9 +230,9 @@ impl NativePlugin {
                 Ok(table)
             })
             .transpose()?;
-        let services = services
+        let services = services()
             .map(|entry| -> anyhow::Result<_> {
-                let table = *unsafe { checked_table(entry())? };
+                let table = *unsafe { checked_table(entry)? };
                 anyhow::ensure!(
                     table.version == abi::services::VERSION
                         && table.reserved == 0
@@ -190,7 +244,7 @@ impl NativePlugin {
             })
             .transpose()?;
         let mut handle = abi::PluginHandle::null();
-        unsafe { take_status(entry(&mut handle))? };
+        entry(&mut handle)?;
         let plugin = Arc::new(unsafe { PluginOwner::new(handle)? });
         let schemas: Vec<_> = manifest
             .schemas
@@ -209,6 +263,30 @@ impl NativePlugin {
         for (index, metadata) in manifest.factories.iter().enumerate() {
             let mut handle = abi::FactoryHandle::null();
             let index = u32::try_from(index).context("too many native factories")?;
+            let sink_batching = if let Some(extension) = batching {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                wire::decode::<bool>(&response)?.then_some(extension)
+            } else {
+                None
+            };
+            let snapshot_reads = if let Some(extension) = query_snapshots {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                wire::decode::<bool>(&response)?.then_some(extension)
+            } else {
+                None
+            };
             let consumer_binding = if let Some(extension) = consumer {
                 let response = unsafe {
                     drasi_computation_plugin_sdk::transport::take_reply(extension
@@ -298,6 +376,8 @@ impl NativePlugin {
                     source_progress,
                 )?
                 .with_consumer(consumer_binding)?
+                .with_batching(sink_batching)?
+                .with_query_snapshots(snapshot_reads)?
                 .with_configuration_details(configurations.remove(&metadata.implementation))
             }));
         }
@@ -384,6 +464,14 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         unsafe { library.get::<abi::configuration::ConfigurationFn>(abi::configuration::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let batching = unsafe { library.get::<abi::batching::BatchingFn>(abi::batching::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let query_snapshots = unsafe {
+        library.get::<abi::query_snapshots::QuerySnapshotsFn>(abi::query_snapshots::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -391,6 +479,8 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && bootstrap.is_none()
         && consumer.is_none()
         && configuration.is_none()
+        && batching.is_none()
+        && query_snapshots.is_none()
     {
         return Ok(None);
     }
@@ -403,20 +493,22 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     let entry =
         entry.ok_or_else(|| anyhow::anyhow!("native computation entry symbol is missing"))?;
     Ok(Some(unsafe {
-        NativePlugin::from_entry_points_with_configuration(
-            metadata,
-            entry,
-            services,
-            recovery,
-            bootstrap,
-            consumer,
-            configuration,
+        NativePlugin::from_exports(
+            || metadata(),
+            |out| take_status(entry(out)),
+            || services.map(|entry| entry()),
+            || recovery.map(|entry| entry()),
+            || bootstrap.map(|entry| entry()),
+            || consumer.map(|entry| entry()),
+            || configuration.map(|entry| entry()),
+            || batching.map(|entry| entry()),
+            || query_snapshots.map(|entry| entry()),
         )?
     }))
 }
 
-unsafe fn read_metadata(metadata: abi::MetadataFn) -> anyhow::Result<PluginMetadata> {
-    let metadata = unsafe { checked_table(metadata())? };
+unsafe fn read_metadata(metadata: *const abi::Metadata) -> anyhow::Result<PluginMetadata> {
+    let metadata = unsafe { checked_table(metadata)? };
     let target = std::str::from_utf8(unsafe { borrowed_bytes(metadata.target, 4096)? })?;
     anyhow::ensure!(
         target == TARGET,
@@ -431,7 +523,7 @@ unsafe fn read_metadata(metadata: abi::MetadataFn) -> anyhow::Result<PluginMetad
 }
 
 unsafe fn read_configuration(
-    entry: Option<abi::configuration::ConfigurationFn>,
+    entry: Option<*const abi::configuration::ConfigurationMetadataV1>,
     manifest: &PluginMetadata,
 ) -> anyhow::Result<
     std::collections::BTreeMap<
@@ -442,7 +534,7 @@ unsafe fn read_configuration(
     let Some(entry) = entry else {
         return Ok(Default::default());
     };
-    let metadata = unsafe { checked_table(entry())? };
+    let metadata = unsafe { checked_table(entry)? };
     anyhow::ensure!(
         metadata.version == abi::configuration::VERSION && metadata.reserved == 0,
         "incompatible native configuration-description extension"
@@ -461,17 +553,53 @@ unsafe fn read_configuration(
 }
 
 unsafe fn read_bootstrap(
-    entry: Option<abi::bootstrap::BootstrapFn>,
+    entry: Option<*const abi::bootstrap::PluginBootstrapV1>,
 ) -> anyhow::Result<Option<abi::bootstrap::PluginBootstrapV1>> {
     entry
         .map(|entry| {
-            let table = *unsafe { checked_table(entry())? };
+            let table = *unsafe { checked_table(entry)? };
             anyhow::ensure!(
                 table.version == abi::bootstrap::VERSION
                     && table.reserved == 0
                     && table.factories.is_some()
                     && table.create.is_some(),
                 "incompatible or incomplete native bootstrap extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_batching(
+    entry: Option<*const abi::batching::PluginBatchingV1>,
+) -> anyhow::Result<Option<abi::batching::PluginBatchingV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::batching::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.policy.is_some(),
+                "incompatible or incomplete native batching extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_query_snapshots(
+    entry: Option<*const abi::query_snapshots::PluginQuerySnapshotsV1>,
+) -> anyhow::Result<Option<abi::query_snapshots::PluginQuerySnapshotsV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::query_snapshots::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.create.is_some(),
+                "incompatible or incomplete native query-snapshot extension"
             );
             Ok(table)
         })
@@ -498,6 +626,14 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::configuration::ConfigurationFn>(abi::configuration::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let batching = unsafe { library.get::<abi::batching::BatchingFn>(abi::batching::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let query_snapshots = unsafe {
+        library.get::<abi::query_snapshots::QuerySnapshotsFn>(abi::query_snapshots::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && !has_services
@@ -505,6 +641,8 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && bootstrap.is_none()
         && !has_consumer
         && configuration.is_none()
+        && batching.is_none()
+        && query_snapshots.is_none()
     {
         return Ok(None);
     }
@@ -512,9 +650,11 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     anyhow::ensure!(has_entry, "native computation entry symbol is missing");
     let metadata =
         metadata.ok_or_else(|| anyhow::anyhow!("native computation metadata symbol is missing"))?;
-    let manifest = unsafe { read_metadata(metadata)? };
-    unsafe { read_configuration(configuration, &manifest)? };
-    let bootstrap = unsafe { read_bootstrap(bootstrap)? };
+    let manifest = unsafe { read_metadata(metadata())? };
+    unsafe { read_configuration(configuration.map(|entry| entry()), &manifest)? };
+    unsafe { read_batching(batching.map(|entry| entry()))? };
+    unsafe { read_query_snapshots(query_snapshots.map(|entry| entry()))? };
+    let bootstrap = unsafe { read_bootstrap(bootstrap.map(|entry| entry()))? };
     anyhow::ensure!(
         !manifest.factories.is_empty() || bootstrap.is_some(),
         "native plugin has no component factories or bootstrap extension"

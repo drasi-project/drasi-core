@@ -1450,6 +1450,7 @@ impl QosChannel {
                 receiver: Some(Receiver {
                     endpoint,
                     gap_policy,
+                    batch: None,
                 }),
             }),
         })
@@ -1624,10 +1625,216 @@ impl Drop for Ack {
 struct Receiver {
     endpoint: Arc<Endpoint>,
     gap_policy: ReplayGapPolicy,
+    batch: Option<BatchCollection>,
+}
+
+struct BatchCollection {
+    buffer: super::pipe::batching::BatchBuffer,
+    lease: Arc<BatchLease>,
+}
+struct BatchLease {
+    endpoint: Arc<Endpoint>,
+    interrupted: tokio::sync::Mutex<bool>,
+}
+impl Drop for BatchLease {
+    fn drop(&mut self) {
+        self.endpoint
+            .binding
+            .pending
+            .store(false, Ordering::Release);
+        self.endpoint.channel.changed.notify_waiters();
+    }
+}
+struct BatchAck {
+    lease: Arc<BatchLease>,
+    position: u64,
 }
 #[async_trait]
+impl Acknowledgement for BatchAck {
+    async fn complete(self: Box<Self>, outcome: HandlingOutcome) -> Result<(), PipeError> {
+        let mut interrupted = self.lease.interrupted.lock().await;
+        if *interrupted {
+            return Err(backend(
+                "interrupted QoS batch acknowledgement requires reconstruction",
+            ));
+        }
+        match outcome {
+            HandlingOutcome::Handled => {
+                *interrupted = true;
+                self.lease.endpoint.complete(self.position, false).await?;
+                *interrupted = false;
+                Ok(())
+            }
+            HandlingOutcome::Failed { reason } => {
+                log::warn!(
+                    "QoS batch delivery {} remains unacknowledged: {reason}",
+                    self.position
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl EnvelopeReceiver for Receiver {
+    fn supports_batch_receive(&self) -> bool {
+        true
+    }
+    fn take_pending_batch(&mut self) -> Result<Vec<Delivery>, PipeError> {
+        self.endpoint.check()?;
+        Ok(self
+            .batch
+            .take()
+            .map(|batch| batch.buffer.deliveries.into_iter().collect())
+            .unwrap_or_default())
+    }
+
+    async fn receive_batch(
+        &mut self,
+        limits: super::SinkBatching,
+        port: &super::PortId,
+    ) -> Result<Vec<Delivery>, PipeError> {
+        limits.validate().map_err(PipeError::Backend)?;
+        let endpoint = self.endpoint.clone();
+        loop {
+            self.endpoint.check()?;
+            if self.batch.as_ref().is_some_and(|batch| batch.buffer.full()) {
+                return self.take_pending_batch();
+            }
+            let notified = endpoint.channel.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let mut state = self.endpoint.channel.state.lock().await;
+            self.endpoint.check()?;
+            let cursor = &state.metadata.cursors[&self.endpoint.subscriber];
+            if cursor.retired {
+                return Err(backend("QoS subscriber is retired"));
+            }
+            if self.endpoint.binding.pending.load(Ordering::Acquire) && self.batch.is_none() {
+                drop(state);
+                self.endpoint.channel.wait_changed(notified).await?;
+                continue;
+            }
+            let after = self
+                .batch
+                .as_ref()
+                .map_or(cursor.position, |batch| batch.buffer.after);
+            if let Some(oldest) = state.oldest {
+                if after < oldest - 1 {
+                    drop(state);
+                    if self.batch.is_some() {
+                        return self.take_pending_batch();
+                    }
+                    if self.gap_policy == ReplayGapPolicy::Strict {
+                        return Err(PipeError::PositionUnavailable {
+                            requested: after,
+                            oldest,
+                        });
+                    }
+                    self.endpoint.complete(oldest - 1, true).await?;
+                    log::warn!(
+                        "QoS subscriber {} explicitly skips positions {}..{}",
+                        self.endpoint.subscriber,
+                        after + 1,
+                        oldest
+                    );
+                    continue;
+                }
+            }
+            if self.endpoint.channel.shared.is_some()
+                && state.page_limits.is_some()
+                && after.checked_add(1).is_some_and(|next| {
+                    next <= state.metadata.head && !state.entries.contains_key(&next)
+                })
+            {
+                drop(state);
+                // Shared page refill owns the storage gate before the journal
+                // lock. Do not bypass its established lock ordering to prefetch.
+                if self.batch.is_some() {
+                    return self.take_pending_batch();
+                }
+                let delivery = self
+                    .endpoint
+                    .channel
+                    .refill_shared_delivery(&self.endpoint)
+                    .await?;
+                self.endpoint.check()?;
+                if let Some(delivery) = delivery {
+                    return Ok(vec![delivery]);
+                }
+                continue;
+            }
+            self.endpoint.channel.cache_after(&mut state, after).await?;
+            self.endpoint.check()?;
+            let candidate = state
+                .entries
+                .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+                .next()
+                .map(|(position, envelope)| (*position, envelope.clone()));
+            if let Some((position, envelope)) = candidate {
+                let bytes = match &self.batch {
+                    Some(batch) => batch.buffer.size(&envelope)?,
+                    None => super::SinkBatching::input_size(&super::InputEnvelope {
+                        port: port.clone(),
+                        envelope: envelope.clone(),
+                    })
+                    .map_err(PipeError::Backend)?,
+                };
+                if self.batch.is_none() {
+                    let buffer = super::pipe::batching::BatchBuffer::new(limits, port.clone())?;
+                    self.endpoint.binding.pending.store(true, Ordering::Release);
+                    self.batch = Some(BatchCollection {
+                        buffer,
+                        lease: Arc::new(BatchLease {
+                            endpoint: self.endpoint.clone(),
+                            interrupted: tokio::sync::Mutex::new(false),
+                        }),
+                    });
+                }
+                let batch = self.batch.as_mut().expect("batch lease");
+                if !batch.buffer.can_push(&envelope, bytes) {
+                    drop(state);
+                    return self.take_pending_batch();
+                }
+                let delivery = Delivery::new(
+                    envelope,
+                    Some(Box::new(BatchAck {
+                        lease: batch.lease.clone(),
+                        position,
+                    })),
+                );
+                batch.buffer.push(position, delivery, bytes);
+                continue;
+            }
+            if self.endpoint.binding.closed.load(Ordering::Acquire) {
+                drop(state);
+                return self.take_pending_batch();
+            }
+            drop(state);
+            if let Some(batch) = &self.batch {
+                tokio::select! {
+                    result = self.endpoint.channel.wait_changed(notified) => result?,
+                    _ = tokio::time::sleep_until(batch.buffer.deadline) => return self.take_pending_batch(),
+                }
+            } else {
+                self.endpoint.channel.wait_changed(notified).await?;
+            }
+        }
+    }
+
     async fn receive(&mut self) -> Result<Option<Delivery>, PipeError> {
+        if let Some(batch) = &mut self.batch {
+            self.endpoint.check()?;
+            batch.buffer.finished = true;
+            let delivery = batch.buffer.deliveries.pop_front();
+            if batch.buffer.deliveries.is_empty() {
+                self.batch = None;
+            }
+            if delivery.is_some() {
+                return Ok(delivery);
+            }
+        }
         loop {
             let notified = self.endpoint.channel.changed.notified();
             tokio::pin!(notified);

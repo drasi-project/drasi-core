@@ -24,7 +24,12 @@ The PostgreSQL Replication Source is a Change Data Capture (CDC) plugin for Dras
 ## Native complete-transaction source
 
 `native::PostgresTransactionSource` (also exported as `NativePostgresSource`)
-is a separate, opt-in Rust ComputationGraph source. It does **not** replace the
+is the direct Rust host binding for the
+[native PostgreSQL source library](../../computation-plugins/sources/postgres).
+That library and the separate
+[coordinated bootstrap library](../../computation-plugins/bootstrappers/postgres)
+support static SDK registration and independently loaded native cdylibs in the
+hosting DrasiLib instance's single graph. They do **not** replace the
 legacy `PostgresReplicationSource` per-change contract or its plugin ABI. Use a native graph/pipeline,
 not the ordinary legacy source builder.
 
@@ -41,11 +46,13 @@ stream and connect it to the query's complete-transaction `in` port.
 WAL feedback follows this owner's committed input, never queue acceptance.
 This protects query state/output recovery, not atomic external reaction effects.
 
-The source and coordinated constructors also accept a `SourceProgressReader`.
+The direct source and coordinated constructors also accept a `SourceProgressReader`.
 Local readers retain the actual progress owner; an external read-only provider
-does not supply local ownership proof. Source/bootstrap pairing requires the
-same reader handle and read failures propagate before WAL feedback. This is
-preparation for host-provided progress, not a completed native plugin ABI service.
+does not supply local ownership proof. Native SDK implementations receive only a
+`SourceProgressView`; the Host SDK retains and validates the actual owner at the
+boundary. Read failures propagate before WAL feedback. Separately loaded source
+and bootstrap libraries share the committed position, including its managed slot,
+not a Rust object or an independent checkpoint store.
 
 `PostgresTransactionConfig` has these fields (required unless marked optional):
 
@@ -136,11 +143,18 @@ Completed-slot retirement is an operator action: retire it before deprovisioning
 the query and deleting its ownership metadata. Do not share that state or managed
 slot between concurrently running query owners.
 
-The source factory also accepts `coordinated_snapshot: true` with a `snapshot`
+The direct Rust host factory also accepts `coordinated_snapshot: true` with a `snapshot`
 dependency: a `ResourceRole::Bootstrap` handle containing the paired
 `PostgresSnapshot`. The query uses that same object as its bootstrap provider
 (or inside `QueryBootstrapResource`). Construction checks the actual progress
 resource, source, stream and settings rather than trusting resource names.
+
+The SDK-native source factory requires only the actual `source_progress`
+dependency, plus `coordinated_snapshot: true`; attach the separate native bootstrap
+factory to the owner query. Its committed watermark carries the managed slot and
+binding. Both factories verify graph/query scope, and the host checks actual-owner
+identity. Native-library configuration, compilation and qualification commands are
+documented in the linked crate guides.
 
 The initial implementation accepts ordinary non-partitioned tables and complete
 insert/update/delete publications. It rejects row/column filters, inheritance and
@@ -148,7 +162,7 @@ partition-root remapping for coordinated snapshots. Keep schema/publication
 definitions stable while running. The legacy bootstrapper is not upgraded to this
 coordinated contract.
 
-**Remaining limitations:** no native cdylib/Server registration, TRUNCATE, streaming/two-phase transaction protocol,
+**Remaining limitations:** TRUNCATE, streaming/two-phase transaction protocol,
 automatic schema/key/publication migration or cross-database transaction.
 Configured keys must be complete and carried by replica identity. Runtime policy
 owns restart after a failure; the source does not silently reconnect at a newer
@@ -172,6 +186,11 @@ query progress. The existing TLS-refusal case also remains required.
 ### Components
 
 The PostgreSQL source consists of several specialized modules:
+
+Connection, decoder, protocol, SCRAM and value/type modules are implemented in
+`drasi-postgres-common` and re-exported at their existing source-crate Rust paths.
+Native replication and snapshots use those same modules; the legacy per-row
+streaming loop remains in this crate.
 
 1. **Connection** (`connection.rs`): Manages the PostgreSQL replication protocol connection, authentication (including SCRAM-SHA-256), and message exchange
 2. **Stream** (`stream.rs`): Handles the continuous WAL streaming loop, message processing, and transaction coordination

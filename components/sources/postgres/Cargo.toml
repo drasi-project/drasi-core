@@ -32,7 +32,10 @@ workspace = true
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
-drasi-postgres-common.workspace = true
+drasi-postgres-common = { workspace = true, features = ["replication"] }
+drasi-computation-source-postgres.workspace = true
+drasi-computation-bootstrap-postgres.workspace = true
+drasi-computation-plugin-sdk.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"
@@ -63,6 +66,8 @@ tokio-stream = "0.1"
 prost-types = "0.12"
 
 [dev-dependencies]
+drasi-host-sdk.workspace = true
+drasi-computation-sink-storedproc-postgres.workspace = true
 drasi-bootstrap-postgres = { workspace = true }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-reaction-application = { workspace = true }

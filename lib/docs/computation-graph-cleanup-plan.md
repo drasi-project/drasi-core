@@ -2,13 +2,21 @@
 
 **Status: stages 0-5 are complete for their stated scope, including the
 controlled performance comparison and Server configuration/API consolidation.
-Stage 6 is starting with the application components in the user-selected
-23-component scope below.
+Stage 6 is in progress, now prioritizing HTTP, gRPC, SSE and PostgreSQL.
 Stages 7-9 remain pending.**
-**Date: 18 October 2026.**
+**Updated: 19 October 2026.**
 **Code baseline:** Core `66e71e3f59eab1becb3df94e86cd7ed78b7e9bd4`,
 Server `1906c439feca8f16bc5c9eafb3658187e3104808`, plus the current
 [remaining-work inventory](computation-graph-remaining-work.md).
+
+**Priority change - user directed, 19 October:** complete the HTTP source,
+reaction and bootstrap, gRPC source and reaction, existing SSE reaction/sink,
+and PostgreSQL source, bootstrap and stored-procedure reaction end to end.
+Review and reuse the legacy implementations and their behavioral assertions.
+Preserve static linking and dynamic loading inside the hosting instance's
+ComputationGraph. Other connector families, application/SQLite migration and
+general cleanup are paused unless strictly required by these components.
+This overrides the earlier execution order and explicitly includes SSE.
 
 ## Execution record
 
@@ -20,8 +28,49 @@ Server `1906c439feca8f16bc5c9eafb3658187e3104808`, plus the current
 | 3 | Completed: explicit dependency waits, deferred query/resource construction, automatic activation, explicit-stop preservation, waiting-graph startup/reconstruction, Server diagnostics and live native-factory registration. Named lifecycle, recovery, public-API and real-library checks pass. This is not qualification of every connector or deployment profile. |
 | 4 | Completed: query/pipeline/source-subscription mode switches, old namespace/hash support and provider/cleanup fallbacks are removed. Functional, recovery, real-plugin, Server, responsiveness, lint and controlled performance checks pass; architecture artifacts are refreshed. |
 | 5 | Completed: one explicit `instances` layout, no first-instance routes or configuration DTO aliases, canonical persistence, store-owned generated IDs, and updated consumers. The full Server matrix, current client builds and selected real browser/dataflow checks pass, with the pre-existing Learning Trading unused-local limitation recorded below. |
-| 6 | Scope settled: the 23 existing components itemized below. Kafka/SQLite reactions and functional gRPC bootstrap are excluded from the first release by user decision. Start with application components, reusing existing logic/native implementations and preserving equivalent test coverage. |
+| 6 | In progress. The earlier 23-component inventory remains below; current work is restricted to the user-prioritized HTTP, gRPC, SSE and PostgreSQL paths and their required dependencies. Reuse existing logic and finish real consumers/static-dynamic hosting before claiming completion. Kafka/SQLite reactions and functional gRPC bootstrap remain excluded. |
 | 7-9 | Pending: old-stack retirement, surviving-code cleanup, and integrated qualification. |
+
+**Current four-family status, 19 October:** HTTP/gRPC now have independent native
+source/sink libraries and HTTP bootstrap, reusing the legacy authentication,
+mapping, rendering and protocol helpers. Actual static/dynamic graph flows and
+the external Server/test-service legacy/native comparison pass, with exact
+ordered output equivalence and independently identified native libraries.
+Their opt-in batching retains inputs and acknowledgements through cancellation
+without changing the default bridge receive path.
+
+The SSE slice now reuses the legacy renderer for query/default templates and
+static/dynamic paths. Its bounded `query_snapshots` capability reads the actual
+host catalogue; it creates neither another evaluator nor a second result cache.
+Static and rebuilt dynamic libraries pass both-runtime graph/lifecycle checks,
+including path limits, stop/restart and foreign-catalogue rejection. Server's
+`nativeQuerySnapshots` recipe preserves JSON/YAML configuration and exact
+resource dependencies. The rebuilt stock Server and Move-a-wall plugin pass the
+real scene/API/SSE/browser checks, including empty/insert/update/delete snapshot
+equivalence between Server and native SSE for the configured queries. All
+isolated processes shut down; existing demo state was not reset. This endpoint
+is a point-in-time read, distinct from the snapshot-first live subscription
+contract below, and SSE remains a volatile notification sink.
+
+PostgreSQL's native transaction source, coordinated bootstrap and stored-procedure
+sink are implemented and qualified against real PostgreSQL and rebuilt native
+libraries. Ordinary per-row delivery, SELECT-only standalone snapshots,
+coordinated row bootstrap and bounded same-worker reconnect also pass their
+focused real-database cases. Safe one-source/many-query
+feedback/replay and gap-free initial CDC bootstrap for a memory query without
+a checkpoint store remain explicit gaps, not weaker substitutes for the actual
+owner/persistent-bootstrap contracts. GPU input now selects native factories and
+compiles, but fresh live GPU qualification is pending. Runtime source-schema
+discovery also remains open. Stage 6 is not complete.
+
+**Next work - user directed, 19 October:** commit and push the current native
+family implementation before changing the shared recovery model. Then fix
+fan-out generically: one source must support multiple subscribing transformers
+(including queries), and one transformer must support multiple subscribing
+transformers and sinks. Preserve every required subscriber's processing/replay
+obligations, independent progress and lifecycle; do not remove ownership guards
+or replace one producer with a separate producer per subscriber. This is an
+existing graph requirement, not a PostgreSQL-only feature or optional scope.
 
 **Dependency policy - user decision during execution:** a valid node may be
 declared before its dependencies are available. The node must say what it is

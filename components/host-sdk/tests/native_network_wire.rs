@@ -315,8 +315,9 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
         GrpcSourceConfig::from_value(json!({"stream":"facilities-db/out"}))?.port,
         50051
     );
+    assert!(HttpSourceConfig::from_value(json!({"stream":"s","adaptiveEnabled":true})).is_ok());
     for config in [
-        json!({"stream":"s","adaptiveEnabled":true}),
+        json!({"stream":"s","adaptiveEnabled":true,"adaptiveMinBatchSize":0}),
         json!({"stream":"s","ingressCapacity":0}),
         json!({"stream":"s","durability":{}}),
         json!({"stream":"s","timeoutMs":0}),
@@ -327,8 +328,12 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
         HttpSinkConfig::parse(json!({"queryId":"q","url":"http://localhost:9001/reaction"}))?;
     assert_eq!(http.stream.as_str(), "q/out");
     assert_eq!(http.headers["x-query-sequence"], "q");
+    assert!(HttpSinkConfig::parse(
+        json!({"queryId":"q","url":"http://localhost","outputTemplates":{}})
+    )
+    .is_ok());
     for config in [
-        json!({"queryId":"q","url":"http://localhost","outputTemplates":{}}),
+        json!({"queryId":"q","url":"http://localhost","outputTemplates":{"defaultTemplte":{}}}),
         json!({"queryId":"q","url":"http://localhost","headers":{"x-query-sequence":"other"}}),
         json!({"queryId":"q","url":"http://localhost","headers":{"x-bad":"line\nbreak"}}),
     ] {
@@ -337,9 +342,14 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
     let grpc = GrpcSinkConfig::parse(json!({"queryId":"q"}))?;
     assert_eq!(grpc.metadata["x-query-sequence"], "q");
     assert_eq!(grpc.max_retries, 5);
+    assert_eq!(
+        GrpcSinkConfig::parse(json!({"queryId":"q","batchSize":2}))?.batch_size,
+        2
+    );
+    assert!(GrpcSinkConfig::parse(json!({"queryId":"q","batching":{"mode":"adaptive"}})).is_ok());
     for config in [
-        json!({"queryId":"q","batchSize":2}),
-        json!({"queryId":"q","batching":{"mode":"adaptive"}}),
+        json!({"queryId":"q","batchSize":0}),
+        json!({"queryId":"q","batching":{"mode":"adaptive","adaptiveMinBatchSize":0}}),
         json!({"queryId":"q","metadata":{"x-query-sequence":"wrong"}}),
         json!({"queryId":"q","connectionRetryAttempts":0}),
     ] {

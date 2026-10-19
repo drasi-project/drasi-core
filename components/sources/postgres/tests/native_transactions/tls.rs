@@ -8,14 +8,14 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
 
-struct Certificates {
+pub(super) struct Certificates {
     ca: String,
     server: String,
     key: String,
 }
 
 impl Certificates {
-    fn new(expired: bool) -> Result<Self> {
+    pub(super) fn new(expired: bool) -> Result<Self> {
         let today = chrono::Utc::now().date_naive();
         let date = |day: chrono::NaiveDate| {
             rcgen::date_time_ymd(day.year(), day.month() as u8, day.day() as u8)
@@ -40,7 +40,7 @@ impl Certificates {
         })
     }
 
-    async fn database(&self) -> Result<Database> {
+    pub(super) async fn database(&self) -> Result<Database> {
         let container = GenericImage::new("postgres", "16-alpine")
             .with_exposed_port(ContainerPort::Tcp(5432))
             .with_wait_for(WaitFor::log(
@@ -87,7 +87,7 @@ fn paired(
     }
 }
 
-async fn retired(database: &Database) -> Result<()> {
+pub(super) async fn retired(database: &Database) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let count: i64 = database

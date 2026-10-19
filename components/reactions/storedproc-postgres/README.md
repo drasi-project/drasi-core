@@ -2,6 +2,12 @@
 
 A Drasi reaction plugin that invokes PostgreSQL stored procedures when continuous query results change.
 
+For native ComputationGraph hosting, use
+[drasi-computation-sink-storedproc-postgres](../../computation-plugins/sinks/storedproc-postgres).
+It reuses this reaction's parameter-only SQL renderer and the transactional
+destination handler, with static and independently loaded native factories.
+The legacy queue-based API below remains available for consumers not yet converted.
+
 ## Overview
 
 The PostgreSQL Stored Procedure reaction enables you to:
@@ -82,7 +88,8 @@ async fn main() -> anyhow::Result<()> {
 The separate Rust API `delivery::PostgresDeliveryHandler` can be used with
 ComputationGraph's [`DeliveryRunner`](../../../lib/docs/computation-graph-qos.md#opt-in-operation-completion).
 It does **not** change this reaction's existing configuration, retry loop or
-log-and-continue behavior, and is not yet exposed by its plugin ABI or factory.
+log-and-continue behavior. The same handler is now exposed by the separate native
+stored-procedure library's external-consumer factory, not by the legacy ABI.
 
 Implement `PostgresDeliveryEffect::apply` using only the supplied PostgreSQL
 transaction. The adapter commits the operation's effect and its stable ordered
@@ -123,6 +130,10 @@ corruption and actual database `SIGKILL` recovery:
 ```sh
 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-reaction-storedproc-postgres --test delivery -- --test-threads=1
 ```
+
+For Podman, point `DOCKER_HOST` at its API socket and set
+`DRASI_TEST_CONTAINER_CLI=podman` so the crash case targets that same engine.
+The suite creates its own containers; it does not use a demo database.
 
 ## Configuration
 

@@ -4,6 +4,7 @@
 //! Native ComputationGraph SDK. See the crate README for the ownership, scheduling
 //! and capability contracts. No legacy Source/Reaction interfaces are involved.
 
+pub use drasi_computation_contracts::SinkBatching;
 pub use drasi_computation_plugin_abi as abi;
 pub mod admission;
 pub mod bootstrap;
@@ -14,6 +15,7 @@ mod control;
 mod export;
 pub mod metadata;
 pub mod progress;
+pub mod query_snapshots;
 mod transaction;
 pub mod transport;
 pub mod wire;
@@ -32,6 +34,7 @@ pub use metadata::{
     Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, PluginMetadata,
 };
 pub use progress::NativeSourceProgress;
+pub use query_snapshots::{NativeQuerySnapshot, NativeQuerySnapshots, QuerySnapshotMetadata};
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
 pub use wire::{CreateRequest, Scope};
 
@@ -82,6 +85,28 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.services(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_batching_v1(
+        ) -> *const $crate::abi::batching::PluginBatchingV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.batching(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_query_snapshots_v1(
+        ) -> *const $crate::abi::query_snapshots::PluginQuerySnapshotsV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.query_snapshots(),
                     Err(_) => std::ptr::null(),
                 }
             }))

@@ -59,12 +59,10 @@
 
 pub(crate) mod adaptive_batcher;
 pub(crate) mod adaptive_loop;
-pub(crate) mod batch;
-pub mod config;
+pub(crate) use drasi_http_common::reaction::{batch, process};
+pub use drasi_http_common::reaction::{config, output};
 pub mod descriptor;
 pub mod http;
-pub mod output;
-pub(crate) mod process;
 pub(crate) mod standard_loop;
 
 #[cfg(test)]

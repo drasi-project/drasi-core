@@ -19,6 +19,7 @@ members = [
   "components/kubernetes-common",
   "components/oracle-common",
   "components/postgres-common",
+  "components/reaction-common",
   "components/sqlite-common",
   "components/sources/mapping",
 
@@ -122,6 +123,8 @@ members = [
   "components/computation-plugin-sdk",
 
   # Native ComputationGraph plugins
+  "components/computation-plugins/bootstrappers/http",
+  "components/computation-plugins/bootstrappers/postgres",
   "components/computation-plugins/bootstrappers/sqlite",
   "components/computation-plugins/common/bridge",
   "components/computation-plugins/common/network",
@@ -129,6 +132,7 @@ members = [
   "components/computation-plugins/sources/counter",
   "components/computation-plugins/sources/grpc",
   "components/computation-plugins/sources/http",
+  "components/computation-plugins/sources/postgres",
   "components/computation-plugins/transformers/arithmetic",
   "components/computation-plugins/transformers/middleware",
   "components/computation-plugins/sinks/bridge",
@@ -136,6 +140,7 @@ members = [
   "components/computation-plugins/sinks/grpc",
   "components/computation-plugins/sinks/http",
   "components/computation-plugins/sinks/sse",
+  "components/computation-plugins/sinks/storedproc-postgres",
 
   # Host SDK (host-side plugin loading and proxy types)
   "components/host-sdk",
@@ -189,6 +194,8 @@ drasi-plugin-sdk = { version = "0.11.3", path = "components/plugin-sdk" }
 drasi-computation-plugin-abi = { version = "0.11.3", path = "components/computation-plugin-abi" }
 drasi-computation-contracts = { version = "0.11.3", path = "components/computation-contracts" }
 drasi-computation-plugin-sdk = { version = "0.11.3", path = "components/computation-plugin-sdk" }
+drasi-computation-bootstrap-http = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/http" }
+drasi-computation-bootstrap-postgres = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/postgres" }
 drasi-computation-bootstrap-sqlite = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/sqlite" }
 drasi-computation-bridge-common = { version = "0.11.3", path = "components/computation-plugins/common/bridge" }
 drasi-computation-network-common = { version = "0.11.3", path = "components/computation-plugins/common/network" }
@@ -196,6 +203,7 @@ drasi-computation-source-bridge = { version = "0.11.3", path = "components/compu
 drasi-computation-source-counter = { version = "0.11.3", path = "components/computation-plugins/sources/counter" }
 drasi-computation-source-grpc = { version = "0.11.3", path = "components/computation-plugins/sources/grpc" }
 drasi-computation-source-http = { version = "0.11.3", path = "components/computation-plugins/sources/http" }
+drasi-computation-source-postgres = { version = "0.11.3", path = "components/computation-plugins/sources/postgres" }
 drasi-computation-transformer-arithmetic = { version = "0.11.3", path = "components/computation-plugins/transformers/arithmetic" }
 drasi-computation-transformer-middleware = { version = "0.11.3", path = "components/computation-plugins/transformers/middleware" }
 drasi-computation-sink-bridge = { version = "0.11.3", path = "components/computation-plugins/sinks/bridge" }
@@ -203,9 +211,11 @@ drasi-computation-sink-capture = { version = "0.11.3", path = "components/comput
 drasi-computation-sink-grpc = { version = "0.11.3", path = "components/computation-plugins/sinks/grpc" }
 drasi-computation-sink-http = { version = "0.11.3", path = "components/computation-plugins/sinks/http" }
 drasi-computation-sink-sse = { version = "0.11.3", path = "components/computation-plugins/sinks/sse" }
+drasi-computation-sink-storedproc-postgres = { version = "0.11.3", path = "components/computation-plugins/sinks/storedproc-postgres" }
 drasi-host-sdk = { version = "0.11.3", path = "components/host-sdk" }
 drasi-http-common = { version = "0.11.3", path = "components/http-common" }
 drasi-grpc-common = { version = "0.11.3", path = "components/grpc-common" }
+drasi-reaction-common = { version = "0.11.3", path = "components/reaction-common" }
 
 # Common dependencies
 im = "15"

@@ -18,6 +18,7 @@ mod factory;
 mod loader;
 mod progress;
 mod proxy;
+mod query_snapshots;
 mod transaction;
 
 pub use bootstrap::{NativeBootstrapFactories, NativeBootstrapFactory, NativeBootstrapProxy};
@@ -37,6 +38,7 @@ pub use factory::NativeFactory;
 pub use loader::{load, try_load, NativePlugin};
 pub(crate) use loader::{try_load_library, try_read_metadata};
 pub use proxy::NativeComponentProxy;
+pub use query_snapshots::NativeQuerySnapshotsResource;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NativeConsumerFactoryMetadata {

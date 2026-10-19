@@ -6,7 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
-       build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-sqlite-plugins test-native-network \
+       build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
        publish-all publish-all-dry-run \
@@ -20,7 +20,8 @@ help:
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
 	@echo "  build-native-plugins      - Build all independent native plugin libraries"
 	@echo "  build-native-standard-plugins - Build counter, middleware, capture and arithmetic plugins"
-	@echo "  build-native-network-plugins - Build the five independent native network plugins"
+	@echo "  build-native-network-plugins - Build native HTTP/gRPC/SSE and HTTP bootstrap plugins"
+	@echo "  build-native-postgres-plugins - Build native PostgreSQL source, bootstrap and stored-procedure sink"
 	@echo "  build-native-sqlite-plugins - Build the native SQLite file bootstrap plugin"
 	@echo "  test-native-network       - Build native network plugins and run wire/loopback tests"
 	@echo "  check-native-dependencies - Reject runtime/query-engine dependencies in native plugin builds"
@@ -60,11 +61,15 @@ NATIVE_NETWORK_PACKAGES := drasi-computation-source-http \
                           drasi-computation-source-grpc \
                           drasi-computation-sink-http \
                           drasi-computation-sink-grpc \
-                          drasi-computation-sink-sse
+                          drasi-computation-sink-sse \
+                          drasi-computation-bootstrap-http
+NATIVE_POSTGRES_PACKAGES := drasi-computation-source-postgres \
+                           drasi-computation-bootstrap-postgres \
+                           drasi-computation-sink-storedproc-postgres
 NATIVE_SQLITE_PACKAGES := drasi-computation-bootstrap-sqlite
 TEST_PLUGIN_NAMES := drasi_source_mock drasi_reaction_log drasi_reaction_sse \
                      drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile \
-                     $(subst -,_,$(NATIVE_STANDARD_PACKAGES) $(NATIVE_NETWORK_PACKAGES) $(NATIVE_SQLITE_PACKAGES))
+                     $(subst -,_,$(NATIVE_STANDARD_PACKAGES) $(NATIVE_NETWORK_PACKAGES) $(NATIVE_POSTGRES_PACKAGES) $(NATIVE_SQLITE_PACKAGES))
 
 build-test-plugins: build-native-plugins
 	@echo "=== Building cdylib test plugins ==="
@@ -97,7 +102,7 @@ test-host-sdk: build-test-plugins
 	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
-build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-sqlite-plugins
+build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-postgres-plugins build-native-sqlite-plugins
 
 check-native-dependencies:
 	python3 ci/check_native_dependencies.py
@@ -107,6 +112,9 @@ build-native-standard-plugins:
 
 build-native-network-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_NETWORK_PACKAGES),-p $(package)) --features dynamic-plugin
+
+build-native-postgres-plugins:
+	cargo build --lib $(foreach package,$(NATIVE_POSTGRES_PACKAGES),-p $(package)) --features dynamic-plugin
 
 build-native-sqlite-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_SQLITE_PACKAGES),-p $(package)) --features dynamic-plugin

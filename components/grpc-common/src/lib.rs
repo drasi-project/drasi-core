@@ -5,6 +5,8 @@
 //! Source and reaction contracts use separate modules because their historical
 //! `drasi.v1.QueryResult` messages have different layouts.
 
+#[cfg(feature = "output")]
+pub mod output;
 mod value;
 pub use value::{convert_json_to_proto_struct, convert_json_to_proto_value};
 

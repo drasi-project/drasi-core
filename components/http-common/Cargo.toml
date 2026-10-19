@@ -7,14 +7,57 @@ repository.workspace = true
 description = "Shared HTTP source message definitions and graph-change conversion"
 readme = "README.md"
 
+[features]
+default = []
+adaptive = ["dep:tokio"]
+reaction = [
+    "dep:drasi-computation-contracts", "dep:drasi-reaction-common", "dep:reqwest",
+    "dep:handlebars-reaction", "dep:utoipa", "dep:tokio",
+]
+bootstrap = [
+    "dep:reqwest", "dep:handlebars", "dep:serde_yaml", "dep:quick-xml-bootstrap",
+    "dep:url", "dep:tokio",
+]
+webhook = [
+    "dep:drasi-source-mapping", "dep:axum", "dep:serde_yaml", "dep:quick-xml",
+    "dep:hmac", "dep:sha1", "dep:sha2", "dep:subtle", "dep:base64", "dep:hex",
+    "dep:regex", "dep:tower-http",
+]
+
 [dependencies]
 drasi-core-types = { workspace = true }
+drasi-source-mapping = { workspace = true, optional = true }
+drasi-computation-contracts = { workspace = true, optional = true }
+drasi-reaction-common = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
 anyhow = "1"
 chrono = "0.4"
 log = "0.4"
 ordered-float = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+axum = { version = "0.7", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+quick-xml = { version = "0.37", features = ["serialize"], optional = true }
+hmac = { version = "0.12", optional = true }
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+subtle = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
+hex = { version = "0.4", optional = true }
+regex = { version = "1.10", optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+handlebars = { version = "6", optional = true }
+handlebars-reaction = { package = "handlebars", version = "5.1", optional = true }
+quick-xml-bootstrap = { package = "quick-xml", version = "0.31", features = ["serialize"], optional = true }
+url = { version = "2", optional = true }
+tokio = { version = "1", features = ["sync", "time"], optional = true }
+
+[dev-dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+wiremock = "0.6"
 
 [lints]
 workspace = true

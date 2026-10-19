@@ -15,106 +15,23 @@
 //! PostgreSQL executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+#[cfg(test)]
 use bytes::BytesMut;
 use drasi_lib::identity::Credentials;
+use drasi_postgres_common::sql::SqlParam;
 use log::{debug, info};
 use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
-use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use tokio_postgres::types::{to_sql_checked, IsNull, ToSql, Type};
+use tokio_postgres::types::ToSql;
+#[cfg(test)]
+use tokio_postgres::types::{IsNull, Type};
 use tokio_postgres::{Client, NoTls};
 
 use crate::config::PostgresStoredProcReactionConfig;
-
-/// Wrapper enum for SQL parameters that implements ToSql
-#[derive(Debug, Clone)]
-enum SqlParam {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Text(String),
-    Json(Value),
-}
-
-impl ToSql for SqlParam {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut BytesMut,
-    ) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        match self {
-            SqlParam::Null => None::<String>.to_sql(ty, out),
-            SqlParam::Bool(b) => b.to_sql(ty, out),
-            SqlParam::Int(i) => {
-                // Try to match the target type
-                match *ty {
-                    Type::INT2 => (*i as i16).to_sql(ty, out),
-                    Type::INT4 => (*i as i32).to_sql(ty, out),
-                    Type::INT8 => i.to_sql(ty, out),
-                    Type::FLOAT4 => (*i as f32).to_sql(ty, out),
-                    Type::FLOAT8 => (*i as f64).to_sql(ty, out),
-                    Type::NUMERIC => i.to_sql(ty, out),
-                    Type::TEXT | Type::VARCHAR => i.to_string().to_sql(ty, out),
-                    _ => i.to_sql(ty, out),
-                }
-            }
-            SqlParam::Float(f) => {
-                // Try to match the target type
-                match *ty {
-                    Type::FLOAT4 => (*f as f32).to_sql(ty, out),
-                    Type::FLOAT8 => f.to_sql(ty, out),
-                    Type::NUMERIC => f.to_sql(ty, out),
-                    Type::TEXT | Type::VARCHAR => f.to_string().to_sql(ty, out),
-                    _ => f.to_sql(ty, out),
-                }
-            }
-            SqlParam::Text(s) => {
-                // Bind verbatim for text targets; coerce only when the target
-                // column is genuinely numeric so string-typed row data can still
-                // feed numeric stored-procedure parameters. A non-numeric string
-                // aimed at a numeric column is a real type error and surfaces as
-                // a parse error here rather than silently corrupting the value.
-                match *ty {
-                    Type::INT2 => s.parse::<i16>()?.to_sql(ty, out),
-                    Type::INT4 => s.parse::<i32>()?.to_sql(ty, out),
-                    Type::INT8 => s.parse::<i64>()?.to_sql(ty, out),
-                    Type::FLOAT4 => s.parse::<f32>()?.to_sql(ty, out),
-                    Type::FLOAT8 => s.parse::<f64>()?.to_sql(ty, out),
-                    _ => s.to_sql(ty, out),
-                }
-            }
-            SqlParam::Json(v) => v.to_sql(ty, out),
-        }
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        // Accept most common PostgreSQL types
-        matches!(
-            *ty,
-            Type::BOOL
-                | Type::INT2
-                | Type::INT4
-                | Type::INT8
-                | Type::FLOAT4
-                | Type::FLOAT8
-                | Type::NUMERIC
-                | Type::TEXT
-                | Type::VARCHAR
-                | Type::JSON
-                | Type::JSONB
-        ) || <String as ToSql>::accepts(ty)
-            || <i64 as ToSql>::accepts(ty)
-            || <f64 as ToSql>::accepts(ty)
-            || <bool as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!();
-}
 
 /// PostgreSQL stored procedure executor
 pub struct PostgresExecutor {
@@ -327,28 +244,7 @@ impl PostgresExecutor {
             // (preserving exact content such as leading zeros); numeric coercion,
             // when the target column is actually numeric, is handled type-aware in
             // `SqlParam::to_sql`.
-            let sql_params: Vec<SqlParam> = params
-                .iter()
-                .map(|v| match v {
-                    Value::Null => SqlParam::Null,
-                    Value::Bool(b) => SqlParam::Bool(*b),
-                    Value::Number(n) => {
-                        // Keep numbers as their native type
-                        if let Some(i) = n.as_i64() {
-                            SqlParam::Int(i)
-                        } else if let Some(f) = n.as_f64() {
-                            SqlParam::Float(f)
-                        } else {
-                            SqlParam::Text(n.to_string())
-                        }
-                    }
-                    Value::String(s) => SqlParam::Text(s.clone()),
-                    Value::Array(_) | Value::Object(_) => {
-                        // For complex types, pass as JSON
-                        SqlParam::Json(v.clone())
-                    }
-                })
-                .collect();
+            let sql_params: Vec<SqlParam> = params.iter().cloned().map(SqlParam::from).collect();
 
             // Create references for the execute call
             let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params

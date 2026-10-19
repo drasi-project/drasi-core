@@ -14,7 +14,7 @@ use drasi_lib::{
 use serde::{Deserialize, Serialize};
 
 mod native;
-pub use native::NativeBootstrapConfig;
+pub use native::{NativeBootstrapConfig, NativeQuerySnapshotsConfig};
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -34,6 +34,7 @@ enum Recipe {
     SharedQos(SharedQosConfig),
     NativeConsumer(NativeConsumerConfig),
     NativeBootstrap(NativeBootstrapConfig),
+    NativeQuerySnapshots(NativeQuerySnapshotsConfig),
     Middleware,
     QueryMiddleware,
     TransactionalTransformers,
@@ -374,6 +375,7 @@ impl ManagementResourceResolver for HostManagementResources {
                 Recipe::NativeConsumer(config) => {
                     config.validate_dependencies(resource, &dependencies)?
                 }
+                Recipe::NativeQuerySnapshots(config) => config.validate(resource, &dependencies)?,
                 _ => {}
             }
         }
@@ -450,6 +452,9 @@ impl ManagementResourceResolver for HostManagementResources {
                 )
                 .await;
         }
+        if let Recipe::NativeQuerySnapshots(config) = recipe {
+            return config.resolve(graph, specification, dependencies);
+        }
         anyhow::ensure!(
             dependencies.is_empty(),
             "this host recipe does not accept resource dependencies"
@@ -503,6 +508,9 @@ impl ManagementResourceResolver for HostManagementResources {
             Recipe::NativeConsumer(_) => unreachable!("native consumer resolved with dependencies"),
             Recipe::NativeBootstrap(_) => {
                 unreachable!("native bootstrap resolved with dependencies")
+            }
+            Recipe::NativeQuerySnapshots(_) => {
+                unreachable!("native query snapshots resolved with dependencies")
             }
             Recipe::Middleware => ResourceHandle::new(
                 ResourceRole::Middleware,

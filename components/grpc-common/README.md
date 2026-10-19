@@ -10,6 +10,7 @@ Select the needed protocol features:
 |---|---|---|
 | `source` | `source` | [Source events and service](proto/source/drasi/v1/source.proto), [shared source messages](proto/source/drasi/v1/common.proto) |
 | `reaction` | `reaction` | [Reaction results and service](proto/reaction/drasi/v1/reaction.proto) |
+| `output` | `output` (also enables `reaction`) | Extracted reaction configuration, templating, metadata-compatible batches, connection/retry classification and their regression suites |
 
 The historical source and reaction contracts both use the protobuf package
 `drasi.v1`, but their `QueryResult` messages are different. They are deliberately
@@ -24,5 +25,9 @@ source or reaction include directory shown above. Build scripts can use
 `SOURCE_PROTO_ROOT` to import source messages without maintaining another copy.
 The native source retains its own admission-service protocol and conversions.
 
-Run `cargo test -p drasi-grpc-common --features source,reaction`
+The output helpers do not own a component queue or graph. Both reaction
+implementations use the same rendering/protocol logic; native delivery retains
+the host's handled-input and cancellation boundary.
+
+Run `cargo test -p drasi-grpc-common --features source,output`
 from the workspace root.

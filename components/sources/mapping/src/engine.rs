@@ -19,7 +19,7 @@ use crate::config::{
     SourceMapping, TimestampFormat,
 };
 use anyhow::{anyhow, Result};
-use drasi_core::models::{
+use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use handlebars::{

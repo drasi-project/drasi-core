@@ -25,9 +25,9 @@
 //! wire unchanged so receivers always recover the change.
 
 pub(crate) mod adaptive_batcher;
-pub(crate) mod batch;
-pub mod config;
-pub mod connection;
+pub use drasi_grpc_common::output::config;
+pub use drasi_grpc_common::output::connection;
+pub(crate) use drasi_grpc_common::output::{batch, templates};
 pub mod descriptor;
 pub mod grpc;
 pub mod helpers;
@@ -36,8 +36,7 @@ mod lifecycle_tests;
 pub mod proto;
 mod runner_adaptive;
 mod runner_fixed;
-mod send;
-mod templates;
+use drasi_grpc_common::output::send;
 
 pub use config::{
     BatchingConfig, GrpcQueryConfig, GrpcReactionConfig, GrpcTemplateExtension, OutputFormat,

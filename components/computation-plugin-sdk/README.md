@@ -121,9 +121,33 @@ that arbitrary JSON Schema validation is implemented.
 Server's kind-schema API, version-qualified `configurationSchemas` metadata and
 OpenAPI definitions. A factory without the extension retains its original
 field/type schema and reports that detailed descriptions are unavailable.
-The bundled network components explicitly describe unsupported choices:
-`adaptiveEnabled` allows only `false`, gRPC `batchSize` allows only `1`, and the
-unused single-item flush timeout is identified as a compatibility setting.
+The independent network components describe their actual supported choices:
+gRPC source `adaptiveEnabled` allows only `false`, while gRPC sink `batchSize`
+is bounded to `1..=65536`. Optional capabilities are negotiated separately;
+configuration descriptions alone do not enable them.
+
+## Read-only query snapshots
+
+A factory may opt in to the `query-snapshots-v1` extension through
+`supports_query_snapshots()` and `create_with_query_snapshots()`. The host supplies
+an optional `NativeQuerySnapshots` capability scoped to its existing query
+catalogue and an explicit set of allowed query IDs. The plugin cannot register
+queries, obtain graph ownership or mutate query state through this capability.
+
+`snapshot(query_id)` returns `NativeQuerySnapshot`: sequence/generation metadata
+and a bounded-operation stream of JSON rows. The host captures the immutable
+query snapshot; each subsequent read returns one row without materializing
+another complete result cache. Admission limits and readiness timeouts are
+host-owned. Dropping the stream releases its reader, and component stop revokes
+pending reads. Errors remain errors, including after streaming has begun.
+
+The native SSE sink demonstrates this interface. Its Host resource is a
+`NativeQuerySnapshotsResource` over the actual `QueryResultsCatalog`, bound as
+the factory's `query_snapshots` dependency. Server/Host configurations declare
+`nativeQuerySnapshots` with an explicit catalogue dependency. Snapshot callbacks
+enter the owning host runtime while being polled; no Tokio handle or Rust query
+object crosses the ABI. This read service is distinct from incoming recovery
+snapshot envelopes and does not provide an atomic snapshot/live subscription.
 
 ## Scheduling and ownership
 

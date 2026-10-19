@@ -30,6 +30,24 @@ use crate::{
 /// standalone and transactional construction use this same immutable contract.
 pub trait Factory: Send + Sync + 'static {
     fn metadata(&self) -> FactoryMetadata;
+    fn supports_query_snapshots(&self) -> bool {
+        false
+    }
+    fn create_with_query_snapshots(
+        &self,
+        request: &CreateRequest,
+        control: ControlSender,
+        snapshots: Option<crate::NativeQuerySnapshots>,
+    ) -> anyhow::Result<CreatedComponent> {
+        anyhow::ensure!(
+            snapshots.is_none(),
+            "factory does not implement query snapshot reads"
+        );
+        self.create(request, control)
+    }
+    fn supports_sink_batching(&self) -> bool {
+        false
+    }
     /// Optional pure metadata describing defaults and supported field values.
     fn configuration_details(&self) -> Option<crate::ConfigDetails> {
         None
@@ -193,6 +211,14 @@ impl PluginDefinition {
                 .collect(),
         };
         metadata.validate()?;
+        for (factory, metadata) in factories.iter().zip(&metadata.factories) {
+            anyhow::ensure!(
+                !factory.supports_sink_batching()
+                    || (metadata.role == drasi_computation_contracts::ComponentRole::Sink
+                        && factory.consumer_mode().is_none()),
+                "host-owned batching requires an ordinary native sink, not a consumer service"
+            );
+        }
         let configurations = crate::configuration::ConfigurationMetadata {
             version: abi::configuration::VERSION,
             factories: factories
@@ -318,6 +344,12 @@ impl ExportedPlugin {
     pub fn services(&self) -> *const abi::services::PluginServicesV1 {
         &PLUGIN_SERVICES
     }
+    pub fn batching(&self) -> *const abi::batching::PluginBatchingV1 {
+        &PLUGIN_BATCHING
+    }
+    pub fn query_snapshots(&self) -> *const abi::query_snapshots::PluginQuerySnapshotsV1 {
+        &PLUGIN_QUERY_SNAPSHOTS
+    }
     pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
         &PLUGIN_RECOVERY
     }
@@ -376,6 +408,83 @@ static PLUGIN_SERVICES: abi::services::PluginServicesV1 = abi::services::PluginS
     factory: Some(factory_services),
     create: Some(create_component_with_admission),
 };
+
+static PLUGIN_BATCHING: abi::batching::PluginBatchingV1 = abi::batching::PluginBatchingV1 {
+    header: Header::new::<abi::batching::PluginBatchingV1>(),
+    version: abi::batching::VERSION,
+    reserved: 0,
+    factory: Some(factory_batching),
+    policy: Some(batching_policy),
+};
+
+static PLUGIN_QUERY_SNAPSHOTS: abi::query_snapshots::PluginQuerySnapshotsV1 =
+    abi::query_snapshots::PluginQuerySnapshotsV1 {
+        header: Header::new::<abi::query_snapshots::PluginQuerySnapshotsV1>(),
+        version: abi::query_snapshots::VERSION,
+        reserved: 0,
+        factory: Some(factory_query_snapshots),
+        create: Some(create_component_with_query_snapshots),
+    };
+
+unsafe extern "C" fn factory_query_snapshots(state: *mut c_void, index: u32) -> Reply {
+    transport::reply_boundary(|| {
+        let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let factory = plugin
+            .definition
+            .factories
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown query-snapshot factory"))?;
+        wire::encode(&factory.supports_query_snapshots()).map_err(Failure::from)
+    })
+}
+
+unsafe extern "C" fn factory_batching(state: *mut c_void, index: u32) -> Reply {
+    transport::reply_boundary(|| {
+        let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let factory = plugin
+            .definition
+            .factories
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native batching factory"))?;
+        wire::encode(&factory.supports_sink_batching()).map_err(Failure::from)
+    })
+}
+
+unsafe extern "C" fn batching_policy(state: *mut c_void) -> Reply {
+    transport::reply_boundary(|| {
+        let instance = unsafe { state_ref::<Arc<Instance>>(state)? };
+        if instance.damaged.is_damaged() {
+            return Err(Failure::panicked());
+        }
+        if !instance.batching {
+            return Err(Failure::new(
+                abi::status::UNSUPPORTED,
+                "sink batching not declared",
+            ));
+        }
+        let component = instance.component.try_lock().map_err(|_| {
+            Failure::new(
+                abi::status::BUSY,
+                "batch policy requires an operation boundary",
+            )
+        })?;
+        let Component::Sink(sink) = &*component else {
+            return Err(Failure::protocol("batching requires an ordinary sink"));
+        };
+        let policy =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.batching())) {
+                Ok(policy) => policy.map_err(Failure::from)?,
+                Err(_) => {
+                    instance.damaged.quarantine();
+                    return Err(Failure::panicked());
+                }
+            };
+        if let Some(policy) = policy {
+            policy.validate().map_err(Failure::from)?;
+        }
+        wire::encode(&policy).map_err(Failure::from)
+    })
+}
 
 static PLUGIN_RECOVERY: abi::recovery::PluginRecoveryV1 = abi::recovery::PluginRecoveryV1 {
     header: Header::new::<abi::recovery::PluginRecoveryV1>(),
@@ -756,6 +865,7 @@ struct Instance {
     running: AtomicBool,
     damaged: Arc<transport::PanicState>,
     admission: bool,
+    batching: bool,
     progress: Option<SourceProgressView>,
     recovery: Option<crate::progress::InstanceRecovery>,
     consumer: Option<Box<crate::consumer::ConsumerState>>,
@@ -796,7 +906,15 @@ unsafe extern "C" fn create_component(
     out: *mut abi::ComponentHandle,
 ) -> Status {
     unsafe {
-        create_component_with_services(state, input, std::ptr::null(), std::ptr::null(), false, out)
+        create_component_with_services(
+            state,
+            input,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            false,
+            out,
+        )
     }
 }
 
@@ -806,7 +924,17 @@ unsafe extern "C" fn create_component_with_admission(
     admission: *const abi::services::SourceAdmissionV1,
     out: *mut abi::ComponentHandle,
 ) -> Status {
-    unsafe { create_component_with_services(state, input, admission, std::ptr::null(), false, out) }
+    unsafe {
+        create_component_with_services(
+            state,
+            input,
+            admission,
+            std::ptr::null(),
+            std::ptr::null(),
+            false,
+            out,
+        )
+    }
 }
 
 unsafe extern "C" fn create_component_with_progress(
@@ -818,7 +946,39 @@ unsafe extern "C" fn create_component_with_progress(
     if progress.is_null() {
         return transport::status_result(Err(Failure::protocol("missing source progress")));
     }
-    unsafe { create_component_with_services(state, input, std::ptr::null(), progress, false, out) }
+    unsafe {
+        create_component_with_services(
+            state,
+            input,
+            std::ptr::null(),
+            progress,
+            std::ptr::null(),
+            false,
+            out,
+        )
+    }
+}
+
+unsafe extern "C" fn create_component_with_query_snapshots(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    snapshots: *const abi::query_snapshots::QuerySnapshotsV1,
+    out: *mut abi::ComponentHandle,
+) -> Status {
+    if snapshots.is_null() {
+        return transport::status_result(Err(Failure::protocol("missing query-snapshot service")));
+    }
+    unsafe {
+        create_component_with_services(
+            state,
+            input,
+            std::ptr::null(),
+            std::ptr::null(),
+            snapshots,
+            false,
+            out,
+        )
+    }
 }
 
 unsafe extern "C" fn create_component_with_consumer(
@@ -827,7 +987,15 @@ unsafe extern "C" fn create_component_with_consumer(
     out: *mut abi::ComponentHandle,
 ) -> Status {
     unsafe {
-        create_component_with_services(state, input, std::ptr::null(), std::ptr::null(), true, out)
+        create_component_with_services(
+            state,
+            input,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            true,
+            out,
+        )
     }
 }
 
@@ -836,6 +1004,7 @@ unsafe fn create_component_with_services(
     input: BorrowedBytes,
     admission: *const abi::services::SourceAdmissionV1,
     progress: *const abi::recovery::SourceProgressV1,
+    snapshots: *const abi::query_snapshots::QuerySnapshotsV1,
     consumer_bound: bool,
     out: *mut abi::ComponentHandle,
 ) -> Status {
@@ -891,7 +1060,25 @@ unsafe fn create_component_with_services(
                     crate::NativeAdmission::from_borrowed(admission, state.plugin.codec.clone())?
                 })
             };
-            let (created, progress) = if progress.is_null() {
+            let (created, progress) = if !snapshots.is_null() {
+                anyhow::ensure!(
+                    admission.is_null()
+                        && progress.is_null()
+                        && !consumer_bound
+                        && factory.supports_query_snapshots()
+                        && metadata.role == drasi_computation_contracts::ComponentRole::Sink,
+                    "unsupported native query-snapshot binding"
+                );
+                let snapshots = unsafe { crate::NativeQuerySnapshots::from_borrowed(snapshots)? };
+                (
+                    factory.create_with_query_snapshots(
+                        &request,
+                        control.clone(),
+                        Some(snapshots),
+                    )?,
+                    None,
+                )
+            } else if progress.is_null() {
                 (
                     factory.create_with_admission(&request, control.clone(), service)?,
                     None,
@@ -937,6 +1124,14 @@ unsafe fn create_component_with_services(
                             && metadata.capabilities.snapshot == sink.supports_snapshot(),
                         "native sink completion/snapshot capability mismatch"
                     );
+                    let batching = sink.batching()?;
+                    anyhow::ensure!(
+                        factory.supports_sink_batching() || batching.is_none(),
+                        "native sink has undeclared batching"
+                    );
+                    if let Some(batching) = batching {
+                        batching.validate()?;
+                    }
                     drasi_computation_contracts::ComponentRole::Sink
                 }
                 Component::Consumer(_) | Component::TransactionalConsumer(_) => {
@@ -1034,6 +1229,7 @@ unsafe fn create_component_with_services(
                 running: AtomicBool::new(false),
                 damaged: Arc::new(transport::PanicState::default()),
                 admission: !admission.is_null(),
+                batching: factory.supports_sink_batching(),
                 progress,
                 recovery,
                 consumer,
@@ -1195,6 +1391,7 @@ unsafe extern "C" fn begin(
                 instance.factory.role == drasi_computation_contracts::ComponentRole::Transformer
             }
             HANDLE => instance.factory.role == drasi_computation_contracts::ComponentRole::Sink,
+            HANDLE_BATCH => instance.batching,
             RUN | QUIESCE => {
                 instance.factory.role == drasi_computation_contracts::ComponentRole::Service
             }
@@ -1406,6 +1603,33 @@ async fn execute(
                 .transformer_mut()?
                 .delivery_completed(&outputs)
                 .await?;
+        }
+        HANDLE_BATCH => {
+            let Component::Sink(sink) = &mut *component else {
+                anyhow::bail!("batching requires an ordinary native sink");
+            };
+            let batch: Vec<wire::Envelope> = wire::decode(&input)?;
+            anyhow::ensure!(
+                batch.len() <= 1024,
+                "native sink batch input limit exceeded"
+            );
+            let inputs = batch
+                .into_iter()
+                .map(|input| input.into_input(&instance.codec))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let policy = sink
+                .batching()?
+                .ok_or_else(|| anyhow::anyhow!("sink batching is disabled"))?;
+            policy.validate_inputs(&inputs)?;
+            for input in &inputs {
+                wire::check_port(
+                    &instance.metadata.descriptor,
+                    &input.port,
+                    &input.envelope,
+                    PortDirection::Input,
+                )?;
+            }
+            sink.handle_batch(inputs).await?;
         }
         HANDLE | SNAPSHOT => {
             let Component::Sink(sink) = &mut *component else {

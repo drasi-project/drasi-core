@@ -28,6 +28,8 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
+drasi-postgres-common = { workspace = true, features = ["storedproc"] }
+drasi-reaction-common.workspace = true
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

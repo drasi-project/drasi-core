@@ -525,9 +525,11 @@ async fn database_sigkill_retains_committed_effects_and_deduplicates_unconfirmed
     assert_eq!(effects(&observer).await?, 1);
     let killed = tokio::time::timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new("docker")
-            .args(["kill", "--signal=KILL", database.container.id()])
-            .output(),
+        tokio::process::Command::new(
+            std::env::var_os("DRASI_TEST_CONTAINER_CLI").unwrap_or_else(|| "docker".into()),
+        )
+        .args(["kill", "--signal=KILL", database.container.id()])
+        .output(),
     )
     .await??;
     anyhow::ensure!(

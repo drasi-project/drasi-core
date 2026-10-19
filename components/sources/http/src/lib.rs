@@ -220,15 +220,12 @@ pub mod config;
 pub mod descriptor;
 pub use config::HttpSourceConfig;
 
-mod adaptive_batcher;
+use drasi_http_common::adaptive_batcher;
 mod models;
 mod time;
 
 // Webhook support modules
-pub mod auth;
-pub mod content_parser;
-pub mod route_matcher;
-pub mod template_engine;
+pub use drasi_http_common::webhook::{auth, content_parser, route_matcher, template_engine};
 
 // Export HTTP source models and conversion
 pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};

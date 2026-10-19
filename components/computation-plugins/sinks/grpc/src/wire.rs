@@ -3,7 +3,7 @@
 
 use crate::config::OutputFormat;
 use anyhow::Result;
-pub use drasi_computation_network_common::wire::{notifications, Notification, Operation};
+pub use drasi_computation_network_common::wire::{Notification, Operation};
 use drasi_grpc_common::{convert_json_to_proto_struct, reaction};
 use serde_json::Value;
 

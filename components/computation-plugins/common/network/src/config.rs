@@ -115,13 +115,89 @@ pub fn input_stream(value: &mut Value) -> Result<()> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("sink configuration must be an object"))?;
+    let bindings = object
+        .get("queryStreams")
+        .map(|bindings| {
+            let bindings: BTreeMap<String, StreamId> = serde_json::from_value(bindings.clone())?;
+            ensure!(!bindings.is_empty(), "queryStreams must not be empty");
+            for query in bindings.keys() {
+                ComponentId::try_new(query.as_str())?;
+            }
+            Ok::<_, anyhow::Error>(bindings)
+        })
+        .transpose()?;
+    if !object.contains_key("queryId") {
+        if let Some(bindings) = &bindings {
+            object.insert(
+                "queryId".into(),
+                Value::String(bindings.keys().next().expect("nonempty").clone()),
+            );
+        }
+    }
     let query_id = object
         .get("queryId")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("queryId is required"))?;
     ComponentId::try_new(query_id)?;
-    let stream = format!("{query_id}/out");
+    let stream = match &bindings {
+        Some(bindings) => bindings
+            .get(query_id)
+            .ok_or_else(|| anyhow::anyhow!("queryStreams must include queryId"))?
+            .to_string(),
+        None => format!("{query_id}/out"),
+    };
+    if let Some(existing) = object.get("stream") {
+        ensure!(
+            bindings.is_none() || existing.as_str() == Some(stream.as_str()),
+            "stream must match queryStreams for queryId"
+        );
+    }
     object.entry("stream").or_insert(Value::String(stream));
+    Ok(())
+}
+
+#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
+pub fn validate_output_templates(value: &Value, extensions: &[&str]) -> Result<()> {
+    let Some(templates) = value.get("outputTemplates") else {
+        return Ok(());
+    };
+    fn fields<'a>(
+        value: &'a Value,
+        allowed: &[&str],
+    ) -> Result<&'a serde_json::Map<String, Value>> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("output template must be an object"))?;
+        for field in object.keys() {
+            ensure!(
+                allowed.contains(&field.as_str()),
+                "unknown output template field {field}"
+            );
+        }
+        Ok(object)
+    }
+    let templates = fields(templates, &["routes", "defaultTemplate"])?;
+    let mut queries = Vec::new();
+    if let Some(default) = templates.get("defaultTemplate") {
+        queries.push(default);
+    }
+    if let Some(routes) = templates.get("routes") {
+        queries.extend(
+            routes
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("output template routes must be an object"))?
+                .values(),
+        );
+    }
+    let mut options = vec!["template"];
+    options.extend_from_slice(extensions);
+    for query in queries {
+        for spec in fields(query, &["added", "updated", "deleted"])?.values() {
+            if !spec.is_null() {
+                fields(spec, &options)?;
+            }
+        }
+    }
     Ok(())
 }
 

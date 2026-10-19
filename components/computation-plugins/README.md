@@ -1,11 +1,13 @@
 # Native ComputationGraph components
 
-Components are organized by role, with **one component or bootstrap provider per crate**. Build and load
-only the components your solution uses; there is no standard or network bundle.
+Components are organized by role, with **one component or bootstrap-provider
+family and role per crate**. A family's mode-specific factories share its library;
+unrelated components do not. Build and load only the components your solution
+uses; there is no standard or network bundle.
 Each dynamic library owns its configuration, factory, implementation and export.
 Shared crates contain helpers, not additional registered components.
 
-The ten dynamic plugins use the lightweight `drasi-computation-contracts` and
+The fourteen dynamic plugins use the lightweight `drasi-computation-contracts` and
 `drasi-core-types` packages, not `drasi-lib` or the query engine. The SDK exposes
 only supported plugin operations and borrowed host services. A query-result
 message does not require query execution. `make check-native-dependencies`
@@ -13,10 +15,13 @@ checks every native library independently, including its build dependencies.
 
 | Role | Crate | Component kind | Hosting |
 |---|---|---|---|
+| Bootstrap | [drasi-computation-bootstrap-http](bootstrappers/http) | `drasi.network/http-bootstrap` | Dynamic or Rust SDK |
+| Bootstrap | [drasi-computation-bootstrap-postgres](bootstrappers/postgres) | `drasi.postgres/coordinated-bootstrap`, `drasi.postgres/coordinated-row-bootstrap`, `drasi.postgres/snapshot` | Dynamic or Rust SDK |
 | Bootstrap | [drasi-computation-bootstrap-sqlite](bootstrappers/sqlite) | `drasi.sqlite/file-bootstrap` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-counter](sources/counter) | `drasi.standard/volatile-counter` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-http](sources/http) | `drasi.network/http-source` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-grpc](sources/grpc) | `drasi.network/grpc-source` | Dynamic or Rust SDK |
+| Source | [drasi-computation-source-postgres](sources/postgres) | `drasi/postgres-transactions`, `drasi.postgres/changes` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-bridge](sources/bridge) | `drasi.bridge/source` | Static Rust factory |
 | Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
@@ -24,6 +29,7 @@ checks every native library independently, including its build dependencies.
 | Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-sse](sinks/sse) | `drasi.network/sse-sink` | Dynamic or Rust SDK |
+| Sink | [drasi-computation-sink-storedproc-postgres](sinks/storedproc-postgres) | `drasi.postgres/storedproc` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-bridge](sinks/bridge) | `drasi.bridge/sink` | Static Rust factory |
 
 ## Build just one plugin
@@ -43,14 +49,19 @@ engine and query-language parsers.
 
 Use the same command with another dynamic component's package name. Without
 `dynamic-plugin`, its Rust `plugin()` definition is available without exporting
-the C entrypoint. The two bridge endpoint crates retain their existing static
+the C entrypoint. Pass that definition to
+`drasi_host_sdk::computation::NativePlugin::from_definition(...)` to register the
+same validated processing/bootstrap factories without loading a library file.
+The two bridge endpoint crates retain their existing static
 hosting contract: register the chosen crate's `factory()` in a normal
 `FactoryRegistry`. They do not export a dynamic ABI.
 
-For contributors, `make build-native-plugins` builds the ten separate libraries;
+For contributors, `make build-native-plugins` builds the fourteen separate libraries;
 `make build-native-standard-plugins` and `make build-native-network-plugins` build
-the corresponding test selections. `make build-native-sqlite-plugins` builds the
-SQLite file bootstrap library. These are build conveniences, not bundles.
+the corresponding test selections. The network selection includes HTTP bootstrap.
+`make build-native-postgres-plugins` builds the three PostgreSQL libraries;
+`make build-native-sqlite-plugins` builds the SQLite file bootstrap library.
+These are build conveniences, not bundles.
 Bootstrap-only libraries expose factories through the bootstrap extension, not
 a dummy entry in the processing-component list.
 
@@ -63,9 +74,9 @@ its own configuration declaration. With the plugins loaded in Drasi Server,
 `detailsAvailable` distinguishes these descriptions from an older binary's
 field/type-only metadata.
 
-For example, gRPC batching is advertised as `batchSize: 1`, not as an unrestricted
-integer, and adaptive ingress is restricted to `false`. These descriptions do not
-enable missing features. Rebuild the component library to publish the new details;
+For example, gRPC sink `batchSize` is bounded to `1..=65536`, while gRPC source
+adaptive ingress is restricted to `false`. These descriptions do not enable
+missing features. Rebuild the component library to publish the new details;
 loading an older native ABI 1.0 library remains supported.
 
 ## Shared code and contracts
@@ -81,10 +92,12 @@ loading an older native ABI 1.0 library remains supported.
 - [NETWORK.md](NETWORK.md) documents the HTTP/gRPC wire, admission and completion
   contracts. The [SSE crate](sinks/sse) also has a standalone usage guide.
 
-Implementation names, implementation version `"1"`, configuration version `1`,
-ports, record schemas and processing semantics are unchanged. The native plugin
-ABI remains **1.0.0**, independently of the workspace package version and the
-legacy Source/Reaction ABI.
+Existing implementation names, implementation version `"1"` and configuration
+version `1` remain stable. New factory modes have distinct identities; consult
+each family guide for its schemas, resource requirements and recovery boundaries.
+The native plugin ABI remains **1.0.0**, with optional batching and query-snapshot
+extensions rather than changes to its base tables. Its version is independent of
+the workspace package version and the legacy Source/Reaction ABI.
 
 ## Migrating from the bundled libraries
 

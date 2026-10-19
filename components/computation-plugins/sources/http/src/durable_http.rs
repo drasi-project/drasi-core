@@ -215,6 +215,12 @@ async fn submit(
         ingress.admit_durable(&session, sequence, changes).await
     }
     .await;
+    admission_response(result)
+}
+
+pub(crate) fn admission_response(
+    result: Result<crate::durable::BatchOutcome, AdmissionError>,
+) -> Response {
     match result {
         Ok(outcome) => {
             let code = outcome.error.as_ref().map_or(StatusCode::OK, |error| {

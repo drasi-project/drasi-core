@@ -168,7 +168,7 @@ the same two symbols.
 
 | Family | Base metadata / entry point | Additional interfaces |
 |---|---|---|
-| Native | `drasi_computation_plugin_metadata` / `drasi_computation_plugin_entry` | Separately negotiated configuration, admission, recovery, bootstrap and consumer extensions |
+| Native | `drasi_computation_plugin_metadata` / `drasi_computation_plugin_entry` | Separately negotiated configuration, admission, recovery, bootstrap, consumer, batching and query-snapshot extensions |
 | Ordinary compatibility | `drasi_plugin_metadata` / `drasi_plugin_init` | The selected ordinary SDK's registration and callback interfaces |
 
 Use the corresponding SDK export macro rather than writing these interfaces by

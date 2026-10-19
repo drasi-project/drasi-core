@@ -4,6 +4,7 @@
 use anyhow::{ensure, Result};
 use drasi_computation_contracts::StreamId;
 use drasi_computation_network_common::config::{self as shared, IngressConfig};
+pub use drasi_http_common::webhook::config::WebhookConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -41,6 +42,22 @@ pub struct HttpSourceConfig {
     pub max_batch_events: Option<usize>,
     #[serde(default)]
     pub adaptive_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_max_batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_min_batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_max_wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_min_wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_window_secs: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "drasi_http_common::webhook::dto::optional"
+    )]
+    pub webhooks: Option<WebhookConfig>,
 }
 
 impl HttpSourceConfig {
@@ -58,23 +75,34 @@ impl HttpSourceConfig {
             Field::new("ingressCapacity", Integer, false, "Maximum simultaneous network requests; also bounds the volatile ingress queue.").default(shared::ingress_capacity()).minimum(1).maximum(shared::MAX_INGRESS_CAPACITY as u64),
             Field::new("maxMessageBytes", Integer, false, "Maximum HTTP request-body size in bytes.").default(message_bytes()).minimum(1).maximum(shared::MAX_MESSAGE_BYTES as u64),
             Field::new("maxBatchEvents", Integer, false, "Maximum events in one HTTP batch.").default(json!(batch_events())).minimum(1).maximum(MAX_BATCH_EVENTS as u64),
-            Field::new("adaptiveEnabled", Boolean, false, "Adaptive ingress is not implemented; this compatibility option must remain false.").default(false).allowed([json!(false)]),
+            Field::new("adaptiveEnabled", Boolean, false, "Enable bounded, cancellation-safe prefetch using the legacy throughput tiers in volatile ingress mode. Each event remains a separate graph envelope.").default(false),
+            Field::new("adaptiveMaxBatchSize", Integer, false, "Maximum prefetched events, no greater than ingressCapacity.").default(1000).minimum(1).maximum(shared::MAX_INGRESS_CAPACITY as u64),
+            Field::new("adaptiveMinBatchSize", Integer, false, "Minimum adaptive collection target.").default(10).minimum(1),
+            Field::new("adaptiveMaxWaitMs", Integer, false, "Maximum collection wait in milliseconds.").default(100).minimum(1).maximum(60000),
+            Field::new("adaptiveMinWaitMs", Integer, false, "Minimum collection wait in milliseconds.").default(1).minimum(1),
+            Field::new("adaptiveWindowSecs", Integer, false, "Throughput observation window, in seconds.").default(5).minimum(1).maximum(3600),
+            Field::new("webhooks", Object, false, "Custom webhook routes with legacy authentication, JSON/XML/YAML/text parsing, conditions, mapping, timestamps and CORS. When present, replaces the standard volatile event routes."),
         ]).expect("constant HTTP source configuration")
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
         let config: Self = serde_json::from_value(value)?;
         config.ingress().validate()?;
-        ensure!(
-            !config.adaptive_enabled,
-            "adaptive source processing is unsupported"
-        );
+        config.adaptive_settings()?;
         ensure!(
             config
                 .max_batch_events
                 .is_some_and(|value| (1..=MAX_BATCH_EVENTS).contains(&value)),
             "maxBatchEvents must be in 1..=1048576"
         );
+        if let Some(webhooks) = &config.webhooks {
+            webhooks.validate()?;
+            ensure!(
+                webhooks.routes.iter().all(|route| route.mappings.len()
+                    <= config.max_batch_events.expect("validated limit")),
+                "webhook mapping count exceeds maxBatchEvents"
+            );
+        }
         Ok(config)
     }
 
@@ -95,6 +123,53 @@ impl HttpSourceConfig {
             ingress_capacity: self.ingress_capacity,
             max_message_bytes: self.max_message_bytes,
         }
+    }
+
+    pub(crate) fn adaptive_settings(
+        &self,
+    ) -> Result<Option<drasi_http_common::adaptive_batcher::AdaptiveBatchConfig>> {
+        if !self.adaptive_enabled {
+            ensure!(
+                self.adaptive_max_batch_size.is_none()
+                    && self.adaptive_min_batch_size.is_none()
+                    && self.adaptive_max_wait_ms.is_none()
+                    && self.adaptive_min_wait_ms.is_none()
+                    && self.adaptive_window_secs.is_none(),
+                "adaptive settings require adaptiveEnabled"
+            );
+            return Ok(None);
+        }
+        let mut config = drasi_http_common::adaptive_batcher::AdaptiveBatchConfig::default();
+        config.max_batch_size = self
+            .adaptive_max_batch_size
+            .unwrap_or(1000.min(self.ingress_capacity));
+        config.min_batch_size = self
+            .adaptive_min_batch_size
+            .unwrap_or(10.min(config.max_batch_size));
+        config.max_wait_time = shared::duration(
+            self.adaptive_max_wait_ms.unwrap_or(100),
+            "adaptiveMaxWaitMs",
+        )?;
+        config.min_wait_time =
+            shared::duration(self.adaptive_min_wait_ms.unwrap_or(1), "adaptiveMinWaitMs")?;
+        let window = self.adaptive_window_secs.unwrap_or(5);
+        ensure!(
+            (1..=3600).contains(&window),
+            "adaptiveWindowSecs must be in 1..=3600"
+        );
+        config.throughput_window = std::time::Duration::from_secs(window);
+        ensure!(
+            config.min_batch_size > 0
+                && config.min_batch_size <= config.max_batch_size
+                && config.max_batch_size <= self.ingress_capacity,
+            "adaptive batch bounds exceed ingressCapacity or are inverted"
+        );
+        ensure!(
+            config.min_wait_time <= config.max_wait_time
+                && config.max_wait_time <= std::time::Duration::from_secs(60),
+            "invalid adaptive wait bounds"
+        );
+        Ok(Some(config))
     }
 }
 
@@ -120,7 +195,7 @@ mod tests {
     #[test]
     fn rejects_invalid_shared_and_http_only_settings() {
         for field in [
-            json!({"adaptiveEnabled":true}),
+            json!({"adaptiveEnabled":true,"adaptiveMinBatchSize":0}),
             json!({"maxBatchEvents":0}),
             json!({"maxBatchEvents":null}),
             json!({"maxMessageBytes":0}),

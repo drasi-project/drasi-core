@@ -3106,6 +3106,7 @@ fn commit_desired(
                 retired_handlers.push(index);
                 let old = leases.get_mut(&index).expect("prepared replacement lease");
                 new.inputs = std::mem::take(&mut old.inputs);
+                new.sink_batch = old.sink_batch.take();
                 new.outputs = std::mem::take(&mut old.outputs);
                 new.sequences = std::mem::take(&mut old.sequences)
                     .into_iter()
