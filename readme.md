@@ -238,7 +238,7 @@ Publishes built plugins to an OCI container registry. Each plugin is pushed as a
 | Plugin binary (`.so`/`.dylib`/`.dll`) | `application/vnd.drasi.plugin.v1+binary` |
 | Metadata JSON | `application/vnd.drasi.plugin.v1+metadata` |
 
-After publishing all plugins, the command also updates the **plugin directory** — a special OCI package (`drasi-plugin-directory`) where each tag represents a known plugin (e.g. `source.postgres`, `reaction.storedproc-mssql`). This enables plugin discovery without knowing plugin names in advance.
+After successfully publishing all plugins, the command also updates the **plugin directory** — a special OCI package (`drasi-plugin-directory`) where each tag represents a known plugin (e.g. `source.postgres`, `reaction.storedproc-mssql`). This enables plugin discovery without knowing plugin names in advance. Required catalog errors fail publication, even after successful uploads; uploaded artifacts are not rolled back. Upload/signature failures prevent that batch from updating the directory.
 
 **Flags:**
 
@@ -252,6 +252,8 @@ After publishing all plugins, the command also updates the **plugin directory** 
 | `--pre-release <LABEL>` | Append a pre-release label (e.g. `dev.1`) |
 | `--arch-suffix <SUFFIX>` | Append an architecture suffix to the tag (e.g. `linux-amd64`) |
 | `--dry-run` | Show what would be published without pushing |
+| `--sign` | Require cosign signing and verification |
+| `--report <PATH>` | Write artifact/digest and catalog outcomes as JSON |
 
 **Examples:**
 
@@ -299,6 +301,7 @@ Supported architecture suffixes:
 | `linux-musl-amd64` | `x86_64-unknown-linux-musl` |
 | `linux-musl-arm64` | `aarch64-unknown-linux-musl` |
 | `windows-amd64` | `x86_64-pc-windows-gnu` |
+| `windows-msvc-amd64` | `x86_64-pc-windows-msvc` |
 | `darwin-amd64` | `x86_64-apple-darwin` |
 | `darwin-arm64` | `aarch64-apple-darwin` |
 
@@ -310,7 +313,10 @@ This enables the `plugin search` command in Drasi Server to discover available p
 
 ### Publishing All Architectures
 
-The `publish-all` target builds and publishes plugins for all 7 supported architectures in sequence:
+The `publish-all` target attempts its seven default architectures in sequence and
+returns nonzero if any build or publication fails, even if other targets succeed.
+Use `PUBLISH_TARGETS` to select targets supported by your local host; the release
+workflow independently retains all eight targets, including native Windows MSVC.
 
 ```bash
 # Publish all architectures
@@ -329,7 +335,20 @@ The [Release-plz workflow](.github/workflows/release-plz.yml) publishes crates t
 
 Before publishing, read-only package metadata checks verify that `drasi-plugin-directory` exists and is public. After all builds and pushes succeed, every plugin package is checked for public visibility. GitHub does not support changing package visibility through the REST endpoint used to read metadata: a package administrator must select **Public** in each package's GitHub **Package settings** → **Change visibility**, including for new packages after their first push, then rerun verification.
 
-The compatibility-named `PACKAGES_ADMIN_TOKEN` secret only needs a classic PAT with `read:packages` and appropriate organization access/SSO for these checks; a successful check does not establish admin access. See [workflow setup and release recovery](.github/workflows/readme.md#recovering-from-failed-releases) for details. Nightly publishing intentionally skips visibility checks and signing; a passing nightly is not a complete signed-release check.
+The compatibility-named `PACKAGES_ADMIN_TOKEN` secret only needs a classic PAT with `read:packages` and appropriate organization access/SSO for these checks; a successful check does not establish admin access. See [workflow setup and release recovery](.github/workflows/readme.md#recovering-from-failed-releases) for details.
+
+Normal nightly and release preparation share the committed root `Cargo.lock`.
+Each prepared candidate is frozen once and consumed with `--locked` across all
+eight release targets, including nested Cargo/cross builds. Intentional dependency
+updates are separate from the default nightly path. See the
+[lockfile policy](.github/workflows/readme.md#shared-dependency-baseline-and-prepared-candidates).
+
+Nightly verifies local crate packages and signs/verifies plugins in the isolated
+`ghcr.io/drasi-project/drasi-core-nightly` namespace, including its catalog and
+signatures. Unique run/attempt tags and an exact-digest handoff identify the
+candidate. It does not publish crates or official releases. Runtime E2E consumption
+requires the coordinated test-infra integration; see the
+[nightly contract](.github/workflows/readme.md#exact-producer-handoff-to-test-infra).
 
 ### Makefile Reference
 
