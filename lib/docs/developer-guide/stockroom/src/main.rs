@@ -558,11 +558,11 @@ impl EnvelopeSink for Alerts {
 
 // ANCHOR_END: alert-sink
 
-async fn finish(core: &DrasiLib, work: anyhow::Result<()>) -> anyhow::Result<()> {
+async fn finish<T>(core: &DrasiLib, work: anyhow::Result<T>) -> anyhow::Result<T> {
     let cleanup = core.shutdown().await.map_err(anyhow::Error::from);
     match (work, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(cleanup)) => Err(drasi_lib::error::OperationFailures::new(
             "Stockroom work and cleanup failed",
             vec![error, cleanup],
@@ -620,14 +620,34 @@ fn normalization() -> anyhow::Result<MiddlewareTransformer> {
 }
 // ANCHOR_END: normalization
 
+async fn low_stock_query() -> anyhow::Result<(ContinuousQueryTransformer, QueryResults)> {
+    // ANCHOR: query-construction
+    let query = ContinuousQueryTransformer::new(
+        ContinuousQueryDefinition {
+            graph_id: GRAPH.into(),
+            id: ComponentId::try_new("low-stock")?,
+            query: LOW_STOCK.into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("low-stock/out")?,
+            outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
+        },
+        Arc::new(InMemoryComputationProvider),
+    )
+    .await?;
+    let results = query.results();
+    // ANCHOR_END: query-construction
+    Ok((query, results))
+}
+
 async fn build_application(
     path: &Path,
     scenario: Scenario,
-    plugins: Option<&Path>,
+    plugins: Option<(&Path, u16, u16)>,
 ) -> anyhow::Result<(
     DrasiLib,
     watch::Receiver<ResultView>,
     Option<broadcast::Receiver<ChangeEnvelope>>,
+    cli::Health,
 )> {
     let audit = matches!(scenario, Scenario::Audit);
     let (query_id, query_text) = scenario.query();
@@ -678,24 +698,27 @@ async fn build_application(
     } else {
         QueryExecutionSettings::default()
     };
-    // ANCHOR: query-construction
-    let mut query = ContinuousQueryTransformer::new_configured(
-        ContinuousQueryDefinition {
-            graph_id: GRAPH.into(),
-            id: ComponentId::try_new(query_id)?,
-            query: query_text.into(),
-            language: ComputationQueryLanguage::Cypher,
-            output_stream: StreamId::try_new(format!("{query_id}/out"))?,
-            outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
-        },
-        Arc::new(InMemoryComputationProvider),
-        QueryOptions::default(),
-        execution,
-        None,
-    )
-    .await?;
-    // ANCHOR_END: query-construction
-    let results = query.results();
+    let (mut query, results) = if scenario == Scenario::LowStock {
+        low_stock_query().await?
+    } else {
+        let query = ContinuousQueryTransformer::new_configured(
+            ContinuousQueryDefinition {
+                graph_id: GRAPH.into(),
+                id: ComponentId::try_new(query_id)?,
+                query: query_text.into(),
+                language: ComputationQueryLanguage::Cypher,
+                output_stream: StreamId::try_new(format!("{query_id}/out"))?,
+                outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
+            },
+            Arc::new(InMemoryComputationProvider),
+            QueryOptions::default(),
+            execution,
+            None,
+        )
+        .await?;
+        let results = query.results();
+        (query, results)
+    };
     let catalog = (scenario == Scenario::Stream)
         .then(|| QueryResultsCatalog::new(GRAPH))
         .transpose()?;
@@ -706,14 +729,14 @@ async fn build_application(
     let mut batch = ComponentBatch::builder()
         .query(Box::new(query))
         .sink(alerts);
-    if let Some(directory) = plugins {
+    if let Some((directory, http_port, sse_port)) = plugins {
         #[cfg(feature = "plugins")]
         {
-            batch = network::connect(batch, directory, query_id)?;
+            batch = network::connect(batch, directory, query_id, http_port, sse_port)?;
         }
         #[cfg(not(feature = "plugins"))]
         anyhow::bail!(
-            "plugins at {} require --features plugins",
+            "plugins at {} (ports {http_port}/{sse_port}) require --features plugins",
             directory.display()
         );
     } else {
@@ -781,7 +804,8 @@ async fn build_application(
         .await?;
     // ANCHOR_END: instance-build
     let setup = async {
-        core.start().await?;
+        let mut health = cli::Health::new(&core)?;
+        core.start().await.context("start Stockroom")?;
         let mut required = vec!["inventory", query_id, "alerts"];
         if plugins.is_some() {
             required.push("notifications");
@@ -793,20 +817,20 @@ async fn build_application(
             required.push("live-results");
         }
         for component in required {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                core.computation_component(component)?.wait_started(),
-            )
-            .await??;
+            cli::wait_started(&core, component, Duration::from_secs(5)).await?;
         }
-        tokio::time::timeout(Duration::from_secs(5), results.wait_ready()).await??;
-        Ok(())
+        tokio::time::timeout(Duration::from_secs(5), results.wait_ready())
+            .await
+            .with_context(|| format!("wait for query '{query_id}' readiness"))??;
+        health.check()?;
+        Ok(health)
     }
     .await;
-    if let Err(error) = setup {
-        finish(&core, Err(error)).await?;
-    }
-    Ok((core, reader, events))
+    let health = match setup {
+        Ok(health) => health,
+        Err(error) => return finish(&core, Err(error)).await,
+    };
+    Ok((core, reader, events, health))
 }
 
 #[cfg(test)]
@@ -814,7 +838,7 @@ async fn start(
     path: &Path,
     scenario: Scenario,
 ) -> anyhow::Result<(DrasiLib, watch::Receiver<ResultView>)> {
-    let (core, view, _) = build_application(path, scenario, None).await?;
+    let (core, view, _, _) = build_application(path, scenario, None).await?;
     Ok((core, view))
 }
 
@@ -879,7 +903,7 @@ async fn run_cli() -> anyhow::Result<()> {
             println!(
                 "stockroom [totals|totals-filtered|audit|join|sustained|normalize|reorders|stream|callback]"
             );
-            println!("stockroom plugins <native-library-directory>  (requires --features plugins)");
+            println!("stockroom plugins <native-library-directory> [http-port] [sse-port] (requires --features plugins)");
             println!(
                 "stockroom webhook <native-library-directory> <url> (requires --features plugins)"
             );
@@ -936,6 +960,27 @@ async fn run_cli() -> anyhow::Result<()> {
     } else {
         None
     };
+    let (http_port, sse_port) = if mode.as_deref() == Some("plugins") {
+        let http = args
+            .next()
+            .map(|value| value.parse::<u16>())
+            .transpose()
+            .context("parse HTTP input port")?
+            .unwrap_or(9080);
+        let sse = args
+            .next()
+            .map(|value| value.parse::<u16>())
+            .transpose()
+            .context("parse SSE output port")?
+            .unwrap_or(9081);
+        ensure!(
+            http != 0 && sse != 0 && http != sse,
+            "HTTP and SSE ports must be nonzero and distinct"
+        );
+        (http, sse)
+    } else {
+        (9080, 9081)
+    };
     ensure!(args.next().is_none(), "unexpected additional arguments");
     let path = Path::new(if scenario == Scenario::Normalize {
         "encoded-inventory.json"
@@ -948,13 +993,14 @@ async fn run_cli() -> anyhow::Result<()> {
     );
     let plugins = native_directory
         .as_deref()
-        .filter(|_| mode.as_deref() == Some("plugins"));
-    let (core, _view, mut events) = build_application(path, scenario, plugins).await?;
+        .filter(|_| mode.as_deref() == Some("plugins"))
+        .map(|directory| (directory, http_port, sse_port));
+    let (core, _view, mut events, mut health) = build_application(path, scenario, plugins).await?;
     let work = async {
         if mode.as_deref() == Some("live") {
             let directory = native_directory.as_deref().context("missing native library directory")?;
             #[cfg(feature = "plugins")]
-            return network::watch_destination(&core, directory, &mut shutdown).await;
+            return network::watch_destination(&core, directory, &mut shutdown, &mut health).await;
             #[cfg(not(feature = "plugins"))]
             anyhow::bail!("live {} requires --features plugins", directory.display());
         }
@@ -966,13 +1012,15 @@ async fn run_cli() -> anyhow::Result<()> {
             anyhow::bail!("webhook {} {url} requires --features plugins", directory.display());
         }
         if plugins.is_some() {
-            println!("Ready: HTTP input at 127.0.0.1:9080; SSE output at 127.0.0.1:9081/events.");
+            println!("Ready: HTTP input at 127.0.0.1:{http_port}; SSE output at 127.0.0.1:{sse_port}/events.");
         } else {
             println!("Ready. Watching {} for saved changes.", path.display());
         }
         if let Some(events) = &mut events {
             loop {
                 tokio::select! {
+                    biased;
+                    result = health.failed() => { result?; }
                     signal = shutdown.requested() => { signal?; break; }
                     event = events.recv() => {
                         let event = event.context("live result stream closed or lagged; rebuild the view")?;
@@ -983,8 +1031,13 @@ async fn run_cli() -> anyhow::Result<()> {
                 }
             }
         } else {
-            shutdown.requested().await?;
+            tokio::select! {
+                biased;
+                result = health.failed() => result?,
+                result = shutdown.requested() => result?,
+            }
         }
+        health.check()?;
         Ok(())
     }.await;
     finish(&core, work).await
@@ -993,6 +1046,181 @@ async fn run_cli() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailsLater {
+        descriptor: ComponentDescriptor,
+        fail: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ComputationComponent for FailsLater {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+
+        async fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ComputationService for FailsLater {
+        async fn run(&mut self) -> anyhow::Result<()> {
+            self.fail.notified().await;
+            anyhow::bail!("injected destination failure")
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_reports_a_failure_even_after_stop_acknowledges_it() -> anyhow::Result<()> {
+        let fail = Arc::new(tokio::sync::Notify::new());
+        let core = DrasiLib::builder()
+            .with_id("health-test")
+            .with_components(
+                ComponentBatch::builder()
+                    .service(Box::new(FailsLater {
+                        descriptor: descriptor("destination", &[])?,
+                        fail: fail.clone(),
+                    }))
+                    .build()?,
+            )
+            .build()
+            .await?;
+        let work = async {
+            let mut health = cli::Health::new(&core)?;
+            core.start().await?;
+            cli::wait_started(&core, "destination", Duration::from_secs(5)).await?;
+            health.check()?;
+            let control = core.computation_control()?;
+            let mut observed = control.subscribe_observed();
+            fail.notify_one();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                observed.wait_for(|snapshot| {
+                    snapshot
+                        .components
+                        .values()
+                        .any(|component| component.failure.is_some())
+                }),
+            )
+            .await??;
+            core.computation_component("destination")?.stop().await?;
+            ensure!(core
+                .computation_component("destination")?
+                .observed()?
+                .failure
+                .is_none());
+            let error = health
+                .check()
+                .expect_err("retained failure must be reported");
+            let messages = cli::error_messages(&error).join("\n");
+            ensure!(
+                messages.contains("component 'destination' failed"),
+                "{messages}"
+            );
+            ensure!(
+                messages.contains("injected destination failure"),
+                "{messages}"
+            );
+            Ok(())
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_connection_is_a_wait_with_a_named_readiness_deadline() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("inventory.json");
+        tokio::fs::write(&path, "[]").await?;
+        let (query, results) = low_stock_query().await?;
+        let (view, _) = watch::channel(ResultView::default());
+        let core = DrasiLib::builder()
+            .with_id("missing-connection-test")
+            .with_components(
+                ComponentBatch::builder()
+                    .source(Box::new(Inventory::new(&path)?))
+                    .query(Box::new(query))
+                    .sink(Box::new(Alerts {
+                        descriptor: descriptor(
+                            "alerts",
+                            &[(
+                                "in",
+                                PortDirection::Input,
+                                QueryChangeCodec::schema().descriptor().clone(),
+                            )],
+                        )?,
+                        query_id: "low-stock",
+                        view,
+                        output: tokio::io::stdout(),
+                        audit: false,
+                        reorders: false,
+                        display: true,
+                    }))
+                    .bind_stream(
+                        endpoint("inventory", "out")?,
+                        StreamId::try_new("inventory/out")?,
+                    )
+                    .bind_stream(
+                        endpoint("low-stock", "out")?,
+                        StreamId::try_new("low-stock/out")?,
+                    )
+                    .connect(
+                        EdgeDefinition::new(
+                            endpoint("low-stock", "out")?,
+                            endpoint("alerts", "in")?,
+                        ),
+                        Box::new(BoundedPipeConfig { capacity: 8 }),
+                    )
+                    .build()?,
+            )
+            .build()
+            .await?;
+        let work = async {
+            let mut health = cli::Health::new(&core)?;
+            core.start().await?;
+            health.check()?;
+            let error = cli::wait_started(&core, "inventory", Duration::from_millis(30))
+                .await
+                .expect_err("an unconnected source cannot become ready");
+            let messages = cli::error_messages(&error).join("\n");
+            ensure!(
+                messages.contains("component 'inventory' readiness"),
+                "{messages}"
+            );
+            ensure!(
+                messages.contains("connection for 'inventory:out'"),
+                "{messages}"
+            );
+            ensure!(messages.contains("deadline has elapsed"), "{messages}");
+            ensure!(!messages.contains("Blocked"), "{messages}");
+            health.check()?;
+            let report = core
+                .computation_control()?
+                .connect(
+                    EdgeDefinition::new(
+                        endpoint("inventory", "out")?,
+                        endpoint("low-stock", "in")?,
+                    ),
+                    Box::new(BoundedPipeConfig { capacity: 8 }),
+                    RelationshipPolicy::default(),
+                )
+                .await?;
+            ensure!(report.summary == OperationSummary::Completed);
+            for component in ["inventory", "low-stock", "alerts"] {
+                cli::wait_started(&core, component, Duration::from_secs(5)).await?;
+            }
+            tokio::time::timeout(Duration::from_secs(5), results.wait_ready()).await??;
+            health.check()?;
+            Ok(())
+        }
+        .await;
+        finish(&core, work).await
+    }
 
     fn inventory(quantity: i64) -> serde_json::Value {
         serde_json::json!([{
@@ -1263,7 +1491,7 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("inventory.json");
         save(&path, &inventory(8)).await?;
-        let (core, mut view, events) = build_application(&path, Scenario::Stream, None).await?;
+        let (core, mut view, events, _) = build_application(&path, Scenario::Stream, None).await?;
         let mut events = events.context("stream mode did not create an outlet")?;
         let work = async {
             save(&path, &inventory(3)).await?;

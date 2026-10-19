@@ -1,18 +1,20 @@
 """Check book links/excerpts and optionally exercise the copied starter.
 
 Run from any directory:
-    python3 lib/docs/developer-guide/check_book.py --test
+    python3 lib/docs/developer-guide/check_book.py --test --network
 
 The test copy uses the same sibling layout as the book. The repository itself
 is linked, never cloned or modified by this checker.
 """
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unicodedata
@@ -198,7 +200,7 @@ use drasi_source_sqlite::native::SqliteSource;
     print(f"Compiling {len(illustrations)} illustrations and the source for {len(blocks)-len(illustrations)} exact excerpts.", flush=True)
 
 
-def test_starter():
+def test_starter(test, network):
     environment = dict(os.environ)
     environment.setdefault("CARGO_TARGET_DIR", str(REPOSITORY / "target"))
     environment["RUST_LOG"] = "error"
@@ -208,24 +210,55 @@ def test_starter():
         project = root / "stockroom"
         shutil.copytree(BOOK / "stockroom", project, ignore=shutil.ignore_patterns("target"))
         subprocess.run(["cargo", "fmt", "--", "--check"], cwd=project, env=environment, check=True)
-        compile_contexts(project)
-        for arguments in [
-            ["test", "--locked", "--quiet"],
-            ["test", "--locked", "--quiet", "--features", "normalize,persistence,plugins,management,callbacks"],
-        ]:
-            subprocess.run(["cargo", *arguments], cwd=project, env=environment, check=True)
+        if test:
+            compile_contexts(project)
+            for arguments in [
+                ["test", "--locked", "--quiet"],
+                ["test", "--locked", "--quiet", "--features", "normalize,persistence,plugins,management,callbacks"],
+            ]:
+                subprocess.run(["cargo", *arguments], cwd=project, env=environment, check=True)
+        if network:
+            subprocess.run([
+                "cargo", "build", "--quiet",
+                "-p", "drasi-computation-source-http",
+                "-p", "drasi-computation-sink-sse",
+                "-p", "drasi-computation-sink-http",
+                "--features", "dynamic-plugin",
+            ], cwd=REPOSITORY, env=environment, check=True)
+            build = subprocess.run([
+                "cargo", "build", "--locked", "--quiet", "--features", "plugins",
+                "--message-format=json",
+            ], cwd=project, env=environment, stdout=subprocess.PIPE, text=True)
+            if build.returncode:
+                print(build.stdout, file=sys.stderr)
+                build.check_returncode()
+            executable = None
+            for line in build.stdout.splitlines():
+                message = json.loads(line)
+                if (message.get("reason") == "compiler-artifact"
+                        and message["target"]["name"] == "stockroom"
+                        and message.get("executable")):
+                    executable = Path(message["executable"])
+            if executable is None:
+                raise SystemExit("Cargo did not report the Stockroom executable.")
+            subprocess.run([
+                sys.executable, str(BOOK / "network_smoke.py"),
+                "--binary", str(executable),
+                "--libraries", str(executable.parent),
+            ], cwd=project, env=environment, check=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test", action="store_true", help="also compile and test the complete starter")
+    parser.add_argument("--network", action="store_true", help="build native plugins and smoke-test the network lessons (Linux/macOS)")
     parser.add_argument("--sync-excerpts", action="store_true", help="refresh marked excerpts from source")
     options = parser.parse_args()
     if options.sync_excerpts:
         sync_excerpts()
     check_book()
-    if options.test:
-        test_starter()
+    if options.test or options.network:
+        test_starter(options.test, options.network)
 
 
 if __name__ == "__main__":

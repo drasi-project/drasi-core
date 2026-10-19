@@ -128,7 +128,7 @@ cargo run --locked
 Use a destination that does not already exist. Keep `stockroom` and `drasi-core`
 beside each other so the supplied dependency paths remain valid.
 
-The main files in your copy are:
+Your copy contains these lesson files:
 
 ```text
 stockroom/
@@ -139,10 +139,21 @@ stockroom/
   inventory.json
   catalog.json
   encoded-inventory.json
-  src/main.rs
+  http-insert.json
+  http-restock.json
+  destination.json
+  webhook_receiver.py
+  src/
+    main.rs
+    cli.rs
+    network.rs
+    persistence.rs
+    managed.rs
+  tests/
+    cli.rs
 ```
 
-The native-integration and recovery lessons use `src/network.rs`,
+Begin with `inventory.json` and `src/main.rs`. The native-integration and recovery lessons use `src/network.rs`,
 `src/persistence.rs`, and `src/managed.rs`. `src/cli.rs` owns terminal signals,
 concise error reporting, and key generation. Cargo features select the optional
 integration and storage dependencies.
@@ -298,32 +309,34 @@ memory-backed processing state and small file source are starting points:
 storage providers and source/sink plugins support persistent state and other
 external systems.
 
-The query is a `ContinuousQueryTransformer`. `query_id`, `query_text`, and
-`execution` select the requested lesson:
+The first lesson constructs one `ContinuousQueryTransformer` for the low-stock
+query. The companion's `low_stock_query` function creates it and obtains its
+result handle:
 
 <!-- excerpt: stockroom/src/main.rs#query-construction -->
 ```rust
-let mut query = ContinuousQueryTransformer::new_configured(
+let query = ContinuousQueryTransformer::new(
     ContinuousQueryDefinition {
         graph_id: GRAPH.into(),
-        id: ComponentId::try_new(query_id)?,
-        query: query_text.into(),
+        id: ComponentId::try_new("low-stock")?,
+        query: LOW_STOCK.into(),
         language: ComputationQueryLanguage::Cypher,
-        output_stream: StreamId::try_new(format!("{query_id}/out"))?,
+        output_stream: StreamId::try_new("low-stock/out")?,
         outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
     },
     Arc::new(InMemoryComputationProvider),
-    QueryOptions::default(),
-    execution,
-    None,
 )
 .await?;
+let results = query.results();
 ```
 
 The imports, query text, and `GRAPH` are at the top of the companion.
 `GRAPH` is `ComponentBatch::GRAPH_ID`, the public identity for the graph inside
 `DrasiLib`. The application's instance ID is a separate scope. The memory
 provider supplies the state needed to evaluate the query.
+`query.results()` supplies the read handle used to await readiness and inspect
+the maintained answer. Obtain it before moving the query into the component
+batch. Later lessons introduce configurable construction and query settings.
 
 `ComponentBatch` groups components and their connections. After constructing
 the source and sink, the program adds them with the query:
@@ -356,12 +369,13 @@ batch = batch
 ```
 
 The query output is bound and connected to `alerts/in` in the same way.
-Declaring a port does not connect it. Invalid endpoint names and incompatible
-schemas are errors, while an otherwise valid declaration with missing
-connections can remain waiting for its dependencies. A successful build or
-instance start therefore does not prove that every component is processing.
-Complete the connections and bound the required components' readiness waits
-with deadlines, as the next section shows.
+Declaring a port and connecting it are separate operations. Ports on known
+components must have the declared names and compatible schemas; missing
+dependencies can remain waiting for later connections.
+`DrasiLib::start()` accepts those waits, so successful instance startup alone
+does not establish that every component is processing. Stockroom bounds its
+required components' readiness waits and reports the specific missing
+connection when a deadline expires.
 
 Finally, the application gives the batch to its runtime owner:
 
@@ -386,23 +400,25 @@ the components the application needs:
 <!-- illustration: readiness -->
 ```rust
 core.start().await?;
-tokio::time::timeout(
-    Duration::from_secs(5),
-    core.computation_component("alerts")?.wait_started(),
-)
-.await??;
-tokio::time::timeout(Duration::from_secs(5), results.wait_ready()).await??;
+cli::wait_started(&core, "alerts", Duration::from_secs(5)).await?;
+tokio::time::timeout(Duration::from_secs(5), results.wait_ready())
+    .await
+    .context("wait for query 'low-stock' readiness")??;
 ```
 
-The complete program waits for all three components. The two `?` operators
-unwrap different failures: an application deadline and a failed runtime
-operation.
+The complete program waits for all three components. Its `cli::wait_started`
+helper includes the component name and observed dependency waits in timeout
+errors. The two `?` operators on the query wait unwrap different failures:
+an application deadline and a failed runtime operation.
 
 Processing continues while `main` waits for Ctrl-C. Each query output updates
 the sink's view; inputs that do not change the answer produce no output.
 Saving the file is not a synchronous promise that processing has finished:
 the terminal notification shows the view after the sink handles a result.
 
+The application also observes component failures. If a required component fails
+after startup, Stockroom reports it, awaits cleanup, and exits unsuccessfully;
+this behavior is independent of `RUST_LOG`.
 On Ctrl-C, the program awaits `core.shutdown()` and reports any cleanup failure
 before returning. This pattern matters even in a small program: Rust cannot
 await runtime cleanup in `Drop`.
@@ -830,7 +846,11 @@ cargo run --locked --features callbacks -- callback
 
 Lower a product's quantity and save. The callback prints
 `callback: [{"quantity":3,"sku":"bolts"}]`. It receives the native input envelope,
-updates the view, and completes directly in the graph's owned task:
+updates the view, and completes directly in the graph's owned task.
+
+`ResultView` is the small keyed result cache explained
+[later in this chapter](#stockroom-result-view). Here the callback uses its
+`apply` and `rows` methods to update and display that cache:
 
 <!-- excerpt: stockroom/src/main.rs#application-callback -->
 ```rust
@@ -973,6 +993,8 @@ identity, and do not derive identity from a field that may change.
 record's `RecordId`.
 
 The companion stores:
+
+<a id="stockroom-result-view"></a>
 
 <!-- excerpt: stockroom/src/main.rs#view-shape -->
 ```rust
@@ -1120,9 +1142,9 @@ provides an asynchronous live stream; recovery adds a coordinated starting point
 
 ### 5. Compose a processing pipeline
 
-Add a processing step before Stockroom's query without changing its answer.
-Then use the same connection model to normalize real input, expand records,
-and perform work that is not itself a query.
+Connect Stockroom to external producers and consumers using native plugins.
+Then add a processing step before its query, normalize real input, expand
+records, and perform work that is not itself a query.
 
 #### Connect existing native plugins
 
@@ -1143,10 +1165,12 @@ Return to your copied Stockroom project and run:
 cargo run --locked --features plugins -- plugins ../drasi-core/target/debug
 ```
 
-The first `plugins` selects Stockroom's lesson; the final argument is the
+The first `plugins` selects Stockroom's lesson; the directory argument is the
 directory of libraries you just built and trust. The code selects the platform's
 `.dylib`, `.so`, or `.dll` filenames. It loads only those two explicit packages.
 If Cargo uses a custom target directory, pass that directory's `debug` folder.
+Optional HTTP and SSE port arguments follow the directory; for example,
+`plugins ../drasi-core/target/debug 9084 9085` uses those two ports instead.
 
 Wait for:
 
@@ -1168,9 +1192,12 @@ curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-re
 ```
 
 Use `curl.exe` in Windows PowerShell. The supplied JSON requests insert the
-product at quantity 3 and update it to 8. The SSE terminal receives an addition
-and a deletion for the low-stock answer, including row identity and before/after
-data. Heartbeat frames are transport liveness messages, not inventory changes.
+product at quantity 3 and update it to 8. Each SSE data message contains
+`queryId`, `timestamp`, and a `results` array. These two requests produce `ADD`
+and `DELETE` entries containing `type`, `data`, and `row_signature`; neither
+entry is a paired before/after update. An `UPDATE` entry carries the changed
+row plus its `before` and `after` values. Heartbeat frames are transport
+liveness messages, not inventory changes.
 
 The HTTP response confirms volatile ingress acceptance. The SSE sink is also
 volatile and **Accepted**: a disconnected browser receives no retained history,
@@ -1181,6 +1208,22 @@ Stop both curl and Stockroom with Ctrl-C when finished.
 The source response's phrase `events processed successfully` and its
 `events_processed` field refer to ingress acceptance. They do not confirm query
 completion or downstream handling.
+
+The implementation in [network.rs](stockroom/src/network.rs) follows one
+native path:
+
+```text
+trusted library -> native factory -> validated specification -> ComponentBatch
+```
+
+`drasi_host_sdk::computation::load` supplies the native factory. Its
+`specification` method validates configuration and supplies the component's
+ports and schemas. Stockroom connects the source's graph-change output to the
+query, then fans the query's output out to its local view and the SSE sink.
+
+**Try it.** Inspect `http-insert.json`, change its ID and SKU to a second
+product, and submit it. Verify that restocking one product retracts only
+that product's result.
 
 #### Send changes to a webhook
 
@@ -1210,23 +1253,23 @@ cargo run --locked --features plugins -- webhook ../drasi-core/target/debug http
 After `Connected live webhook destination` appears, lower the quantity and save.
 The receiver prints the query-result addition. Restocking produces its deletion.
 The application configured a native sink; it did not implement HTTP delivery.
+Webhook payloads identify the `operation`, `queryId`, and `sequenceId`.
+An addition has `after`, a deletion has `before`, and an update has both.
 
 The observation receiver acknowledges receipt and printing, not a durable
 purchase. For external business effects, use the completion/idempotency contract
-in Chapter 12. The example uses zero automatic retries so a failed request is
-visible rather than silently repeated.
+in Chapter 12. With strict handling and zero retries, a failed request fails
+the webhook component. Stockroom observes that failure, prints
+`component 'webhook' failed` with its cause, awaits shutdown, and exits with a
+nonzero status, even with `RUST_LOG=off`. Zero retries chooses the delivery
+policy; application supervision makes the failure visible.
 
-The implementation in [network.rs](stockroom/src/network.rs) follows one
-native path:
+**Try it.** Stop the receiver, change quantity from 8 to 3, and save.
+Expect Stockroom to report the webhook failure and exit unsuccessfully.
+Restart the receiver, restore quantity 8, restart Stockroom, and repeat the
+edit to see successful delivery.
 
-```text
-trusted library -> native factory -> validated specification -> ComponentBatch
-```
-
-`drasi_host_sdk::computation::load` supplies the native factory. Its
-`specification` method validates configuration and supplies the component's
-ports and schemas. Stockroom connects the source's graph-change output to the
-query, then fans the query's output out to its local view and the SSE sink.
+#### Available native integrations
 
 Native plugins and in-process components use the same graph-owned processing
 contracts. Dynamic packaging is optional; a statically linked native factory
@@ -1235,10 +1278,6 @@ than assuming every connector package exposes every execution mode.
 For databases, the native SQLite source used in Part III captures writes
 through its own handle; PostgreSQL's native transaction source uses a replication
 protocol. Those are different capture boundaries, not interchangeable APIs.
-
-For another source, start with its **native** contract and bootstrap requirements:
-
-#### Available native integrations
 
 These are native component surfaces, rather than a count of every historical
 connector package. Some are dynamically packaged; others are statically linked
@@ -1273,10 +1312,6 @@ Database capture requires its source-specific setup:
 The HTTP lesson receives changes another application supplies. A database CDC
 plugin instead detects committed changes through its database protocol. Choosing
 the source changes how input is obtained; query and sink composition stay native.
-
-**Try it.** Inspect `http-insert.json`, change its ID and SKU to a second
-product, and submit it. Verify that restocking one product retracts only
-that product's result.
 
 #### Add the audit step
 
@@ -1332,7 +1367,7 @@ impl Transformer for Audit {
 }
 ```
 
-These are statements inside `Audit::transform` in the companion.
+This is the companion's complete `Transformer` implementation for `Audit`.
 The original graph records keep their identities. The new envelope has the
 transformer's emission identity and retains input context and lineage.
 Appending an annotation affects this branch, not a sibling's envelope.
@@ -1776,9 +1811,15 @@ connections. Repair the missing dependency while preserving auto-start settings
 and explicit stops. Reserve retries for failures classified as retryable, rather
 than treating every unready component as a failed constructor.
 
-**Try it.** Remove one connection from the copied application's batch and bound
-the affected component's readiness wait. Observe the invalid/incomplete
-topology outcome, restore the edge, and confirm that readiness returns.
+**Try it.** In your copied `main.rs`, find the default edge list in
+`build_application` and temporarily remove `("inventory", query_id)`, leaving
+`(query_id, "alerts")`. Run `cargo run --locked`. The graph declaration and
+instance start are accepted, but the inventory source waits for its output
+connection. After the five-second readiness deadline, Stockroom reports
+`wait for component 'inventory' readiness` and
+`connection for 'inventory:out'`, then exits unsuccessfully. Restore the edge,
+rerun, and confirm that `Ready. Watching inventory.json` returns.
+
 Then stop the persistent lesson with Ctrl-C while it is applying an edit.
 Its signal receiver remains owned while work completes, and the healthy graph
 is quiesced before terminal cleanup.
@@ -1899,7 +1940,9 @@ Use the message together with the component and phase that produced it:
 | `normalize mode requires --features normalize` | Build configuration | Rerun with the lesson's feature enabled |
 | `load trusted native library ...` | Plugin loading | Build the named native package and pass its actual target directory |
 | Address already in use during plugin startup | Resource acquisition | Release or reconfigure the conflicting listener; inspect the failed component rather than assuming the query failed |
-| `deadline has elapsed` around a readiness wait | Incomplete startup | Inspect the nested component error, bootstrap progress, and required dependencies |
+| `wait for component '...' readiness` / `deadline has elapsed` | Incomplete startup | Read the named missing connection or dependency; for query readiness, inspect bootstrap progress |
+| `component 'webhook' failed` | Outgoing delivery | Restore the receiver or correct its URL; strict handling stops the application on failure |
+| `create new key file ...: File exists` | Key generation | Preserve the existing key or choose a different output path |
 | `query configuration changed; explicit reset/rebootstrap is required` | Persistent query identity | Preserve state and choose an explicit migration/rebuild plan |
 | `live result stream closed or lagged; rebuild the view` | Volatile consumer | Reestablish a coordinated view rather than applying a missing tail |
 | `Saved reorders unavailable: enumeration index missing or stale` | Saved business-state format | Preserve the per-record state; complete enumeration requires a matching view index |
@@ -1909,10 +1952,11 @@ an empty result as failure: a valid product above minimum produces no low-stock
 row. Tests in Chapter 4 wait for the expected business state and report a bounded
 failure when that state never arrives.
 
-The CLI prints each distinct root cause once and returns a failing exit status.
-It retains typed work/cleanup errors internally, so a cleanup failure is not
-lost behind an earlier startup failure. Use diagnostic logging for the
-surrounding component and lifecycle context.
+The CLI prints the outer useful operation context and root cause together,
+retaining the relevant component or file path without repeating framework
+wrappers. It returns a failing exit status and retains typed work/cleanup
+errors internally, so a cleanup failure is not lost behind an earlier failure.
+Diagnostic logging supplies additional lifecycle detail.
 
 #### Start with state, then inspect history
 
@@ -1921,6 +1965,15 @@ Use `inspect_computation_inventory`, `inspect_computation_graph`, and
 and the control handle expose coherent observed snapshots and bounded change
 history. `list_queries` and `get_query_results` provide application-oriented
 query inspection.
+
+Stockroom's `cli::Health` subscribes before startup and observes failures
+through the existing graph inspector. It includes destinations added later.
+Because a watch can coalesce a failure followed by cleanup, the monitor reads
+each retained publication, not just the latest state. If that bounded history
+has been evicted, it reports the observation gap and stops rather than claiming
+the application remained healthy. This is application supervision, not a
+durable audit log. Ordinary dependency waits and intentionally held alerts
+are not component failures.
 
 Include component generation and graph revision in observations. A health probe
 belongs to the incarnation it inspected; `report_health` checks that revision,
@@ -2073,6 +2126,7 @@ Wait for readiness, change quantity to 3, and save. You will see:
 
 ```text
 Saved reorder changes through query sequence 1.
+Saved reorders: [{"sku":"bolts","quantity":3}]
 low-stock: [{"quantity":3,"sku":"bolts"}]
 ```
 
@@ -3889,7 +3943,9 @@ pub(super) async fn add_webhook(
     if report.summary != OperationSummary::Completed {
         return Err(LifecycleReportError::Reconciliation(report).into());
     }
-    tokio::time::timeout(Duration::from_secs(10), component.start()).await??;
+    tokio::time::timeout(Duration::from_secs(10), component.start())
+        .await
+        .context("wait for webhook readiness")??;
     println!("Connected live webhook destination: {url}");
     Ok(())
 }
@@ -3898,7 +3954,12 @@ pub(super) async fn add_webhook(
 The exercise adds one destination. Existing results are not replayed
 automatically to it; make a new inventory edit after connection. Replacing or
 removing a destination requires the explicit policies below rather than simply
-changing or clearing its URL. Managed members use desired-state updates instead.
+changing or clearing its URL. In this runnable lesson, changing or clearing an
+already-connected URL reports an error and exits with a nonzero status.
+A malformed JSON save instead reports `Destination unchanged` and keeps the
+current destination while you repair the file. A delivery failure also stops
+the application, using the same supervision as Chapter 5.
+Managed members use desired-state updates instead.
 
 #### Exercise revisioned changes
 
@@ -4485,10 +4546,15 @@ The book supplies the application path; the reference supplies the catalog.
 | Host independent processes | [Instance host](../../../components/instance-host/README.md) and [bridges](../../../components/computation-plugins/common/bridge/README.md) |
 | Change the library implementation | [Maintainer's guide](../computation-graph-maintainers-guide.md) |
 
-For book maintenance, `python3 lib/docs/developer-guide/check_book.py --test`
+For book maintenance, `python3 lib/docs/developer-guide/check_book.py --test --network`
 checks local links and source-linked excerpts, compiles every Rust fence with
 explicit surrounding types, then runs the starter's default and extended
-lesson tests in a fresh copy. It is also part of the repository test workflow.
+lesson tests in a fresh copy. The `--network` option builds the three native
+network libraries and exercises HTTP/SSE payloads, webhook delivery and failure,
+and live destination changes through the real application with logging disabled.
+These bounded smoke tests use local endpoints and temporary files, and run on
+Linux/macOS; Windows remains unqualified. Omit `--network` to run only the
+book and starter checks. The combined command is part of the repository test workflow.
 The marked excerpts are compared with their compiled source; contextual
 fragments receive the values named by their surrounding lesson. Compile-only
 fragments are not executed as additional applications.

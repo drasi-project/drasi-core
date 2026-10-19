@@ -39,5 +39,5 @@ jobs:
         cargo test --workspace --exclude drasi-host-sdk --exclude drasi-lib --exclude lib-integration-tests -- --test-threads=1
         bash lib/tests/run-runtime-parity.sh
         cargo test -p drasi-lib --doc
-        python3 lib/docs/developer-guide/check_book.py --test
+        python3 lib/docs/developer-guide/check_book.py --test --network
         cargo test -p drasi-core --features parallel_solver

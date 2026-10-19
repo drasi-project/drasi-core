@@ -37,6 +37,8 @@ pub(super) fn connect(
     mut batch: ComponentBatchBuilder,
     directory: &Path,
     query_id: &str,
+    http_port: u16,
+    sse_port: u16,
 ) -> anyhow::Result<ComponentBatchBuilder> {
     for (package, implementation, id, configuration) in [
         (
@@ -45,7 +47,7 @@ pub(super) fn connect(
             "inventory",
             serde_json::json!({
                 "stream":"inventory/out", "sourceId":"inventory",
-                "host":"127.0.0.1", "port":9080,
+                "host":"127.0.0.1", "port":http_port,
                 "ingressCapacity":32, "maxMessageBytes":65536
             }),
         ),
@@ -55,7 +57,7 @@ pub(super) fn connect(
             "notifications",
             serde_json::json!({
                 "queryStreams":{query_id:format!("{query_id}/out")},
-                "host":"127.0.0.1", "port":9081, "ssePath":"/events",
+                "host":"127.0.0.1", "port":sse_port, "ssePath":"/events",
                 "broadcastCapacity":32
             }),
         ),
@@ -104,7 +106,9 @@ pub(super) async fn add_webhook(
     if report.summary != OperationSummary::Completed {
         return Err(LifecycleReportError::Reconciliation(report).into());
     }
-    tokio::time::timeout(Duration::from_secs(10), component.start()).await??;
+    tokio::time::timeout(Duration::from_secs(10), component.start())
+        .await
+        .context("wait for webhook readiness")??;
     println!("Connected live webhook destination: {url}");
     Ok(())
 }
@@ -121,6 +125,7 @@ pub(super) async fn watch_destination(
     core: &DrasiLib,
     directory: &Path,
     shutdown: &mut cli::Shutdown,
+    health: &mut cli::Health,
 ) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
     let mut connected: Option<String> = None;
@@ -130,7 +135,9 @@ pub(super) async fn watch_destination(
     );
     loop {
         tokio::select! {
-            result = shutdown.requested() => { result?; return Ok(()); }
+            biased;
+            result = health.failed() => { result?; }
+            result = shutdown.requested() => { result?; return health.check(); }
             _ = interval.tick() => {}
         }
         let read = async {

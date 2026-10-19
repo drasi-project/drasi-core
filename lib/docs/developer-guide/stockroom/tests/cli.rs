@@ -4,6 +4,7 @@
 use std::process::Command;
 
 #[cfg(unix)]
+#[allow(dead_code)]
 #[path = "../src/cli.rs"]
 mod terminal;
 
@@ -118,9 +119,34 @@ fn keygen_command_refuses_to_replace_a_key() -> anyhow::Result<()> {
     assert_eq!(first.len(), 32);
     let second = run()?;
     assert!(!second.status.success());
+    let error = String::from_utf8(second.stderr)?;
+    assert!(
+        error.contains("create new key file stockroom.key"),
+        "{error}"
+    );
+    assert!(error.contains("exists"), "{error}");
     assert_eq!(
         std::fs::read(directory.path().join("stockroom.key"))?,
         first
     );
+    Ok(())
+}
+
+#[cfg(feature = "plugins")]
+#[test]
+fn missing_plugin_reports_the_loading_operation_and_path() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let missing = directory.path().join("missing-plugins");
+    let output = Command::new(env!("CARGO_BIN_EXE_stockroom"))
+        .current_dir(directory.path())
+        .arg("plugins")
+        .arg(&missing)
+        .env("RUST_LOG", "off")
+        .output()?;
+    let error = String::from_utf8(output.stderr)?;
+    assert!(!output.status.success());
+    assert!(error.contains("load trusted native library"), "{error}");
+    assert!(error.contains(&missing.display().to_string()), "{error}");
+    assert!(error.contains("drasi_computation_source_http"), "{error}");
     Ok(())
 }

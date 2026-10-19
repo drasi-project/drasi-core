@@ -207,6 +207,7 @@ pub(super) struct PersistentStockroom {
     #[cfg(test)]
     journal: Arc<QosChannel>,
     completion: watch::Receiver<u64>,
+    health: cli::Health,
     #[cfg(test)]
     runner: Arc<Mutex<DeliveryRunner>>,
     last_file: Option<BTreeMap<String, Product>>,
@@ -376,15 +377,14 @@ impl PersistentStockroom {
             .build()
             .await?;
         let setup = async {
+            let mut health = cli::Health::new(&core)?;
             core.start().await?;
             for component in ["inventory", "low-stock", "alerts"] {
-                tokio::time::timeout(
-                    Duration::from_secs(10),
-                    core.computation_component(component)?.wait_started(),
-                )
-                .await??;
+                cli::wait_started(&core, component, Duration::from_secs(10)).await?;
             }
-            tokio::time::timeout(Duration::from_secs(10), results.wait_ready()).await??;
+            tokio::time::timeout(Duration::from_secs(10), results.wait_ready())
+                .await
+                .context("wait for query 'low-stock' readiness")??;
             sql.execute(
                 "CREATE TABLE IF NOT EXISTS Product (
                 sku TEXT PRIMARY KEY, quantity INTEGER NOT NULL,
@@ -409,12 +409,14 @@ impl PersistentStockroom {
                 println!("Pending alerts in the output journal at open: {pending_at_open}.");
             }
             allow_delivery.send_replace(true);
-            Ok(())
+            health.check()?;
+            Ok(health)
         }
         .await;
-        if let Err(error) = setup {
-            finish(&core, Err(error)).await?;
-        }
+        let health = match setup {
+            Ok(health) => health,
+            Err(error) => return finish(&core, Err(error)).await,
+        };
         Ok(Self {
             core,
             sql,
@@ -423,6 +425,7 @@ impl PersistentStockroom {
             #[cfg(test)]
             journal,
             completion,
+            health,
             #[cfg(test)]
             runner,
             last_file: None,
@@ -500,6 +503,8 @@ pub(super) async fn run(
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         loop {
             tokio::select! {
+                biased;
+                result = app.health.failed() => { result?; }
                 result = shutdown.requested() => { result?; break; }
                 _ = interval.tick() => { app.apply_file(Path::new("inventory.json")).await?; },
                 result = app.completion.changed() => {
@@ -509,6 +514,7 @@ pub(super) async fn run(
                 }
             }
         }
+        app.health.check()?;
         Ok(())
     }
     .await;

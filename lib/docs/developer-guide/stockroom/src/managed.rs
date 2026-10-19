@@ -231,7 +231,7 @@ async fn open(
     path: &Path,
     store: Arc<dyn ConfigurationStore>,
     threshold: Option<i64>,
-) -> anyhow::Result<DrasiLib> {
+) -> anyhow::Result<(DrasiLib, cli::Health)> {
     let mut factories = FactoryRegistry::standard();
     factories.register(file_factory()?)?;
     factories.register(alert_factory()?)?;
@@ -245,6 +245,7 @@ async fn open(
         .await?;
     // ANCHOR_END: managed-builder
     let setup = async {
+        let mut health = cli::Health::new(&core)?;
         let current = core.desired_configuration()?;
         if current.revision == 0 || threshold.is_some() {
             let request = core.new_configuration_request_id().await?;
@@ -261,19 +262,17 @@ async fn open(
         );
         core.start().await?;
         for component in ["inventory", "low-stock", "alerts"] {
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                core.computation_component(component)?.wait_started(),
-            )
-            .await??;
+            cli::wait_started(&core, component, Duration::from_secs(10)).await?;
         }
-        Ok(())
+        health.check()?;
+        Ok(health)
     }
     .await;
-    if let Err(error) = setup {
-        finish(&core, Err(error)).await?;
-    }
-    Ok(core)
+    let health = match setup {
+        Ok(health) => health,
+        Err(error) => return finish(&core, Err(error)).await,
+    };
+    Ok((core, health))
 }
 
 pub(super) async fn run(
@@ -293,14 +292,18 @@ pub(super) async fn run(
         key,
     )?);
     println!("Starting managed Stockroom.");
-    let core = open(&path, store, threshold).await?;
+    let (core, mut health) = open(&path, store, threshold).await?;
     let work = async {
         println!(
             "Ready at saved configuration revision {}. Edit inventory.json; Ctrl-C stops.",
             core.desired_configuration()?.revision
         );
-        shutdown.requested().await?;
-        Ok(())
+        tokio::select! {
+            biased;
+            result = health.failed() => result?,
+            result = shutdown.requested() => result?,
+        }
+        health.check()
     }
     .await;
     finish(&core, work).await
@@ -317,7 +320,7 @@ mod tests {
         tokio::fs::write(&path, "[]").await?;
         let database = directory.path().join("configuration.redb");
         let key = [19; 32];
-        let core = open(
+        let (core, _health) = open(
             &path,
             Arc::new(RedbConfigurationStore::new(&database, key)?),
             Some(10),
@@ -326,7 +329,7 @@ mod tests {
         let saved = core.desired_configuration()?;
         core.shutdown().await?;
         drop(core);
-        let core = open(
+        let (core, _health) = open(
             &path,
             Arc::new(RedbConfigurationStore::new(&database, key)?),
             None,
