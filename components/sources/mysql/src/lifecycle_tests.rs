@@ -82,12 +82,7 @@ async fn failed_and_panicked_replication_require_cleanup_even_in_error_status() 
         *source.cleanup_required.lock().await = true;
         source.subscriber_resume_positions.write().await.insert(
             "old-query".into(),
-            ReplicationState {
-                binlog_file: "mysql-bin.000001".into(),
-                binlog_position: 100,
-                gtid_set: None,
-                last_processed_timestamp: 0,
-            },
+            ReplicationState::new("mysql-bin.000001", 100, None, 0),
         );
         source
             .base

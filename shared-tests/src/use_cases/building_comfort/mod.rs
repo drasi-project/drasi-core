@@ -35,6 +35,7 @@ use crate::QueryTestConfig;
 
 mod data;
 mod queries;
+pub mod snapshots;
 
 macro_rules! variablemap {
   ($( $key: expr => $val: expr ),*) => {{

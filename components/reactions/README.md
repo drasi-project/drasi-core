@@ -123,7 +123,7 @@ appending to a file, or updating a UI.
 
 ### Bundled completion boundaries
 
-All 19 bundled legacy reaction crates reach ComputationGraph through
+All 20 bundled legacy reaction crates reach ComputationGraph through
 `ReactionPluginAdapter`, whose successful call means **Accepted**, not handled
 or durably completed. Its factory rejects stronger declarations. Internal
 checkpoints, broker replies, or a persistent destination do not change that
@@ -135,6 +135,7 @@ skip or fallback MUST NOT silently become a stronger guarantee.
 
 | Legacy reaction | Actual processing and failure boundary |
 |---|---|
+| [a2a](a2a/src/process.rs) | Calls A2A endpoints and saves activation state/checkpoints. Retryable and JSON-RPC failures stop processing; selected permanent HTTP failures are dropped. Remote effects and local progress are not one atomic transaction. |
 | [application](application/src/application.rs) | Forwards into the application's channel, not completion of the application's work. A closed receiver logs an error and ends forwarding. |
 | [aws-sqs](aws-sqs/src/reaction.rs) | Sends individual messages; render/send failures are logged and processing continues. FIFO queue settings alone do not establish a graph-wide deduplication contract. |
 | [azure-storage](azure-storage/src/reaction.rs) | Prepares and writes individual storage operations; payload/write failures are logged and later operations continue. |
