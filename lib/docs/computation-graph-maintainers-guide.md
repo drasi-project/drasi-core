@@ -1,11 +1,11 @@
 # Maintaining ComputationGraph
 
-**Implementation baseline: 13 October 2026 development checkout, `agentofreality-parallel-computation-graph`.**
+**Implementation baseline: 20 October 2026 development checkout, `agentofreality-parallel-computation-graph`.**
 
 The current-code descriptions were checked against Core
-[`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8),
+[`54735c05`](https://github.com/drasi-project/drasi-core/commit/54735c056ca45bd784462cd462c14f0a514de442),
 with matching Server integration at
-[`f15706d`](https://github.com/drasi-project/drasi-server/commit/f15706d0d65c5c829c0a653c0d977f4cad617d6a).
+[`15dafa2`](https://github.com/drasi-project/drasi-server/commit/15dafa225ac76ba9868452a7082f693027621ad7).
 
 This guide is for engineers changing Drasi itself: its runtime, query execution,
 storage integration, component lifecycle or plugin hosting. For building a
@@ -13,9 +13,11 @@ solution *with* Drasi, use the [application developer guide](developer-guide/REA
 For exact signatures and configuration fields, use the
 [implementation reference](computation-graph-reference.md).
 
-For the single current list of outstanding work, including design/code-review
-findings, scope, priorities and completion criteria, see the
-[consolidated inventory](computation-graph-remaining-work.md).
+For current migration status and completion criteria, see the
+[cleanup plan](computation-graph-cleanup-plan.md). The
+[consolidated inventory](computation-graph-remaining-work.md) retains the broader
+design/code-review backlog; its earlier checkpoints are not a substitute for
+the later, scoped implementation and qualification records.
 
 ComputationGraph makes the processing topology an executable, owned structure.
 It decides which component instances exist, which connections they use, when
@@ -79,6 +81,12 @@ sequences, durable multicast, explicit source-time merging and capability-checke
 recovery paths. It also gives maintainers one ownership model to extend instead
 of adding a new manager/executor for each processing shape.
 
+The latest native fan-out work closes a migration restriction, not a missing
+requirement in the old product. A source can feed several transformers/queries;
+a transformer can feed several transformers and sinks. One producer is reused,
+while each required consumer keeps its own progress owner and recovery boundary.
+This is separate from choosing a multicast journal for the connecting pipes.
+
 For the previous design, read the pinned
 [ComponentGraph module](https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/component_graph/mod.rs),
 [manager-owned query path](https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/manager.rs)
@@ -86,13 +94,13 @@ and [status-update loop in `lib_core.rs`](https://github.com/drasi-project/drasi
 The current [`component_graph/graph.rs`](../src/component_graph/graph.rs) is
 deliberately different: its `ComponentGraphView` holds a weak runtime reference
 and provides read-only views. It is not a second mutable runtime.
-`ComponentGraph` remains an alias for callers using the old name.
+The former `ComponentGraph` alias has been removed.
 
 Snapshot names also distinguish what is being captured:
 `config::QueryConfigurationSnapshot` contains a query's configuration and status;
 `computation::v1::QueryResultSnapshot` contains its result rows, output sequence
-and generation. The former `QuerySnapshot` imports remain aliases in their
-respective modules; they are not two names for the same kind of snapshot.
+and generation. The former `QuerySnapshot` aliases have been removed; import
+the explicit type for the boundary being inspected.
 
 ## Ownership and the two assembly paths
 
@@ -515,6 +523,23 @@ inventing an identity from just a timestamp, record key or transport envelope ID
 The [producer-provenance tests](../tests/computation_producer_provenance.rs)
 cover the distinction through derived streams.
 
+For a validated stateless path to an actual consumer-progress owner,
+`GraphInputProgress::with_consumer_boundary` can restore the original producer
+boundary. `GraphProducerProgress::read_boundary` reads its actual metadata
+from the envelope lineage; matching a source name or copying an annotation is
+not proof. Retained paths preserve already queued input through supported
+replacement.
+
+Carry the actual producer role for normal and batched inputs, including the
+validated original boundary. An ordinary transformer that expands one query
+result into two envelopes must not label both outputs as the ancestor query's
+same logical result and discard the second as a duplicate. Conversely, a
+validated stateless relay must preserve an original query's logical result
+position rather than substitute its transport counter. Original and immediate
+transport progress advance independently. The
+[handled-input regressions](../tests/computation_input_progress.rs) cover both
+cases and completion after continuations.
+
 ### Ordinary ordering preserves each producer's progress
 
 The ordinary query inbox is a `RankedInputQueue` shared across its sources.
@@ -700,6 +725,43 @@ it during recovery. Dropping a snapshot stream requests cancellation, but
 query cleanup must still await the provider's stop hook before releasing storage.
 The rows are not one fictitious source transaction.
 
+### Composite bootstrap retains the actual child lifecycles
+
+[`CompositeBootstrapProvider`](../src/computation/v1/composite_bootstrap.rs)
+combines 1 through 32 ordered, distinct provider resources for one real query.
+Each child validates the instance/graph/query scope, and recovery-bearing
+children must share the same actual local progress owner. Neither same-named
+readers nor the same provider under two resource IDs are valid substitutes.
+
+The composite streams children through the existing snapshot interface without
+buffering every snapshot. Its version-1 record namespaces optional child state
+by ordered resource ID within the existing 65,536-byte initialization bound.
+Changed membership/order cannot reinterpret a retained record. Completion state
+and at most 256 distinct watermarks enter the existing query transaction;
+partial snapshots publish no completed handover.
+
+Preparation aggregates `ResetRequired` before `RefreshVolatile` before `Ready`.
+A non-Ready result stops and rearms **all** children before retry, including
+siblings that returned Ready. Otherwise a memory PostgreSQL refresh combined
+with an already-prepared HTTP child would violate that child's sealed native
+lifecycle. The query's recovery policy still decides whether a persistent
+incomplete initialization may be reset.
+
+Cancelled streams and failed operations retain cleanup ownership until awaited
+stop succeeds. Retirement holds the actual child leases, not sampled stopped
+flags; partial acquisition must resume acquired children on rejection and
+retain any unresolved cleanup. Do not replace this with a list of factory names
+or release children when a caller stops waiting.
+
+Host/Server `CompositeBootstrapConfig` supplies the canonical
+`{kind: "compositeBootstrap", component: <query>, providers: [<ordered IDs>]}`
+recipe. It must be a graph-owned Bootstrap resource with exactly those child
+Bootstrap dependencies, bound to the query's unchanged single `bootstrap` slot.
+See the [Host resolver and validators](../../components/host-sdk/src/management/native.rs)
+and [real static/dynamic PG/HTTP composition](../../components/host-sdk/tests/native_postgres_http_bootstrap.rs).
+This adds no execution ABI, envelope schema or extra executor, and does not
+upgrade an HTTP snapshot to a durable or globally atomic snapshot protocol.
+
 ### Timer notifications do not own scheduled work
 
 Temporal evaluation stores due work in the query's future queue.
@@ -815,6 +877,65 @@ Likewise, a sink's completion declaration describes what its successful handler
 actually proves. A retained pipe cannot upgrade an acceptance-only plugin to
 completed handling. [Recovery-contract tests](../tests/computation_recovery_contracts.rs)
 exercise those mismatches.
+
+### A shared producer observes independent actual owners
+
+[`ConsumerProgressSet`](../src/computation/v1/consumer_progress.rs) binds one
+producer to 1 through 256 actual `Arc<QuerySourceProgress>` owners in the same
+graph. It preserves each member's readiness, persistence, failure, reset
+generation and checkpoint map. It does not synthesize an aggregate checkpoint,
+sequence, source cursor or persistence flag. Read-only views cannot replace
+local owner proof, and dropping a reader does not retire an obligation.
+
+[`graph/consumer_progress.rs`](../src/computation/v1/graph/consumer_progress.rs)
+checks the actual required downstream paths and exact owner resources.
+Missing prerequisites remain dependency waits; invalid owners or uncovered
+branches are errors. Capture contracts at construction/activation and supported
+reconfiguration, not per envelope. Readiness is an observation, not a lease
+authorizing a concurrent reset or member replacement.
+
+`ComponentRecovery::with_consumer_progress` exposes the actual set;
+`with_consumer_positions` additionally retains a source-defined
+`InputPositionPolicy`. Source positions may describe a WAL commit, a row within
+a commit, a binlog boundary or a journal epoch. Every input/checkpoint pair must
+be comparable in that source's domain. Invalid or incomparable positions fail;
+they never fall back to numerical query-sequence comparison.
+
+Replay and retention use each owner's actual physical coverage, including
+independently captured snapshots. Emission floors separately include the
+relevant logical and transport counters and retained allocations. Taking the
+minimum or maximum of all counters as one cursor is incorrect. Queries,
+durable middleware and transaction transformers filter physically covered
+input per owner while retaining truthful transport progress.
+
+This remains one producer with independent consumers. It is not one source per
+query, a shared query transaction, or an acknowledgement inferred from queue
+acceptance. Source-specific history retention remains an additional contract;
+the progress set alone neither retains WAL nor makes volatile owners durable.
+
+### The graph can own volatile handled-input progress
+
+[`graph/input_progress.rs`](../src/computation/v1/graph/input_progress.rs) owns
+the optional `ComponentRecovery::with_volatile_input_progress` publication for
+standalone transformers and ordinary Handled sinks. This is a separate field
+from atomic `committed_progress`, so incompatible owner claims are rejected
+rather than overwritten. Accepted sinks, sources, services, atomic participants
+and consumer wrappers are ineligible. A factory's ability to create transactional
+steps does not exclude its separately constructed standalone transformer.
+
+Publish only after handler success, all output acceptances, continuations and
+completion hooks. Batched preflight computes prospective duplicate decisions
+without publishing; only completed handling confirms them. Covered replay may
+advance transport without replacing the handled cursor. Failure/cancellation
+fences the owner, and restart requires successful cleanup; an unclean drop is
+not release of writer ownership.
+
+Same-instance clean stop/start retains the volatile handled prefix. A replacement
+writer advances the generation and clears it. This is not persistent replay or
+an external-effect transaction. Keep the large optional tracking state boxed
+and off the default path. The
+[normal, batched and interrupted-input tests](../tests/computation_input_progress.rs)
+protect these boundaries.
 
 ### Retained and multicast pipes make obligations explicit
 
@@ -1046,6 +1167,22 @@ the same component's queued starts with `StartSuperseded`, so a completed stop
 is never undone by an older start. Conflicting group, structural and
 recovery-freeze commands still return `OperationInProgress`.
 
+Consumer-progress membership and validated paths are immutable for a live
+binding. A change that resets/replaces an owner or alters that required path
+must await the producer's actual `stop`, not merely park graph polling:
+source-owned I/O may otherwise acknowledge upstream data during the change.
+Drain admitted input before replacing the set, retain unchanged actual owners,
+initialize enrolled members, then restart with new subscriptions only after
+all required boundaries are ready. A source-specific removal rule can be
+stronger than graph drain; SQLite requires the departing owner to cover the
+current journal head.
+
+The shared-source qualification covers drained reconstruction and reconciliation
+with the drain barrier. It does not establish cold reconstruction with undrained
+persistent input-pipe frames: handled progress does not reveal every queued
+transport allocation. Do not infer those counters, discard frames or reset
+source state to hide that missing recovery evidence.
+
 ### Durable acceptance precedes realization
 
 Optional management persists *what the instance should contain*. Its
@@ -1151,6 +1288,44 @@ borrowed transaction. The host does not extend a borrowed Rust context to an
 invented static lifetime. Late callbacks after cancellation must fail rather
 than reach a replacement's storage.
 
+The separate `drasi_computation_plugin_consumer_progress_v1` symbol adds
+producer consumer-progress inspection and an optional retained position
+comparator. Base ABI `1.0.0`, wire `2` and recovery-v1 are unchanged.
+Opt-in source/transformer factories require one `consumer_progress` Checkpoint
+dependency containing the actual `Arc<ConsumerProgressSet>`; it cannot coexist
+with single-owner progress or admission on that producer.
+
+`NativeConsumerProgress` exposes immutable member IDs and read-only observations,
+not storage writers. Constructors retain it without reading or subscribing
+before start. Bounds include 256 members, 4,096 checkpoint/transport entries,
+a 1-MiB encoded progress frame and 16 retained subscriptions. Failed encoding
+must not consume an observation; a cancelled wait must not consume a publication.
+Stop revokes old readers, and successful cleanup precedes new subscriptions.
+
+The source returns one stable immutable position-policy handle. Comparisons
+can run outside the component's mutable-operation lock, including while an I/O
+operation is pending. Both arguments use the source's checkpointable position
+format, bounded by 65,536 bytes. Preserve comparator errors; a panic quarantines
+the native instance and wakes waiters. Queued input can retain the comparator
+after component removal, so the producer-owned handle and library pin must
+outlive every such use.
+
+The optional `input_progress` slot has a different direction: it binds an
+eligible component's own upstream-facing handled-input owner. The Host attaches
+the volatile contract, but the handle never enters the plugin and direct proxy
+calls never publish it. A transformer can have both its own input owner and a
+set of downstream owners. Reject conversion of an actually tracked instance
+into a transactional participant.
+
+Managed `ConsumerProgressConfig` resolves
+`{kind: "consumerProgress", producer: <ID>, consumers: {<component>: <resource>}}`.
+Declare exactly one distinct Checkpoint dependency per consumer, using its
+actual `sourceProgress` resource. The producer binds the set to
+`consumer_progress`; a query binds its member to `source_progress`, while an
+eligible standalone transformer/Handled sink binds its member to `input_progress`.
+The [Host SDK recipe guide](../../components/host-sdk/README.md#native-producer-consumer-progress)
+also distinguishes canonical secret references from literal Server graph config.
+
 For scheduling and lifetime changes, start with the
 [native SDK design](../../components/computation-plugin-sdk/README.md), then
 [`host-sdk/computation/proxy.rs`](../../components/host-sdk/src/computation/proxy.rs)
@@ -1160,12 +1335,53 @@ For capability changes, follow
 [`admission.rs`](../../components/host-sdk/src/computation/admission.rs),
 [`bootstrap.rs`](../../components/host-sdk/src/computation/bootstrap.rs) or
 [`consumer.rs`](../../components/host-sdk/src/computation/consumer.rs).
+Shared producer capabilities live in
+[`consumer_progress.rs`](../../components/host-sdk/src/computation/consumer_progress.rs)
+and [`input_position.rs`](../../components/host-sdk/src/computation/input_position.rs);
+data-only contracts remain in
+[`drasi-computation-contracts`](../../components/computation-contracts/src/consumer_progress.rs).
 Keep the [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
 ordinary SDK wire contracts separate.
 
 A trait implemented by an in-process Rust component does not automatically
 exist across FFI. Test separately built libraries and actual capability
 negotiation, not just Rust mocks in one binary.
+
+### Current source adoption and consumer boundaries
+
+| Surface | Implemented scope and limit |
+|---|---|
+| [PostgreSQL shared rows](../../components/computation-plugins/sources/postgres/README.md#shared-ordinary-row-queries) | Independent memory/persistent owners, row-position filtering and per-query configured-slot snapshots; memory mode makes no process-restart promise |
+| [PostgreSQL shared transactions](../../components/computation-plugins/sources/postgres/README.md#shared-complete-transactions) | Whole committed inputs for actual atomic persistent transaction-enabled queries; distinct source/bootstrap identities and whole-commit positions |
+| [MySQL](../../components/sources/mysql/README.md#shared-consumer-recovery) | One native Rust live worker, persistent consumer sets and per-query snapshots; finite unregistered history readers avoid live replication-ID collisions |
+| [SQLite](../../components/sources/sqlite/README.md#shared-native-recovery) | Existing transaction journal, oldest-member replay/pruning and serialized snapshots; bounded enrollment metadata includes retired identities |
+| [WAL replay](../src/computation/v1/wal_source.rs) | Actual shared-owner resume and typed factory binding; no new WAL pruning/deletion policy |
+
+PostgreSQL's shared bootstrap providers use temporary export/import resources,
+not ownership of the configured live slot. Never reset/drop/recreate that slot
+to enroll a member. Old single-owner, row and whole-transaction positions remain
+distinct; a new factory identity is not permission to reinterpret stored state.
+Strict interrupted persistent bootstrap remains fenced unless an explicit
+recovery policy permits the supported reset.
+
+MySQL snapshot timestamps use a server clock sampled before acquisition;
+live events use precise immediate commit timestamps where required. Regressing
+to coarse statement seconds can silently reject valid post-snapshot updates.
+SQLite cannot prune a lagging member's history or remove its enrollment merely
+because a reader disappeared.
+
+Server's canonical definitions now cover seven PostgreSQL configurations and
+Trading's actual 11-query group with two shared PG sources, one HTTP source and
+composed initialization. Generation uses actual factory metadata and the app's
+query declarations; secret `ConfigurationValue` references remain references.
+Provisioning installs the complete fixed-member bundle in one existing batch,
+then its SSE reaction; partial/conflicting bundles fail explicitly. See the
+[Server recipes and qualification tools](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/postgres).
+
+This does not close native schema discovery, MySQL/SQLite dynamic **source**
+packaging and Server registration, cold undrained-input reconstruction, or the
+rest of cleanup stage 6 and stages 7 through 9. HTTP snapshots/live prices have
+no added durable or atomic replay guarantee.
 
 ## Inspection and diagnosing a running system
 
@@ -1212,6 +1428,8 @@ Use failure phase, generation and the relevant progress boundary together:
 | A replayed event is skipped or applied twice | Immediate producer/query identity, logical versus transport sequence, receipt retention and handoff confirmation |
 | Temporal result disappears after restart | Committed future queue, bootstrap state and due-work transaction; not only the timer notification |
 | A slow consumer causes apparent upstream inactivity | Pipe capacity, subscriber cursors and pending output; distinguish backpressure from a dead worker |
+| Shared CDC will not start or acknowledge further history | Every actual member's readiness, failure, reset generation and source cursor; then owner/path validation and source cleanup |
+| A mixed bootstrap will not restart | Each child's preparation outcome, same-query owner binding, namespaced state and retained cleanup; do not silently reset persistent state |
 | Replacement cannot acquire storage or a port | Previous generation's cleanup/retirement owner and retained worker joins |
 
 Logs and metrics complement these publications. The relevant paths are
@@ -1246,6 +1464,8 @@ The essential review questions are:
 - Do retries retain logical identity and reject conflicting or expired content?
 - Are configuration intent, processing state and external effects kept distinct?
 - Does the ordinary memory-only path acquire work or allocations for an unused feature?
+- Does a shared producer cover every actual required owner without merging their cursors or assuming unrelated counters are comparable?
+- Can membership, reset or bootstrap retirement race source-owned I/O after graph polling is paused?
 
 ### Measure the path actually changed
 
@@ -1280,6 +1500,12 @@ cargo test --locked -p drasi-lib \
   --test computation_graph_dataflow --test computation_runtime_lifecycle \
   --test computation_controller --test computation_task_execution
 
+# Actual shared owners, normal/batched handling, and composed initialization.
+cargo test --locked -p drasi-lib \
+  --test computation_input_progress --test computation_queries \
+  --test computation_wal_source
+cargo test --locked -p drasi-lib --lib computation::v1::composite_bootstrap::tests
+
 # Real RocksDB query reset/deprovision and merger child-crash reconstruction.
 cargo test --locked -p drasi-lib --no-default-features \
   --features computation-rocksdb-tests \
@@ -1292,6 +1518,24 @@ Tests involving source/reaction crates that depend on drasi-lib belong in
 [`lib-integration-tests`](../../lib-integration-tests), avoiding dependency
 cycles. Backend injection can be tested from `lib` with its existing backend
 test features.
+
+For native progress/position interfaces, include the
+[Host consumer-progress suite](../../components/host-sdk/src/computation/consumer_progress_tests.rs)
+with freshly built independent libraries. For composition, include the
+[Host recipe tests](../../components/host-sdk/src/management/composite_bootstrap_tests.rs)
+and [real PG/HTTP test](../../components/host-sdk/tests/native_postgres_http_bootstrap.rs)
+on both Tokio flavors. The latter exercises static and rebuilt dynamic providers,
+a held HTTP snapshot with concurrent PG writes and a feedback fence, live input,
+rollback exclusion, restart, and actual retirement hold/resume. Follow its
+database/plugin prerequisites; a Rust-only mock is not equivalent evidence.
+
+Use the connector-specific suites for shared source behavior: PostgreSQL
+[row, snapshot and transaction cases](../../components/sources/postgres/tests/native_transactions),
+MySQL [shared recovery](../../components/sources/mysql/src/native/tests/shared.rs),
+and SQLite [consumer enrollment](../../components/sources/sqlite/tests/native/consumers.rs).
+Check unequal snapshot positions and unrelated counters, the slow member's
+retention floor, exact transaction effects, failure/cancellation, and explicit
+replacement. Passing row fan-out does not qualify whole-transaction fan-out.
 
 Before a cross-cutting change is considered qualified, consult
 [`run-runtime-parity.sh`](../tests/run-runtime-parity.sh) and its

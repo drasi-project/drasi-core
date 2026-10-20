@@ -1,5 +1,8 @@
 # The drasi-lib developer guide
 
+**API baseline: 20 October 2026, Core
+[`54735c05`](https://github.com/drasi-project/drasi-core/commit/54735c056ca45bd784462cd462c14f0a514de442).**
+
 **drasi-lib is an embedded data-processing runtime for Rust applications.**
 You connect **components** into a **computation graph** to ingest data, transform it,
 maintain **state**, and perform actions. A graph can use custom processing logic,
@@ -1291,8 +1294,9 @@ Rust components:
 | gRPC source/sink | Native graph-change ingress and query-result egress | Explicit transport acceptance and configured handling policies |
 | SSE sink | Live query-result notifications to browser/stream clients | Volatile acceptance; reconnecting clients need a current view |
 | Capture sink | Graph-change envelopes written to a file | Write/flush completion; it consumes graph changes, not query rows |
-| SQLite source | Changes committed through the native SQL handle | Optional journal, coordinated bootstrap, and actual consumer progress |
-| PostgreSQL/MySQL sources | Database transaction change capture | Database-specific log retention and persistent consumer progress |
+| SQLite source | Changes committed through the native SQL handle | Optional journal and coordinated snapshots for one owner or an explicit group of persistent owners |
+| PostgreSQL sources | Committed row changes or complete transactions, selected by factory | Configured-slot shared recovery or the distinct single-owner modes; whole-transaction queries require atomic persistent progress |
+| MySQL source | Complete binlog transactions | Retained binlog history and coordinated snapshots for actual persistent consumer owners |
 | Middleware transformer | Parsing, mapping, relabeling and other graph-change normalization | Memory, durable, or transactional configuration |
 | Inter-instance bridge source/sink | Data between independently owned instances | Explicit volatile or durable receiver-admission profile |
 
@@ -1305,9 +1309,15 @@ Database capture requires its source-specific setup:
 
 | Integration | Native interface | What the host must supply |
 |---|---|---|
-| [SQLite](../../../components/sources/sqlite/README.md#native-computationgraph-component) | `drasi_source_sqlite::native::SqliteSource` | Its owned SQL handle; for recovery, coordinated bootstrap and the actual query progress owner |
-| [PostgreSQL](../../../components/sources/postgres/README.md#native-complete-transaction-source) | `PostgresTransactionSource` / its native factory | Logical-replication configuration, stable slot/publication ownership, transaction limits, and persistent query progress |
-| [MySQL](../../../components/sources/mysql/README.md#native-computationgraph-source) | Native binlog transaction source | The source's documented binlog/identity configuration and coordinated persistent consumer boundary |
+| [SQLite](../../../components/sources/sqlite/README.md#native-computationgraph-component) | `drasi_source_sqlite::native::SqliteSource` | Its owned SQL handle; replay needs the actual persistent owner or consumer set, plus paired providers for initial snapshots |
+| [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md) | Independent native source and bootstrap factories | Matching row/transaction modes, explicit publication/slot settings and actual owners; shared row mode also supports memory queries without a process-restart guarantee |
+| [MySQL](../../../components/sources/mysql/README.md#native-computationgraph-source) | Native binlog transaction source | Its documented binlog/identity settings and the actual persistent owner or consumer set, with matching snapshots |
+
+The MySQL and SQLite **source** APIs above are native Rust implementations;
+their shared-recovery support does not imply completed dynamic source packaging
+or Server registration. Native database schema-discovery integration also
+remains separate work. Consult the selected family's documentation rather than
+assuming that its ordinary plugin and native source have identical surfaces.
 
 The HTTP lesson receives changes another application supplies. A database CDC
 plugin instead detects committed changes through its database protocol. Choosing
@@ -2503,6 +2513,80 @@ A read-only progress capability does not itself retain source history.
 The source must separately guarantee that input after that progress remains
 available for replay. State the retained-until-consumer boundary explicitly.
 
+#### Share a source without sharing its recovery owner
+
+One inventory source can feed both `low-stock` and a second audit query. Do not
+create a source per query or make both queries publish through one progress
+owner. Give each query its own `QuerySourceProgress`, bind it to that query,
+and construct a `ConsumerProgressSet` from those actual owners, the graph ID
+and the producer ID. The set retains 1 through 256 distinct owners. Matching
+names or a newly allocated same-named owner are not equivalent bindings.
+
+The producer observes each member's readiness, failure, reset generation and
+handled position independently. It must keep enough history for every required
+member. The slow member can therefore hold back upstream acknowledgement or
+pin journal capacity; it cannot be silently dropped to let the source advance.
+The graph checks that the declared owners really cover the required downstream
+paths, including supported stateless intermediates.
+
+Independent snapshots can cover different source positions. A source-defined
+`InputPositionPolicy` compares those physical positions, and each query filters
+replayed input against its own checkpoint. Do not take the minimum of unrelated
+query counters or fabricate a combined checkpoint. Logical output positions
+and original/immediate transport counters remain separate from that comparison.
+
+Choose the source's shared interface and matching initialization contract:
+
+| Source | Shared recovery and initialization |
+|---|---|
+| PostgreSQL rows | `drasi.postgres/shared-changes` with one `drasi.postgres/shared-row-bootstrap` per query; memory or persistent progress as configured |
+| PostgreSQL whole transactions | `drasi.postgres/shared-transactions` with one `drasi.postgres/shared-transaction-bootstrap` per query; every query must be atomic, persistent and transaction-enabled |
+| MySQL | `MySqlSource::coordinated_consumers` supplies a source and per-query snapshots for the actual persistent owners |
+| SQLite | `SqliteSource::coordinated_with_consumers` supplies a source and shared snapshot service; `for_consumer` returns each actual query's provider |
+
+PostgreSQL's shared providers use independent temporary exported snapshots.
+They do not reset, recreate or claim managed ownership of the configured live
+slot. Each query commits its own handover before the source resumes. Whole
+transactions remain whole inputs; row-mode fan-out is not a substitute for
+transaction-preserving processing.
+
+The existing Stockroom lesson deliberately keeps its single-owner
+`SqliteSource::coordinated` path. Shared modes have their own source identities
+and recovery records; do not reopen single-owner state as shared state.
+See the [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md#shared-ordinary-row-queries),
+[MySQL](../../../components/sources/mysql/README.md#shared-consumer-recovery) and
+[SQLite](../../../components/sources/sqlite/README.md#shared-native-recovery)
+contracts for retention and enrollment rules.
+
+#### Combine initial data from multiple inputs
+
+A query joining database inventory with an HTTP catalog needs both initial
+datasets. Use `CompositeBootstrapProvider` to wrap the real query-scoped
+providers, then attach the composite through the query's existing
+`with_bootstrap` method. Supply the instance, graph and query scope, and an
+ordered list of distinct resource IDs and actual provider handles. There are
+1 through 32 children, not a new bootstrap slot or query runtime.
+
+Recovery-bearing children must use the same actual query progress owner.
+The composite streams their rows without collecting every snapshot in memory.
+It namespaces initialization metadata by child resource ID, preserving that
+order and membership in a versioned record bounded by 65,536 bytes. Combined
+completion state and at most 256 distinct watermarks commit through the
+existing query transaction. Partial loading is still incomplete.
+
+Preparation preserves the strongest requested action: `ResetRequired`, then
+`RefreshVolatile`, then `Ready`. If any child needs reset or refresh, every
+child is stopped and rearmed before preparation retries, including a child
+that had returned `Ready`. Strict incomplete persistent initialization still
+requires an explicit recovery policy; composition does not authorize erasing it.
+Cancellation and failure require awaited cleanup of the actual children.
+
+This combines initialization protocols, not their external guarantees. An HTTP
+snapshot and live prices do not acquire durable replay, atomic delivery, or a
+single cross-database snapshot instant. The
+[real PostgreSQL/HTTP example](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/postgres)
+demonstrates the supported combination. Chapter 16 shows its managed recipe.
+
 #### Finish snapshot cleanup
 
 Dropping the snapshot stream must cancel its work. A provider with auxiliary
@@ -3048,6 +3132,35 @@ For external work, retain destination-specific confirmation evidence rather
 than advertising a stronger recovery contract than the destination provides.
 Recovery assertions verify declared and bound capabilities; they cannot prove
 an opaque external system's behavior.
+
+#### Track handled input without claiming persistence
+
+A standalone transformer or ordinary `Handled` sink can participate in a
+shared producer's required recovery boundary without becoming a query. Bind
+its own `QuerySourceProgress` using
+`ComponentRecovery::with_volatile_input_progress`; native Host factories expose
+the equivalent optional `input_progress` Checkpoint dependency.
+
+The graph publishes that owner's progress only after successful handling,
+all output acceptances, continuations and completion callbacks. It also handles
+batching and replay filtering. A failed or cancelled operation cannot publish
+a handled prefix as if the whole operation succeeded. The plugin must not
+advance the owner itself; the Host-only `input_progress` handle never crosses
+the native interface.
+
+This is **volatile** progress. A clean stop/start of the same instance retains
+its handled prefix, but replacement or process failure is not persistent
+recovery. It cannot satisfy a source that requires persistent consumers, and
+it does not make external effects atomic. Accepted-only sinks, sources,
+services, actual transaction participants and consumer-wrapper factories
+cannot use this tracker. A transformer factory may support transactions while
+also constructing a separate eligible standalone instance.
+
+An upstream-facing `input_progress` owner and a downstream-facing
+`consumer_progress` set serve different purposes. A transformer may need both:
+one reports its own completed input; the other observes the owners receiving
+its output. This supports transformer-to-transformer and transformer-to-sink
+fan-out without adding another executor.
 
 **Summary.** Completion is durable business progress, not receipt into another
 queue. Transactional handlers can commit local state with operation completion;
@@ -3721,6 +3834,65 @@ actual handles. It owns application-specific policy such as allowed paths,
 provider selection, credentials, and recovery-domain validation. Wrapping
 another resolver must preserve those checks.
 
+#### Declare shared progress and composed bootstrap resources
+
+Host SDK and Server resolvers support two distinct resource recipes. A
+`consumerProgress` recipe groups the downstream owners of **one producer**;
+a `compositeBootstrap` recipe groups the initializers of **one query**.
+These JSON objects are recipe configurations, not complete graph definitions.
+The enclosing definition must declare their resources, dependencies, factories
+and connections.
+
+For a shared inventory source, the progress-set recipe is:
+
+```json
+{
+  "kind": "consumerProgress",
+  "producer": "inventory",
+  "consumers": {
+    "low-stock": "low-stock-progress",
+    "stock-audit": "stock-audit-progress"
+  }
+}
+```
+
+Declare it as a Checkpoint resource with exactly those two distinct Checkpoint
+dependencies. Each member resource uses a `sourceProgress` recipe for its actual
+component. Bind the set to the source's `consumer_progress` slot and each query's
+own member resource to its `source_progress` slot. An eligible standalone
+transformer or Handled sink instead uses its own `input_progress` slot.
+
+For `low-stock` to initialize from inventory and an HTTP catalog:
+
+```json
+{
+  "kind": "compositeBootstrap",
+  "component": "low-stock",
+  "providers": ["inventory-bootstrap", "catalog-bootstrap"]
+}
+```
+
+Declare this as a graph-owned Bootstrap resource with exactly the listed
+distinct Bootstrap dependencies. Those child recipes must resolve the actual
+providers for `low-stock`; their progress-bearing bindings use its same
+`low-stock-progress` owner. Bind only the composite resource to the query's
+single `bootstrap` slot. Other queries require their own initialization
+providers, not the same composite under a different name.
+
+Use actual factory metadata to construct canonical component specifications,
+and retain secret `ConfigurationValue` references. Server's readable
+`computation.graph.config` is literal JSON; a reference-shaped object there
+does not become a secret reference. Secret-bearing native definitions use
+canonical `computation.definition`.
+
+The [Trading example](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/trading)
+generates its complete fixed-member definition from the actual 11 app queries
+and factory metadata. App setup submits one batch through the existing
+`/computation/components` endpoint, then creates its SSE reaction. It uses two
+shared PostgreSQL sources and one HTTP source, with PG/HTTP initialization
+where needed. Repeating a matching setup is idempotent; a partial or conflicting
+bundle is an explicit error, not implicit membership replacement.
+
 #### Enable management at the host boundary
 
 `ManagementOptions` groups factories, the resource resolver, and an optional
@@ -3976,6 +4148,27 @@ rebuild from a source that can provide a consistent snapshot, run a new query
 identity alongside the old one and cut consumers over after reconciliation,
 or supply a storage migration you can validate. Preserve the old query's
 pending output until its consumers finish or it is explicitly retired.
+
+#### Change shared-source membership through the graph
+
+A `ConsumerProgressSet` has fixed membership for its binding, not necessarily
+for the lifetime of the application. To enroll, remove or reset a required
+member, use explicit reconciliation: await the old producer's actual stop,
+drain accepted input, replace the affected bindings, initialize new owners,
+and resume only after all required owners are ready. Pausing calls to `next`
+is insufficient: a source-owned connection could still acknowledge upstream
+history while its consumer is being replaced.
+
+Keep the actual owners of unchanged members and follow source-specific
+retention rules. For example, SQLite will not remove a member still behind the
+current journal head. Dropping a reader, observing a disconnected subscriber
+or editing a stored member list cannot release an obligation. Failed cleanup
+or uncertain configuration acceptance must keep the old ownership fenced.
+
+The shared-source qualification covers drained reconstruction and explicit
+drain-barrier replacement, not cold reconstruction with undrained persistent
+input-pipe frames. Do not infer the missing queued counters from handled
+progress or erase the queue to make a replacement start.
 
 #### Preview changes to unmanaged topology
 
@@ -4336,7 +4529,17 @@ storage ownership:
 | Consumer completion | External or transactional mode backed by the host's `DeliveryRunner` |
 | Source admission | A revocable `NativeAdmission` capability backed by the actual outgoing QoS channel |
 | Source progress | A read-only view of the actual processing owner's committed progress |
+| Consumer progress set | `NativeConsumerProgress` exposes each required actual owner separately; membership is fixed per binding |
+| Input-position comparison | One retained immutable source-defined policy for independent replay filtering, not a generic minimum sequence |
 | Query bootstrap | A query-owned provider with bounded snapshot/state operations and awaited cleanup |
+
+Consumer progress and its optional position policy use the separate
+`drasi_computation_plugin_consumer_progress_v1` extension. Base ABI `1.0.0`,
+wire `2` and the existing recovery interface are unchanged. Opt-in producer
+factories require the actual `consumer_progress` resource and cannot mix it
+with single-owner progress or source admission. Constructors retain the
+capability without reading/subscribing until start; stop revokes old readers
+and cleanup must finish before restart. The graph validates the complete path.
 
 Admission mode has no alternate `next` publication path. A progress reader
 does not itself guarantee source retention. A transaction participant may not
@@ -4499,7 +4702,9 @@ own. The final application must still identify who owns every unfinished action.
 | Port / edge / pipe | A component boundary / a declared connection / its transport implementation |
 | Row signature | A query result's identity within its query namespace, not its JSON value |
 | Bootstrap | Coordinated initial loading and handover to live/replayed input |
+| Composite bootstrap | Ordered query-scoped providers with namespaced initialization state and one existing query completion boundary |
 | Checkpoint | A saved position proving only the owning processor's completion boundary |
+| Consumer progress set | The actual independent input-progress owners required by one producer, not a merged checkpoint |
 | Outbox | Retained committed output available for replay |
 | Journal | Retained transport entries and the progress of their consumers |
 | Admission | Acceptance of responsibility for input, possibly at a durable storage boundary |
@@ -4535,6 +4740,9 @@ The book supplies the application path; the reference supplies the catalog.
 | Normalize data | `MiddlewareTransformer`; [middleware guide](../computation-graph-middleware.md) |
 | Reorder source time | `SourceTimeMergeTransformer`; [time-merge guide](../computation-graph-time-merge.md) |
 | Retain transport and retry identity | `QosChannel`, `SourceAdmission`, `RetainedPipe`; [QoS guide](../computation-graph-qos.md) |
+| Share source recovery | `ConsumerProgressSet`, `InputPositionPolicy`; [Host bindings and recipes](../../../components/host-sdk/README.md#native-producer-consumer-progress) |
+| Combine initial snapshots | `CompositeBootstrapProvider`; [query bootstrap contracts](../../src/computation/v1/query_bootstrap.rs) |
+| Track ordinary handled input | `ComponentRecovery::with_volatile_input_progress`; [input-progress cases](../../tests/computation_input_progress.rs) |
 | Recover a result view | `QueryReplayTransformer`, `CheckpointedSink`, `ConsumerProgressStore` |
 | Complete consumer work | `DeliveryRunner`; [persistent Stockroom](stockroom/src/persistence.rs) |
 | Preserve transactions | `SourceTransactionBuilder`, `TransactionTransformer`, `SharedStorageGroup`; [transaction guide](../computation-graph-transactions.md) |

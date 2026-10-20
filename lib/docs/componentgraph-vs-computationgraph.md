@@ -4,7 +4,8 @@
 # ComponentGraph and ComputationGraph: what changed, what was fixed, and what is unfinished
 
 **Original comparison snapshot: 13 October 2026.
-Query-host consolidation update: 16 October 2026.**
+Query-host consolidation update: 16 October 2026.
+Native fan-out, bootstrap and consumer update: 20 October 2026.**
 
 The original review compared the older ComponentGraph-based runtime at Core
 [`261b8d40`](https://github.com/drasi-project/drasi-core/commit/261b8d40d35ce203a7f4aaae0028956d76a8def4)
@@ -12,20 +13,26 @@ with the ComputationGraph snapshot at Core
 [`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8)
 and Server
 [`f15706d`](https://github.com/drasi-project/drasi-server/commit/f15706d0d65c5c829c0a653c0d977f4cad617d6a).
-The dated query-host update below describes the subsequent Core working-tree
-changes; those changes are not contained in the original comparison commits.
-It is a targeted update, not a new review of every capability or remaining item.
-The current `ComponentGraphView` (`ComponentGraph` remains an alias) is a
-read-only view, not the old execution system being compared. Here **native**
-means a component using the newer processing/plugin interface, not merely
-code compiled for the local machine.
+The current descriptions include the subsequent published changes through Core
+[`54735c05`](https://github.com/drasi-project/drasi-core/commit/54735c056ca45bd784462cd462c14f0a514de442)
+and Server
+[`15dafa2`](https://github.com/drasi-project/drasi-server/commit/15dafa225ac76ba9868452a7082f693027621ad7).
+Historical defect comparisons still use the pinned old revision. Later
+qualification is identified separately; it is not a fresh rerun of every
+historical suite.
+The current `ComponentGraphView` is a read-only inspection view, not the old
+execution system being compared; the `ComponentGraph` alias has been removed.
+Here **native** means a component using the newer processing/plugin interface,
+not merely code compiled for the local machine.
 
 This is not a published-release announcement. Code, recorded tests and
 unverified claims are distinguished below. This is a source-and-evidence review,
 not a fresh rerun of every test suite. The previous claim that the entire
 execution-and-isolation work package was complete was too strong: the full
 deadline policy and graph-size publication requirement remain unresolved.
-The [current work inventory][remaining] records those and the other limits.
+The [cleanup plan][cleanup] records current migration status; the
+[review inventory][remaining] retains the broader findings and earlier
+qualification checkpoints.
 
 ## In plain English
 
@@ -51,6 +58,13 @@ There are three different achievements:
 The old runtime already had continuous queries, transactions and recovery.
 ComputationGraph did not invent those. Some work preserved existing behavior;
 some generalized it; some corrected bugs.
+
+The latest work restores an important native requirement: one producer can feed
+many processing branches without duplicating that producer or pretending all
+branches have the same saved progress. It also lets one query initialize from
+multiple real providers. PostgreSQL row and whole-transaction groups, mixed
+PG/HTTP initialization and Trading's actual query bundle now exercise those
+contracts. This completes that slice, not the entire connector/release migration.
 
 ## Ordinary queries now run directly in the instance graph
 
@@ -96,6 +110,8 @@ The inspected ComponentGraph version already had:
 - Sources, continuous Cypher/GQL queries, reactions, middleware and initial
   snapshots.
 - Independently running query workers, including use of multiple CPU workers.
+- Shared sources with multiple query subscribers and query results with multiple
+  reactions; fan-out itself was not invented by the new graph.
 - Persistent indexes, saved source positions, current-result snapshots and
   saved outgoing results, usually called the **outbox**.
 - Supported query transactions that saved index changes, source progress and
@@ -340,6 +356,64 @@ not release its outstanding work. Lossless mode keeps the message until every
 required consumer finishes. The old specialized fan-out was not this general
 saved multicast service with explicit membership and positions.
 
+<a id="shared-native-producer-recovery"></a>
+
+### Share a native producer without merging its consumers' recovery
+
+A source can feed multiple transformers/queries, and a transformer can feed
+multiple transformers and sinks. The graph reuses the producer instead of
+executing it once per branch. Native recovery now keeps an actual progress
+owner for every required consumer in a `ConsumerProgressSet`, including
+supported paths through stateless intermediates.
+
+For example, a fast dashboard and a slower audit query can share one database
+change stream. They retain different snapshot boundaries and process at
+different speeds. Replay starts from retained physical source history, and
+each consumer filters changes already covered by its own checkpoint. The fast
+query cannot cause upstream feedback or pruning to pass the slow query's
+unfinished work. Unrelated logical and transport counters are not a combined
+database cursor.
+
+Standalone transformers and Handled sinks can opt into graph-owned volatile
+`input_progress`; publication follows actual handling, output acceptance and
+continuations, including batched operation. That is not persistent state or an
+external-effect transaction. Atomic persistent consumers keep their real
+transaction-owned progress instead.
+
+The native single-owner restriction was an incomplete migration, not an intended
+loss of old fan-out. This correction is distinct from QoS multicast: a consumer
+set describes actual processing owners, while a multicast journal retains
+messages and subscriber positions. Neither can fabricate the other's guarantee.
+See the [owner/path validation][fanout-owners], [handled-input cases][handled-input]
+and [mixed dataflow cases][fanout-dataflow].
+
+Membership is fixed for a live binding, but explicit reconciliation can enroll
+or remove members under each source's retention rules. It must stop the actual
+producer, drain admitted work and initialize the new owners before resuming.
+Pausing graph polling alone does not stop a source-owned connection from
+acknowledging upstream history. A disconnected reader is not a retired member.
+
+### Initialize one query from several native inputs
+
+`CompositeBootstrapProvider` combines ordered, query-scoped providers through
+the existing bootstrap slot. A query joining PostgreSQL holdings with HTTP
+prices can receive both initial datasets instead of starting with a missing
+price table or running a second initialization engine.
+
+The composite retains actual child handles and their cleanup/retirement leases.
+It streams rows, namespaces bounded child state and commits completion
+watermarks through the existing query transaction. Mixed preparation outcomes
+stop and rearm all children before reset/refresh retries. Cancellation or a
+partial snapshot cannot become a successful completed handover.
+
+Host/Server expose `consumerProgress` for the owners of one producer and
+`compositeBootstrap` for the initializers of one query. Canonical definitions
+retain actual resource dependencies and secret configuration references.
+Neither recipe adds a graph executor or a shared transaction across databases.
+HTTP snapshots/live prices retain their existing non-durable replay limits.
+The [composite implementation][composite-bootstrap] and
+[real static/dynamic PG/HTTP cases][mixed-bootstrap] define the supported scope.
+
 <a id="durable-admission-replay-and-shared-storage"></a>
 
 ### Resolve a lost input reply without submitting the input twice
@@ -434,6 +508,13 @@ steps can run on different CPU workers. Old plugins and multicore query workers
 already existed; native roles and their graph-owned supervision are the change.
 The native interface is ABI 1.0.0/wire 2; the older SDK remains independently
 versioned at 0.17.0 while migration proceeds.
+
+Shared progress and a retained source-position comparator use the separate
+`drasi_computation_plugin_consumer_progress_v1` extension, without changing
+the base ABI, wire version or existing recovery interface. The Host binds actual
+owners; plugins receive bounded read-only capabilities, not graph or storage
+ownership. The volatile `input_progress` tracker remains Host/graph-owned and
+does not cross the plugin boundary.
 
 ### Put a risky plugin in another normal DrasiLib process
 
@@ -552,6 +633,50 @@ receipts, cancelled cleanup, failed replacement, native-library failures and
 actual process death with storage reopen. Protected test names and their
 specific checks are listed in the [test inventory][contracts].
 
+<a id="native-fan-out-qualification"></a>
+
+**Published native fan-out checkpoint, 20 October 2026.** The current Core/Server
+commits above include the following recorded qualification. These are named
+supported paths, not a claim that every connector or entire release matrix was
+rerun during this documentation refresh.
+
+| Area | Recorded scope |
+|---|---|
+| Generic graph and native Host | Source/transformer/query/sink fan-out, actual owners, per-consumer replay, normal/batched handled progress, provenance, cancellation and stopped-producer replacement; both Tokio flavors and rebuilt native libraries |
+| PostgreSQL shared rows | Independent snapshots and counters, slow-member feedback, queued replay, memory/persistent owners and explicit late enrollment with one configured live slot |
+| PostgreSQL shared whole transactions | Complete insert/update/delete effects without row prefixes, unequal snapshots, replay, draining two-to-three-owner replacement, persistent interruption and explicit recovery; 53 native transaction integration cases in the final family run |
+| MySQL and SQLite native Rust sources | Actual persistent owner sets, coordinated snapshots and independent replay; MySQL snapshot/commit clocks and history-reader isolation; SQLite oldest-member pruning, bounded enrollment and safe removal |
+| Composite bootstrap | Core and Host/Server recipe cases plus real PG/HTTP tests on both Tokio flavors, each using static and rebuilt dynamic providers; held snapshot/feedback fence, concurrent writes, live changes, rollback, restart and retirement hold/resume |
+| Real Server consumers | Seven reproducible PostgreSQL configurations, actual Trading app provisioning, safe Getting Started setup, and fresh native GPU input/recovery proof |
+
+The PostgreSQL factories distinguish `drasi.postgres/shared-changes` from
+`drasi.postgres/shared-transactions`, with matching shared row/transaction
+bootstrap factories. Row mode supports ordinary memory queries without claiming
+process-restart durability; whole-transaction mode requires every query to be
+atomic, persistent and transaction-enabled. Per-query snapshots use temporary
+export/import resources without resetting, recreating or claiming ownership
+of the configured live slot. Old single-owner and row/transaction position
+formats are not reinterpreted as one another.
+
+Trading's actual setup installs its complete 11-query fixed-member definition
+in one existing `/computation/components` batch, then creates its SSE reaction.
+It uses two shared native PostgreSQL sources and one native HTTP source, with
+the original 50-price seed served by the app's HTTP API and composed into query
+initialization. Recorded proof covers joined snapshots, actual API writes, live
+price fan-out/aggregates, rollback exclusion, SSE output and repeat setup without
+a graph revision change. Partial/conflicting bundles fail explicitly.
+
+The YAMLs and Trading JSON are generated from real factory metadata and the
+app's actual query declarations, preserving secret `ConfigurationValue`
+references. Native Trading requires the matching local library set; it has no
+legacy/registry fallback. The example wrappers preserve existing data and slots
+and reject unsafe partial state. See the [native source contracts][postgres-native],
+[PG bootstrap contracts][postgres-bootstrap], [Server recipes and qualifiers][server-postgres]
+and [Trading application][server-trading].
+
+**Earlier checkpoints follow for historical context.** Their counts and
+performance figures are not totals for the latest implementation.
+
 The 16 October host-consolidation qualification passed 1,157 library tests in
 each middleware-enabled and no-default-features profile, 46 selected public
 query/recovery integration tests, 21 Host lifecycle/pipeline/wire tests, and
@@ -598,11 +723,13 @@ not qualification of every physical-machine failure or production partition.
 
 ### Existing code with incomplete wider evidence
 
-The [48-row test ledger][requirements] remains at 20 covered, 23 partial and
-five unqualified named scenarios. These are not feature-completion counts.
-Additional evidence is needed for combined initial-loading/history/write
-failures, whole-query clock changes with persistent restart, prolonged outages,
-plugin versions/lifetimes and complete Server workflows.
+The original [48-row test ledger][requirements] reported 20 covered, 23 partial
+and five unqualified named scenarios. Those are historical scenario counts,
+not current feature-completion totals. Later shared-source, composed-bootstrap
+and real Server evidence is identified above; it does not automatically
+reclassify every older ledger row. Wider qualification still includes
+production-duration outages, broader clock/failure combinations and
+plugin/platform lifetime behavior beyond the named cases.
 
 An earlier 28-profile compatibility run and the later selected execution tests
 are different checkpoints. Neither should be described as a freshly repeated
@@ -613,9 +740,19 @@ also do not replace the full native-input and policy-context acceptance gate.
 
 The complete startup/shutdown deadline policy is [CW-06][cw06]. Local status
 updates still rebuild whole-graph mappings, and acceptable graph-size cost is
-not demonstrated ([CW-31][cw31]). Native connector feature parity, standard
-result wiring and full Server/UI migration remain [CW-43 through CW-47][migration].
-Other items distinguish confirmed gaps from findings not yet reverified.
+not demonstrated ([CW-31][cw31]). The completed native fan-out and consumer
+work does not close the broader [CW-43 through CW-47 migration][migration]
+or cleanup stage 6; stages 7 through 9 remain pending in the [cleanup plan][cleanup].
+
+Specific remaining boundaries include native database schema discovery,
+MySQL/SQLite dynamic **source** packaging and Server registration, and making
+query execution an optional native plugin rather than a built-in processor.
+Shared native-source recovery has qualified drained reconstruction and
+drain-barrier member replacement, not cold reconstruction with undrained
+persistent input-pipe frames. Handled owner progress is not evidence of all
+queued transport allocations. HTTP snapshots/live prices have no added durable
+or atomic replay guarantee. Other inventory items distinguish confirmed gaps
+from findings not yet reverified.
 
 ### Deliberate limits, not hidden promises
 
@@ -640,8 +777,9 @@ policies must be selected explicitly rather than inferred from successful startu
 
 <a id="implementation-and-further-reading"></a>
 
-- [Current work inventory][remaining]: each item separates implementation,
-  evidence, remaining work and implementation/testing complexity.
+- [Cleanup plan][cleanup]: current migration stages and scoped completion.
+- [Review inventory][remaining]: broader findings, evidence and
+  implementation/testing complexity, including historical checkpoints.
 - [Developer guide](developer-guide/README.md) and
   [maintainer's guide](computation-graph-maintainers-guide.md): using and
   maintaining the current code.
@@ -656,6 +794,7 @@ policies must be selected explicitly rather than inferred from successful startu
   superseded by the current work inventory, not silently treated as proof.
 
 [remaining]: computation-graph-remaining-work.md
+[cleanup]: computation-graph-cleanup-plan.md
 [cw06]: computation-graph-remaining-work.md#cw-06
 [cw08]: computation-graph-remaining-work.md#cw-08
 [cw12]: computation-graph-remaining-work.md#cw-12
@@ -680,6 +819,15 @@ policies must be selected explicitly rather than inferred from successful startu
 [query-assembly]: ../src/computation/runtime/query_assembly.rs
 [query-hosting-tests]: ../src/computation/v1/query_hosting_tests.rs
 [query-lifecycle-tests]: ../../lib-integration-tests/tests/runtime_flavor_tests.rs
+[fanout-owners]: ../src/computation/v1/graph/consumer_progress.rs
+[handled-input]: ../tests/computation_input_progress.rs
+[fanout-dataflow]: ../tests/computation_graph_dataflow.rs
+[composite-bootstrap]: ../src/computation/v1/composite_bootstrap.rs
+[mixed-bootstrap]: ../../components/host-sdk/tests/native_postgres_http_bootstrap.rs
+[postgres-native]: ../../components/computation-plugins/sources/postgres/README.md
+[postgres-bootstrap]: ../../components/computation-plugins/bootstrappers/postgres/README.md
+[server-postgres]: https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/postgres
+[server-trading]: https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/trading
 [optional-query-plugin]: computation-graph-remaining-work.md#cw-43-optional-native-query-plugin
 [ordered-queue]: ../src/channels/priority_queue.rs
 [ranked-input]: ../src/computation/v1/ranked_pipe.rs
