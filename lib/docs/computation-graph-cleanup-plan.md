@@ -2,12 +2,16 @@
 
 **Status: stages 0-5 are complete for their stated scope, including the
 controlled performance comparison and Server configuration/API consolidation.
-Stage 6 is in progress, now prioritizing HTTP, gRPC, SSE and PostgreSQL.
-Stages 7-9 remain pending.**
-**Updated: 19 October 2026.**
-**Code baseline:** Core `66e71e3f59eab1becb3df94e86cd7ed78b7e9bd4`,
-Server `1906c439feca8f16bc5c9eafb3658187e3104808`, plus the current
+Stage 6 remains in progress: the named HTTP/gRPC/SSE/PostgreSQL, generic fan-out
+and real-consumer slices are qualified, but the full native-only inventory and
+old-consumer cutover are not complete. Stages 7-9 remain pending.**
+**Updated: 20 October 2026.**
+**Code baseline:** Core `e900b70d932e350d4d1ec7acb36ae2ba3cbf913c`
+(guide refresh over implementation `54735c056ca45bd784462cd462c14f0a514de442`),
+Server `15dafa225ac76ba9868452a7082f693027621ad7`, plus the current
 [remaining-work inventory](computation-graph-remaining-work.md).
+Test-infra is at `e4636204982a461fbfefd637ade22be9ac617071`; Learning is at
+`5320f0b8ae06fa8789edf7ec4c763939ebb599d6`.
 
 **Priority change - user directed, 19 October:** complete the HTTP source,
 reaction and bootstrap, gRPC source and reaction, existing SSE reaction/sink,
@@ -22,22 +26,28 @@ This overrides the earlier execution order and explicitly includes SSE.
 
 | Stage | Current outcome |
 |---|---|
-| 0 | Baseline and removal callers recorded. Later graph-policy and required-connector decisions must still be settled before dependent changes. |
+| 0 | Completed: baseline/callers recorded; dependency waiting, the first-release component set and later four-family priority including SSE were explicitly selected. New interface/scope decisions still require approval. |
 | 1 | Completed: retired helpers/cache/aliases, the empty DrasiLib feature, the ineffective bootstrap-buffer setting and the redundant query wrapper are removed. Consumers across all four checkouts use the current interfaces. |
-| 2 | Management close retains its reply and driver join. Observation-only resources have explicit lifetime tracking rather than name-based cleanup. The dependency policy below is agreed; its complete implementation belongs with stage 3's assembly contracts. |
+| 2 | Completed: management close retains its reply/driver join and resource observation has explicit lifetime tracking. The agreed dependency policy was subsequently implemented in stage 3. |
 | 3 | Completed: explicit dependency waits, deferred query/resource construction, automatic activation, explicit-stop preservation, waiting-graph startup/reconstruction, Server diagnostics and live native-factory registration. Named lifecycle, recovery, public-API and real-library checks pass. This is not qualification of every connector or deployment profile. |
 | 4 | Completed: query/pipeline/source-subscription mode switches, old namespace/hash support and provider/cleanup fallbacks are removed. Functional, recovery, real-plugin, Server, responsiveness, lint and controlled performance checks pass; architecture artifacts are refreshed. |
 | 5 | Completed: one explicit `instances` layout, no first-instance routes or configuration DTO aliases, canonical persistence, store-owned generated IDs, and updated consumers. The full Server matrix, current client builds and selected real browser/dataflow checks pass, with the pre-existing Learning Trading unused-local limitation recorded below. |
-| 6 | In progress. The earlier 23-component inventory remains below; current work is restricted to the user-prioritized HTTP, gRPC, SSE and PostgreSQL paths and their required dependencies. Reuse existing logic and finish real consumers/static-dynamic hosting before claiming completion. Kafka/SQLite reactions and functional gRPC bootstrap remain excluded. |
+| 6 | Partly complete. Prioritized native network/PG implementations, generic fan-out, composed bootstrap and selected real consumers have recorded static/dynamic proof. Remaining selected families, native source-schema discovery, MySQL/SQLite live/coordinated packaging and old consumers still prevent full closure. Other families remain paused under the last execution priority. Kafka/SQLite reactions and functional gRPC bootstrap remain excluded. |
 | 7-9 | Pending: old-stack retirement, surviving-code cleanup, and integrated qualification. |
 
-**Current four-family status, 19 October:** HTTP/gRPC now have independent native
+**Current four-family status, 20 October:** HTTP/gRPC now have independent native
 source/sink libraries and HTTP bootstrap, reusing the legacy authentication,
 mapping, rendering and protocol helpers. Actual static/dynamic graph flows and
 the external Server/test-service legacy/native comparison pass, with exact
 ordered output equivalence and independently identified native libraries.
 Their opt-in batching retains inputs and acknowledgements through cancellation
 without changing the default bridge receive path.
+This closes the named transport/template/batching profiles, not every old
+recovery mode: native sinks still reject snapshot/progress-only recovery-control
+messages, and HTTP completion helpers are not automatically negotiated by their
+factories. The family contracts and
+[remaining connector work](computation-graph-remaining-work.md#cw-44)
+retain those limits explicitly.
 
 The SSE slice now reuses the legacy renderer for query/default templates and
 static/dynamic paths. Its bounded `query_snapshots` capability reads the actual
@@ -64,12 +74,13 @@ configured live slot. Static and rebuilt dynamic libraries cover both Tokio
 flavors. Fresh isolated GPU live qualification also covers concurrent
 snapshot/CDC, atomic multi-table writes, rollback exclusion, graceful restart,
 offline writes and abrupt runtime loss without changing the managed slot.
-Conversion of the remaining real PostgreSQL Server examples is in progress;
-runtime source-schema discovery remains open. Cold reconstruction with undrained
+The seven selected PostgreSQL Server configurations and actual Trading conversion
+are complete, as recorded below; runtime source-schema discovery remains open.
+Cold reconstruction with undrained
 persistent input-pipe frames is not established by the successful reconciled-drain
 scenarios. Stage 6 is not complete.
 
-**Current work - user directed, 19 October:** commit and push the current native
+**Completed execution decision - user directed, 19 October:** commit and push the native
 family implementation before changing the shared recovery model. Then fix
 fan-out generically: one source must support multiple subscribing transformers
 (including queries), and one transformer must support multiple subscribing
@@ -80,7 +91,10 @@ existing graph requirement, not a PostgreSQL-only feature or optional scope.
 
 The pre-fix implementation snapshot is published at Core `859ad07d`, Server
 `e720b1d` and Test-infra `e463620`. The subsequent generic fan-out implementation
-and real-consumer integration are complete for the scope recorded here. The
+and real-consumer integration are complete for the scope recorded here, published
+at Core `54735c05` and Server `15dafa2`. The later guide/comparison/PDF refresh is
+published at Core `e900b70d`. These publications are complete, not pending worker
+handoffs or uncommitted implementation work. The
 shared contract and separate native consumer-progress extension
 now retain bounded, independent observations of every actual consumer's progress,
 readiness, failure and persistence. No aggregate query checkpoint is manufactured.
@@ -124,8 +138,9 @@ HTTP snapshot is paused, no premature configured-slot feedback, live updates,
 rollback exclusion and mixed-preparation restart.
 
 Trading's canonical bundle now uses all 11 actual app queries, two shared
-PostgreSQL sources and one HTTP source; the app provisions that bundle atomically
-instead of creating per-query sources or omitting initial prices. The fresh real
+PostgreSQL sources and one HTTP source; the app provisions that bundle in one
+canonical batch instead of creating per-query sources or omitting initial prices.
+The fresh real
 Server proof now passes through the actual app provisioning path: original
 50-price initialization, joined snapshots, portfolio/watchlist API writes, live
 price fan-out and aggregates, rollback exclusion, SSE output and idempotent repeat
@@ -138,6 +153,8 @@ metadata. Tooling passes 69 cases; the full serial Trading app suite passes 310
 cases plus 41 policy cases. The untouched lazy-modal accessibility case can time
 out in parallel runs; its assertions/timeouts were not weakened. This closes the
 current fan-out/consumer work, not the broader stage-6 migration inventory.
+The batch does not imply one atomic cross-source snapshot or atomic external
+effects; HTTP snapshots/live prices retain their non-durable replay boundary.
 
 **Dependency policy - user decision during execution:** a valid node may be
 declared before its dependencies are available. The node must say what it is
@@ -693,17 +710,38 @@ configuration conversion remains.
 
 **Work items:** CW-44/CW-45; relevant CW-47 applications and providers.
 
+**Current exit status, 20 October:** see the
+[remaining connector work](computation-graph-remaining-work.md#cw-44)
+for missing native surfaces. The priority network/PG and
+generic fan-out/composition work is not an unstarted task. Native runtime schema
+discovery, remaining families/services/packaging and ordinary callers still
+prevent native-only closure. Stock-Server GPU hosting is still absent despite
+the embedded GPU proofs. Cold undrained persistent input-pipe reconstruction is
+not qualified by the completed drain-barrier cases.
+
+The progress subsections below are successive execution records. Their counts
+describe named checkpoints, not one additive or freshly repeated full-suite
+total. Other families remain paused unless selected for execution.
+
 **Initial inventory, 18 October 2026:** direct old-SDK dependencies include
 22 source packages, 19 bootstrap packages, 18 non-fixture reaction packages,
 two non-fixture identity packages and three secret-store packages. Reaction and
 identity test fixtures bring the manifest total to 66. This is a dependency
 count, not a claim that each package needs an independent implementation.
-Hosted application-source helpers and ordinary API/adaptation users also remain.
-Native HTTP/gRPC/SSE, reference and bridge components exist, but current native
-network implementations do not cover every template, batching or recovery option.
-No connector/provider code has been deleted during this inventory. Choosing the
-full current set versus an explicitly smaller first-release set is a scope
-decision, not a reason to silently drop required behavior.
+Hosted application-source helpers and ordinary API/adaptation users were
+additional dependencies. At that checkpoint the native network template/batching
+coverage was incomplete; the later priority slice added those implementations
+and their real-service assertions. This initial dependency count is historical,
+not the current feature-completion count.
+
+**Current dependency inventory, 20 October:** 64 tracked
+source/bootstrap/reaction/identity/secret-store manifests still directly depend
+on the old SDK through normal/target dependencies: 22 sources, 18 bootstrappers,
+17 non-fixture reactions, two non-fixture identity providers, three secret stores
+and two reaction/identity fixtures. Host SDK plus two index providers bring the
+broader component-manifest total to 67. A dependency declaration is not a request
+to rewrite every package or delete shared protocol/provider code. The selected
+scope and its consumers govern retirement.
 
 **User-selected first-release scope, clarified after checking the reference:**
 
@@ -1008,7 +1046,9 @@ rekeys/deletes, independent query removal and absence of an invented source
 journal. Shared-library/source/bootstrap strict all-target Clippy passes.
 Evidence: `cleanup-stage6-sqlite-shared-mapping.log` and
 `cleanup-stage6-native-sqlite-file-bootstrap-qualified.log`.
-Native-ABI packaging/Server wiring and full old-interface retirement remain open.
+At this checkpoint file-bootstrap ABI packaging/Server wiring were still open;
+that sub-slice was completed below. Live-source/coordinated-snapshot packaging
+and full old-interface retirement remain open.
 
 **Standalone SQLite bootstrap ABI:** the implementation now lives in the
 independent `drasi-computation-bootstrap-sqlite` package; the direct Rust graph
@@ -1266,7 +1306,8 @@ backlog.
 
 ## References
 
-- [Removal inventory and release policy](computation-graph-remaining-work.md#breaking-release-policy)
+- [Prioritized remaining work](computation-graph-remaining-work.md)
+- [Release policy](#goal-and-release-policy)
 - [Core runtime profile runner](../tests/run-runtime-parity.sh)
 - [Protected behavior inventory](../tests/runtime_parity/computation-contracts.tsv)
 - [Management and resource tests](../../lib-integration-tests/tests/computation_management.rs)

@@ -15,9 +15,9 @@ For exact signatures and configuration fields, use the
 
 For current migration status and completion criteria, see the
 [cleanup plan](computation-graph-cleanup-plan.md). The
-[consolidated inventory](computation-graph-remaining-work.md) retains the broader
-design/code-review backlog; its earlier checkpoints are not a substitute for
-the later, scoped implementation and qualification records.
+[remaining-work list](computation-graph-remaining-work.md) puts unfinished work
+in priority order, with a description, effort estimate and completion condition
+for each item.
 
 ComputationGraph makes the processing topology an executable, owned structure.
 It decides which component instances exist, which connections they use, when
@@ -1439,8 +1439,9 @@ Logs and metrics complement these publications. The relevant paths are
 Profiling intervals can include queueing, waits and storage, so do not interpret
 every elapsed interval as evaluator CPU time. Bounded history/watch channels
 are diagnostic tools, not a lossless audit ledger.
-Logging and event-history implementations live in `observability`; `managers`
-retains only compatibility imports, not an execution layer.
+Logging and event-history implementations live in `observability`. The old
+`managers` forwarding module has been removed; use the supported observability
+imports directly.
 
 ## Making and validating a change
 

@@ -1,3050 +1,547 @@
-<a id="computationgraph-consolidated-outstanding-work-inventory"></a>
-
-# ComputationGraph: what is done and what remains
-
-<a id="breaking-release-policy"></a>
-
-**Release policy - user decision, 17 October 2026:** this release is an
-intentional **breaking change**. **Migration code/paths and backward
-compatibility are not required.** Every application, plugin, tool and example
-depending on the old DrasiLib will be updated to use the new interfaces and
-rebuilt as needed. Do not add old-API wrappers, old-format readers, configuration
-converters, dual-version plugin support or upgrade/rollback machinery merely to
-keep an old consumer working.
-
-This policy supersedes compatibility requirements in earlier plans and in
-historical entries below. Updating consumers to the new implementation is still
-work; it is not a requirement to ship a migration facility. Required query,
-connector and application functionality must continue to exist, but its API,
-configuration and stored representation may change.
-
-**Still required:** reject incompatible binaries and data clearly; protect
-current-version transactions, replay, reset, restart and cleanup; distinguish
-stale runtime handles from their replacements. The policy does not authorize
-silently deleting user data, interpreting an old format as current, or treating
-a failed read as an empty store. Normal bootstrap, explicit reset, same-version
-crash recovery and key rotation are not backward-compatibility features.
-
-The [breaking-release cleanup plan](computation-graph-cleanup-plan.md) orders
-the removal work and its prerequisites, with explicit checks and exit criteria
-at every stage. Its execution record now covers completed stage-1 removals and
-the stage-2 management-close/resource-ownership fixes. Automatic dependency
-waiting is the newly agreed target; its implementation and later stages remain open.
-
-**Inventory review and consolidation: 17 October 2026.**
-This is the current work list, not a completion announcement.
-
-This update adds the unfinished code-organization recommendations, gives
-overlapping work one primary home, and separates active work from completed,
-retired and optional items. The 16 October shutdown and GPU fixes remain
-recorded as completed within their stated scope. The optional query plugin and
-its separate performance investigation remain under
-[CW-43](#cw-43-optional-native-query-plugin).
-
-**The approved execution-and-isolation work package is not fully complete.**
-Independent component execution, tracked background work, several failure and
-cleanup protections, child-process hosting and inter-instance links are
-implemented and have recorded tests. However, the complete startup/shutdown
-deadline requirement is unfinished. The requirement to avoid excessive
-whole-graph work for small status changes also remains unresolved. These were
-part of the approved plan, not newly discovered optional features.
-
-Earlier statements that the entire E1/E2/B1/H1/H2/N1/Q1 package was complete were
-too strong. The 17 October follow-up corrected the original wording in the
-[execution and isolation plan][execution-plan] and its shutdown comments.
-The plan now identifies the unfinished approved requirements explicitly;
-its dated test results remain useful historical evidence.
-
-The 65 **CW** numbers are stable tracking numbers, not 65 missing features.
-Some entries are finished fixes, some combine working code with remaining work,
-some need more testing, and some are proposals or work explicitly no longer
-being pursued. Existing numbers have not been reassigned. A merged entry points
-to its owner; it is not labelled fixed merely because it was consolidated.
-
-## Contents
-
-- [Breaking-release policy](#breaking-release-policy)
-- [How to read the assessment](#reading-the-status-correctly)
-- [Code, evidence and the approved scope](#code-and-evidence-used)
-- [Work removed or reduced by the release policy](#compatibility-work-removed-or-reduced)
-- [Code-review recommendations and completion](#unfinished-code-review-recommendations)
-- [Suggested priorities](#suggested-priorities)
-- [Startup, changes and shutdown](#startup-changes-and-shutdown)
-- [Query and recovery correctness](#query-and-recovery-correctness)
-- [Status, errors and monitoring](#status-errors-and-monitoring)
-- [Performance and resource use](#performance-and-resource-use)
-- [Native components, Server and examples](#native-components-server-and-examples)
-- [Tests and deployment evidence](#tests-and-deployment-evidence)
-- [Code organization and documentation](#code-organization-and-documentation)
-- [Concrete compatibility removal work](#breaking-release-removal-work)
-- [Optional features](#optional-features-and-decisions)
-- [Completed, retired and redirected entries](#completed-retired-and-redirected-entries)
-- [Earlier tracking numbers](#where-earlier-tracking-numbers-went)
-
-## Reading the status correctly
-
-Every item separates implementation from testing:
-
-- **Done for the stated task:** the specific change and its stated tests exist.
-  This is not a claim about every possible deployment or failure.
-- **Implemented, tested on named paths:** the mechanism exists and specified
-  scenarios have passing evidence. Other scenarios may still need checking.
-- **Partly implemented:** the entry names actual missing behavior, not just a
-  wish for more tests.
-- **Implementation present; evidence incomplete:** do not rebuild the feature.
-  Establish the missing test evidence, fixing code only if those tests find a
-  problem.
-- **Finding not reverified:** an earlier report or code concern exists, but this
-  review did not establish the current failing scenario or a completed fix.
-  That is different from both a confirmed current bug and work not started.
-- **Not implemented / not selected:** a proposed capability does not exist in
-  the requested form. An unselected proposal is not unfinished approved work.
-- **Retired, not fixed:** the older integration work is no longer being pursued.
-  This does not mean its defects were repaired.
-
-The **Testing** paragraphs describe inspected tests and previously recorded
-runs. This documentation review did not rerun the full runtime, database,
-plugin, Server or cross-platform suites. A test that exists, a test that passed
-in a recorded run, and an untested scenario are not interchangeable.
-
-**Complexity estimates concern the remaining work.** Low means a localized
-change or small set of checks. Medium means several related paths or a modest
-test setup. High means changes across ownership, recovery, stored formats or
-several components, with substantial failure testing. Very high means a
-multi-product or multi-platform effort needing its own breakdown. These are
-engineering estimates, not promises of elapsed time. Where the defect itself
-is unverified, implementation effort is necessarily conditional.
-
-**P1** means required before relying on the affected behavior or completing the
-affected native replacement. **P2** means an important improvement. **P3** means a
-capability to select when a use case needs it. Priority does not measure how
-much work is already done.
-
-## Code and evidence used
-
-The reviewed code baseline is Core
-[`66e71e3f`](https://github.com/drasi-project/drasi-core/commit/66e71e3f59eab1becb3df94e86cd7ed78b7e9bd4)
-and Server
-[`1906c43`](https://github.com/drasi-project/drasi-server/commit/1906c439feca8f16bc5c9eafb3658187e3104808).
-The unchanged reference checkouts are learning-drasi-server `7277082` and
-test-infra `55ff7ee`. All four use the existing
-`agentofreality-parallel-computation-graph` branches. This describes development
-code, not the guarantees of a published release.
-
-The earlier consolidated assessment used Core `707d27c5` and Server `f15706d`;
-the older runtime review used Core `4587bd5e` and Server `f97bb59`. Existing
-entries retain their stated evidence limits unless a later update is identified. This pass
-reviewed the whole document and checked the named code-organization findings;
-it did not reproduce every historical bug or rerun every test.
-Old findings are not automatically current defects, and an old successful run
-is not a new run against today's binaries.
-
-The [test requirement ledger][requirements] has 48 scenario rows: 20 marked
-covered, 23 partial and five unqualified. Those are **test-coverage labels, not
-feature-completion counts**. For example, an unqualified Server row can mean
-that the required complete workflow has no evidence attached to that row, even
-though Server code and other Server tests exist. The
-[protected test list][contracts] names many narrower checks.
-Those ledgers still include historical compatibility cases. As the code below
-is retired, update their matching requirements and protected test names:
-successful old-binary/alias/format support is no longer a gate. Keep the
-independent correctness, failure and ownership assertions on the new interfaces.
-
-The [comparison](componentgraph-vs-computationgraph.md) explains what changed
-from the older runtime. The [maintainer's guide][maintainer-guide] explains the
-code. The [older backlog][old-backlog] and [reliability plan][reliability-plan]
-are historical sources, not additional active work lists.
-
-<a id="which-graph-does-an-item-concern"></a>
-
-<a id="runtime-work-versus-migration-work"></a>
-
-### Runtime work versus replacing the old interfaces
-
-ComputationGraph is already the only execution engine. Older source, query and
-reaction interfaces still run through it. `ComponentGraphView` (also available
-under the old `ComponentGraph` name) is a read-only view, not a second executor.
-
-Here **native** means a component using the newer processing/plugin interface,
-not merely code compiled for the local machine. **Durable** means saved in
-persistent storage for recovery after restart. A **receipt** is a saved record
-of a particular request and its outcome; its retry protection lasts only as
-long as the applicable retention policy allows.
-
-An **owner** is responsible for keeping track of work and resources until they
-can safely be released. **Bootstrap** means loading the initial snapshot.
-A component's **generation** identifies one created instance, so an old callback
-cannot affect its replacement. **Fencing** means refusing to reuse uncertain or
-damaged state until cleanup/recovery, not forcibly interrupting arbitrary code.
-A **merger** combines and orders input from several sources.
-
-The separately requested **native-only replacement** moves required component
-and plugin functionality to the new interfaces. Consumers will be updated;
-old signatures, configuration layouts and binary formats do not need continued
-support. Do not confuse that larger replacement with finishing the selected
-execution-and-isolation round. Older uses of "migration" in tracking IDs refer
-to this replacement work, not a required old-to-new conversion facility.
-
-Do not expand work into repairing retiring interfaces, adding compatibility
-bridges or unselected features. The specific code-organization and documentation
-recommendations are tracked below; listing them does not authorize a general
-rewrite or a new developer framework. Shared
-query evaluation and storage still matter wherever native queries use them.
-Retiring a connector does not authorize losing its required behavior.
-
-<a id="scope-and-evidence"></a>
-<a id="native-only-target-and-work-exclusions"></a>
-<a id="capability-preservation-gaps-and-owners"></a>
-<a id="required-plugin-failure-contract"></a>
-<a id="status-and-priority"></a>
-
-### What the previous round did, and what it did not finish
-
-The previous plan explicitly included CW-03, CW-05 through CW-08, CW-17,
-targeted status/reporting and publication work, and CW-50/CW-56. It selected
-parts of those packages, not every future provider or deployment scenario.
-
-The implemented portions include independently scheduled native components;
-tracked tasks that remain owned when a caller stops waiting; catching supported
-Rust panics and refusing to reuse the damaged object; unrelated management
-commands progressing during selected slow operations; explicit cancellation of
-the complete registered group sharing a resource; and normal child/grandchild
-DrasiLib processes with separate data links.
-
-Two important distinctions follow:
-
-- **CW-06 is unfinished approved implementation.** Existing cleanup timeouts
-  do not provide the promised limits for each startup/cleanup step, each
-  component/resource owner and the whole shutdown.
-- **CW-31 remains an approved concern.** Local status changes still rebuild
-  whole-graph mappings. The cost has not been measured over growing graphs, and
-  the plan's proportional-publication requirement is not demonstrated.
-
-CW-03/CW-05/CW-07/CW-17 must not be described as wholly missing or untested:
-their named mechanisms and tests exist. Their broader checks need to identify
-specific missing evidence or a reproduced bug. CW-08's unrelated management
-store open/close problems were explicitly not all included in the previous
-round. Windows, a security sandbox and arbitrary remote-machine provisioning
-were not promised by the selected Unix child-host implementation.
-
-<a id="recommended-sequence"></a>
-<a id="recommended-order-and-completion-rules"></a>
-
-### How to use this inventory
-
-Finish or explicitly resolve remaining requirements from the already approved
-package before calling it complete. Preserve the working mechanisms rather
-than starting them again. For an investigation, reproduce the problem before
-planning a fix. For a testing-only gap, add the missing scenario rather than
-claiming the whole subsystem is unimplemented.
-
-Native connector and Server replacement have their own missing features in
-CW-43 through CW-47. Optional features remain optional. A hard limit, such as
-not being able to interrupt arbitrary native code inside a process, is not an
-implementable promise merely because it appears in a work list.
-
-### One home for each piece of work
-
-- **Storage cost and growth:** CW-28 owns write grouping, excessive whole-state
-  writes, replay-read cost and old on-disk bookkeeping. CW-30 redirects there.
-- **Query reads versus wiring:** CW-10 owns correct public query/status results;
-  CW-43 owns constructing and restoring the connections that support them.
-  CW-23 concerns operational status/log observers, not a second query-feed task.
-- **Test verdicts versus Server coverage:** CW-36 owns proof that processing and
-  delivery finished. CW-46 owns running the complete Server workflow matrix
-  using those rules.
-- **Fault coverage:** CW-03/05/07/14/17/20 name the component-specific gaps.
-  CW-39 owns combinations of those failures; do not create duplicate test
-  projects under every related heading.
-- **Measurement versus fixes:** CW-40 owns the common performance/long-run
-  measurement work. CW-28/29/31/32/33 own the corresponding implementation
-  changes. The query-plugin experiment remains part of CW-43, not a second
-  investigation under CW-32.
-- **Code cleanup:** CW-34 owns shared recovery helpers and controller structure.
-  CW-57 through CW-61 own the newly recorded packaging, documentation and
-  compiler-warning recommendations. CW-62 through CW-65 own concrete
-  compatibility removals; retirement of the full old component/plugin stack
-  remains with CW-44/CW-45 rather than a duplicate removal project.
-
-<a id="compatibility-work-removed-or-reduced"></a>
-
-### Work removed or reduced by the release policy
-
-The following requirements are no longer release work:
-
-- **CW-12/18/28/53:** no previous-release data migration, old-format read/write
-  compatibility or mixed-version state tests. Current-format correctness,
-  explicit version rejection and same-version crash/replay checks remain.
-- **CW-25/41:** no requirement to preserve old plugin layouts or successfully
-  load older binaries. Define the selected new interface, rebuild dependents,
-  reject unsupported versions and retain current-library lifetime/error checks.
-- **CW-43:** no old query constructor signatures, legacy storage namespace or
-  persisted built-in-factory migration. The new query API/configuration can
-  change. Actual query functionality, one evaluator, safe resource ownership and
-  the performance decision remain required.
-- **CW-44/45/46/47:** no old endpoint/configuration-shape parity, dual old/new
-  plugin operation, automatic adoption of old definitions or rollback to old
-  binaries. Update the selected connectors, clients, UI and examples directly
-  and qualify them together against the new release.
-- **CW-61:** do not retain unused aliases/helpers only for source compatibility.
-  Platform-specific and test-only exceptions still need justification.
-- **CW-52:** automatic old-to-new state migration is outside this release's
-  scope, not an optional task waiting to be included in its completion count.
-
-No recovery requirement is dropped merely because it mentions an "old" receipt,
-handle or key. A retry from earlier in the same release, a replaced component
-generation, and a rotated encryption key still need correct handling.
-New removal work and exact source evidence appear in
-[CW-62](#cw-62), [CW-63](#cw-63), [CW-64](#cw-64) and [CW-65](#cw-65).
-
-<a id="already-complete-do-not-reopen-as-missing-features"></a>
-<a id="qualification-snapshot"></a>
-
-### Foundations that already exist
-
-Atomic query state/output commits, saved outgoing results, replay, saved input
-positions, whole-source-transaction input, durable middleware, per-consumer
-completion, managed configuration and recovery-path checks already exist in
-their supported forms. The relevant items below describe their exact limits.
-Do not create second implementations of them.
-
-Recorded evidence includes focused transaction and crash tests, actual native
-plugin libraries, real RocksDB reconstruction, local CPU-scaling measurements,
-and macOS/Linux child-process and prepared encrypted-network cases. It does
-not prove every connector, failure combination or production workload.
-
-<a id="unfinished-code-review-recommendations"></a>
-
-## Code-review recommendations and completion
-
-These are the original **review numbers**, not CW numbers: review item 2 is
-not CW-02. Review items 1, 3, 6, 7, 8, 9 and 10 were implemented.
-The seven later recommendations have these homes. The 17 October five-task
-follow-up completed review items 11, 12 and 13, plus the first package of item
-14 and the independent restore-error subtask in CW-08.
-
-| Review item | Recommendation and status | Work item |
-|---|---|---|
-| 2 | Make query processing an optional plugin; preparation exists, but the full plugin does not. | [CW-43](#cw-43-optional-native-query-plugin) |
-| 4 | Separate the child-process supervisor package from the complete host application if the benefit justifies it. | [CW-57](#cw-57) |
-| 5 | Divide the controller and graph-change code into clearer responsibilities. | [CW-34](#cw-34) |
-| 11 | Completed: public integration docs and compiled examples distinguish supported and compatibility interfaces. | [CW-58](#cw-58) |
-| 12 | Completed: the plugin architecture guide now describes the actual plugin families and build/load paths. | [CW-59](#cw-59) |
-| 13 | Completed: original completion and shutdown statements now match the implemented scope. | [CW-60](#cw-60) |
-| 14 | Partial: unused-code warnings are enforced in `drasi-ffi-primitives`; the rest of the workspace remains open. | [CW-61](#cw-61) |
-
-Removing the extra query host/private graph prepared item 2 but did not finish
-dynamic loading. The documentation fixes and warning policy do not change
-production query execution or accept the experimental plugin's performance.
-
-## Suggested priorities
-
-These are recommendations, not new implementation authorizations. Impact is
-ranked by reliability, protection of saved work and usefulness of the native
-runtime. Effort estimates concern the stated scope, not just lines of code.
-
-### Five highest-impact remaining issues
-
-1. **[CW-06: complete startup and shutdown time limits](#cw-06).** Prevent one
-   slow component or resource from making lifecycle operations wait indefinitely.
-2. **[CW-08: reliable management cleanup](#cw-08).**
-   Make cancelled-close retry safe. The original restore-error preservation
-   subtask is now fixed; that does not close the ownership work.
-3. **[CW-18: unambiguous current formats and retry identities](#cw-18).**
-   Protect current-release data and replay, and reject unsupported versions.
-   Previous-release migration and read compatibility are no longer required.
-4. **[CW-44: required native connector features](#cw-44).** Make the native
-   replacement usable without losing existing payload, batching or recovery
-   behavior through the new interfaces. CW-45's Server replacement depends on this work.
-5. **[CW-31: graph-size publication cost](#cw-31).** Keep small status changes
-   from becoming expensive as graphs grow. The repeated whole-graph work is
-   confirmed; its unacceptable-cost threshold still needs measurement.
-
-<a id="five-easiest-useful-work-units"></a>
-
-### Completed five-task follow-up - 17 October 2026
-
-1. **[CW-60](#cw-60):** corrected the original execution-plan completion claims
-   and graph shutdown comments, keeping historical evidence and links.
-2. **[CW-59](#cw-59):** rewrote the plugin architecture guide around the current
-   native and ordinary compatibility families, build commands and actual limits.
-3. **[CW-08 restore-error subtask](#cw-08-open-and-cleanup-errors):** retains the
-   original load/validation cause and a separately inspectable cleanup failure.
-4. **[CW-58](#cw-58):** exposed the supported public integration documentation,
-   added compiled import examples and explained compatibility/ownership boundaries.
-5. **[CW-61 first package](#cw-61):** enabled `deny(unused)` in
-   `drasi-ffi-primitives`, with no unused-code exceptions or public API removals.
-
-CW-08 cancelled-close handling and the broader CW-61 workspace warning rollout
-remain unfinished. These were explicitly bounded first tasks, not completion
-of every issue under those headings.
-
-<a id="running-components-handling-failures-and-stopping-safely"></a>
-<a id="correctness-address-first"></a>
-<a id="close-the-remaining-runtime-hardening-gaps"></a>
-<a id="computationgraph-runtime-integrity"></a>
-
-## Startup, changes and shutdown
-
-Keep accepted work and resource cleanup safe while components start, change, fail and stop.
-
-<a id="cw-03"></a>
-<a id="cw-03-contain-component-panics-and-publish-driver-failure"></a>
-
-### CW-03: Keep a catchable component crash from taking down unrelated work
-
-**Priority: P1. Implementation: present on the protected execution paths; complete callback coverage is not established.**
-
-**What works:** supported component and resource tasks catch Rust panics, retain
-the failed component and its cause, and prevent reuse of that damaged runtime
-object. A fresh replacement can use the same logical component name after safe
-cleanup. Driver failures are published rather than silently losing the driver.
-
-**Testing:** recorded cases cover processing, control, startup/control races,
-preparation, connection construction, reconfiguration and destruction of
-replaced objects. They check continued healthy traffic and repair. Actual
-native-library panic cases also exist.
-
-**Remaining work:** check coverage of the remaining custom factory, provider,
-schema and destruction callbacks. This review has not established a new failing
-callback in every one of those categories. Do not describe them as uniformly
-unimplemented. Native aborts and memory faults require the separate-process
-option in CW-56; an in-process panic catcher cannot contain them.
-
-**Likely complexity:** implementation **Medium**, conditional on a concrete
-unprotected path being found; testing **High**, because failures must be
-injected at several points without losing saved work or stopping healthy peers.
-
-**Evidence:** [protected tasks][execution], [driver reporting][instance],
-[execution tests][task-tests], [protected cases][contracts], [native Host tests][host-tests].
-Earlier tracking: GC-03/06/15, GM-11, QX-11, RT-09, part of LI-11.
-
-<a id="cw-05"></a>
-<a id="cw-05-pause-and-stop-at-safe-processing-boundaries"></a>
-
-### CW-05: Stop without abandoning accepted work; make forced interruption explicit
-
-**Priority: P1. Implementation: graceful stop and registered-group force are implemented.**
-
-**What works:** normal stop waits for already admitted processing, outgoing
-work and required acknowledgements. A deadline does not silently authorize
-aborting that work. Explicit force checks the registered components sharing
-the affected resources, interrupts only an eligible complete group and reports
-interruption separately from cleanup.
-
-**Testing:** recorded cases cover blocked handling, exact results after restart,
-deadline/retry, persistent continuations, active input writes, shared providers,
-forced reconfiguration and an idle companion that previously prevented force
-from finishing.
-
-**Remaining work:** broader provider and hidden-sharing scenarios need checking.
-An unreported private resource cannot be assumed safe. No new general failure
-of the implemented force mechanism is established here. Non-yielding code
-cannot be forcibly stopped in-process; killing a child stops the whole child.
-
-**Likely complexity:** implementation **Medium** if another retained provider
-needs explicit ownership reporting; testing **High** for interruption around
-real commits and reconstruction.
-
-**Evidence:** [stop tests][graceful-tests], [force/ownership tests][task-tests],
-[controller][controller]. Earlier tracking: GC-02/09, DP-01. The older ordinary
-subscription-setup investigation PX-04 is not a new native repair task.
-
-<a id="cw-05-durable-network-source-stop"></a>
-
-#### Resolved: stopping a durable network source during commit
-
-**Priority: P1. Status: stop-contract tests corrected and timeout/retry bug fixed.
-Original failure recorded: 14 October 2026. Resolution: 16 October 2026.**
-
-The fixture deliberately held a real RocksDB commit and originally expected a
-graceful stop to interrupt it. Waiting until the five-second deadline was correct
-for graceful stop; deliberate interruption now uses explicit force over all
-registered users of the shared journal.
-
-A separate real bug was fixed: after a timed-out stop withdrew its pause
-request, the next stop incorrectly treated the worker as already pausing.
-A retry now sends a fresh pause request.
-
-The [regressions][native-admission-tests] cover HTTP/gRPC before and after the
-commit, graceful completion, force, and stop retry on both Tokio runtime flavors.
-A 100 ms request timeout still reports `AcceptanceUnknown`; retrying the same
-producer/session/sequence resolves the saved outcome. The checks preserve exact
-acceptance and one downstream delivery after reopen, without extending deadlines
-or removing assertions.
-
-Build the actual dynamic plugins before running the focused cases:
-
-```sh
-make build-native-network-plugins
-cargo test -p drasi-host-sdk --test native_network_loopback \
-  durable_tests::network -- --nocapture --test-threads=1
-```
-
-This resolves the named test mismatch and retry defect, not every item in
-CW-05 or the broader per-owner/whole-shutdown deadline work in [CW-06](#cw-06).
+# ComputationGraph remaining work
 
 <a id="cw-06"></a>
-<a id="cw-06-give-lifecycle-phases-independent-enforceable-deadlines"></a>
 
-### CW-06: Give startup and shutdown clear time limits without losing ownership
+## 1. Make starting and stopping dependable (CW-06)
 
-**Priority: P1. Implementation: partly implemented; this is unfinished approved work.**
+**Priority:** High. **Effort:** Large.
 
-**What works:** construction, reconfiguration and cleanup have several existing
-timeouts. Independent component cleanup gets execution time, and cancelling a
-wait does not lose the tracked cleanup task.
+**Work:** Set separate time limits for startup steps, individual components and
+resources, and the whole shutdown. A timeout must report what remains unfinished
+and who still owns it, without abandoning work or pretending cleanup succeeded.
 
-**Testing:** recorded tests check slow independent cleanup, retained work after
-cancelled waits, and graceful-stop timeout/retry. They do not establish the
-complete deadline policy promised by E2. The separately recorded
-[durable network source-stop case](#cw-05-durable-network-source-stop)
-now distinguishes graceful drain from force and protects retry after a withdrawn
-pause. That repair does not provide the complete deadline policy.
-
-**Remaining work:** provide separate time limits for each startup/cleanup step,
-each component or resource owner, and the whole shutdown. A component's startup
-function is still awaited without its own startup deadline. Several cleanup
-categories get separate waits using the shared `cleanup_timeout`; resource
-disposal also waits through owners in sequence. Those waits are not one overall
-shutdown limit. On expiry, report what finished, what remains and who still
-owns it. Do not falsely report that arbitrary synchronous code was interrupted.
-
-**Likely complexity:** implementation **High**, because the policy affects
-startup, updates, cleanup, cancellation and public outcomes; testing **High**
-for slow/failing owners in different positions and retries after partial work.
-
-**Evidence:** [start/cleanup implementation][controller], [timeout setting][graph],
-[cleanup tests][task-tests], [approved E2 requirement][execution-plan].
-Earlier tracking: GC-07/09/11, GM-08, QX-06.
-
-<a id="cw-07"></a>
-<a id="cw-07-own-and-compensate-multi-step-updates"></a>
-
-### CW-07: Keep accepted updates owned and let unrelated commands finish
-
-**Priority: P1. Implementation: selected independent-operation paths implemented; broader operation handling is not fully verified.**
-
-**What works:** unrelated start/stop commands can finish while another component
-is waiting. Overlapping operations retain ordering. Reconfiguration work survives
-the caller stopping its wait, and the graph checks actual shared resources
-before allowing conflicting work.
-
-**Testing:** recorded tests hold startup, processing, drain or reconfiguration
-at controlled points and complete unrelated commands. They exercise cancelled
-callers, explicit force, replacement and delayed resource observations on both
-Tokio runtime flavors.
-
-**Remaining work:** finish checking combinations of accepted managed updates,
-conflicting stop/update/remove commands, failed replacement and additions during
-startup. Identify a failing case before claiming another executor or operation
-tracker is missing. Do not repair the retiring ordinary update implementation
-as a separate project.
-
-**Likely complexity:** implementation **Medium** if combined cases reveal a
-missing completion/recovery path; testing **High**, because applied definitions,
-unfinished work and conflicts must be checked independently.
-
-**Evidence:** [reconciliation][reconcile], [reconciliation tests][reconcile-tests],
-[independent command tests][task-tests]. Earlier tracking: RT-01/02; LI-05
-remains an investigation rather than a proven lost-start incident.
-
-<a id="cw-08"></a>
-<a id="cw-08-make-cleanup-management-close-and-rejected-resources-reliable"></a>
-
-### CW-08: Make failed or cancelled cleanup retryable and keep every error
-
-**Priority: P1. Implementation: management-close and restore-error fixes implemented; broader cleanup qualification remains.**
-
-**What works:** selected graph cleanup, rejected-resource disposal and removal
-of replaced objects use tracked work. Independent owners are attempted, errors
-remain available, and an unfinished task is not treated as released storage.
-Instance stop and shutdown have retry tests.
-Initial configuration load/validation failures now retain their original cause
-even when the acquired store session also fails to close.
-Management close now retains the accepted request, its reply and the driver
-join when a caller stops waiting. A retry observes that same operation.
-After a reported store-close failure, a later attempt can retry cleanup;
-a driver failure remains inspectable instead of becoming a false success.
-
-**Testing:** recorded cases cover failed builder cleanup, rejected registration,
-cancelled shutdown, retained resource operations and force cleanup. The
-17 October restore regressions cover load/validation failure with successful
-and failed close on both Tokio runtime flavors. New close regressions cover
-cancellation before admission, during storage close and after acknowledgement
-before join, concurrent callers, retained failures, and actual redb lease
-release/reopen. The accepted-close cancellation cases failed before the fix
-and pass afterward on both flavors.
-
-**Remaining work:** extend combined cleanup qualification across the selected
-native providers and real plugin paths as they replace the old stack. Do not
-reimplement the now-owned management-close operation. The policy for limiting
-cleanup retries and total shutdown time belongs to CW-06, not a second deadline
-project here.
-
-These management-store cases were not all included in the previous execution
-round; its runner/resource cleanup must not be reopened as wholly absent.
-
-**Likely complexity:** implementation depends on defects found by the remaining
-integration checks; testing **High** across provider and plugin combinations.
-
-**Evidence:** [management open/close][management-runtime], [instance tests][instance-tests],
-[resource tasks][resource-tasks]. Earlier tracking: GM-02, RT-07/14, LI-03/04/10.
-
-<a id="cw-08-open-and-cleanup-errors"></a>
-
-#### Small independent fix: keep the restore error when closing also fails
-
-**Resolved: 17 October 2026.** Both failed load and invalid stored configuration
-attempt store close once. A failed close is retained in `OperationFailures`
-without replacing the original typed load/validation cause or its context.
-Successful close returns the original error without an extra failure wrapper.
-
-The [public management regressions][managed-tests] exercise all four
-combinations on both Tokio runtime flavors and reject unexpected configuration
-writes after failed restore. The original code failed these cause-preservation
-checks; the corrected code passes them. This fixes diagnostics, not cancelled
-close ownership or the overall shutdown-deadline policy.
-
-<a id="cw-09"></a>
-<a id="cw-09-make-topology-validation-and-ownership-explicit"></a>
-
-### CW-09: Apply the same connection and ownership rules when building or changing a graph
-
-**Priority: P2. Implementation: completed for the selected dependency-waiting and ownership contract.**
-
-**What works:** graph construction validates components, ports, connections and
-declared resources. Valid declarations can precede their dependencies without
-a completeness-mode switch.
-
-**Selected behavior:** users may add valid nodes before their dependencies
-exist. Each node should explain what it is waiting for and automatically begin
-working when those dependencies become available, respecting auto-start and
-explicit stop settings. Invalid definitions and incompatible supplied interfaces
-must still produce clear errors.
-
-**Completed:** missing sources, queries, resources, factories and port connections
-have typed, readable waiting observations. The existing graph retains deferred
-construction and starts eligible work when dependencies arrive, without a retry
-worker or another graph. Explicit stops and disabled auto-start remain effective;
-genuine construction and processing failures are not retried as missing
-dependencies. Waiting definitions round-trip and reopen.
-
-Observation-only resource lifetime is tracked explicitly,
-independently of names and cleanup ownership. A declared resource named
-`attached/...` is not discarded when its observer detaches, is removed or is
-replaced. Borrowed resources are not closed; graph-owned resources retain their
-real cleanup boundary. Explicit rebinding also updates the declaration origin.
-
-**Testing:** name-based cleanup regressions failed before the fix and now pass
-on both Tokio flavors. Resource observation/dependency, reconciliation,
-configuration-snapshot and metadata-retirement suites also pass. Both runtime
-flavors exercise out-of-order source/query/reaction declarations with exact
-insert/update/delete results, deferred resources/factories, explicit pending stop,
-waiting startup and reconstruction. Server inspection reports waiting reasons,
-and loading a rebuilt native library activates already-declared nodes.
-
-**Boundary:** readable Server shorthand still needs actual factory metadata;
-host resource declarations still need reconstructible recipes. These are
-current-contract checks, not compatibility switches. The full invalid-definition
-matrix, broader connector coverage and long-running qualification remain under
-their own work items; this does not close those broader requirements.
-
-**Evidence:** [addition][addition], [live changes][reconcile], [definitions][topology].
-Earlier tracking: GM-03/15, original GM-09, part of GC-14.
-
-<a id="cw-17"></a>
-<a id="cw-17-register-every-workers-owner-before-spawning"></a>
-
-### CW-17: Keep background work owned until it has actually finished
-
-**Priority: P1. Implementation: engine-owned work implemented; private component/provider work not fully checked.**
-
-**What works:** the engine records its processing, lifecycle, control and
-supported resource tasks before scheduling them. Cancelling a caller's wait
-does not discard the actual task handle. Old task completions cannot be
-applied to a newer replacement.
-
-**Testing:** recorded tests cover cancelled cleanup, pending resource results,
-late observations, force, callback faults and independent processing/control.
-This is not work that has not started.
-
-**Remaining work:** inspect retained native components/providers that start
-their own tasks or threads. The graph cannot automatically track arbitrary
-private native work. Establish who waits for that work to finish or use process
-isolation; do not claim optional helper use is a guarantee. This review does
-not identify every such component as defective.
-
-**Likely complexity:** implementation **Medium** for a concrete unowned worker,
-potentially **High** for blocking work; testing **High** for setup/stop races,
-cancelled waits and resource reuse.
-
-**Evidence:** [graph tasks][execution], [resource operations][resource-tasks],
-[worker ownership][workers], [execution tests][task-tests]. Earlier tracking: LI-06.
-
-<a id="query-correctness-and-component-owned-background-work"></a>
-<a id="shared-input-evaluator-and-plugin-correctness"></a>
-<a id="saved-data-retries-and-input-limits"></a>
-<a id="persistence-wire-formats-and-delivery-integrity"></a>
-
-## Query and recovery correctness
-
-Protect actual query answers and saved progress. An unverified report is an investigation, not an established current defect.
-
-<a id="cw-12"></a>
-<a id="cw-12-preserve-real-aggregate-rows-and-remove-genuinely-empty-groups"></a>
-
-### CW-12: Distinguish an empty result group from a real group whose answer is zero
-
-**Priority: P1. Implementation: aggregation exists; the listed edge-case fixes are not verified complete.**
-
-**What works:** ordinary grouping and aggregation run in the shared evaluator.
-Previous fixes to aggregate identity are already present and are not this task.
-
-**Testing:** aggregate and persistence tests exist. Earlier reports cover
-missing first results, incorrect removal of groups and averages containing null
-values. This review checked the retained implementation but did not rerun reduced
-reproductions of every reported case or establish a completed fix for them.
-
-**Remaining work:** reproduce each case against the current evaluator. A real
-group must not disappear just because its count/value is zero; a genuinely
-empty group must disappear. Check initial Add, later Update/Delete and restored
-averages. Check that old group bookkeeping is removed during repeated creation
-and deletion. A new stored representation is allowed for this breaking release;
-it needs correct current-format handling and explicit rejection of unsupported
-data, not an upgrade converter.
-
-**Likely complexity:** implementation **High** if contributor/group state must
-change; testing **High** across nested aggregates, nulls, restart and churn.
-Reproduction comes first.
-
-**Evidence:** [group processing][query-parts], [average][average].
-Earlier reports: [#384][i384], [#498][i498], [#806][i806], [#411][i411].
-PRs [#409][p409]/[#907][p907] are historical leads, not proof of completion.
-
-<a id="cw-13"></a>
-<a id="cw-13-correct-matching-scope-and-list-comprehension-behavior"></a>
-
-### CW-13: Correct the reported query matching and variable-scope edge cases
-
-**Priority: P1. Implementation: query features exist; the reported fixes are not verified complete.**
-
-**What works:** matching, optional matches and list expressions already work
-for supported cases. This is not an unimplemented query engine.
-
-**Testing:** existing tests cover many normal queries. The earlier assessment
-reported optional-filter, outer-variable, list-membership and relationship-end
-errors. This review did not freshly reproduce or close every reported case.
-
-**Remaining work:** use reduced examples to establish the current failures.
-For example, filtering an optional member must not remove its unmatched team;
-an A-to-B relationship must not prove an A-to-C connection. Then check multiple
-candidates, changed/deleted relationships and both supported solving modes.
-Do not declare all optional matching broken, or fixed, from one example.
-
-**Likely complexity:** implementation **High**, because query scope and matching
-interact; testing **High** for exact rows across updates and both solver modes.
-
-**Evidence:** [evaluator][evaluator], [query parts][query-parts], [matching][solver].
-Earlier reports: [#795][i795], [#796][i796], [#797][i797], [#798][i798],
-[#807][i807], [#808][i808], [#812][i812]. PRs
-[#904][p904]/[#912][p912]/[#915][p915] are reuse leads.
-
-<a id="cw-14"></a>
-<a id="cw-14-enforce-source-history-and-subscription-ownership-contracts"></a>
-
-### CW-14: Verify that a native source can really resume from the requested position
-
-**Priority: P1. Implementation: recovery mechanisms exist; native-source coverage is incomplete.**
-
-**What works:** native progress, durable input and coordinated initial snapshots
-have implementations. Missing retained history must cause a visible failure or
-an explicitly selected recovery action.
-
-**Testing:** native framework and selected source recovery tests exist.
-Historical ordinary-source dispatcher/filter reports do not establish the same
-bug in native sources.
-
-**Remaining work:** test real native sources when the requested position is too
-old, history is removed, snapshots fail, or live input arrives during initial
-loading. Check cancellation and independent subscriptions. Identify actual
-native failures before applying an old SourceBase patch.
-
-**Likely complexity:** implementation **Medium**, conditional on the source
-failure found; testing **High** because source retention and snapshot/live
-handover need real provider controls.
-
-**Evidence:** [native progress/recovery][query-recovery], [bootstrap services][native-sdk],
-[source recovery tests][source-recovery-tests]. Earlier reports:
-[#721][i721], [#722][i722], [#723][i723], [#919][i919], [#891][i891].
-
-<a id="cw-18"></a>
-<a id="cw-18-own-and-version-payload-retry-and-configuration-identity"></a>
-
-<a id="cw-18-make-stored-formats-and-retry-identities-safe-to-change-between-versions"></a>
-
-### CW-18: Define current stored formats and retry identities; reject incompatible data
-
-**Priority: P1. Implementation: partly implemented.**
-
-**What works:** native ABI/wire versions, bridge versions and query configuration
-versions are checked. Unsupported versions and conflicting retry identities
-can fail explicitly.
-
-**Testing:** version rejection, retry-content and selected bridge reconstruction
-tests exist. Successful loading or conversion of previous-release formats is
-not required.
-
-**Remaining work:** some graph payloads still serialize evolving Core types
-under an unchanged schema description. Define the new release's formats and
-which fields determine stored data, retry identity and configuration identity;
-use reference bytes/digests for those current contracts. Reject incompatible
-records clearly. Diagnostics must not change business identity, and a retry
-within the supported release must not become new input because it was re-encoded.
-Remove legacy query namespace/hash behavior under CW-64. Do not add old readers,
-dual writers, data converters or a release-upgrade/rollback path.
-
-**Likely complexity:** implementation **Medium to High** for clear format/identity
-ownership; testing **High** for current bytes, replay, corruption and rejected
-versions. Cross-release migration and partial-upgrade qualification are removed.
-
-**Evidence:** [graph encoding][graph-codec], [query encoding][query-codec],
-[output identity][output-identity], [query configuration][query-configuration],
-[bridge code][bridge-codec]. Earlier tracking: PX-02/07/09, QX-03.
-
-<a id="cw-19"></a>
-<a id="cw-19-bound-decoded-structure-and-recursive-destruction"></a>
-
-### CW-19: Reject excessively deep data before it can crash the process
-
-**Priority: P1 where input can abort the process. Implementation: bridge protection present; general protection incomplete.**
-
-**What works:** the inter-instance bridge checks encoded size, collection counts,
-nesting and ancestry before normal decoding of its three supported data formats.
-Peer data cannot select arbitrary executable validators.
-
-**Testing:** bridge tests include very deep and malformed input, oversized
-collections and standard data/transaction round trips.
-
-**Remaining work:** arbitrary custom formats, other persisted/shared value
-decoders and deeply nested objects built inside the process are not all covered.
-Releasing a deep recursive object can also overflow the stack even if decoding
-was bounded. Add appropriate limits and safe release behavior for supported
-paths; test failed decoding, cancellation and destruction.
-
-**Likely complexity:** implementation **High**, particularly safe destruction;
-testing **High**, including generated hostile structures in isolated test processes.
-
-**Evidence:** [bridge checks][bridge-codec], [bridge tests][bridge-codec-tests],
-[graph encoding][graph-codec], [value encoding][value-codec].
-Earlier tracking: PX-05/06.
-
-<a id="cw-20"></a>
-<a id="cw-20-qualify-interrupted-deprovision-across-providers"></a>
-
-### CW-20: Check that a crash during query reset cannot leave partly cleared state usable
-
-**Priority: P1. Implementation: reset markers and generation changes exist; provider coverage is incomplete.**
-
-**What works:** native reset/deprovision records that clearing has begun and
-advances output identity. Incomplete clearing is not supposed to look like a
-normal saved query on restart. The old claim that no marker exists is obsolete.
-
-**Testing:** real child-process deaths at six selected reset/deprovision points
-were recorded on macOS and Linux using RocksDB. Tests check actual saved rows,
-markers, exclusive ownership, strict refusal and an explicit successful retry.
-
-**Remaining work:** extend evidence to the other supported providers and
-weaker optional storage methods. Separate clearing commits must never permit
-partly cleared state to resume as healthy. Do not implement the marker again.
-
-**Likely complexity:** implementation **Medium** if a provider cannot honor the
-existing protocol; testing **High** for real crash/reopen points per provider.
-
-**Evidence:** [reset code][query-recovery], [reset/reopen tests][query-recovery-tests].
-Earlier tracking: narrowed QX-04; QX-01's output-identity reuse is fixed.
-
-<a id="cw-21"></a>
-<a id="cw-21-resolve-remaining-admission-receipt-and-acknowledgement-edge-cases"></a>
-
-### CW-21: Resolve the remaining questions about what was accepted or acknowledged
-
-**Priority: P1. Implementation: core receipt/retry mechanisms exist; these findings need focused verification.**
-
-**What works:** saved input receipts, output replay, consumer completion and
-merger recovery have implementations and tests. This item is not one confirmed
-data-loss incident.
-
-**Testing:** broad tests exist, but the following particular concerns have not
-all been resolved by a named reproduction or proof that they cannot occur.
-
-**Remaining work:** check clock changes between merger decisions; retrying input
-with no original timestamp; whether middleware confirmation checks enough
-content; replay older than a merger's latest saved receipt; and whether an
-already failed storage owner incorrectly reports a never-attempted write as
-uncertain. For each, distinguish rejected work, saved work and an unknown result.
-Do not silently reinterpret an old or conflicting retry as new input.
-
-**Likely complexity:** implementation **Medium** after reproduction, but an
-expanded saved-receipt format could be **High**; testing **High** for exact
-positions, content and crash/retry behavior.
-
-**Evidence:** [merger][time-merge], [consumer recovery][consumer-recovery],
-[middleware recovery][middleware-recovery], [saved queues][qos].
-Earlier tracking: DP-06/07/09/11, PC-09.
-
-<a id="errors-inspection-logs-and-measurements"></a>
-<a id="error-reporting-observation-and-observability"></a>
-<a id="reconcile-error-reporting-and-consumption"></a>
-
-## Status, errors and monitoring
-
-Make the system's state understandable to applications and operators.
-
-<a id="cw-10"></a>
-<a id="cw-10-align-status-read-handles-and-public-operation-outcomes"></a>
-
-### CW-10: Show the same truthful status and query results through every supported API
-
-**Priority: P1. Implementation: native read/status mechanisms exist; the remaining public outcomes are not fully verified.**
-
-**What works:** failed native nodes remain visible; query readers reject use
-after their query has been replaced; snapshots, saved outgoing results and live
-subscriptions have native implementations. Driver failures and member-level
-stop failures are retained.
-
-**Testing:** native API, read-handle, failure, restart and instance-stop tests
-exist. That is not proof of every Server workflow or complete live-subscription
-wiring after restoration.
-
-**Remaining work:** check and correct public outcomes for partial startup or
-shutdown, missing/duplicate components, old query readers, missing history and
-the changeover from an initial result snapshot to live updates. CW-43 owns
-constructing/restoring the required result connections; CW-46 owns the complete
-Server workflow runs. CW-23 covers status/log feeds rather than duplicating
-query-result tests. Do not create another evaluator or repair older-only API
-parity as a separate project.
-
-**Likely complexity:** implementation **Medium** for a reproduced API gap;
-testing **High** for replacement, restart and subscription races.
-
-**Evidence:** [native catalogue][catalog], [inspection][runtime-inspection],
-[instance][instance], [native API tests][api-tests]. Earlier tracking: RT-03
-through RT-06, LI-02/09/11/13; ordinary-only portions are retired.
-
-<a id="cw-22"></a>
-<a id="cw-22-reconcile-error-reporting-and-consumption"></a>
-
-### CW-22: Make errors explain what stopped, what is saved and what can be retried
-
-**Priority: P1 for the reporting requirement. Implementation: partly implemented.**
-
-**What works:** typed causes, retained failed nodes, task/process failures and
-several cleanup reports exist. They are not all missing because a broader
-reporting plan remains open.
-
-**Testing:** failure-policy, driver, native-plugin and cleanup tests check
-selected preserved causes. They do not establish consistent presentation through
-every Server response, UI view, log, metric and external alert consumer.
-
-**Remaining work:** present the same incident consistently, including component
-identity, whether processing stopped, saved unfinished work and failed cleanup.
-Distinguish a rejected request from a failed component. Keep safe useful causes,
-not only a phase or HTTP 500. Demonstrate diagnosis and recovery from Rust and an
-external consumer. Report a skipped range only after the saved position changes.
-
-**Likely complexity:** implementation **High** across Core, plugins and Server;
-testing **High** for the same failure viewed through each supported interface.
-
-**Evidence:** [errors][errors], [controller][controller], [delivery][delivery],
-[Server routes][server-routes]. Earlier tracking: original GM-10, PC-04/06/07,
-PX-10, RT-11, LI-02 and the error-consumption proposal.
-
-<a id="cw-23"></a>
-<a id="cw-23-make-observation-loss-instance-identity-and-host-controls-explicit"></a>
-
-### CW-23: Tell observers when they missed updates and how to get current state again
-
-**Priority: P1. Implementation: current inspection and selected host reporting exist; the complete observation behavior is unfinished.**
-
-**What works:** graph snapshots are coherent, changes carry versions, and the
-child host retains bounded last-known state with identity/failure information.
-
-**Testing:** inspection, generation and host tests exist. A complete long-lived
-snapshot-plus-live-feed/reconnect sequence across Server and logs is not proven.
-
-**Remaining work:** make the handover from an initial operational-status
-snapshot to live status/log updates either lossless or explicit about missed
-updates and the need to fetch fresh state. Check slow observers, reconnects and
-replacements. Query-result handover belongs to CW-10/CW-43, not this item.
-Logs need unambiguous instance identity
-and instance-owned state must be released. Recovery completion, reset and any
-explicitly skipped input range also need usable notifications. Decide separately
-whether durable incident history belongs in Drasi or an external system.
-
-**Likely complexity:** implementation **Medium to High** across inspection and
-Server; testing **High** for gaps and stale observers under load.
-
-**Evidence:** [inspection publication][inspection], [component logs][component-logs],
-[host behavior][host-readme]. Earlier tracking: LI-07/08, GM-13,
-[#632][i632], [#355][i355]. Older introspection-adapter repairs are retired.
-
-<a id="cw-24"></a>
-<a id="cw-24-establish-application-owned-observability-and-logging"></a>
-
-### CW-24: Let the embedding application control logging and monitoring
-
-**Priority: P2. Implementation: existing logging/profiling works; the full proposal is not implemented.**
-
-**What works:** component logs, metrics and optional profiling exist today.
-That is different from the proposed common instrumentation/configuration model.
-
-**Testing:** existing facilities have tests. The proposed complete off/basic/
-debug/persistence profile behavior has no complete acceptance evidence here.
-
-**Remaining work:** implement the selected parts of the
-[monitoring proposal][observability-design] using established tracing/metrics
-libraries. The application chooses collection, filtering, export and flushing.
-Drasi must not silently replace its logging setup. Turning off new measurements
-must not disable existing application/component logs. Resolve the unused
-profiling interfaces and dependency-upgrade questions explicitly rather than
-assuming a different exporter has resolved them. Preserve current log history/
-subscriptions, inspection measurements and optional profiling.
-
-**Likely complexity:** implementation **High** across initialization and existing
-interfaces; testing **Medium to High** for embedding combinations, filtering,
-shutdown and overhead.
-
-**Evidence:** [tracing integration][tracing-layer], [metrics][metrics],
-[component logs][component-logs]. Earlier tracking: observability A,
-R1/R3/R4/R5/R8/R9, [#633][i633].
-
-<a id="cw-25"></a>
-<a id="cw-25-carry-trace-context-and-valid-timing-through-the-complete-path"></a>
-
-### CW-25: Follow one request through queues, plugins and network calls
-
-**Priority: P2. Implementation: some identity/context support exists; full tracing is not implemented.**
-
-**What works:** envelopes carry context and the selected task/host/link work
-includes useful identities. This is not complete end-to-end distributed tracing.
-
-**Testing:** selected context-preservation and bridge tests exist. Continuous
-trace relationships across all input protocols, plugin calls, retries and actual
-destination completion are not established.
-
-**Remaining work:** preserve the information linking a request to its work from
-input through processing and actual delivery, including supported control
-requests.
-A retry gets a new attempt without changing saved business identity. Define
-how one result can refer to several contributing inputs. Saved tracing context
-needs a versioned data format, not temporary in-memory tracing objects. Plugin
-interfaces may change with the breaking release; update/rebuild the dependent
-plugins rather than preserve old tables. Measure durations with an
-elapsed-time clock that does not jump when the wall clock changes, and do not
-invent a duration across restart or mistake HTTP 202 for completed work.
-
-**Likely complexity:** implementation **High** across protocols and the native
-plugin interface; testing **High** for retries, batching, cancellation and restart.
-
-**Evidence:** [envelopes][envelope], [native SDK][native-sdk], [network plugins][network].
-Earlier tracking: observability B/D/E, R2/R7/R10. The previous execution round
-included only the minimal correlation/timing portion, not this whole proposal.
-
-<a id="cw-26"></a>
-<a id="cw-26-implement-the-shared-signal-catalogue-without-double-counting"></a>
-
-### CW-26: Count work, errors, queue pressure and processing time consistently
-
-**Priority: P2. Implementation: existing measurements present; the proposed shared set is incomplete.**
-
-**What works:** runtime, queue, query and component measurements already exist.
-Some loss/failure diagnostics are also tested.
-
-**Testing:** current measurements have scoped tests. The complete proposed
-instrument set, including native-plugin consistency and no double counting,
-does not have complete evidence.
-
-**Remaining work:** consistently measure component availability; source events;
-query inputs/results; destination handling; queue depth, peak, blocked sends and
-drops; saved-position lag; errors; query-engine duration; and actual end-to-end
-completion time. Preserve the proposed names and units when implementing them.
-Keep labels bounded and exclude payloads, secrets and error text. Plugins should
-reuse host instrumentation rather than each owning exporters.
-
-The existing proposal's initial names remain:
-
-- Current values (gauges): `drasi.component.up`, `drasi.queue.depth`,
-  `drasi.queue.depth_max`, `drasi.reaction.checkpoint_lag_events`.
-- Running totals (counters): `drasi.source.events_dispatched`,
-  `drasi.query.events_processed`, `drasi.query.results_emitted`,
-  `drasi.reaction.results_processed`, `drasi.queue.blocked_enqueues`,
-  `drasi.queue.drops`, `drasi.errors`.
-- Duration distributions (histograms): `drasi.query.engine.duration`,
-  `drasi.pipeline.end_to_end.duration`.
-
-Record all enabled events before potentially lossy export. Distinguish instances
-and actual queues without unbounded labels. Durations use seconds; query-engine
-time excludes committing storage, and initial loading is distinct from live
-processing. Extra future measurements must be selected explicitly rather than
-silently added to this initial commitment.
-
-**Likely complexity:** implementation **High** across processing and plugin
-interfaces; testing **High** for exact counts, failure/retry behavior, timing
-boundaries and disabled/enabled overhead.
-
-**Evidence:** [metrics][metrics], [queue measurements][pipe-metrics],
-[monitoring proposal][observability-design]. Earlier tracking: observability C/D/H,
-R6/R7, PX-01's remaining counter.
-
-<a id="cw-27"></a>
-<a id="cw-27-provide-isolated-otlp-and-local-telemetry-consumption"></a>
-
-### CW-27: Export monitoring data without letting monitoring stall business work
-
-**Priority: P2. Implementation: proposed adapter not implemented.**
-
-**What works:** the OTel source can ingest application telemetry. That is not
-the proposed exporter for Drasi's own logs, metrics and completed traces.
-
-**Testing:** tutorials and existing telemetry features are not acceptance
-evidence for this new combined export/local-consumption facility.
-
-**Remaining work:** supply an optional application-owned adapter that collects
-once and independently sends through OpenTelemetry's export protocol (OTLP),
-to local Drasi consumers, or both. Each
-destination needs bounded queues and visible loss. Slow monitoring must not
-block business processing. Prevent monitoring from recursively monitoring its
-own output; define flush and shutdown ownership.
-
-**Likely complexity:** implementation **High**; testing **High** for slow/broken
-destinations, combined modes, recursion, instance isolation and shutdown.
-
-**Evidence:** [proposal][observability-design], [OTel source][otel-source].
-Earlier tracking: observability F/G and proposal acceptance requirements.
-
-<a id="performance-storage-growth-and-maintainability"></a>
-<a id="efficiency-resource-bounds-and-rust-structure"></a>
-<a id="performance-and-resource-management-improvements"></a>
-
-## Performance and resource use
-
-Reduce unnecessary work and resource growth without weakening correctness or recovery.
-
-<a id="cw-28"></a>
-<a id="cw-28-reduce-storage-overhead-and-check-long-term-disk-growth"></a>
-<a id="cw-28-improve-durable-source-storage-and-persistent-hygiene"></a>
-
-### CW-28: Reduce unnecessary storage reads, writes and disk growth
-
-**Priority: P2. Implementation: storage and recovery are working; cost and growth
-improvements remain. Includes the former CW-30 work.**
-
-**What works:** source logs, indexes, saved merger input, receipts, replay and
-consumer progress exist. Some persistent queues already read data in pages.
-These mechanisms do not prove that each small change has a small storage cost.
-
-**Testing:** storage/recovery tests and selected persistent benchmarks exist.
-Historical slowdown reports are not current measurements of this branch.
-
-**Remaining work:** use CW-40's measurement approach to identify full-state
-rewrites, repeated per-record reads, receipt-update cost and inefficient write
-grouping. Where worthwhile, use smaller updates, bounded pages or explicitly
-bounded write groups. Check multi-query disk growth and obsolete stored
-relationship/aggregate records. Keep per-query archive choices independent.
-CW-12 owns whether an aggregate group is logically correct; this item owns
-unnecessary storage cost and obsolete on-disk records.
-
-Preserve exact retry identity and saved progress. Never acknowledge work that
-has not finished or move related writes out of their required transaction.
-The historical Garnet count concern still needs reproduction before a fix is
-claimed. This consolidation does not turn unverified reports into known bugs.
-
-**Likely complexity:** implementation **Medium to High** for write boundaries
-and storage behavior; testing **High** for current-format restart, failed writes,
-replay, throughput, slow cases and disk growth. No old-format conversion or
-backward-readable representation is required.
-
-**Evidence:** [source log][redb-wal], [RocksDB][rocksdb], [provider selection][index-factory].
-[Merger persistence][merge-recovery], [delivery][delivery],
-[source replay][wal-source], [query delivery][query-delivery] and [queues][qos]
-retain the former CW-30 evidence.
-Earlier reports: [#668][i668], [#782][i782], [#309][i309], [#635][i635],
-[#411][i411], [#276][i276]. Earlier tracking also includes PC-03,
-DP-03/04/07 and QX-10.
-
-<a id="cw-29"></a>
-<a id="cw-29-extend-byte-budgets-and-choose-transformer-admission-behavior"></a>
-
-### CW-29: Finish the selected memory/queue limits and define what a full buffer does
-
-**Priority: P2. Implementation: partly implemented; some behavior needs a decision.**
-
-**What works:** selected ordinary and saved queues, including queues shared by
-several subscribers, have limits on record counts and bytes. Persistent queues
-support bounded read pages. Prior paged
-trimming errors were fixed. These are not total-process memory limits.
-
-**Testing:** byte budgets, oversized records, reopen, required subscribers and
-paged caches have tests. The shared-transaction queue's byte reservation and
-outgoing-result/live-row byte limits are not complete.
-
-**Remaining work:** add agreed limits where missing and reserve the required
-queue space before processing commits. Define oversized-input behavior. A full merger
-currently fails explicitly; changing it to wait needs a selected policy, not a
-claim that waiting already exists. Measure slow-subscriber behavior before
-changing result publication.
-
-**Likely complexity:** implementation **High** for shared-transaction reservation
-and output limits; testing **High** for capacity, crashes and retained obligations.
-
-**Evidence:** [shared queue][shared-qos], [saved output][query-state],
-[merger][time-merge], [byte/page tests][budget-tests]. Earlier tracking:
-DP-02, QX-09/12, Q08; PC-01's old trimming bug is fixed.
-
-<a id="cw-31"></a>
-<a id="cw-31-publish-changes-and-wake-work-proportionally"></a>
-
-### CW-31: Avoid rebuilding whole-graph status data for one small change
-
-**Priority: P1 for the approved graph-size requirement; P2 for unrelated idle overhead. Implementation: unresolved.**
-
-**What works:** each published view is consistent. Independent processing no
-longer runs inside the controller.
-
-**Testing:** small-graph execution and CPU-scaling tests exist. They do not
-measure increasing graph size or startup/status-publication cost.
-
-**Remaining work:** a local controller update still rebuilds the graph-wide
-lists and connections between configuration, query readers and resources.
-That behavior is confirmed; an unacceptable measured slowdown is not yet established. Measure
-larger graphs, set acceptable costs, and reduce or appropriately batch the work.
-This was named in E2 and cannot be closed by the eight-query CPU reference.
-Separate idle polling and broad-wakeup improvements should follow measurements.
-This is not a claim that every data record rebuilds the graph.
-
-**Likely complexity:** implementation **High** while preserving consistent
-snapshots; testing **High** across graph size, observers, allocation and latency.
-
-**Evidence:** [controller update][controller], [registry publication][registry],
-[scheduling][query-scheduling]. Earlier tracking:
-GC-08/14, GM-12, RT-08/13, DP-04, QX-08.
-
-<a id="cw-32"></a>
-<a id="cw-32-remove-measured-hot-path-duplication"></a>
-
-### CW-32: Remove repeated work only where measurements show it matters
-
-**Priority: P2. Implementation: some optimizations complete; remaining candidates need measurement.**
-
-**What works:** direct memory providers and reduced disabled-feature overhead
-are already implemented. Selected fast-path and persistent workloads were
-measured; those improvements must not be reopened as missing.
-
-**Testing:** exact-output benchmarks and recovery tests exist. Repeated encoding,
-hashing, receipt scans and remaining native interface costs have not all been
-quantified and removed.
-
-**Remaining work:** profile retained native paths, then cache genuinely
-unchanging metadata or reuse encoded bytes safely. Preserve validation of
-untrusted input and fixed float/identity representations. Retiring ordinary-only
-interface round trips are not an optimization project.
-Use CW-40 for the measurement setup. The optional query-plugin cost investigation
-is already owned by CW-43 and must not be started again as another CW-32 task.
-
-**Likely complexity:** implementation **Medium** for a measured localized cost;
-testing **High** where retry identity or saved output can change.
-
-**Evidence:** [encoding][graph-codec], [identity][output-identity], [queues][qos],
-[workload measurements][workload-runner]. Earlier tracking: PC-08, DP-08,
-PX-08/11, original PX-13.
-
-<a id="cw-33"></a>
-<a id="cw-33-bound-retired-topology-metadata"></a>
-
-### CW-33: Keep removed-component bookkeeping from growing forever
-
-**Priority: P2. Implementation: task retirement exists; long-lived graph storage remains unresolved.**
-
-**What works:** completed owned tasks can be joined and removed, and replaced
-runtime objects have tracked destruction. Selected bounded churn tests exist.
-
-**Testing:** task/file/socket cleanup and repeated replacement were checked.
-Those checks do not establish bounded configuration/slot memory in one graph
-that continually adds and removes different component names.
-
-**Remaining work:** removed components still leave slots in graph collections.
-Measure repeated addition/removal with new names and reused names, then remove
-unnecessary bookkeeping without forgetting unfinished cleanup, saved output
-or checks that reject old handles.
-Distinguish necessary retained records from unnecessary growth.
-
-**Likely complexity:** implementation **Medium to High** because indexes and
-replacement checks must remain valid; testing **High** for long-lived churn and
-retained failure/recovery state.
-
-**Evidence:** [removal code][reconcile], [graph storage][graph], [resource soak][resource-soak].
-Earlier tracking: GM-04, GC-12. Selected task bookkeeping and general graph
-compaction are different obligations.
-
-<a id="cw-40"></a>
-<a id="cw-40-measure-sustained-behavior-and-current-performance"></a>
-
-### CW-40: Measure sustained performance, resource growth and large graphs
-
-**Priority: P1 for required execution/replacement evidence; P2 for broader production characterization. Implementation: measurement tools and selected results present.**
-
-**What works:** workload runners, exact result checks, bounded replacement
-soaks and CPU measurements exist. CW-50's selected CPU-scaling target passed.
-
-**Testing:** recorded repeated-operation tests checked file/socket/task release
-and no growth in live Rust allocations for their bounded workload. They do not
-prove many-day
-persistent operation, total process memory or production latency limits.
-
-**Remaining work:** measure growing graph sizes, busy/slow branches, shared
-storage, large input messages, outages and long-running native pipelines. Record
-latency, CPU, allocations, memory, disk and actual binary/provider/plugin
-versions. Set workload-specific acceptance limits before claiming success.
-Measure CW-31 separately; extra worker threads alone prove neither scaling
-nor control responsiveness.
-This item owns the shared measurement method and long-run evidence, not another
-copy of each optimization in CW-28/29/31/32/33. CW-43's isolated plugin experiment
-retains its own comparisons and performance decision.
-
-**Likely complexity:** implementation **Low to Medium** for measurement
-fixtures; testing **High**, with substantial run time and environment control.
-
-**Evidence:** [workload runner][workload-runner], [resource soak][resource-soak],
-[recorded execution reference][execution-plan]. Earlier tracking:
-CG-21/22/27, G06/Q08/T07, [#681][i681].
-
-<a id="hosting-connectors-server-and-examples"></a>
-<a id="server-connectors-and-solution-delivery"></a>
-<a id="integration-and-productization"></a>
-
-## Native components, Server and examples
-
-Implement required user workflows through the new interfaces and update their
-consumers. Keeping the old API or configuration shape is not required.
-ComputationGraph is already the only execution engine.
-
-<a id="cw-43"></a>
-<a id="cw-43-complete-ordinary-to-native-wiring-and-reconstruction-recipes"></a>
-
-### CW-43: Make complete native pipelines rebuildable, including their query-result connections
-
-**Priority: P1 for native replacement. Implementation: partly implemented.**
-
-**What works:** native factories, resource descriptions, saved definitions and
-selected Server reconstruction already exist. Export can distinguish a
-rebuildable definition from an application-supplied object it cannot recreate.
-
-**Testing:** selected reconstruction and native query-read tests exist. They
-do not establish every native deployment recipe or live-result outlet.
-
-**Remaining work:** complete new-release native definitions, dependencies and
-versions, including required merger/provider combinations. Query assembly must
-provide the actual result catalogue and output connections needed for snapshots,
-saved results and live subscriptions through same-version export, restart and
-replacement. A processing-only graph may deliberately omit them; an updated
-user workflow that needs them must include them. Old saved definitions need no
-converter or adoption path.
-
-**Likely complexity:** implementation **High** across assembly, recipes and
-Server; testing **High** for recreation and exact result/subscription behavior.
-
-**Evidence:** [assembly][pipeline], [catalogue][catalog], [management guide][managed-guide],
-[Server configuration][server-computation]. Earlier tracking: CG-10/15.
-The proposed ordinary-to-native bridge is retired, not a remaining deliverable.
-
-<a id="cw-43-optional-native-query-plugin"></a>
-
-<a id="selected-migration-make-the-native-query-component-an-optional-plugin"></a>
-
-#### Selected work: make the native query component an optional plugin
-
-**Priority: P1 for the selected optional-query component work. Status: design and an initial experiment exist;
-the production plugin is not implemented. Selected: 14 October 2026.**
-
-Here **optional** means a deployment can choose whether to load the query
-component. This is selected work, not an unselected future feature, but dynamic
-query loading is not a prerequisite for replacing the old DrasiLib runtime.
-
-**Current investigation:** the [design and initial experiment][query-plugin-design]
-were preserved in an [isolated performance snapshot][query-plugin-experiment].
-The performance investigation now runs in a separate worktree, so other work
-can continue on the normal computation-graph branch. None of that experimental
-code is active in this working checkout.
-
-The initial in-memory experiment returned correct results, but its dynamic
-path took roughly 9.7 times as long for a simple projection and 16.9 times as
-long for summing values. It made repeated storage requests across the plugin
-boundary. These are prototype measurements, not proof of an unavoidable plugin
-cost or of full Server performance. The separate investigation owns measuring
-the causes and possible improvements; do not duplicate it here.
-
-**Current boundary:** `ContinuousQueryFactory` and its graph-owned query
-implementation live in `drasi-lib` and are unconditionally included in
-`FactoryRegistry::standard()`. The native plugin SDK explicitly rejects
-`ComponentRole::Query` because dynamic query recovery is not implemented.
-Splitting the existing source/transformer/sink plugins did not remove that
-limitation.
-
-**Remaining work:** first resolve the performance/design decision using that
-investigation. Then move the native continuous-query component, configuration
-and factory into its own component crate under `components/computation-plugins/`.
-Reuse the existing shared query engine, parsers and function libraries rather
-than copying or replacing them. Hosts must register the query component when
-its plugin is selected/loaded, not rely on an unconditional built-in factory.
-Graphs without queries must work with the plugin absent; a graph requiring it
-must report a clear missing-plugin/factory error when it is unavailable.
-
-**Host-consolidation preparation:** ordinary queries now use
-`ContinuousQueryTransformer` directly in the instance graph rather than an
-extra query host and private graph. Existing query configuration and recovery
-identities were preserved in that completed change; retaining those old forms
-is no longer a requirement of the breaking release. This removes an execution-layer dependency; it
-does **not** make the query component an optional dynamically loaded plugin or
-complete the SDK/ABI work below.
-
-Define and implement the required SDK/resource and ABI contracts for the
-query's actual index, bootstrap, scheduling, source-progress and result-catalogue
-dependencies. Preserve graph-owned lifecycle, transaction/recovery guarantees,
-snapshot/result reads and live subscriptions across the plugin boundary.
-Do not bypass the missing query-role support by advertising a transformer,
-weakening recovery or supporting only an in-memory subset.
-
-Update Server/library assembly, discovery, configuration and examples to select
-the plugin normally. Choose the new public APIs, configuration and component
-identities, then update consumers directly. Do not retain old constructors,
-legacy query namespaces or factory-reference migration machinery. This release
-does not need to open old saved definitions or processing data.
-Within the new release, identities still need to remain stable through restart
-and replay; changing a running component must not silently discard its pending
-work. CW-64 owns the built-in query compatibility cleanup and must be coordinated
-with the isolated plugin investigation, not duplicated there.
-
-**Closure criteria:** demonstrate independent build/load and operation with the
-plugin both present and absent. Qualify existing Cypher/GQL behavior, bootstrap
-and scheduled work, exact result changes, supported transactions, cancellation,
-reconstruction and recovery with the real dynamic library. Updated query APIs,
-snapshot and live-result workflows must provide the required behavior; matching
-old method names, wire shapes or data files is not required. Moving files or
-loading a factory alone is not completion.
-
-**Likely complexity:** implementation **High** across component extraction,
-SDK/ABI, resources and host assembly; testing **High** for exact results,
-ownership and recovery across the dynamic boundary.
-
-**Evidence:** [current query component][native-query],
-[built-in registration][standard-factories],
-[SDK query-role restriction][native-sdk-metadata], [shared evaluator][evaluator].
+**Finish when:** Slow or failing components cannot cause an unexplained indefinite
+wait, and cleanup can be safely retried after a timeout or cancellation.
 
 <a id="cw-44"></a>
-<a id="cw-44-select-native-plugin-and-connector-breadth-explicitly"></a>
+<a id="hosting-connectors-server-and-examples"></a>
+<a id="current-required-family-boundary"></a>
 
-### CW-44: Preserve required connector features when replacing older plugins
+## 2. Finish the remaining data connections (CW-44)
 
-**Priority: P1 before each affected native replacement. Implementation: native framework and some connectors present; replacement incomplete.**
+**Priority:** High. **Effort:** Very large.
 
-**What works:** native HTTP/gRPC sources/sinks, SSE and reference components
-exist. Native admission, progress, initial-loading and completion services also
-exist. Queries currently remain built-in; the selected optional
-native query component plugin is tracked under
-[CW-43](#cw-43-optional-native-query-plugin), not implemented by the connector split.
+**Work:** Complete the selected connectors using their existing connection,
+conversion and protocol logic:
 
-**Testing:** selected real native network/service cases passed. That is not
-feature parity with all existing production connectors.
+| Area | Remaining work |
+|---|---|
+| Kafka and Kubernetes | Native sources and initial-data providers, independently packaged and exercised against real services. |
+| SQL Server | Native source, initial-data provider and stored-procedure output. |
+| MySQL | Independently packaged source and initial-data providers, remaining required modes, and stored-procedure output. |
+| SQLite | Independently packaged live source and coordinated initial loading, usable in a complete Server deployment. |
+| Database discovery | Expose available tables, fields and types through the native source and Server interfaces. |
+| Network recovery | Resolve required snapshot/progress replacement and destination-completion gaps that the current HTTP/gRPC/SSE contracts do not cover. |
+| Application components | Move remaining old-interface test and example consumers to the native components. |
 
-**Application progress:** native volatile input and durable admission now reuse
-the existing application handle/value logic and graph-owned QoS services.
-Application bootstrap streams an application-owned snapshot; the existing native
-application reaction is reused. Both-runtime integrations cover snapshot/live
-changes, durable stop/restart and retry receipts, unhandled-input reopen, and
-durable input through a persistent query to a native application consumer.
-The user explicitly chose to reject durable sends while stopped, unlike volatile
-channel buffering. No second WAL or admission runtime was added. Application
-bootstrap is now native-only: its count-only callback, descriptor and unsupported
-legacy configuration have been removed. Server's unused application registrations
-and normal application dependencies are gone, as is the reaction's unusable
-descriptor. Native application nodes now run inside DrasiLib in a reference
-example and both-runtime relationship/aggregation tests. Removal/drain, borrowed
-journal lifetime and producer-session retirement are covered. The old Rust
-Source/Reaction interfaces still have active test/performance consumers; their
-cutover and complete assertion mapping remain. The embedded test host now uses
-native source/query/reaction nodes, preserves its result/profiling projections,
-and retains startup/shutdown ownership. Its old SDK/FFI and unused bootstrap
-dependency closure is removed. Native query input updates, bootstrap preservation,
-late dependency binding, stop intent, source ownership and both-runtime behavior
-have focused coverage; the library and complete test-host library suites pass.
-The cross-instance
-borrowed-source example is ComputationGraph-branch adapter code, not a capability
-demonstrated by current main. Its existence does not add a requirement for a new
-native shared-input service; see the provenance correction in the cleanup plan.
-
-**Remaining work:** implement the required component/provider set and packaging
-against the new interfaces, and update the applications that use them.
-The initial cleanup-stage-6 inventory found 66 component manifests with direct
-old-SDK dependencies, including two test fixtures: 22 sources, 19 bootstrappers,
-18 non-fixture reactions, two non-fixture identity providers and three secret
-stores. Hosted application helpers and ordinary API users are additional
-dependencies. This counts dependency declarations, not completed replacement
-designs. The user selected 23 existing components: application/HTTP/MSSQL/MySQL/
-PostgreSQL source, reaction and bootstrap; gRPC source/reaction; and Kafka/
-Kubernetes/SQLite source/bootstrap. Reuse the existing implementation logic where
-applicable and retain equivalent test coverage. New Kafka/SQLite reactions and
-functional gRPC bootstrap are explicitly outside this first-release scope.
-SQLite now has native explicit/physical-rowid keys, REST using the owned SQL
-worker, and ordinary read-only file bootstrap in addition to its coordinated
-persistent snapshot. Source capture and both native snapshots share the
-`drasi-sqlite-common` mapper. The file provider is independently packaged as
-`drasi-computation-bootstrap-sqlite`, using the native bootstrap extension with
-no dummy processing component. Its real-library checks cover discovery,
-lifecycle, two-query live SQL integration, and Server catalogue/resource recipes
-with memory-backed queries. The 96 SQLite-family cases, both-runtime hosted
-checks, existing Host/Server native suites and strict scoped lints pass.
-Ordinary file bootstrap still requires caller-controlled live-write ordering;
-it does not invent a replay checkpoint. Live-source/coordinated-snapshot native
-packaging, a complete native-only SQLite Server deployment and legacy-interface
-retirement remain open.
-See the stage-6 scope in the
-[cleanup plan](computation-graph-cleanup-plan.md).
-Concrete gaps include payload/header/routing templates, fixed/adaptive batching,
-and supported snapshot/recovery replacement messages. Native gRPC currently
-supports only `batchSize=1`; applicable native network options reject unsupported
-features. That is missing implementation, not just missing tests. Required
-transport/security and destination-completion behavior remain necessary, but
-the old option names, plugin factories and binary layouts need not remain.
-
-<a id="cw-44-retire-ordinary-plugin-adapters"></a>
-
-**Removal targets identified in the code:** once their consumers use the
-selected new interfaces, remove the old Source/Reaction/Bootstrap plugin family,
-its Host proxies, and the `LegacySourceFactory`, `LegacyReactionFactory`,
-`SourcePluginAdapterFactory` and `ReactionPluginAdapterFactory` registrations.
-Retire the corresponding ordinary source/reaction hosts, `Legacy*Resource`
-wrappers and old message-conversion paths. These are active today, not dead
-code: the app/connector changes must accompany removal. Coordinate the Server
-wiring with CW-45. Do not build another ordinary-to-native bridge or maintain
-both families for old consumers.
-
-Native bootstrap, identity/secret services, current result/snapshot reads and
-actual storage providers are required capabilities where used. Remove the old
-interface/adaptation, not those capabilities because their implementation has
-an old name. Smaller old-binary fallbacks are itemized under CW-63.
-
-**Likely complexity:** implementation **Very high** for the full connector set,
-to be split by required connector/feature; testing **Very high** across real
-products, protocols, failures and recovery.
-
-**Evidence:** [native network limits][network], [SDK services][native-sdk],
-[Server recipes][server-computation]. Earlier tracking: CG-02/03/07/11/12,
-[#44][i44]; related acceptance reports [#238][i238]/[#301][i301]/[#426][i426].
+**Finish when:** Each selected connection works through the new interfaces with
+equivalent functional and failure coverage, including real libraries and services.
 
 <a id="cw-45"></a>
-<a id="cw-45-complete-supported-server-operations-and-native-ui-controls"></a>
 
-### CW-45: Finish moving supported Server and UI workflows to native components
+## 3. Finish native Server and client workflows (CW-45)
 
-**Priority: P1 for the full native-only target. Implementation: partly implemented.**
+**Priority:** High. **Effort:** Very large. **Depends on:** CW-44.
 
-**What works:** Server exposes native definitions, resources, inspection,
-configuration acceptance/receipts and selected result/lifecycle operations.
-Everything already executes through ComputationGraph.
-Query SSE attachment now uses `DrasiLib::subscribe_query_results` directly,
-without a temporary application reaction or asynchronous drop-cleanup task.
-The native catalogue preserves bounded delivery, retained-history gap recovery,
-instance/generation fencing and synchronous reader removal. Each connection
-starts with a consistent snapshot, followed only by changes after its sequence.
-This result-view reader is not a durable consumer.
+**Work:** Complete creation, editing, discovery, lifecycle and result viewing for
+the remaining native components in Server, UI and clients. Make waiting,
+accepted, running and failed states clear. Resolve the recorded full VS Code
+type-check failures in the component and YAML tooling.
 
-**Testing:** many Server unit/integration cases and selected live examples have
-recorded passes. This does not establish a fully native Server/UI deployment.
+**Finish when:** Required workflows run entirely through supported native
+components and current instance-scoped APIs, without old factory registrations
+or misleading success states.
 
-**Remaining work:** update Server, UI and clients to the new interfaces for
-creation, loading, configuration, lifecycle, results, snapshots, subscriptions,
-management and editing. Show accepted, starting, ready and failed states
-correctly. Old endpoints, DTO names and configuration/data formats can be
-removed; do not implement adoption, migration, compatibility routes or rollback
-to old binaries. CW-65's configuration/route consolidation is complete. The remaining work here
-is native-only component/provider hosting and its current workflows, not another
-Server layout or a first-instance route.
+<a id="cw-14"></a>
 
-Remove old registry categories and statically wired ordinary helpers as their
-required functionality is provided by the chosen new components. Server's
-application registrations are now removed: native query viewing no longer needs
-a temporary reaction, and in-process application data/receivers are supplied as
-native Rust objects rather than empty Server factories. Other selected connector
-and provider registrations remain part of CW-44. Keep necessary operations working
-under the new API rather than maintaining two APIs for compatibility.
+## 4. Recover safely while saved input is still waiting (CW-14)
 
-The user selected a snapshot followed by updates on each SSE connection, including
-reconnects. The UI now replaces rows on that initial event, without a separate
-REST fetch, and waits for a fresh snapshot before reporting a reconnect as current.
-The VS Code watcher consumes the same snapshot event; after stream termination it
-refreshes through its existing snapshot-polling path. Neither consumer treats
-malformed stream data as successful updates.
+**Priority:** High for deployments needing this recovery mode. **Effort:** Large.
 
-**Likely complexity:** implementation **Very high** across APIs, plugins,
-configuration and UI; testing **Very high** for existing client/workflow behavior.
+**Work:** Establish safe reconstruction after a process dies with unprocessed
+messages still in persistent input queues. Saved consumer progress alone does
+not describe every queued message or its transport number. Extend source-history
+and initial-loading checks to the remaining required connectors.
 
-**Evidence:** [routes][server-routes], [native UI][native-ui], [Server tests][server-tests].
-Earlier tracking: CG-04/09/14. This is not replacing a second execution engine.
-
-<a id="cw-47"></a>
-<a id="cw-47-finish-templates-stock-server-examples-and-tutorial-acceptance"></a>
-
-### CW-47: Make existing examples and templates work on the native Server with exact checks
-
-**Priority: P1 for existing required solutions; P3 for additional examples. Implementation: partly implemented.**
-
-**What works:** native example work, selected browser/live checks and updated
-developer/maintainer documentation exist. The OTel tutorial correlates application
-telemetry; it does not implement Drasi-wide monitoring.
-
-**Testing:** selected Move-a-Wall and GPU functional/restart/browser checks were
-recorded. The 16 October GPU update reports the implemented native
-policy-context transaction contract instead of its obsolete unsupported marker.
-Full acceptance now includes real native transaction input/recovery checks,
-writer faults, restart, commands and scenarios; two consecutive complete runs
-passed on matching current-source images through Podman. The restart check
-validates its captured rows at fresh confirmation without dropping persistence
-or receipt checks. Atomic configuration and delayed policy-result regressions
-protect the contract; none of this is proof of a stock-Server GPU equivalent or
-atomic downstream effects.
-
-**Remaining work:** finish required native templates and packaging for the
-standard Server executable, rather than only custom embedded hosts. Complete
-readiness/reset behavior and exact result/effect checks. Update Getting Started
-and other examples to the new release while retaining their meaningful expected
-outcomes, not their old configuration spelling. No old-example upgrade path is
-required. Keep guides consistent with actual capabilities;
-describing a missing feature does not implement it. Additional tutorial breadth
-is separate from preserving existing supported examples.
-
-**Likely complexity:** implementation **High**, depending on CW-44/CW-45;
-testing **High** across installation, browser use, reset and recovery.
-
-**Evidence:** [solution documentation][server-readme], [stock GPU example][gpu-server],
-[tutorials][tutorials], [OTel tutorial][otel-tutorial]. Earlier tracking: CG-16/17/28.
-
-<a id="evidence-still-needed"></a>
-<a id="assurance-and-qualification"></a>
-<a id="recovery-and-operational-qualification"></a>
-
-## Tests and deployment evidence
-
-Complete the missing evidence for working mechanisms; do not assume the implementation is absent merely because a scenario is unqualified.
+**Finish when:** A fresh process restores the exact outstanding work without
+missing or repeating effects, inventing progress, or deleting queued messages.
 
 <a id="cw-36"></a>
-<a id="cw-36-make-tests-prove-behavior-not-just-execute-named-cases"></a>
 
-### CW-36: Make the acceptance tests prove the promised result
+## 5. Make passing recovery checks prove completion (CW-36)
 
-**Priority: P1. Implementation: substantial test infrastructure exists; overall acceptance evidence is incomplete.**
+**Priority:** High. **Effort:** Medium to large.
 
-**What works:** protected test names, independent result models, persistent
-recovery checks and exact-output workloads exist. These are not all missing.
+**Work:** Prove that all required query processing and destination work finished
+before comparing results. Add genuine completion evidence to Building Comfort
+baseline and recovery captures. Update the requirement checklist to reference
+the newer tests and distinguish proved behavior from incomplete evidence.
 
-**Testing:** selected models and test-runner checks have recorded results.
-Passing test names or high line coverage alone do not prove the assertion is
-strong enough.
-
-**Remaining work:** connect every required behavior to an actual native setup,
-an exact expected outcome and a recorded run. Deliberately break selected
-behavior to check that its test fails. Extend generated data, malformed-input
-and narrowly bounded concurrency checks where they protect a stated requirement.
-An unrelated command must actually finish; a stop hook being called is not
-proof its resource was released.
-
-This is also the single owner for truthful recovery-comparison verdicts:
-establish that the required query processing and destination work finished
-before taking the final capture. An incomplete capture stays inconclusive or
-failed. Quiet output, a received-message count or a manufactured completion
-flag is not enough. Existing Building Comfort captures do not yet establish
-all required completion conditions. CW-46 owns the Server scenarios that use
-this rule, not a second definition of a valid pass.
-Use an independent expected result and baseline/recovery runs of the new release.
-There is no requirement to make old binaries, old APIs or previous-release
-captures compatible with it.
-
-**Likely complexity:** runtime implementation **None unless a test finds a
-bug**; test infrastructure **Medium**, potentially **High** for missing
-completion evidence; testing/review **High** across the required behavior set.
-
-**Evidence:** [protected cases][contracts], [test ledger][requirements],
-[runner tooling][parity-tooling], [recovery comparator][recovery-comparison] and
-[unfinished completion checks][scheduled-recovery].
-Earlier tracking: TS-01/03/04/10, PC-10 and CW-46's shared verdict rules.
-
-<a id="cw-37"></a>
-<a id="cw-37-make-timing-completion-and-test-environments-deterministic"></a>
-
-### CW-37: Stop using timing guesses as proof that asynchronous work finished
-
-**Priority: P2. Implementation: controlled tests exist; broader deterministic testing is incomplete.**
-
-**What works:** many newer tests use explicit gates and saved processing
-positions. Selected scheduling tests control clock changes.
-
-**Testing:** those cases have scoped evidence. The separately inspected query
-test-clock branch is not included in the current Core commit. It must not be
-described as an available integrated feature.
-
-**Remaining work:** use actual query completion, due-work completion and
-destination completion as separate checks. Add only the native controls needed
-for required acceptance. Isolate global test state and retain single-thread
-coverage. Reproduce relevant shared evaluator range problems rather than
-merely freezing a panic as expected behavior. Do not create a general public
-testing-helper project.
-
-**Likely complexity:** implementation **Medium** for internal test controls;
-testing **High** for reliable clock, completion and concurrency scenarios.
-
-**Evidence:** [tests][lib-tests], [scheduling][query-scheduling],
-[separate clock proposal][timing-control]. Earlier tracking: TS-02/05/06/08/09,
-[#245][i245], [#461][i461], [#482][i482], [#880][i880], [#483][i483].
-PRs [#246][p246]/[#887][p887] are historical leads.
-
-<a id="cw-39"></a>
-<a id="cw-39-extend-combined-recovery-and-lifecycle-scenarios"></a>
-
-### CW-39: Test failures in combination, not only one at a time
-
-**Priority: P1. Implementation: underlying recovery mechanisms present; combined evidence incomplete.**
-
-**What works:** transactions, saved delivery, managed configuration, reset
-markers and selected real crash/restart scenarios exist.
-
-**Testing:** the ledger records substantial coverage, including its completed
-M01-M07 Core/redb configuration scenarios. Other rows remain partial. A passing
-single-fault test does not establish the following combinations.
-
-**Remaining work:** combine failed/delayed initial snapshots with live input;
-lost history with failed reads/writes; clock changes with persistent query
-restart; cancelled replacement with several downstream branches; disconnected
-consumers with damaged history; and lost destination replies with failed
-completion writes.
-Include the remaining merger cases with late input held across crash/reopen and
-additional providers, previously repeated under CW-38. Extend actual
-provider/connector coverage. Specifically show that a failure to read current
-query configuration does not authorize deleting saved state, instead of
-inferring that protection from a broad successful suite. This requirement
-survives removal of old hash formats; it does not require their migration.
-
-**Likely complexity:** runtime implementation **None assumed**; test setup
-**Medium to High**, testing **High** for exact rows, positions, effects and
-released resources. Any discovered bug gets its own implementation assessment.
-
-**Evidence:** [requirement details][requirements], [persistent query tests][transaction-query-tests],
-[configuration tests][managed-tests]. Earlier tracking: CG-01/20-24,
-[#393][i393], [#394][i394], [#743][i743], [#818][i818].
-PR [#745][p745] is a scenario lead.
-
-<a id="cw-41"></a>
-<a id="cw-41-qualify-independently-built-plugin-lifetimes-and-compatibility"></a>
-
-<a id="cw-41-check-real-plugin-binaries-across-failure-replacement-and-version-changes"></a>
-
-### CW-41: Check rebuilt plugin binaries, failure handling and safe replacement
-
-**Priority: P1. Implementation: native SDK/Host present; current-binary lifetime evidence incomplete.**
-
-**What works:** separately built native libraries exercise processing,
-transactions, input receipts, initial loading, consumer completion and panic
-handling. Invalid capabilities and revoked storage can be rejected.
-
-**Testing:** actual-binary cases and selected restart/cancellation tests passed
-in recorded runs. They are more than compile-only checks, but not every
-late-callback or replacement schedule. Historical positive tests for old ABIs
-are not a release requirement under the breaking-change policy.
-
-**Remaining work:** expand malformed metadata/buffer, version mismatch,
-cancel/restart, reused handle and delayed callback tests. Measure per-instance
-allocation cleanup under repeated multi-instance use. Libraries intentionally
-loaded for process lifetime are not by themselves a leak; hot unloading is not
-the selected requirement. Use independently rebuilt libraries for the selected
-new contract. Reject unsupported old versions; remove positive old-binary
-compatibility fixtures with their retired code under CW-63/CW-44. No coexistence,
-mixed-version rollout or old-binary rollback facility is required.
-
-**Likely complexity:** implementation **Medium** if tests reveal a lifetime
-gap; testing **High** with independently built current binaries and
-allocation/lifetime accounting. Preserving old layouts no longer adds work.
-
-**Evidence:** [Host tests][host-tests], [native SDK][native-sdk], [test ledger][requirements].
-Earlier tracking: CG-05/06/07/25, A01-A05. Ordinary SDK expansion is excluded.
+**Finish when:** Incomplete captures cannot pass, and each required behavior has
+an exact expected result and a matching recorded run.
 
 <a id="cw-46"></a>
-<a id="cw-46-prove-complete-server-workflows-and-stop-treating-incomplete-recovery-captures-as-passes"></a>
-<a id="cw-46-qualify-server-contracts-and-truthful-recovery-test-verdicts"></a>
 
-### CW-46: Run complete Server workflow and recovery checks
+## 6. Complete the Server workflow and recovery checks (CW-46)
 
-**Priority: P1. Implementation: Server/tests exist; full workflow evidence is incomplete.**
+**Priority:** High. **Effort:** Large. **Depends on:** CW-36 and the affected CW-44/45 work.
 
-**What works:** native Server operations, selected restart/retirement tests,
-producer identity capture and a recovery comparator exist. The comparator can
-report failed or inconclusive results rather than calling everything a pass.
+**Work:** Cover the remaining combinations of delayed or failed startup, saved
+configuration, reconstruction, reconnecting clients, old readers, native providers
+and interrupted delivery. Record the actual Server and plugin versions used.
 
-**Testing:** the final selected record includes 448 Server unit/selected
-integration executions. The broader ledger still lacks complete Server workflow
-coverage. That is historical evidence, not a fresh execution of the complete
-workflow matrix. CW-36 owns the shared rules for a trustworthy recovery verdict.
+**Finish when:** The selected current-version workflows have trustworthy
+end-to-end results, including failure and restart, rather than only matching
+intermediate captures.
 
-**Remaining work:** cover delayed/failed startup, accepted configuration,
-REST/SSE reconnects, stale readers and required snapshot/result workflows.
-Run baseline and recovered instances of the new release under CW-36's
-completion rules, with exact expected results and binary/plugin identities.
-Recovery here means restarting the supported release, not upgrading old state.
-Scheduled `main`/nightly runs are not automatically evidence for this branch.
-Actual Server/UI implementation belongs to CW-45; this item owns the integrated
-workflow evidence, not duplicate implementation or test-verdict projects.
+<a id="cw-43"></a>
+<a id="cw-43-optional-native-query-plugin"></a>
 
-**Likely complexity:** test orchestration **High**; testing **Very high** across
-real Server workflows. Runtime fixes are conditional on the failures found.
+## 7. Finish loadable query support and application definitions (CW-43)
 
-**Evidence:** [Server tests][server-tests], [recovery comparator][recovery-comparison],
-[documented unfinished completion checks][scheduled-recovery].
-Earlier tracking: CG-26, H01-H05,
-[#791][i791]/[#881][i881]/[#929][i929]/[#935][i935];
-PR [#948][p948] is a scenario lead.
+**Priority:** High for the selected query-component work. **Effort:** Large.
 
-## Code organization and documentation
+**Work:** Resolve the separate performance/design investigation, then make query
+processing an independently loadable component using the existing evaluator.
+Carry its real storage, initial loading, scheduled work and result-reading
+capabilities across that boundary. Complete remaining rebuildable definitions,
+including selected source-time merger and provider combinations.
 
-These are specific maintenance and review recommendations, not a general rewrite or a new runtime.
+**Finish when:** Applications work with query support present or absent, missing
+support is reported clearly, and loaded queries preserve required results,
+transactions, restart and cleanup behavior.
 
-<a id="cw-34"></a>
-<a id="cw-34-simplify-duplicated-recovery-logic-without-changing-its-behavior"></a>
-<a id="cw-34-consolidate-duplicated-algorithms-and-explicit-state-machines"></a>
+<a id="cw-47"></a>
 
-### CW-34: Separate controller responsibilities and share repeated recovery logic
+## 8. Finish required examples and normal builds (CW-47)
 
-**Priority: P2. Implementation: shared helpers exist; the controller reorganization and remaining duplication are not resolved.**
+**Priority:** High for required examples. **Effort:** Large overall.
 
-**What works:** task ownership, resource jobs and several transaction/delivery
-mechanisms are shared already. There is one graph runtime, not a need for a
-replacement execution framework.
+**Work:** Implement the GPU Lab deployment using the standard Server, finish
+examples for the remaining selected connectors, and verify readiness, reset and
+expected effects. Fix the Learning Trading build's unused `createdReaction`
+field without disabling compiler checks.
 
-**Testing:** their existing regression tests establish selected behavior, not
-the safety of an unperformed large refactor.
+**Finish when:** Required examples build normally and run against the supported
+Server with clear setup, shutdown and recovery behavior.
 
-**Remaining work:** review item 5 belongs here, not in another cleanup project.
-Separate live component ownership, command handling, connection setup,
-scheduling and shutdown into clearer internal modules. The large controller
-and reconciliation files still mix these responsibilities.
-Share repeated retained-history, saved-progress and reset logic where doing so
-removes a real maintenance risk. Keep one authoritative state and make allowed
-transitions explicit. Prefer a bounded extraction alongside needed controller
-work, such as CW-06, rather than moving files solely to reduce their length.
-Do not add another runtime or merge retiring adapters back into native code.
+<a id="cw-18"></a>
 
-**Likely complexity:** implementation **Medium** for one bounded extraction,
-**High** for a recovery state change; testing **High** to preserve cancellation,
-commit and cleanup behavior.
+## 9. Keep saved data and retries unambiguous (CW-18)
 
-**Evidence:** [controller][controller], [reconciliation][reconcile],
-[queues][qos], [delivery][delivery]. Earlier tracking: GC-10, GM-05/06,
-PC-02, DP-05, QX-07, RT-14, PX-14, [#582][i582], [#584][i584].
+**Priority:** High. **Effort:** Medium to large.
 
-<a id="cw-35"></a>
-<a id="cw-35-tighten-rust-api-and-ownership-invariants"></a>
+**Work:** Audit current saved and transmitted formats. Define which fields
+identify a request, result or configuration, and add fixed examples of expected
+bytes or identities. Formatting or diagnostic changes must not turn a retry into
+new work. Unsupported or damaged data must fail clearly.
 
-### CW-35: Track concrete ownership and overflow defects, not general code-style work
+**Finish when:** Current-format restart and retries preserve identity, and
+incompatible records are rejected without silently resetting valid state.
 
-**Priority: P2. Implementation: safeguards exist; remaining native defects need an explicit case.**
+<a id="cw-19"></a>
 
-**What works:** checked counters, actual storage ownership checks, replacement
-guards and truthful failure state already exist in several changed paths.
+## 10. Reject excessively deep data safely (CW-19)
 
-**Testing:** counter exhaustion, stale owners and rejected retirement have
-focused tests. This heading is not evidence that all similar code is defective.
+**Priority:** High where input could terminate the process. **Effort:** Large.
 
-**Remaining work:** identify and reproduce any retained native path that
-violates these rules. Keep actual lock order, arithmetic and safe retirement
-fixes in scope. General API annotations, cosmetic cleanup and author-convenience
-wrappers are not an open-ended implementation task. The specific public
-documentation and warning recommendations have separate owners in CW-58 through
-CW-61. Close or narrow unsupported review suspicions
-rather than leaving an unlimited “improve safety” task.
+**Work:** Audit supported decoders and internally constructed values beyond the
+already bounded paths. Apply appropriate size and nesting limits, including safe
+release of deeply nested values after an error or cancellation.
 
-**Likely complexity:** investigation **Low to Medium**; implementation
-**Medium** for a specific defect, otherwise not estimable; testing **Medium to
-High** for malformed input, concurrency and resource reuse.
+**Finish when:** Supported malformed-input cases fail with an error rather than
+exhausting the call stack or terminating the process.
 
-**Evidence:** [lifecycle][lifecycle], [retirement][retirement], [shared storage][shared-qos],
-[inspection][runtime-inspection]. Earlier tracking: GC-13, GM-11/14/16,
-PC-09/10, PX-14, RT-10/12/15, LI-13.
+<a id="cw-20"></a>
 
-<a id="cw-57"></a>
-<a id="cw-57-separate-child-supervision-from-host-application"></a>
+## 11. Verify interrupted reset across storage providers (CW-20)
 
-### CW-57: Separate child-process supervision from the complete host application
+**Priority:** High. **Effort:** Large, mainly failure testing.
 
-**Priority: P3. Status: proposed packaging improvement; no runtime change selected.**
+**Work:** Exercise process failure during query reset and removal with the
+remaining supported storage providers and their optional operations.
 
-**What works:** the supervisor is already a native service. `host.rs` and
-`supervisor.rs` separate the two responsibilities within `drasi-instance-host`.
-The same package still includes storage, middleware and the complete child-host
-application.
+**Finish when:** Partly cleared state cannot reopen as healthy, and explicit
+recovery restores correct rows, progress and output identity.
 
-**Remaining work:** if reuse or dependency measurements justify it, put the
-supervisor in a separate service package and keep full application hosting
-separate. Preserve the existing control and data connections. It can initially
-remain statically linked; this does not require a new process model.
+<a id="cw-22"></a>
 
-**Testing and limits:** existing real-process tests cover the current behavior.
-A package split needs dependency, build and parent/child lifecycle checks.
-No build-size or performance saving has been established, and splitting the
-package would not itself improve crash isolation or shutdown correctness.
+## 12. Make errors explain what happened and what to do (CW-22)
 
-**Likely complexity:** implementation **Medium**; testing **Medium to High**.
-Low priority unless a concrete reuse or dependency benefit is demonstrated.
+**Priority:** High. **Effort:** Large.
 
-**Evidence:** [combined public surface][instance-host-code],
-[package dependencies][instance-host-manifest], [host tests][host-readme].
-Original code-review recommendation: **4**.
+**Work:** Present the same failure consistently through the library, Server, UI,
+logs and monitoring. Identify the affected component, what stopped, what work is
+saved or unfinished, whether cleanup failed, and what can safely be retried.
+
+**Finish when:** A user can diagnose and recover from the selected failures
+without guessing from a generic error or mistaking rejection for successful work.
+
+<a id="cw-23"></a>
+
+## 13. Make live status and log updates reliable (CW-23)
+
+**Priority:** High. **Effort:** Medium to large.
+
+**Work:** Complete operational-status and log handover, slow-reader and reconnect
+behavior. Detect missed updates and provide a way to obtain current state.
+Preserve instance identity and release observer state when its owner is removed.
+
+**Finish when:** Readers either receive the required updates or are explicitly
+told to refresh, and old readers cannot report a replacement as their old component.
+
+<a id="cw-10"></a>
+
+## 14. Finish public status and result consistency checks (CW-10)
+
+**Priority:** High. **Effort:** Medium to large.
+
+**Work:** Check remaining public outcomes for partial startup/shutdown, missing
+or duplicate components, replaced query readers, missing result history and
+initial-result/live-update races.
+
+**Finish when:** Supported library and Server operations report the same truthful
+state and results through replacement, restart and failure.
+
+<a id="cw-03"></a>
+
+## 15. Check remaining extension failure boundaries (CW-03)
+
+**Priority:** High. **Effort:** Medium to large.
+
+**Work:** Audit uncovered factory, provider, data-validation and destruction
+callbacks for catchable Rust failures. Add protection only where a concrete
+unprotected path is found.
+
+**Finish when:** The selected callback failures leave useful diagnostics, prevent
+reuse of damaged objects and allow unrelated healthy work to continue.
+
+<a id="cw-05"></a>
+
+## 16. Extend safe-stop coverage to remaining shared resources (CW-05)
+
+**Priority:** High. **Effort:** Medium to large.
+
+**Work:** Exercise graceful stop and explicit forced interruption with remaining
+providers and component-private shared resources. Verify who owns unfinished
+work when a stop times out or its caller stops waiting.
+
+**Finish when:** No supported stop path abandons accepted work, hides incomplete
+cleanup or interrupts an unreported shared owner.
+
+<a id="cw-07"></a>
+
+## 17. Verify overlapping application changes (CW-07)
+
+**Priority:** High. **Effort:** Large, mainly testing.
+
+**Work:** Combine saved configuration changes with conflicting start, stop,
+replacement and removal requests. Include failed construction and cancelled
+callers while unrelated operations continue.
+
+**Finish when:** Accepted changes remain owned, conflicting changes stay ordered,
+and the reported result accurately distinguishes applied changes from failures.
+
+<a id="cw-08"></a>
+
+## 18. Complete cleanup checks across native providers (CW-08)
+
+**Priority:** High. **Effort:** Large, mainly testing.
+
+**Work:** Extend combined cleanup checks to the remaining native component,
+storage and plugin combinations. Verify that failed or cancelled cleanup retains
+the resources and errors needed for a later retry.
+
+**Finish when:** Each selected combination releases its actual resources or
+reports unfinished ownership truthfully, including after repeated cleanup attempts.
+
+<a id="cw-17"></a>
+
+## 19. Make components stop their own background work (CW-17)
+
+**Priority:** High. **Effort:** Medium to large.
+
+**Work:** Audit remaining components and providers that create their own tasks,
+threads or connections. Establish ownership before starting them and retain it
+until their real work has ended, including during failed startup and cancellation.
+
+**Finish when:** Removed or stopped components leave no unowned background work
+that can affect a replacement or keep its resources unavailable.
+
+<a id="cw-39"></a>
+
+## 20. Test the remaining combinations of failures (CW-39)
+
+**Priority:** High. **Effort:** Large.
+
+**Work:** Cover lost history with storage failures, clock changes with restart,
+held late input across crashes, disconnected consumers with damaged history,
+and lost destination replies with failed completion writes. Add direct proof
+that a failed configuration read cannot cause saved state to be deleted.
+
+**Finish when:** Each selected combination has exact expected data, progress,
+effects and cleanup outcomes rather than an inference from single-failure tests.
+
+<a id="cw-41"></a>
+
+## 21. Complete checks using real plugin libraries (CW-41)
+
+**Priority:** High. **Effort:** Large.
+
+**Work:** Extend malformed-data, version-rejection, cancellation, delayed-callback
+and replacement tests using independently built libraries. Measure per-instance
+resource release through repeated use; distinguish it from libraries intentionally
+kept loaded for the process lifetime.
+
+**Finish when:** The selected libraries reject invalid calls and release instance
+resources without letting old callbacks act on replacements.
+
+<a id="cw-40"></a>
+
+## 22. Measure larger and longer-running applications (CW-40)
+
+**Priority:** High for release claims. **Effort:** Large.
+
+**Work:** Measure growing application sizes, busy and slow branches, large
+messages, shared storage, outages and prolonged operation. Set acceptable limits
+for response time, processing cost, memory and disk use before declaring success.
+
+**Finish when:** The selected deployment profiles have repeatable measurements,
+exact result checks and explicit operating limits.
+
+<a id="cw-31"></a>
+
+## 23. Avoid rebuilding unchanged information for status updates (CW-31)
+
+**Priority:** High for the agreed scaling requirement. **Effort:** Large.
+
+**Work:** Measure the cost of rebuilding whole-application read-only reports.
+Use graph-owned information on request or share unchanged data instead of
+recreating all lookup tables whenever one component changes status. This concerns
+reporting work, not changing or restarting working components.
+
+**Finish when:** Small status changes avoid unnecessary whole-graph rebuilding,
+while current-state reads, notifications and required history remain consistent.
+
+<a id="cw-33"></a>
+
+## 24. Reclaim bookkeeping left by removed components (CW-33)
+
+**Priority:** Medium. **Effort:** Medium to large.
+
+**Work:** Measure repeated removal and addition within one long-running graph,
+then reclaim or reuse entries no longer needed by pending work or cleanup.
+Preserve the distinction between an old component and a replacement.
+
+**Finish when:** Keeping a stable number of active components does not accumulate
+unnecessary entries indefinitely, and delayed old requests cannot affect new ones.
+
+<a id="cw-29"></a>
+
+## 25. Finish memory limits for saved queues and results (CW-29)
+
+**Priority:** Medium. **Effort:** Large.
+
+**Work:** Add the missing byte limits for shared transactional queues, saved
+output and current result rows. Reserve required capacity before processing
+commits, and define what happens to an oversized input or a full buffer.
+
+**Finish when:** The selected limits hold through slow consumers, cancellation
+and restart without accepting work that cannot be retained safely.
+
+<a id="cw-28"></a>
+
+## 26. Reduce unnecessary disk work and growth (CW-28)
+
+**Priority:** Medium. **Effort:** Medium to large.
+
+**Work:** Measure full-state rewrites, repeated reads, small writes and obsolete
+stored records. Improve the expensive cases while preserving exact saved progress
+and retry identity. Reproduce older storage reports before treating them as bugs.
+
+**Finish when:** Selected workloads show lower storage cost or bounded growth
+without changing results, recovery or independent query retention choices.
+
+<a id="cw-32"></a>
+
+## 27. Remove measured repetition from data processing (CW-32)
+
+**Priority:** Medium. **Effort:** Medium.
+
+**Work:** Find significant repeated encoding, hashing, metadata construction and
+history scans in the retained processing paths. Reuse results where safe rather
+than weakening input checks.
+
+**Finish when:** Measured processing cost falls while exact output, identity,
+replay and failure behavior remain unchanged.
+
+<a id="cw-37"></a>
+
+## 28. Make asynchronous tests reliable (CW-37)
+
+**Priority:** Medium. **Effort:** Medium to large.
+
+**Work:** Replace timing guesses with actual completion signals where tests
+depend on them. Isolate shared test state and reproduce the Trading
+`dialogAccessibility.test.tsx` failure under parallel execution.
+
+**Finish when:** Selected tests reliably prove the intended behavior under load
+and on both supported runtime styles, without weakened assertions or inflated timeouts.
 
 <a id="cw-61"></a>
-<a id="cw-61-restore-useful-unused-code-warnings"></a>
 
-### CW-61: Restore useful warnings about unused code
+## 29. Restore useful compiler and code-check warnings (CW-61)
 
-**Priority: P2. Status: first package complete; workspace-wide rollout remains open.**
+**Priority:** Medium. **Effort:** Medium overall; small packages can be done separately.
 
-**Completed slice (17 October 2026):** `drasi-ffi-primitives` now denies the
-`unused` group at crate level, overriding the workspace allowance for that
-package. It needs no unused-code exceptions, new dependencies or public API
-removals. Its library, generated documentation and compilable macro examples
-build with the policy, and all-target Clippy passes.
+**Work:** Enable unused-code warnings in manageable parts of the project, remove
+genuine leftovers and keep only justified exceptions. Reproduce and resolve the
+recorded test-infra code-check failures rather than hiding them with broad suppression.
 
-**Remaining work:** inventory the warnings and enable them gradually, starting
-with the next small package or a specific warning such as unused imports. Remove true
-leftovers and keep narrow, explained exceptions only for real current uses,
-platform differences or tests. Compatibility-only aliases and helpers need no
-exception: remove them through CW-62 and update their callers. Replace the broad
-suppression only when the selected new-release builds are clean; do not delete
-unrelated useful public interfaces merely to silence warnings.
-The workspace still permits the `unused` group elsewhere.
-
-**Testing:** run the relevant formatting, lint and build checks across supported
-feature/runtime combinations. A successful first package is progress, not
-completion of the workspace-wide item.
-
-**Likely complexity:** implementation **Medium** overall, with a **Low**-effort
-first slice; verification **Medium to High** across configurations.
-
-**Evidence:** [workspace warning settings][workspace-lints],
-[package warning policy and commands][ffi-primitives-guide].
-Original code-review recommendation: **14**.
-
-<a id="breaking-release-removal-work"></a>
-
-### Compatibility removal work found in the code
-
-The following is a source-backed removal inventory, not a claim that all code
-with "legacy" in its name is unused. Pure aliases and deprecated helpers can be
-removed directly with caller updates. Active query, plugin and Server adapters
-must be removed together with the consumers that still use them.
-This inventory began as a document review. Stage 1 has since removed CW-62's
-targets and the narrow CW-64 query wrapper; active query mode and plugin/Server
-replacement work remains.
-
-<a id="cw-62"></a>
-<a id="cw-62-remove-retired-rust-apis-and-transition-settings"></a>
-
-### CW-62: Remove retired Rust APIs and settings kept only for old callers
-
-**Priority: P2. Status: completed in cleanup stage 1.**
-
-**Removed:** `compatibility::QueryBase`, `SequenceDedup`, the deprecated
-`queries::output_state::QueryOutputState` cache, their forwarding modules and
-old root exports. Current query execution/state did not use those helpers.
-
-Removed duplicate names and old import surfaces: `ComponentGraph` in favor
-of `ComponentGraphView`; both old `QuerySnapshot` aliases in favor of the
-specific configuration/result names; the `api` builder alias; `managers`
-forwarding exports; compatibility schema re-exports; and deprecated
-`init_tracing`/`try_init_tracing` entry points. The actual inspection, builder,
-observability and snapshot/outbox/error exchange implementations remain.
-
-The empty DrasiLib `computation` feature and
-`bootstrapBufferSize`/`bootstrap_buffer_size`/`Query::with_bootstrap_buffer_size`
-are removed, including their Server mappings, current client models, examples
-and test-runner output. The real Core/SDK/backend features remain. Live bootstrap
-buffering still uses `priority_queue_capacity`; both removed setting spellings
-are rejected. Historical captured responses retain their original bytes.
-
-**Validation:** the Core workspace and Server all-target builds, library lint,
-public documentation examples, relevant query/recovery and Server configuration/API
-checks, and React SDK/Trading checks pass. Source-order assertions no longer
-depend on the retired deduplication helper. The Learning tutorial's unchanged
-unused-field build error is recorded in the
-[execution record](computation-graph-cleanup-plan.md#execution-record), not
-hidden by a blanket success claim.
-
-**Evidence:** [retained exchange types][ordinary-query-output],
-[public interfaces][public-interface-declarations], [inspection view][inspection-alias],
-[configuration snapshots][config-snapshot-code],
-[result snapshots][result-snapshot-code], [observability][tracing-layer],
-[library features][lib-manifest], [query settings][query-schema-code],
-[query builder][query-builder-code], [Server query DTO][server-query-dto].
+**Finish when:** Selected packages pass their normal checks with useful warnings
+enabled across supported configurations.
 
 <a id="cw-63"></a>
-<a id="cw-63-remove-old-plugin-binary-and-decoder-fallbacks"></a>
-
-### CW-63: Remove old plugin-binary support and permissive compatibility fallbacks
-
-**Priority: P2. Status: removal targets verified; not implemented.**
-
-**Remove:** the Host loader's positive support for ordinary ABI 0.16 and its
-older-prefix behavior. With all plugins rebuilt for the selected release, it
-does not need to retain two old-family ABIs. The loader also still gates fields
-on SDK 0.6 and 0.12 even though its accepted versions start at 0.16; remove those
-obsolete version-dependent branches after selecting the new registration layout.
-Keep strict target, header, version and capability validation.
-
-Remove two concrete decoding workarounds in the ordinary SDK:
-
-- `make_snapshot_stream` retries a failed keyed-row decode as arbitrary JSON
-  and invents row signature zero for old bare rows. Updated producers must send
-  the selected explicit shape. Malformed current data must remain an error,
-  not an old-format success or an apparently empty/end-of-stream result.
-- `DescriptorSchema::new` guesses an old descriptor's root schema from a short
-  type name or `ConfigDto` alias. Update descriptors to name their actual schema
-  and remove the guessing path.
-
-Where CW-44 retires the entire old plugin family, remove these paths with it
-instead of improving and then retaining that SDK. New native ABI layouts may
-change for this breaking release; update all matched hosts/plugins and version
-them honestly rather than maintaining old layouts for compatibility.
-
-**Keep:** optional native capabilities that have a real current use, current
-buffer/lifetime bounds, verification and rejection of unsupported libraries.
-An optional extension is not obsolete solely because an older library lacked
-it. Platform support and protocol-version validation are not old-release
-migration features.
-
-**Closure:** only selected rebuilt libraries load; unsupported old binaries
-fail before their layout is used. Update/remove positive old-binary/bare-row
-fixtures, preserving malformed-input, typed-error and cleanup tests.
-
-**Likely complexity:** implementation **Medium**, larger if the selected ABI is
-redesigned; testing **High** for real independently built libraries and failure
-paths. No mixed-version deployment or rollback support is required.
-
-**Evidence:** [ordinary loader and old-version gates][ordinary-loader],
-[ABI history][ordinary-abi-metadata], [snapshot fallback][ordinary-vtable-code],
-[descriptor schema guessing][ordinary-descriptor-schema].
-
-<a id="cw-64"></a>
-<a id="cw-64-remove-query-compatibility-mode-and-wrapper"></a>
-
-### CW-64: Remove the query compatibility mode and redundant query wrapper
-
-**Priority: P2. Status: completed for the selected current query contract and measured profiles.**
-
-**Completed:** `TransactionTransformer::query`/`from_query` and its query-body
-variant are removed. Callers use `ContinuousQueryTransformer` directly with
-`with_delivery_tracking()`, or the factory which enables tracking automatically.
-The shared evaluator and real linear transaction implementation remain; their
-query fault, replay, persistent restart and transaction checks pass. Dynamic
-query loading is not involved.
-
-The `runtime_compatibility` query, pipeline and source-subscription switches,
-old namespace alias, legacy hash reader/writer and public hash helper are
-removed. Their semantic fingerprint assertions now exercise the current native
-configuration record, preserving meaningful source/middleware ordering and
-ignoring cosmetic label/join ordering and operational tuning.
-
-Source-facing memory queries explicitly supply volatile checkpoint storage;
-there is no provider fallback or persistent downgrade. The minimal processing-only
-Core memory provider remains unchanged. Persistent queries require persistent
-checkpoints, an outbox and live results; atomic publication additionally requires
-their actual shared transaction. Unsupported cleanup fails instead of being
-ignored. Current reset markers require a generation, and unidentified old output
-is rejected rather than assigned a producer identity during recovery.
-
-Both admission paths now share scheduling, source progress, bootstrap and
-empty-source behavior. Result timestamps mean production time; logical event/due
-time remains in the graph envelope. Ordinary result metadata is projected at the
-API boundary rather than stored redundantly in the engine. Query output buffering
-uses the configured dispatch capacity. Native source-host resources are not
-mistaken for independent same-named graph nodes, while actual borrowed instance
-sources retain their ownership dependencies.
-
-**Qualification so far:** current-scope reconstruction and unconfirmed-output
-replay, preservation of retired-namespace files, incomplete-provider rejection on
-both runtimes, configuration/read/reset failures, exact metadata and ordering,
-actual WAL/shared-source restart, source-dependency protection, query updates and
-atomic output checks. The expanded library run has 1,102 passing tests and two
-existing ignored cases. The new persistent native-admission update case passes
-the same output-generation and sequence assertions as ordinary admission.
-
-Matching-artifact SDK/Server checks, no-default library coverage, shared query
-tests, bootstrap recovery, both-runtime responsiveness and scoped lint now pass.
-Nine native libraries were rebuilt, actual HTTP/gRPC projections agree, and
-generated architecture artifacts are refreshed.
-
-The controlled pre-cleanup comparison passed using freshly built baseline and
-current binaries, identical benchmark source/compiler/lockfile and matched
-dependency features. Ordinary fast-path throughput improved 10-18%, with about
-6% fewer allocations; four-query ordinary throughput improved about 4%, while
-native throughput stayed within 0.6% of baseline. Measured shutdown and memory
-showed no material regression. See the cleanup plan for workload bounds and
-evidence; this does not qualify every connector or deployment profile.
 
-Stages 5-9 remain separate, unfinished work.
+## 30. Remove the remaining old plugin support (CW-63)
 
-**Closure:** no old-API construction detour or compatibility-only provider
-relaxation remains; current query behavior and current-version recovery work
-on the chosen providers. Coordinate with CW-43's separate experiment without
-importing unaccepted performance or architecture changes.
+**Priority:** Medium. **Effort:** Medium to large. **Depends on:** Required consumer moves in CW-44/45.
 
-**Likely complexity:** wrapper removal **Low to Medium**; complete mode/provider
-consolidation **High**, with **High** lifecycle/recovery testing. No query engine
-rewrite or old-data migration is required.
+**Work:** Remove old hosts/adapters and obsolete binary-version branches once
+their required users have moved. Remove bare-row decoding and guessed-schema
+fallbacks that turn malformed current input into apparent success.
 
-**Evidence:** [linear transactions][transaction-transformer-code],
-[native query construction/recovery][native-query], [shared assembly][pipeline],
-[current reset protocol][query-recovery], [explicit cleanup errors][index-clear-code].
+**Finish when:** The selected current interfaces are sufficient, unsupported
+libraries/data fail clearly, and required functionality no longer depends on the
+retired code.
 
-<a id="cw-65"></a>
-<a id="cw-65-remove-duplicate-server-configuration-and-api-forms"></a>
+<a id="cw-34"></a>
 
-### CW-65: Remove Server configuration conversion and compatibility-only API forms
+## 31. Simplify the remaining management code (CW-34)
 
-**Priority: P2. Status: completed in cleanup stage 5 for the selected Server and consumer scope.**
+**Priority:** Medium. **Effort:** Medium to large.
 
-Server configuration now has only Server-wide fields and explicit `instances`.
-Missing or empty instance lists start an empty Server. Root-level instance fields,
-`instance_configurations`, first-instance routes/middleware, `get_default`, and
-configuration-module DTO aliases are removed. Callers use the canonical API
-models and instance-scoped endpoints.
+**Work:** Separate component ownership, commands, connections, scheduling and
+shutdown where they are still difficult to reason about. Share repeated recovery
+logic through small changes alongside the work that needs them.
 
-`ConfigPersistence` retains one Server-settings value and one instance-settings
-map, always writes an instance list, and no longer promotes single-instance
-fields or guesses missing metadata. Atomic saves, real provider settings, secret
-references, and explicit persistence errors remain.
+**Finish when:** Changed areas have clear responsibilities and one authoritative
+graph, with unchanged processing, cancellation, recovery and cleanup behavior.
 
-The user-selected identity policy is implemented: file-only missing IDs are
-fresh per load; `configurationStore` imports an uninitialized instance once and
-then owns accepted definitions and the generated ID. Accepted empty definitions
-do not re-seed. Identity discovery reads existing redb instance keys, not a new
-record format, sidecar or migration store. Ambiguous shared-store selection
-fails explicitly. `persistConfig` still means YAML saving and is independent.
+<a id="cw-24"></a>
 
-UI, Playground, CLI, VS Code, documentation, tutorial and test-infrastructure
-consumers use the selected shape. The unused UI SSE path and Playground proxy
-are removed; source injection uses the shared scoped Server endpoint. Native
-readable authoring and stored definitions remain distinct current purposes.
+## 32. Let applications control logging and monitoring (CW-24)
 
-**Qualification:** complete Server tests: 948 passed, zero failed, 36 existing
-ignored cases across 45 targets; ignored cases are not counted as acceptance.
-Server/backend lint, client builds, scoped SDK/UI tests, configuration generation
-and selected actual browser/dataflow checks pass. Real Playground insert/update
-and SSE CLI delivery/cleanup use rebuilt matching libraries. The pre-existing
-Learning Trading unused-local build limitation remains documented, with its
-scoped type and bundle checks passing. Full connector/container qualification
-remains CW-44/CW-45/CW-47, not implied by this closure. See the stage-5 execution
-record in the [cleanup plan](computation-graph-cleanup-plan.md).
+**Priority:** Medium. **Effort:** Large.
 
-**Closure:** one chosen public configuration/API shape, no silent conversion of
-old root settings, no first-instance route fallback required by old clients,
-and all selected consumers working against the new shape. There is no old-to-new
-configuration migration tool or dual-layout round-trip requirement.
+**Work:** Implement the selected application-owned collection, filtering,
+export and shutdown controls from the
+[monitoring design](https://github.com/drasi-project/design-documents/tree/77b155319fd8160496ad059f6fdcb1e6bc93e43d/drasi-lib/tracing-logging).
+Resolve the remaining profiling interfaces and dependency choices.
 
-**Likely complexity:** implementation **Medium** across Server and consumers;
-testing **Medium to High** for instance selection, settings persistence and API
-results. Actual component/plugin replacement remains CW-44/CW-45.
+**Finish when:** Applications can choose the required monitoring level without
+Drasi replacing their logging setup or disabling existing logs.
 
-**Evidence:** [Server configuration normalization][server-config-types],
-[configuration conversion/persistence][server-persistence],
-[first-instance routes and middleware][server-routes],
-[Server config re-exports][server-config-module].
+<a id="cw-25"></a>
 
-<a id="optional-capabilities-and-policy-decisions"></a>
-<a id="optional-capabilities-and-explicit-policy-decisions"></a>
+## 33. Follow a request through processing and delivery (CW-25)
 
-## Optional features and decisions
+**Priority:** Medium. **Effort:** Large.
 
-These are not automatic additions to the approved work. Select a requirement before implementing a new capability.
+**Work:** Carry useful request and attempt information across queues, plugins,
+network calls and retries. Define how a result relates to several inputs, while
+keeping diagnostic information separate from the identity of saved business work.
 
-<a id="cw-48"></a>
-<a id="cw-48-stronger-event-time-guarantees"></a>
+**Finish when:** Selected requests can be followed through actual completion,
+with meaningful timing and no invented duration across a restart.
 
-### CW-48: Know when all earlier source-dated input has arrived, or correct late results
+<a id="cw-26"></a>
 
-**Priority: P3. Implementation: proposed stronger behavior not selected or implemented.**
+## 34. Make measurements consistent across components (CW-26)
 
-**What works:** the merger can wait within configured lateness/time/size bounds.
-It cannot know that no unseen earlier input will ever arrive.
+**Priority:** Medium. **Effort:** Large.
 
-**Testing:** bounded merger behavior is tested. That is not a test of
-source-declared completeness or automatic corrections to already published results.
+**Work:** Implement the agreed measurements for availability, input/output,
+completed handling, queue pressure, progress lag, errors and processing time.
+Keep names and units consistent, prevent double counting and exclude sensitive data.
 
-**Remaining work if selected:** define how sources declare earlier input
-complete, how idle sources behave and how late corrections/deletions reach
-downstream consumers. Define equal-time ordering and replay. Do not use arrival
-time as a substitute for source time.
+**Finish when:** Enabled measurements report exact expected counts and timing
+boundaries across normal work, retries, batching and failure.
 
-**Likely complexity:** implementation **High to Very high** across source and
-result semantics; testing **High** for late input, idle sources and reconstruction.
+<a id="cw-27"></a>
 
-**Evidence:** [current merger][time-merge]. Earlier tracking: DP-10 and event-time proposals.
+## 35. Export monitoring data without blocking useful work (CW-27)
 
-<a id="cw-49"></a>
-<a id="cw-49-opt-in-poison-input-quarantine"></a>
+**Priority:** Medium. **Effort:** Large.
 
-### CW-49: Optionally set aside an input that always fails
+**Work:** Provide an optional application-owned export path for logs, measurements
+and completed traces to OpenTelemetry services, local Drasi consumers, or both.
+Bound waiting data, report dropped records and prevent monitoring its own output.
 
-**Priority: P3. Implementation: optional skip/set-aside policy not selected or implemented.**
+**Finish when:** Slow or broken monitoring destinations cannot stall business
+processing, and export/flush/shutdown have explicit ownership.
 
-**What works:** failed input is retained rather than silently acknowledged.
-Restart can therefore encounter the same deterministic error again.
+<a id="cw-12"></a>
 
-**Testing:** failure and retained-work tests exist. They do not establish a
-durable operator-controlled skip policy.
+## 36. Investigate reported errors in grouped results (CW-12)
 
-**Remaining work if selected:** define fail versus set-aside behavior, a saved
-diagnostic identity, explicit operator actions and atomic progress/output changes.
-Never silently skip other input. Useful failure reporting remains required
-under CW-22 regardless of this decision.
+**Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
-**Likely complexity:** implementation **High** because processing progress
-changes; testing **High** across restart, retries and unrelated input.
+**Work:** Reproduce the reported missing first results, incorrect removal of
+groups, zero-valued groups and averages containing null values. Check changes,
+restart and cleanup of old group records.
 
-**Evidence:** [query recovery][query-recovery], [error reporting][errors].
-Earlier tracking: QX-05.
+**Finish when:** Each report is either closed with evidence or fixed with exact
+result and recovery checks.
 
-<a id="cw-51"></a>
-<a id="cw-51-rateburst-limits-and-larger-acknowledgement-windows"></a>
+**Reports:** [#384](https://github.com/drasi-project/drasi-core/issues/384),
+[#498](https://github.com/drasi-project/drasi-core/issues/498),
+[#806](https://github.com/drasi-project/drasi-core/issues/806),
+[#411](https://github.com/drasi-project/drasi-core/issues/411).
 
-### CW-51: Optionally limit events per second or allow more unacknowledged deliveries
+<a id="cw-13"></a>
 
-**Priority: P3. Implementation: proposed features not selected or implemented.**
+## 37. Investigate reported query-matching errors (CW-13)
 
-**What works:** queue capacity limits buffered work. Acknowledged subscriber
-delivery currently has its defined limited outstanding work.
+**Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
-**Testing:** current capacity and acknowledgement behavior is tested. Queue
-size is not a tested events-per-second limit.
+**Work:** Reproduce optional-match filters, outer-variable references, list
+membership and relationship-end errors. Verify exact results when candidates
+and relationships change or disappear.
 
-**Remaining work if selected:** choose whether excess input waits, is rejected
-or is dropped, and define burst behavior. Expand simultaneous deliveries only
-if acknowledgements cannot move past unfinished earlier work. These are protocol
-changes, not one performance switch.
+**Finish when:** Each report has a current reproduction and fix, or evidence that
+the reported problem is not present.
 
-**Likely complexity:** implementation **Medium** for a bounded rate limiter,
-**High** for expanded delivery windows; testing **High** for fairness,
-cancellation, replay and bounded retry records.
+**Reports:** [#795](https://github.com/drasi-project/drasi-core/issues/795),
+[#796](https://github.com/drasi-project/drasi-core/issues/796),
+[#797](https://github.com/drasi-project/drasi-core/issues/797),
+[#798](https://github.com/drasi-project/drasi-core/issues/798),
+[#807](https://github.com/drasi-project/drasi-core/issues/807),
+[#808](https://github.com/drasi-project/drasi-core/issues/808),
+[#812](https://github.com/drasi-project/drasi-core/issues/812).
 
-**Evidence:** [queues][qos], [delivery][delivery]. Earlier tracking:
-rate/window proposals and DP-11's replay-window question.
+<a id="cw-21"></a>
 
-<a id="cw-52"></a>
-<a id="cw-52-wider-atomic-visibility-and-architectural-extensions"></a>
+## 38. Investigate remaining retry and completion questions (CW-21)
 
-### CW-52: Select any wider transaction or distributed-execution promise separately
+**Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
-**Priority: P3 unless a specific deployment requires it. Implementation: larger guarantees not selected or implemented.**
+**Work:** Check clock changes during time-based merging, retries without an
+original timestamp, content checks on output confirmation, expired replay
+records and incorrect uncertainty reported for writes never attempted.
 
-**What works:** complete source transactions can be processed atomically by one
-supported query; selected local processing and output storage can share a commit.
-Independent instances can exchange data.
+**Finish when:** Each concern has a clear result distinguishing rejected, saved
+and genuinely uncertain work, with a fix where a failure is reproduced.
 
-**Testing:** those local boundaries have tests. They do not make several queries
-or remote effects appear atomically to all observers.
+<a id="cw-35"></a>
 
-**Remaining work if selected:** define the participants and failure/recovery
-rules before promising wider atomic visibility. Graph feedback cycles,
-distributed scheduling, undoing an entire live deployment and unloading active
-libraries are separate designs. Automatic migration of previous-release state
-is explicitly outside this release's scope. Child hosting does not implement
-these wider guarantees. Exactly-once remote effects require cooperation from
-the destination.
+## 39. Resolve the remaining ownership and limit findings (CW-35)
 
-**Likely complexity:** implementation/testing **Very high**; each selected
-capability needs a separate plan rather than one combined task.
+**Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
-**Evidence:** [local transactions][transaction-guide], [instance links][bridge-readme].
-Earlier tracking: CG-18's wider boundary and architectural proposals.
+**Work:** Resolve the specific review concerns about shared-resource ownership,
+lock ordering, numeric limits and expired references. Reproduce an actual
+failure before treating a concern as an implementation defect.
 
-<a id="cw-53"></a>
-<a id="cw-53-shared-query-language-and-value-capabilities"></a>
-
-### CW-53: Select additional query-language functions and data types explicitly
-
-**Priority: P2/P3 by use case. Implementation: mixed existing functionality and unselected requests.**
-
-**What works:** both language registries already provide many functions.
-For example, Cypher collection exists; this is not a claim that every requested
-operation is absent everywhere.
-
-**Testing:** existing language/function tests do not establish each requested
-language/type combination. Reported unusual before-value behavior still needs
-a reduced current example.
-
-**Remaining work if selected:** specify the requested logarithm/exponential,
-collection/order, string min/max, correlated existence, matching, row expansion,
-UNION, hashing, escape and geographic capabilities individually. Define how
-updates and restart affect results. General ORDER BY/LIMIT/SKIP remain
-intentionally unsupported. Source fan-in is not query UNION.
-
-**Likely complexity:** implementation **Low to Medium** for isolated scalar
-functions, **High to Very high** for new query operators/types; testing
-**Medium to High**, including current-release restart behavior where relevant.
-No previous-release state compatibility layer is required. The breaking-release
-policy does not itself select removal of existing Cypher/GQL functionality.
-
-**Evidence:** [Cypher functions][cypher-functions], [GQL functions][gql-functions],
-[Cypher parser][cypher-parser], [GQL parser][gql-parser].
-Earlier reports: [#211][i211], [#212][i212], [#217][i217], [#357][i357],
-[#516][i516], [#598][i598], [#800][i800], [#801][i801], [#802][i802],
-[#803][i803], [#804][i804], [#892][i892], [#895][i895], [#916][i916],
-[#917][i917];
-PR [#218][p218] is a scalar-function lead.
-
-<a id="cw-54"></a>
-<a id="cw-54-provider-atomic-compare-and-swap"></a>
-
-### CW-54: Optionally update a stored value only if it still has the expected value
-
-**Priority: P3. Implementation: general provider operation not selected or implemented.**
-
-**What works:** managed configuration has revision checks. That does not give
-every component a general atomic compare-and-update storage operation.
-
-**Testing:** configuration revision tests are not tests of this proposed
-provider/plugin capability.
-
-**Remaining work if selected:** define value/version comparison, durability and
-uncertain outcomes in real providers and the native plugin interface. A separate
-read followed by an unprotected write is not equivalent.
-
-**Likely complexity:** implementation **High** across providers and interfaces;
-testing **High** with simultaneous writers and failed/uncertain commits.
-
-**Evidence:** [storage interfaces][storage-interfaces].
-Earlier tracking: [#918][i918].
-
-<a id="cw-55"></a>
-<a id="cw-55-choose-additional-configuration-retention-and-key-policies"></a>
-
-### CW-55: Decide whether configuration cleanup and key handling need more automation
-
-**Priority: P3. Implementation: explicit operations done; extra automatic policies not selected.**
-
-**What works:** redb supports bounded retry-receipt batches, deleting a named
-configuration snapshot only at the expected revision, and atomic rotation of
-live encrypted records to a new key. Default indefinite receipts are deliberate.
-
-**Testing:** the explicit operations have storage/management tests. They do not
-prove automatic age-based cleanup, external key-service integration or secure
-erasure of old backups.
-
-**Remaining work if selected:** choose bounded in-memory receipt rules,
-automatic snapshot retention, external key providers or erasure/backup policies.
-Preserve rejection of expired retries. Configuration-snapshot deletion must not
-rewind processing; key rotation does not re-encrypt old backups.
-
-**Likely complexity:** implementation **Medium** for bounded retention,
-**High** for key-provider/backup guarantees; testing **High** for expiry,
-uncertain writes and old/new key recovery.
-
-**Evidence:** [management guide][managed-guide], [redb configuration storage][configuration-store].
-Earlier tracking: CG-19's optional policies, LI-12.
-
-## Completed, retired and redirected entries
-
-These records are kept for their evidence and stable links, not as another unfinished implementation queue. Completed means the stated scope; consolidated or retired does not mean fixed.
-
-<a id="cw-58"></a>
-<a id="cw-58-document-supported-public-and-compatibility-interfaces"></a>
-
-### CW-58: Make the supported public interfaces easy to find and understand
-
-**Status: completed for the documentation task, 17 October 2026.**
-
-The crate overview and developer guide now distinguish application APIs,
-in-process native components, dynamic native plugins, host-owned providers and
-ordinary compatibility interfaces. Supported `sources`, `reactions`, `bootstrap`,
-`channels`, `queries` and `profiling` documentation is visible. Remaining hidden
-public implementation modules are explicitly not called crate-private.
-
-Compiled examples preserve the root/module import identities. The generated
-reference explains ownership and links supported contracts; invalid or private
-documentation links exposed by this change were corrected rather than suppressed.
-No public imports were removed, and native SDK separation was not undone.
-
-**Remaining work:** none for this bounded documentation task. API redesign and
-the optional query plugin remain separate work.
-
-**Evidence:** [public module declarations][public-interface-declarations],
-[developer guide][developer-guide], [native SDK guide][native-sdk].
-Original code-review recommendation: **11**.
-
-<a id="cw-59"></a>
-<a id="cw-59-update-the-plugin-architecture-guide"></a>
-
-### CW-59: Rewrite the plugin architecture guide around the current system
-
-**Status: completed, 17 October 2026.**
-
-The guide now starts with the native and ordinary compatibility families,
-correctly describes shared packages and provider kinds, and explains actual
-verification, discovery, configuration, versioning and lifecycle behavior.
-It removes obsolete Server build-mode instructions and unsupported fixed
-plugin-overhead claims. Queries remain documented as built in.
-
-Build commands, feature names, package paths and links were checked against
-the current manifests and tools. The guide preserves the distinction between
-native operation polling and older synchronous bridges, including their
-different memory-ownership rules.
-
-**Remaining work:** none for this guide rewrite. Future implementation changes
-must update the guide without presenting an experiment as a released feature.
-
-**Evidence:** [plugin architecture guide][plugin-architecture-guide],
-[Server manifest][server-manifest], [native SDK][native-sdk].
-Original code-review recommendation: **12**.
-
-<a id="cw-60"></a>
-<a id="cw-60-correct-completion-and-shutdown-documentation"></a>
-
-### CW-60: Correct misleading completion claims and shutdown comments
-
-**Status: completed for the documentation task, 17 October 2026.**
-
-The execution plan's original heading, checkpoint statement and E2/Q1 status
-now identify the unfinished approved deadline and graph-size work. Historical
-test numbers and dates remain labelled as evidence for named portions; the old
-checkpoint link is preserved.
-
-The graph overview now distinguishes graceful drain, cancellation requests,
-dropped runs and awaited cleanup. It describes retained tasks/resources and
-`CleanupRequired`, and no longer calls the reused cleanup timeout a single
-overall shutdown deadline.
-
-**Remaining work:** none for correcting these statements. CW-06/CW-31 remain
-unfinished implementation/evidence requirements.
-
-**Evidence:** [execution plan][execution-plan], [graph overview][graph-overview],
-[run and cleanup implementation][graph]. Original code-review recommendation: **13**.
-
-<a id="cw-01"></a>
-<a id="cw-01-make-desired-topology-commit-atomic"></a>
-
-### CW-01: Do not leave half a graph change applied after rejecting it
-
-**Priority: P1. Implementation: done for the stated fix.**
-
-**What works:** the graph checks counters, ownership and replacement connections
-before changing its active definition. A successful change publishes one
-consistent revision. A rejected change cannot leave some of those internal
-changes applied and others absent.
-
-**Testing:** focused regressions exercise exhausted counters, an occupied
-component and a stale connection. They check that the previous objects,
-counters and published state remain unchanged. Successful replacement also
-checks that old control handles are rejected.
-
-**Remaining work:** none for this fix. Earlier external stop/cleanup effects
-cannot be rolled back; a later startup failure must still report that the
-definition was committed. This is not an all-or-nothing deployment transaction.
-
-**Likely complexity:** implementation **None**; testing **Low** to repeat the
-focused regressions.
-
-**Evidence:** [commit code][reconcile], [commit regressions][commit-tests].
-Earlier tracking: GM-07, GM-09's Phase 0 follow-up.
-
-<a id="cw-02"></a>
-<a id="cw-02-resume-every-eligible-paused-producer"></a>
-
-### CW-02: Try to restart every eligible component after a paused update fails
-
-**Priority: P1. Implementation: done for the stated fix.**
-
-**What works:** restarting one paused component can fail without preventing
-attempts to restart the others. The report keeps each failure and the original
-reason the update failed. A component that could not resume remains visibly
-unavailable.
-
-**Testing:** regressions deliberately prevent more than one restart and verify
-that a later healthy component still starts. Stop-timeout/retry cases check
-that accepted work remains available for a subsequent attempt.
-
-**Remaining work:** none for this fix. Wider combinations of cancelled updates
-and replacement failures belong to CW-07/CW-39.
-
-**Likely complexity:** implementation **None**; testing **Low** for the focused
-cases, with broader combinations estimated under their owning items.
-
-**Evidence:** [resumption code][reconcile], [commit/resumption tests][commit-tests].
-Earlier tracking: GM-10's Phase 0 follow-up, remaining GM-01.
-
-<a id="cw-04"></a>
-<a id="cw-04-use-one-failure-policy-and-preserve-usable-control-channels"></a>
-
-### CW-04: Report component errors consistently and keep control usable
-
-**Priority: P1. Implementation: done for returned-error handling.**
-
-**What works:** ordinary returned errors and invalid output leave the failed
-node inspectable rather than ending the entire graph. Original error types
-survive wrapping. Control-handler errors do not permanently close control.
-Retries have explicit limits and cannot turn uncertain storage results into
-safe success.
-
-**Testing:** recorded tests on single-thread and multi-thread Tokio runtimes check
-failed nodes, healthy branches, invalid output, saturated control queues,
-subsequent control messages, explicit repair and exhausted retry limits.
-Actual native consumer failures retain unfinished work.
-
-**Remaining work:** none for this returned-error fix. Catching panics is CW-03;
-consistent presentation in Server/UI and logs is CW-22.
-
-**Likely complexity:** implementation **None**; testing **Low to Medium** to
-repeat the selected graph and actual-plugin regressions.
-
-**Evidence:** [failure policy][lifecycle], [failure tests][failure-tests],
-[control][control], [delivery][delivery]. Earlier tracking: GC-01/04/05, PC-05,
-part of DP-08.
-
-<a id="cw-11"></a>
-<a id="cw-11-reject-stale-mutations-and-define-duplicate-element-behavior"></a>
-
-### CW-11: Prevent old or duplicate changes from corrupting current query results
-
-**Priority: P1. Implementation: done for the stated mutation rules.**
-
-**What works:** older changes cannot overwrite newer source-dated state.
-Repeated inserts replace the existing row rather than counting it twice.
-Deletes save enough history to prevent an old insert resurrecting a deleted
-row after restart. Conflicting node/relationship identities fail before changing
-the existing object. Equal-time input follows admitted order.
-
-**Testing:** focused evaluator tests and an independent persistent model check
-duplicates, all insert/update/delete orders, source-specific identities,
-rollback and reconstruction. Real RocksDB cases check saved positions and rows.
-
-**Remaining work:** none for these rules. Automatic deletion-history expiry
-requires a separate source-history policy; it is not silently enabled.
-Older saved query configurations require explicit supported reset/rebuild or
-rejection rather than reinterpretation of existing rows. No previous-release
-migration implementation is required; the completed mutation rules still apply
-to old/stale events within the new supported release.
-
-**Likely complexity:** implementation **None**; testing **Medium** to repeat the
-persistent model and backend checks.
-
-**Evidence:** [evaluator][evaluator], [mutation tests][mutation-tests],
-[persistent model][persistent-mutation-tests]. Earlier tracking:
-[#244][i244], [#507][i507], [#805][i805].
-
-<a id="cw-38"></a>
-<a id="finish-qualifying-the-source-time-merger"></a>
-<a id="cw-38-protect-merger-contracts-and-prove-real-process-crash-recovery"></a>
-
-### CW-38: Verify the saved source-time merger survives actual process death
-
-**Priority: P1. Implementation: present; selected real-crash tests completed.**
-
-**What works:** the merger can save buffered input, pending output and retry
-receipts. Protected tests name the important native merger/middleware behavior.
-
-**Testing:** a normal DrasiLib child was killed at eight selected persistence/
-handoff points. macOS/Linux RocksDB reopen tests checked exact buffered/output
-recovery and duplicate prevention. Do not describe real process-crash testing
-as not started.
-
-**Remaining work:** none for the selected real-crash fixture. Broader
-held-late-input/provider combinations are owned by CW-39, and prolonged-operation
-measurements by CW-40. Do not count this completed fixture as another unstarted
-crash-testing project.
-
-**Likely complexity:** implementation **None** for the completed selected
-fixture, **Medium** if another provider exposes a gap; testing **High** for the
-additional crash matrix.
-
-**Evidence:** [merger tests][merge-tests], [persistent/crash tests][merge-tests-recovery],
-[protected cases][contracts]. Earlier tracking: TS-07 and merger follow-ups.
-Storage-window performance is CW-28/CW-40.
-
-<a id="cw-50"></a>
-<a id="cw-50-independent-native-node-cpu-execution"></a>
-
-### CW-50: Let independent native components use different CPU workers
-
-**Priority: P1. Implementation: done for the selected independent-execution task.**
-
-**What works:** native processing runs in separately scheduled tasks, not inside
-one central processing loop. The graph still controls membership and status.
-Each component's own mutable work remains ordered. One stateful query is not
-automatically split across several cores.
-
-**Testing:** the recorded eight-query CPU workload checked 480,000 results over
-three repetitions, including single-thread correctness. Two/four workers
-achieved median throughput ratios of 1.926/3.478 against one worker, exceeding
-the approved 1.25/1.5 targets. Task, panic, cancellation and independent-command
-tests also exist.
-
-**Remaining work:** sustained production measurements, graph-size costs and
-native migration are CW-40, CW-31 and CW-43 through CW-47. They do not mean
-independent execution has not been implemented.
-
-**Likely complexity:** implementation **None** for the completed execution
-change; testing **Low** to repeat the selected reference, **High** for the
-broader measurements owned by CW-40.
-
-**Evidence:** [task implementation][execution], [execution tests][task-tests],
-[recorded workload and limits][execution-plan]. Earlier tracking: CG-13.
-
-<a id="cw-56"></a>
-<a id="cw-56-isolated-drasilib-instance-hosting-and-native-inter-instance-links"></a>
-
-### CW-56: Run normal DrasiLib instances in child processes and connect them safely
-
-**Priority: P1. Implementation: selected macOS/Linux host and link scope implemented.**
-
-**What works:** parent, child and grandchild use the same DrasiLib engine.
-A separate supervisor owns local child processes; native sources/sinks carry
-data between instances. Definitions and last-known failure state survive a
-child exit in the parent. A child-only plugin need not be loaded in the parent.
-
-**Testing:** recorded real-process tests cover hierarchy, abrupt parent death,
-child repair, stale control, cancelled host cleanup, data drain and process
-reaping on macOS/Linux. Bridge tests cover retries, full queues and saved state.
-A prepared macOS/Linux-VM mutual-TLS run checks lost/delayed replies, rejected
-versions/authentication, exact outputs and persistent reopen.
-
-**Remaining work:** the selected host/link mechanism is complete. Broader
-physical-machine/network/provider checks belong to CW-39 and long-run
-measurements to CW-40; package separation is the distinct proposal in CW-57.
-Windows and hard operating-system resource
-containment are not implemented/qualified by this work and were not promises
-of the selected Unix scope. Remote network loss is not proof a process died.
-Transactions remain local to one instance.
-
-**Likely complexity:** implementation **None** for the selected completed
-host/link mechanism; a separately selected Windows/resource-isolation extension
-would be **High to Very high**. Broader production testing is **High**.
-
-**Evidence:** [host documentation/tests][host-readme], [bridge documentation][bridge-readme],
-[protected process cases][contracts], [selected scope][execution-plan].
-This is not a remote per-component executor or automatic remote provisioning.
-
-<a id="cw-30"></a>
-<a id="cw-30-reduce-whole-state-persistence-and-replay-round-trips"></a>
-
-### CW-30: Avoid rewriting or rereading large amounts of state for one small change
-
-**Status: consolidated into [CW-28](#cw-28), not completed.**
-
-Whole-state rewrites, replay-read cost and receipt-update cost are now defined
-once under CW-28 alongside the related storage-efficiency work. Their existing
-evidence, current-format integrity requirements and estimates moved with them.
-This ID remains so old links and review references still resolve.
-
-<a id="cw-15"></a>
-<a id="cw-15-make-plugin-snapshot-and-source-discontinuities-visible"></a>
-
-### CW-15: Older plugin snapshot errors that were not fully surfaced
-
-**Priority: no active ordinary-integration work. Implementation: retired, not fixed.**
-
-**What works:** the previously fixed live-change decode error is reported
-instead of silently skipped. The remaining historical findings concern the
-older snapshot callback and source adapter.
-
-**Testing:** those findings are retained as history, not evidence that native
-streams have the identical defect.
-
-**Remaining work:** no separate repair of the retiring integration is selected.
-Native streams and initial loading must still report loss/failure explicitly;
-their evidence belongs to CW-03/CW-04/CW-39/CW-41.
-
-**Likely complexity:** implementation/testing **Not applicable** to this retired
-task. Any newly reproduced native problem must be estimated under its actual owner.
-
-**Evidence:** [older change receiver][change-receiver], [older adapter][legacy-source].
-Earlier tracking: PX-13's Phase 0 follow-up, PX-03, remaining PX-01.
-
-<a id="cw-16"></a>
-<a id="cw-16-complete-retained-plugin-ownership-and-lifecycle-contracts"></a>
-
-### CW-16: Remaining ownership problems in the older plugin interface
-
-**Priority: no active ordinary-SDK expansion. Implementation: retired, not fixed.**
-
-**What works:** the older SDK remains present while migration proceeds. Some
-ownership and durability fixes already exist, but this does not close every
-reported callback/context problem.
-
-**Testing:** historical reports concern snapshot callbacks, reaction context,
-subscription responses and cleanup. They are not blanket native-ABI findings.
-
-**Remaining work:** do not expand the older SDK to complete this entry.
-Required native ownership and failure behavior stays in CW-03/CW-17/CW-41/CW-44,
-and must work without optional author-helper APIs.
-
-**Likely complexity:** implementation/testing **Not applicable** to the retired
-scope; native replacement is assessed separately.
-
-**Evidence:** [older Host proxies][old-proxies], [older SDK ownership][old-sdk].
-Earlier reports: [#646][i646], [#648][i648], [#649][i649], [#774][i774],
-[#815][i815], [#896][i896]. PRs [#903][p903]/[#906][p906] are historical leads.
-
-<a id="cw-42"></a>
-<a id="cw-42-expose-ordinary-factory-based-creation"></a>
-
-### CW-42: Add another factory API for the older component interface
-
-**Priority: none under the current direction. Implementation: retired, not implemented as a new API.**
-
-**What works:** native declarations and factories already support graph-owned
-construction and retained failures.
-
-**Testing:** native construction tests exist. They do not make a new ordinary
-factory API necessary.
-
-**Remaining work:** none in this retired scope. Use native construction for
-the migration rather than adding another older-interface convenience API.
-
-**Likely complexity:** implementation/testing **Not applicable**.
-
-**Evidence:** [native addition][addition], [native definitions][topology].
-Earlier tracking: CG-08.
-
-<a id="tracking-crosswalk"></a>
-
-## Where earlier tracking numbers went
-
-These are lookup references, not additional work items. Mapping an old finding
-to a CW entry does not make a retired-interface repair active again.
-
-### Original CG backlog
-
-- CG-01: recovery checks exist; broader evidence is CW-39.
-- CG-02/03: native input/consumer services exist; adoption is CW-44 and evidence CW-39/CW-46.
-- CG-04: configuration runtime exists; remaining Server migration is CW-45/CW-46.
-- CG-05/06/07: completed mailbox/listing/ownership/bootstrap fixes are retained; broader native binary checks are CW-41/CW-44.
-- CG-08: retired ordinary factory API, CW-42.
-- CG-09/14: Server/UI migration, CW-45.
-- CG-10: ordinary/native bridge retired; native assembly remains CW-43.
-- CG-11/12: connector breadth, CW-44, not rebuilding completed services.
-- CG-13: selected execution done, CW-50; wider evidence CW-40/CW-41.
-- CG-15: native reconstruction descriptions, CW-43.
-- CG-16/17/28: required examples/templates/docs, CW-47.
-- CG-18: local complete-source transactions exist; wider promises CW-52.
-- CG-19: explicit configuration housekeeping exists; optional policies CW-55.
-- CG-20: named configuration cases covered; broader providers CW-39.
-- CG-21/22: CW-29/CW-36/CW-39/CW-40; not a new implementation of recovery.
-- CG-23/24: CW-37/CW-39/CW-46.
-- CG-25: actual plugin compatibility/lifetime evidence, CW-41.
-- CG-26: Server/recovery verdict evidence, CW-46.
-- CG-27: sustained measurements, CW-40.
-
-<a id="complete-runtime-review-crosswalk"></a>
-<a id="pre-review-topics-and-observability-packages"></a>
-
-### Runtime review identifiers
-
-Some old review numbers were reused. **GM-09 original** is resource naming;
-**GM-09 Phase 0** is partial commit. **GM-10 original** is lost error types;
-**GM-10 Phase 0** is incomplete resumption. **PX-13 original** is float
-representation; **PX-13 Phase 0** is lost snapshot decode errors.
-
-- Controller: GC-01/04/05 -> CW-04; GC-02/09 -> CW-05/CW-06;
-  GC-03/06/15 -> CW-03; GC-07/11 -> CW-06; GC-08/14 -> CW-09/CW-31;
-  GC-10 -> CW-34; GC-12 -> CW-33; GC-13 -> CW-35.
-- Reconciliation: GM-01/07 and Phase 0 GM-09/10 -> completed CW-01/CW-02;
-  GM-02 -> CW-08; GM-03/15 and original GM-09 -> CW-09;
-  GM-04 -> CW-33; GM-05/06 -> CW-34; GM-08 -> CW-06;
-  original GM-10 -> CW-22; GM-11 -> CW-03/CW-35; GM-12 -> CW-31;
-  GM-13 -> CW-23/CW-31; GM-14/16 -> CW-35.
-- Pipes: PC-01 fixed; PC-02 -> CW-34; PC-03 -> CW-30;
-  PC-04/06/07 -> CW-22; PC-05 -> CW-04; PC-08 -> CW-32;
-  PC-09 -> CW-21/CW-35; PC-10 -> CW-35/CW-36.
-- Delivery/merger: DP-01 -> CW-05; DP-02 -> CW-29;
-  DP-03/04/07 -> CW-21/CW-30/CW-31 as applicable; DP-05 -> CW-34;
-  DP-06/09/11 -> CW-21; DP-08 -> CW-04/CW-32;
-  DP-10 -> CW-48; DP-11 also informs CW-51.
-- Query execution: QX-01/02 fixed; QX-03 -> CW-18; QX-04 -> CW-20;
-  QX-05 -> CW-22/CW-49; QX-06 -> CW-06; QX-07 -> CW-34;
-  QX-08 -> CW-31; QX-09/12 -> CW-29; QX-10 -> CW-30; QX-11 -> CW-03.
-- Plugins/encoding: PX-01 live failure fixed, missing counter CW-26;
-  PX-02/07/09 -> CW-18; PX-03 and Phase 0 PX-13 -> retired CW-15;
-  PX-04 ordinary investigation excluded; PX-05/06 -> CW-19;
-  PX-08/11 and original PX-13 -> CW-32; PX-10 -> CW-22; PX-12 fixed;
-  PX-14 -> CW-34/CW-35.
-- Runtime APIs: RT-01/02 -> CW-07; RT-03 through RT-06 -> narrowed CW-10;
-  RT-07 -> CW-08; RT-08/13 -> CW-31; RT-09 -> CW-03;
-  RT-10/12/15 -> CW-35; RT-11 -> CW-22; RT-14 -> CW-08/CW-34.
-- Library: LI-01 fixed; LI-02 -> CW-10/CW-22; LI-03/04/10 -> CW-08;
-  LI-05 -> CW-07 investigation; LI-06 -> CW-17; LI-07/08 -> CW-23;
-  LI-09 -> CW-10; LI-11 -> CW-03/CW-10; LI-12 -> CW-55;
-  LI-13 -> CW-10/CW-35.
-- Tests: TS-01/03/04/10 -> CW-36; TS-02/05/06/08/09 -> CW-37;
-  TS-07 -> CW-38.
-- Monitoring proposal: A -> CW-24; B/E -> CW-25; C/H -> CW-26;
-  D -> native CW-25/CW-26/CW-41; F/G -> CW-27 and Server evidence CW-46.
-
-## Completion and maintenance rules
-
-Apply the [breaking-release policy](#breaking-release-policy) before expanding
-any item: no old-API/binary/format support or migration code is a release
-requirement. Update consumers directly. Older preservation wording in completed
-records documents what was done then; it does not prohibit removing those
-affordances now.
-
-Close the stated requirement, not a broad heading. Record what changed, the
-exact tested behavior and any remaining gap. A tested subset does not make an
-unimplemented requirement complete; lack of universal proof does not make a
-working, tested mechanism “not started.”
-
-For bugs, demonstrate the current failure and verify the actual result or saved
-state after the fix. For testing work, name the missing scenario and preserve
-the implementation already present. For an optional feature, obtain a selected
-requirement first. For retired work, say “not pursued,” not “fixed.”
-
-Keep original approved requirements distinct from larger future ambitions.
-Do not move an unfinished approved requirement into a follow-up merely because
-other parts passed. Do not interpret unsupported Windows/security/remote
-provisioning behavior as a promise of the selected Unix host.
-
-A complete test run, test count, quiet receiver, successful startup or matching
-snapshot does not alone prove full processing/delivery completion. Record
-binary/provider/plugin versions and the actual end-of-work evidence. Never
-weaken a verdict or silently change a stored format to obtain a pass.
-For the breaking release, intentionally choosing a new format is allowed;
-silently treating incompatible existing records as that format is not.
-Remove tests whose sole purpose is preserving a retired alias, binary or format,
-but retain or port their independent correctness/error/ownership assertions.
-
-Keep these CW identifiers stable. Update this document when code or evidence
-changes; historical plans and session records must not become competing claims
-of current completion.
-
-[execution-plan]: computation-graph-execution-isolation-plan.md
-[maintainer-guide]: computation-graph-maintainers-guide.md
-[old-backlog]: computation-graph-backlog.md
-[reliability-plan]: computation-graph-reliability-plan.md
-[requirements]: ../tests/runtime_parity/requirements.tsv
-[contracts]: ../tests/runtime_parity/computation-contracts.tsv
-[parity-tooling]: ../tests/runtime_parity/
-[lib-tests]: ../tests/
-[lib-manifest]: ../Cargo.toml
-[controller]: ../src/computation/v1/graph/controller.rs
-[execution]: ../src/computation/v1/graph/execution.rs
-[resource-tasks]: ../src/computation/v1/graph/resource_tasks.rs
-[reconcile]: ../src/computation/v1/graph/reconcile.rs
-[commit-tests]: ../src/computation/v1/graph/reconcile_commit_tests.rs
-[addition]: ../src/computation/v1/graph/addition.rs
-[graph]: ../src/computation/v1/graph.rs
-[instance]: ../src/computation/instance.rs
-[runtime-inspection]: ../src/computation/runtime/inspection.rs
-[management-runtime]: ../src/management/runtime.rs
-[managed-guide]: managed-configuration.md
-[topology]: ../src/computation/v1/graph/topology.rs
-[lifecycle]: ../src/computation/v1/lifecycle.rs
-[control]: ../src/computation/v1/control.rs
-[registry]: ../src/computation/v1/graph/registry.rs
-[inspection]: ../src/computation/v1/inspection.rs
-[retirement]: ../src/computation/v1/graph/retirement.rs
-[query-recovery]: ../src/computation/v1/query_recovery.rs
-[query-delivery]: ../src/computation/v1/query_delivery.rs
-[query-scheduling]: ../src/computation/v1/query_scheduling.rs
-[query-state]: ../src/computation/internal/query_state.rs
-[ordinary-query-output]: ../src/queries/output_state.rs
-[inspection-alias]: ../src/component_graph/graph.rs
-[config-snapshot-code]: ../src/config/snapshot.rs
-[result-snapshot-code]: ../../components/computation-contracts/src/snapshot.rs
-[query-schema-code]: ../src/config/schema.rs
-[query-builder-code]: ../src/builder.rs
-[transaction-transformer-code]: ../src/computation/v1/transaction_transformer.rs
-[index-clear-code]: ../src/indexes/mod.rs
-[query-configuration]: ../src/computation/v1/query_configuration.rs
-[query-recovery-tests]: ../tests/computation_query_recovery.rs
-[task-tests]: ../tests/computation_task_execution.rs
-[instance-tests]: ../tests/computation_instance.rs
-[graceful-tests]: ../tests/computation_graceful_stop.rs
-[failure-tests]: ../tests/computation_failure_policy.rs
-[reconcile-tests]: ../tests/computation_reconciliation.rs
-[mutation-tests]: ../../core/src/query/tests/mutation_integrity.rs
-[persistent-mutation-tests]: ../tests/computation_mutation_integrity.rs
-[source-recovery-tests]: ../../lib-integration-tests/tests/computation_source_recovery.rs
-[api-tests]: ../tests/component_api_parity.rs
-[budget-tests]: ../tests/computation_journal_budgets.rs
-[transaction-query-tests]: ../../lib-integration-tests/tests/computation_transaction_query.rs
-[managed-tests]: ../../lib-integration-tests/tests/computation_management.rs
-[catalog]: ../src/computation/v1/query_catalog.rs
-[pipeline]: ../src/computation/v1/pipeline.rs
-[native-query]: ../src/computation/v1/query.rs
-[standard-factories]: ../src/computation/v1/factories.rs
-[evaluator]: ../../core/src/query/evaluator.rs
-[query-parts]: ../../core/src/evaluation/parts/mod.rs
-[average]: ../../core/src/evaluation/functions/aggregation/avg.rs
-[solver]: ../../core/src/path_solver/mod.rs
-[graph-codec]: ../../components/computation-contracts/src/graph_codec.rs
-[query-codec]: ../../components/computation-contracts/src/query_codec.rs
-[output-identity]: ../../components/computation-contracts/src/output_identity.rs
-[envelope]: ../../components/computation-contracts/src/envelope.rs
-[value-codec]: ../../components/computation-contracts/src/internal/typed_change/value_codec.rs
-[delivery]: ../src/computation/v1/delivery.rs
-[consumer-recovery]: ../src/computation/v1/consumer_recovery.rs
-[middleware-recovery]: ../src/computation/v1/middleware_recovery.rs
-[time-merge]: ../src/computation/v1/time_merge.rs
-[merge-recovery]: ../src/computation/v1/time_merge/recovery.rs
-[merge-tests]: ../tests/computation_time_merge.rs
-[merge-tests-recovery]: ../tests/computation_time_merge/recovery.rs
-[wal-source]: ../src/computation/v1/wal_source.rs
-[qos]: ../src/computation/v1/qos_pipe.rs
-[shared-qos]: ../src/computation/v1/qos_pipe/shared.rs
-[pipe-metrics]: ../src/computation/v1/pipe_metrics.rs
-[legacy-source]: ../src/computation/v1/legacy_source.rs
-[workers]: ../src/context/workers.rs
-[component-logs]: ../src/observability/component_log.rs
-[tracing-layer]: ../src/observability/tracing_layer.rs
-[metrics]: ../src/metrics/
-[errors]: ../src/error.rs
-[change-receiver]: ../../components/host-sdk/src/proxies/change_receiver.rs
-[old-proxies]: ../../components/host-sdk/src/proxies/
-[old-sdk]: ../../components/plugin-sdk/src/ffi/
-[ordinary-loader]: ../../components/host-sdk/src/loader.rs
-[ordinary-abi-metadata]: ../../components/plugin-sdk/src/ffi/metadata.rs
-[ordinary-vtable-code]: ../../components/plugin-sdk/src/ffi/vtable_gen.rs
-[ordinary-descriptor-schema]: ../../components/plugin-sdk/src/computation.rs
-[native-sdk]: ../../components/computation-plugin-sdk/README.md
-[native-sdk-metadata]: ../../components/computation-plugin-sdk/src/metadata.rs
-[shared-contracts]: ../../components/computation-contracts/src/lib.rs
-[public-interface-declarations]: ../src/lib.rs
-[developer-guide]: developer-guide/README.md
-[ffi-primitives-guide]: ../../components/ffi-primitives/README.md
-[plugin-architecture-guide]: ../../components/plugin-architecture.md
-[graph-overview]: ../src/computation/v1/mod.rs
-[workspace-lints]: ../../Cargo.toml
-[instance-host-code]: ../../components/instance-host/src/lib.rs
-[instance-host-manifest]: ../../components/instance-host/Cargo.toml
-[query-plugin-design]: https://github.com/drasi-project/drasi-core/blob/a0c044084f46555d89ed6104a129010f822a82c8/lib/docs/computation-graph-query-plugin-plan.md
-[query-plugin-experiment]: https://github.com/drasi-project/drasi-core/tree/a0c044084f46555d89ed6104a129010f822a82c8/components/host-sdk/tests/fixtures/query_proof
-[host-tests]: ../../components/host-sdk/tests/
-[native-admission-tests]: ../../components/host-sdk/tests/native_network/durable.rs
-[network]: ../../components/computation-plugins/NETWORK.md
-[host-readme]: ../../components/instance-host/README.md
-[bridge-readme]: ../../components/computation-plugins/common/bridge/README.md
-[bridge-codec]: ../../components/computation-plugins/common/bridge/src/codec.rs
-[bridge-codec-tests]: ../../components/computation-plugins/common/bridge/tests/bridge/codec.rs
-[otel-source]: ../../components/sources/otel/
-[redb-wal]: ../../components/wals/redb/src/provider.rs
-[rocksdb]: ../../components/indexes/rocksdb/
-[configuration-store]: ../../components/state_stores/redb/src/configuration/
-[index-factory]: ../src/indexes/factory.rs
-[storage-interfaces]: ../../core/src/interface/
-[workload-runner]: ../tests/measure-core-workloads.py
-[resource-soak]: ../examples/core_resource_soak.rs
-[transaction-guide]: computation-graph-transactions.md
-[cypher-functions]: ../../functions-cypher/src/lib.rs
-[gql-functions]: ../../functions-gql/src/lib.rs
-[cypher-parser]: ../../query-cypher/src/lib.rs
-[gql-parser]: ../../query-gql/src/lib.rs
-[observability-design]: https://github.com/drasi-project/design-documents/tree/77b155319fd8160496ad059f6fdcb1e6bc93e43d/drasi-lib/tracing-logging
-[timing-control]: https://github.com/drasi-project/drasi-core/blob/b8d1f38a63d53a134b069546d349800d18b0571b/lib/docs/query-test-control.md
-[server-routes]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/api/v1/routes.rs
-[server-computation]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/computation.rs
-[server-readme]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/README.md
-[server-tests]: https://github.com/drasi-project/drasi-server/tree/1906c439feca8f16bc5c9eafb3658187e3104808/tests
-[native-ui]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/ui/src/components/inspector/ComputationDetails.tsx
-[gpu-server]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/examples/gpu-cluster-lab/server/README.md
-[server-manifest]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/Cargo.toml
-[server-config-types]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/config/types.rs
-[server-persistence]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/persistence.rs
-[server-config-module]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/config/mod.rs
-[server-query-dto]: https://github.com/drasi-project/drasi-server/blob/1906c439feca8f16bc5c9eafb3658187e3104808/src/api/models/queries/query.rs
-[recovery-comparison]: https://github.com/drasi-project/test-infra/blob/55ff7eeba41a4222c892c75af526a64d9c16b801/e2e-test-framework/examples/recovery_comparison/README.md
-[scheduled-recovery]: https://github.com/drasi-project/test-infra/blob/55ff7eeba41a4222c892c75af526a64d9c16b801/e2e-test-framework/examples/building_comfort/dynamic/scheduled_recovery.md
-[tutorials]: https://github.com/drasi-project/learning-drasi-server/blob/72770826a214f99b65aa85d092e9b919e08254d8/README.md
-[otel-tutorial]: https://github.com/drasi-project/learning-drasi-server/blob/72770826a214f99b65aa85d092e9b919e08254d8/tutorials/otel-observability/README.md
-[i244]: https://github.com/drasi-project/drasi-core/issues/244
-[i507]: https://github.com/drasi-project/drasi-core/issues/507
-[i805]: https://github.com/drasi-project/drasi-core/issues/805
-[i384]: https://github.com/drasi-project/drasi-core/issues/384
-[i498]: https://github.com/drasi-project/drasi-core/issues/498
-[i806]: https://github.com/drasi-project/drasi-core/issues/806
-[i411]: https://github.com/drasi-project/drasi-core/issues/411
-[i795]: https://github.com/drasi-project/drasi-core/issues/795
-[i796]: https://github.com/drasi-project/drasi-core/issues/796
-[i797]: https://github.com/drasi-project/drasi-core/issues/797
-[i798]: https://github.com/drasi-project/drasi-core/issues/798
-[i807]: https://github.com/drasi-project/drasi-core/issues/807
-[i808]: https://github.com/drasi-project/drasi-core/issues/808
-[i812]: https://github.com/drasi-project/drasi-core/issues/812
-[i721]: https://github.com/drasi-project/drasi-core/issues/721
-[i722]: https://github.com/drasi-project/drasi-core/issues/722
-[i723]: https://github.com/drasi-project/drasi-core/issues/723
-[i919]: https://github.com/drasi-project/drasi-core/issues/919
-[i891]: https://github.com/drasi-project/drasi-core/issues/891
-[i646]: https://github.com/drasi-project/drasi-core/issues/646
-[i648]: https://github.com/drasi-project/drasi-core/issues/648
-[i649]: https://github.com/drasi-project/drasi-core/issues/649
-[i774]: https://github.com/drasi-project/drasi-core/issues/774
-[i815]: https://github.com/drasi-project/drasi-core/issues/815
-[i896]: https://github.com/drasi-project/drasi-core/issues/896
-[i632]: https://github.com/drasi-project/drasi-core/issues/632
-[i355]: https://github.com/drasi-project/drasi-core/issues/355
-[i633]: https://github.com/drasi-project/drasi-core/issues/633
-[i668]: https://github.com/drasi-project/drasi-core/issues/668
-[i782]: https://github.com/drasi-project/drasi-core/issues/782
-[i309]: https://github.com/drasi-project/drasi-core/issues/309
-[i635]: https://github.com/drasi-project/drasi-core/issues/635
-[i276]: https://github.com/drasi-project/drasi-core/issues/276
-[i582]: https://github.com/drasi-project/drasi-core/issues/582
-[i584]: https://github.com/drasi-project/drasi-core/issues/584
-[i245]: https://github.com/drasi-project/drasi-core/issues/245
-[i461]: https://github.com/drasi-project/drasi-core/issues/461
-[i482]: https://github.com/drasi-project/drasi-core/issues/482
-[i880]: https://github.com/drasi-project/drasi-core/issues/880
-[i483]: https://github.com/drasi-project/drasi-core/issues/483
-[i393]: https://github.com/drasi-project/drasi-core/issues/393
-[i394]: https://github.com/drasi-project/drasi-core/issues/394
-[i743]: https://github.com/drasi-project/drasi-core/issues/743
-[i818]: https://github.com/drasi-project/drasi-core/issues/818
-[i681]: https://github.com/drasi-project/drasi-core/issues/681
-[i44]: https://github.com/drasi-project/drasi-core/issues/44
-[i211]: https://github.com/drasi-project/drasi-core/issues/211
-[i212]: https://github.com/drasi-project/drasi-core/issues/212
-[i217]: https://github.com/drasi-project/drasi-core/issues/217
-[i238]: https://github.com/drasi-project/drasi-core/issues/238
-[i301]: https://github.com/drasi-project/drasi-core/issues/301
-[i357]: https://github.com/drasi-project/drasi-core/issues/357
-[i426]: https://github.com/drasi-project/drasi-core/issues/426
-[i516]: https://github.com/drasi-project/drasi-core/issues/516
-[i598]: https://github.com/drasi-project/drasi-core/issues/598
-[i791]: https://github.com/drasi-project/drasi-core/issues/791
-[i800]: https://github.com/drasi-project/drasi-core/issues/800
-[i801]: https://github.com/drasi-project/drasi-core/issues/801
-[i802]: https://github.com/drasi-project/drasi-core/issues/802
-[i803]: https://github.com/drasi-project/drasi-core/issues/803
-[i804]: https://github.com/drasi-project/drasi-core/issues/804
-[i881]: https://github.com/drasi-project/drasi-core/issues/881
-[i892]: https://github.com/drasi-project/drasi-core/issues/892
-[i895]: https://github.com/drasi-project/drasi-core/issues/895
-[i916]: https://github.com/drasi-project/drasi-core/issues/916
-[i917]: https://github.com/drasi-project/drasi-core/issues/917
-[i918]: https://github.com/drasi-project/drasi-core/issues/918
-[i929]: https://github.com/drasi-project/drasi-core/issues/929
-[i935]: https://github.com/drasi-project/drasi-core/issues/935
-[p218]: https://github.com/drasi-project/drasi-core/pull/218
-[p246]: https://github.com/drasi-project/drasi-core/pull/246
-[p409]: https://github.com/drasi-project/drasi-core/pull/409
-[p745]: https://github.com/drasi-project/drasi-core/pull/745
-[p887]: https://github.com/drasi-project/drasi-core/pull/887
-[p903]: https://github.com/drasi-project/drasi-core/pull/903
-[p904]: https://github.com/drasi-project/drasi-core/pull/904
-[p906]: https://github.com/drasi-project/drasi-core/pull/906
-[p907]: https://github.com/drasi-project/drasi-core/pull/907
-[p912]: https://github.com/drasi-project/drasi-core/pull/912
-[p915]: https://github.com/drasi-project/drasi-core/pull/915
-[p948]: https://github.com/drasi-project/drasi-core/pull/948
+**Finish when:** Each named concern has a protected fix or an evidence-backed
+closure, rather than remaining an open-ended code-cleanup task.
