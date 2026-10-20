@@ -104,16 +104,17 @@ Construct the native source with a component ID, stream ID, `MySqlConfig` and
 optional actual `Arc<QuerySourceProgress>`. Its `out` port advertises the schema
 for the selected output mode. The factory identity is `drasi/mysql-native`, version
 `1`; its `stream` and secret-backed `settings` configuration use the same types.
-Recovery additionally requires the `source_progress` checkpoint resource of the
-actual consuming query. A matching name or a resource from another graph is not
-sufficient.
+Recovery additionally requires either the `source_progress` checkpoint resource
+of one actual consuming query, or a `consumer_progress` resource containing its
+actual `ConsumerProgressSet`. The two modes are exclusive. Matching names or
+resources from another graph are not ownership proof.
 
 | Setting | Behavior |
 |---------|----------|
 | `output: changes`, `replay: null` | Fast ordinary graph changes, without whole-transaction assembly, hashing, journal writes or persistent progress. No atomic visibility or replay guarantee. |
 | `output: transactions`, `replay: null` | One complete committed upstream transaction per envelope, without persistent replay ownership. |
-| `replay: server` | Transactions resume from the consumer's durable checkpoint while MySQL retains the required history. Missing history fails explicitly; this does not advertise guaranteed retention. |
-| `replay: until_processed` | Requires automatic binlog expiry disabled and advertises replay to the bound atomic consumer. Operators must maintain safe retention. |
+| `replay: server` | Transactions resume from the required consumers' durable checkpoints while MySQL retains the required history. Missing history fails explicitly; this does not advertise guaranteed retention. |
+| `replay: until_processed` | Requires automatic binlog expiry disabled and advertises replay to the actual bound atomic consumers. Operators must maintain safe retention. |
 | `transactions` | Explicit change-count, encoded-byte and assembly-duration limits. An oversized/incomplete transaction publishes no prefix and advances no checkpoint; retry after increasing limits. |
 | `max_protocol_bytes` | Independently bounds each logical wire packet, retained catalog results, table-map cache, decoded fast-output batch and initial-load row, including charged per-envelope overhead. Initial/live JSON expansion and depth are also bounded. |
 | `io_timeout_ms` | Bounds connection/setup, partial packet I/O and awaited cleanup. An otherwise idle stream does not expire. |
@@ -126,7 +127,8 @@ Replay requires transaction output and either a fixed initial file/position or t
 explicit coordinated snapshot mode below; `start: end` is only for non-replay
 operation. A fixed initial position must be a real transaction boundary.
 Resume binds to the server UUID, database, selected column definitions,
-source/stream and consumer scope. It rereads and verifies the last committed
+source/stream and consumer scope (the producer's graph scope in shared mode).
+It rereads and verifies the last committed
 transaction's content before skipping it, rejecting replaced/reused history.
 **Retain the file containing that checkpoint transaction as well as all later
 files**, even though the checkpoint transaction itself is already processed.
@@ -163,6 +165,67 @@ Local readers preserve actual-owner checks. External readers provide reads only,
 not local ownership proof; pairing requires the same reader handle. Fast mode
 does not construct a reader or subscription. This prepares the Rust boundary,
 not the plugin protocol.
+
+### Shared consumer recovery
+
+`MySqlSource::new_with_consumer_progress` accepts an actual
+`Arc<ConsumerProgressSet>` for fixed-position replay. The source still owns one
+live replication worker. Each required member must independently be recovered,
+ready, admitting, persistent and unfenced. Its actual cursor and reset generation
+are retained; no aggregate `SourceProgressSnapshot` is constructed. A stopped,
+failed or reset member fences live replication until awaited source cleanup and
+a coordinated restart.
+
+Replay selects the earliest required physical binlog boundary, not a query-local
+counter or the largest transport number. The original transport counter is
+restored above every member's recorded transport. A fresh member without a
+checkpoint requires replay from the configured initial position; it is not
+skipped in favor of the already advanced members. Every stored member's history
+is checked, including non-minimum transaction hashes and snapshot file prefixes.
+The immutable source cursor policy lets faster consumers reject already included
+transactions while advancing transport observations.
+
+Shared source and snapshot bindings are distinct from the existing single-owner
+identities. They do not include the current member list, so an explicitly replaced
+group can retain existing owners and add a correctly initialized new one without
+reinterpreting single-owner state. The graph validates actual owners and paths,
+and membership changes must await the source's real stop.
+
+For snapshot initialization, use the existing query-owned bootstrap mechanism:
+
+```rust
+use drasi_lib::computation::v1::ConsumerProgressSet;
+use std::{collections::BTreeMap, sync::Arc};
+
+let consumers = Arc::new(ConsumerProgressSet::new(
+    "graph",
+    source_id.clone(),
+    [left_progress.clone(), right_progress.clone()],
+)?);
+let (source, snapshots) = MySqlSource::coordinated_consumers(
+    source_id, stream_id, config, consumers,
+)?;
+let snapshots: BTreeMap<_, _> = snapshots.into_iter()
+    .map(|snapshot| (snapshot.consumer_id().clone(), snapshot))
+    .collect();
+let left_query = left_query.with_bootstrap(snapshots[&left_id].clone());
+let right_query = right_query.with_bootstrap(snapshots[&right_id].clone());
+```
+
+`config.start` must explicitly select `Snapshot`. Each provider retains its actual
+query reader and validates it at the query boundary. `for_consumer_group` and
+`with_consumer_snapshots` also allow explicit composition with retained providers
+for unchanged members. The factory uses `consumer_progress` (`Checkpoint`,
+`ConsumerProgressSet`) and, in snapshot mode, `consumer_snapshots` (one typed
+`Bootstrap`/`MySqlSnapshot` resource per member). Missing, duplicate, substituted,
+wrong-scope or mixed single/shared bindings fail before live operation. These
+resources do not make a memory-only query eligible for persistent replay.
+
+Snapshot and shared preflight history readers use finite, unregistered
+server-ID-zero binlog requests, like
+[mysqlbinlog's finite remote reads](https://docs.oracle.com/cd/E17952_01/mysql-8.0-en/mysqlbinlog-server-id.html).
+They do not reuse the live source's nonzero replication ID or disconnect another
+snapshot. All connections remain explicitly owned and closed.
 
 **Still incomplete:** native plugin ABI and Server registration. Starting an
 unpaired source does not initialize existing rows. DDL affecting the selected database,
@@ -202,7 +265,8 @@ progress object, not merely matching identifiers. Besides selected-table reads
 and replication privileges, the account needs `RELOAD`; cleanup kills only its
 own sessions and does not require permission to kill other users' connections.
 
-The provider saves initialization intent in query-owned storage, opens a
+The provider saves initialization intent in query-owned storage, samples the
+server clock before acquiring the snapshot, opens a
 repeatable-read view under the global lock, pins selected table definitions,
 captures the binlog boundary, and **releases the global lock before scanning**.
 Owned binary server-side cursors read one row at a time through a bounded channel.
@@ -210,6 +274,14 @@ Initial rows and live changes share types and typed identities. Client buffering
 is bounded; MySQL may materialize server cursors internally. Ordinary writes can
 continue during scanning, but selected-table DDL waits until the read transaction
 ends.
+
+Snapshot rows use that captured server time, not their later scan time. Live
+rows and transaction envelopes use MySQL's precise `immediate_commit_timestamp`
+when supplied, rather than the binlog event header's coarse statement time.
+Snapshot handover requires this commit clock and fails explicitly if it is
+missing. This preserves updates committed in the same second as a snapshot, or
+while a slow initial scan is still running. Fixed-position/non-snapshot modes
+retain header-time handling for older history without a commit timestamp.
 
 `lock_timeout_ms` bounds Drasi's lock-establishment attempt and sets a server
 lock-wait timeout. It is **not an unconditional application-pause bound**:

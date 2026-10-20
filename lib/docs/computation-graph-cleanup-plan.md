@@ -56,14 +56,20 @@ PostgreSQL's native transaction source, coordinated bootstrap and stored-procedu
 sink are implemented and qualified against real PostgreSQL and rebuilt native
 libraries. Ordinary per-row delivery, SELECT-only standalone snapshots,
 coordinated row bootstrap and bounded same-worker reconnect also pass their
-focused real-database cases. Safe one-source/many-query
-feedback/replay and gap-free initial CDC bootstrap for a memory query without
-a checkpoint store remain explicit gaps, not weaker substitutes for the actual
-owner/persistent-bootstrap contracts. GPU input now selects native factories and
-compiles, but fresh live GPU qualification is pending. Runtime source-schema
-discovery also remains open. Stage 6 is not complete.
+focused real-database cases. Shared row CDC now retains every actual query
+owner and safely handles different snapshot/WAL positions, partial transactions,
+reconnect, explicit group replacement and memory-owner re-enrollment. The shared
+bootstrap exports through a separate temporary slot without resetting the
+configured live slot. Static and rebuilt dynamic libraries cover both Tokio
+flavors. Fresh isolated GPU live qualification also covers concurrent
+snapshot/CDC, atomic multi-table writes, rollback exclusion, graceful restart,
+offline writes and abrupt runtime loss without changing the managed slot.
+Conversion of the remaining real PostgreSQL Server examples is in progress;
+runtime source-schema discovery remains open. Cold reconstruction with undrained
+persistent input-pipe frames is not established by the successful reconciled-drain
+scenarios. Stage 6 is not complete.
 
-**Next work - user directed, 19 October:** commit and push the current native
+**Current work - user directed, 19 October:** commit and push the current native
 family implementation before changing the shared recovery model. Then fix
 fan-out generically: one source must support multiple subscribing transformers
 (including queries), and one transformer must support multiple subscribing
@@ -71,6 +77,67 @@ transformers and sinks. Preserve every required subscriber's processing/replay
 obligations, independent progress and lifecycle; do not remove ownership guards
 or replace one producer with a separate producer per subscriber. This is an
 existing graph requirement, not a PostgreSQL-only feature or optional scope.
+
+The pre-fix implementation snapshot is published at Core `859ad07d`, Server
+`e720b1d` and Test-infra `e463620`. The subsequent generic fan-out implementation
+and real-consumer integration are complete for the scope recorded here. The
+shared contract and separate native consumer-progress extension
+now retain bounded, independent observations of every actual consumer's progress,
+readiness, failure and persistence. No aggregate query checkpoint is manufactured.
+Graph binding proves the actual owner and data path, waits for missing
+dependencies, installs source-specific replay comparisons, and awaits producer
+stop before changing a required consumer or path.
+
+The native transformer matrix now includes two direct handled sinks, two real
+queries and two sinks per query in one hosting instance. Static/dynamic libraries
+and both Tokio flavors preserve exact effects and one invocation per input.
+Optional graph-owned `input_progress` records completed inputs for ordinary
+transformers and handled sinks, including output continuations and batching,
+without claiming persistence or external atomicity. Accepted sinks and
+untracked required branches remain rejected. WAL replay uses the slowest actual
+persistent owner, and validated stateless paths preserve logical producer
+identity separately from original and immediate transport counters.
+
+The combined Core query, transaction, middleware, replay, batching and
+reconciliation regression selections pass; the Host/SDK extension and direct
+native sink integration are qualified. The SDK bootstrap retry needed for
+memory re-enrollment is also fixed. The existing native MySQL and SQLite Rust
+replay/bootstrap/factory paths now use actual consumer sets and have passed
+their real-database/file-backed integration selections. MySQL qualification also
+fixed snapshot/live timestamp ordering and isolated finite binlog verification
+from the live replication identity. This is shared-recovery adoption, not new
+dynamic packaging or the full SQLite migration.
+
+PostgreSQL whole-transaction fan-out is now also qualified through the distinct
+`shared-transactions` and `shared-transaction-bootstrap` factories. They preserve
+complete source transactions for actual persistent atomic queries; row mode is
+not used as a substitute. Old single-owner/row positions remain distinct from the
+new whole-commit/configured-snapshot positions. Static/dynamic and both-runtime
+cases cover different counters and snapshots, slow feedback, drained restart,
+third-owner replacement and interrupted initialization with explicit recovery.
+
+Native bootstrap composition is now implemented in Core, Host and Server. Actual
+joined PostgreSQL/HTTP queries pass through static and rebuilt dynamic providers
+on both Tokio flavors, preserving per-provider handover metadata, watermarks,
+retirement holds and cleanup. The proof includes a PostgreSQL write while the
+HTTP snapshot is paused, no premature configured-slot feedback, live updates,
+rollback exclusion and mixed-preparation restart.
+
+Trading's canonical bundle now uses all 11 actual app queries, two shared
+PostgreSQL sources and one HTTP source; the app provisions that bundle atomically
+instead of creating per-query sources or omitting initial prices. The fresh real
+Server proof now passes through the actual app provisioning path: original
+50-price initialization, joined snapshots, portfolio/watchlist API writes, live
+price fan-out and aggregates, rollback exclusion, SSE output and idempotent repeat
+setup. Both configured slots remain intact and inactive after shutdown, temporary
+slots are removed, and the isolated processes, container and state are cleaned up.
+Local startup tooling, safe tutorial setup, documentation and the final consumer
+handoff are complete. All seven PostgreSQL configurations and Trading's canonical
+bundle reproduce exactly from their recipe/query inputs and actual factory
+metadata. Tooling passes 69 cases; the full serial Trading app suite passes 310
+cases plus 41 policy cases. The untouched lazy-modal accessibility case can time
+out in parallel runs; its assertions/timeouts were not weakened. This closes the
+current fan-out/consumer work, not the broader stage-6 migration inventory.
 
 **Dependency policy - user decision during execution:** a valid node may be
 declared before its dependencies are available. The node must say what it is
@@ -129,8 +196,8 @@ Learning Trading's normal build still reports the previously recorded unused
 unused-local lint excluded; a successful normal build is not claimed.
 Full connector replacement and containerized tutorial/demo qualification remain
 in stages 6-9. Logs are retained as `cleanup-stage5-*.log` and browser evidence
-under `cleanup-stage5-browser-iASEt7/` in session artifacts. No cleanup changes
-have been committed or pushed.
+under `cleanup-stage5-browser-iASEt7/` in session artifacts. This dated stage-5
+evidence predates the later publication snapshot recorded above.
 
 This requires more than changing `allow_incomplete`. The earlier query/reaction
 paths retained a missing-dependency error but required an explicit start/retry,

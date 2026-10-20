@@ -93,6 +93,8 @@ pub trait BootstrapRetirement: Send + Sync {
 
 /// A query-scoped snapshot provider. Dropping its stream must cancel its work;
 /// the query awaits `stop` before releasing storage or deprovisioning its state.
+/// Multiple initializers use [`super::CompositeBootstrapProvider`] without
+/// widening the query's single bootstrap slot or its transaction authority.
 #[async_trait]
 pub trait ComputationBootstrapProvider: Send + Sync {
     /// Hold a positively stopped provider against reuse through configuration

@@ -61,9 +61,15 @@ Create `NativeSqliteSource::new(id, stream, settings)` for volatile delivery, or
 transaction replay. Use `NativeSqliteSource::coordinated` for persistent,
 coordinated initial loading before live writes. Ordinary file snapshots for
 in-memory queries use the [standalone native bootstrap provider](../../bootstrappers/sqlite/README.md#native-file-snapshots)
-with caller-controlled initialization/write ordering. `progress` must be the **actual** `Arc<QuerySourceProgress>`
+with caller-controlled initialization/write ordering. For these single-owner
+constructors, `progress` must be the **actual** `Arc<QuerySourceProgress>`
 of the one persistent atomic query consuming this source. The graph validates
 that ownership; another query's resource or a same-named substitute is not enough.
+
+For multiple persistent consumers, use `new_replayable_with_consumers` or
+`coordinated_with_consumers` with the actual `Arc<ConsumerProgressSet>`. See
+[Shared native recovery](#shared-native-recovery) for initialization, membership
+and factory bindings. Neither API creates a source or journal for each query.
 
 The replay/paired constructors also accept a `SourceProgressReader` for a
 read-only host boundary. Local readers retain the actual ownership check;
@@ -77,7 +83,7 @@ The standalone file bootstrap has its own independently built native library.
 |----------|----------------------|
 | `output: Changes`, `replay: None` | Ordinary `drasi.graph-change` batches, without a source journal, checkpoint feedback or whole-transaction query guarantee. This is the fast path. |
 | `output: Transactions`, `replay: None` | One complete `drasi.source-transaction` record per committed SQLite transaction. No restart replay. |
-| `output: Transactions`, `replay: Some(...)` | SQLite data and the bounded replay record commit in the same SQLite transaction. Records remain until the bound query commits its input progress. Requires a real file-backed database and persistent query storage. |
+| `output: Transactions`, `replay: Some(...)` | SQLite data and the bounded replay record commit in the same SQLite transaction. Records remain until every required consumer commits its input progress. Requires a real file-backed database and persistent query storage. |
 
 Transaction output requires the query's `source_transactions` execution setting,
 compatible atomic indexes and atomic publication. Its frame is never split into
@@ -273,6 +279,81 @@ are checked, not just resource names.
 Native REST endpoints, Server registration and a
 separately exported native plugin ABI are not implemented. The existing REST
 server and dynamic-plugin export still serve only the legacy implementation.
+
+### Shared native recovery
+
+`NativeSqliteSource::new_replayable_with_consumers(id, stream, settings, consumers)`
+retains a real `Arc<ConsumerProgressSet>` for the source's graph and component ID.
+Each member must be a distinct actual progress owner, not an aggregate or a
+same-named replacement. Construction only retains the resources; startup waits
+for every member and requires recovered, persistent progress. Volatile query
+storage and graph-owned volatile `input_progress` are not substitutes for this
+journal's persistent recovery contract.
+
+The source validates each member's readiness, failure, reset generation and
+opaque journal position independently. It replays from the oldest required
+SQLite transaction and retires only the prefix handled by every member. A slow
+member therefore pins journal capacity; new writes fail and roll back when that
+bound is reached. A stopped, failed or reset member fences live processing
+without discarding retained records. The graph receives the actual consumer set
+and one immutable SQLite cursor policy: positions compare the same journal epoch
+and logical transaction sequence, not bootstrap row counts or transport counters.
+
+For existing rows or late enrollment, use:
+
+```rust,ignore
+let consumers = Arc::new(ConsumerProgressSet::new(
+    graph_id,
+    source_id.clone(),
+    [first_progress.clone(), second_progress.clone()],
+)?);
+let (source, snapshots) = NativeSqliteSource::coordinated_with_consumers(
+    source_id, stream, settings, consumers,
+)?;
+let first = first_query
+    .with_source_progress(first_progress)?
+    .with_bootstrap(snapshots.for_consumer(&first_id)?);
+let second = second_query
+    .with_source_progress(second_progress)?
+    .with_bootstrap(snapshots.for_consumer(&second_id)?);
+```
+
+Each query records its own initialization identity and commits its own snapshot
+boundary. Providers share one serialized snapshot-worker/connection slot and
+bounded row queues; they work with sequential or concurrent query startup. The
+worker reads the actual journal boundary, then waits for the query's durable
+initialization intent before mutating journal metadata or emitting rows. Live
+SQL admission remains closed until every required query has committed its
+initialization. The same exclusive slot prevents snapshot and live connections
+from overlapping. Cancellation, timeout and error retain worker/client ownership
+until awaited cleanup finishes; stale streams cannot affect replacement work.
+
+The source/stream/graph/table binding for shared recovery is distinct from the
+unchanged single-owner binding. Opening one mode's journal through the other
+fails; no existing identity is silently reinterpreted. The shared mode uses the
+existing transaction journal plus bounded consumer-enrollment metadata, not a
+second journal. It records at most 256 consumer identities, including retired
+identities; reaching this bound requires explicit recovery rather than silently
+forgetting ownership.
+
+Membership is immutable while running. After stop, reconstruction may add a
+consumer if its checkpoint is still retained, or initialize it through its paired
+snapshot in coordinated mode. A new snapshot uses the current journal head, so
+older consumers may replay retained transactions without reapplying them to the
+newly initialized query. Removal requires that the removed member has handled the
+entire current head; a lagging or incomplete enrollment cannot be discarded.
+Re-enrollment with an old cursor behind retired history fails. Losing completed
+query initialization is not permission to replace it silently; interrupted
+initialization follows the existing explicit `AutoReset` recovery policy.
+
+For `SqliteSourceFactory`, bind `consumer_progress` to the actual
+`ConsumerProgressSet` as a `Checkpoint` resource instead of `source_progress`.
+For coordinated loading, set `coordinated_snapshot: true` and bind
+`consumer_snapshots` to the returned `SqliteConsumerSnapshots` as a `Bootstrap`
+resource; each query uses its own `for_consumer` provider. The source's existing
+`client` dependency is unchanged. Single-owner/group progress and snapshot slots
+are mutually exclusive, and configuration, graph/producer identity and exact
+resource ownership are validated.
 
 ## REST API (Optional)
 

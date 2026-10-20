@@ -16,6 +16,48 @@ use testcontainers_modules::mysql::Mysql;
 use tokio::io::{duplex, ReadBuf};
 
 #[tokio::test(flavor = "current_thread")]
+async fn finite_history_reads_do_not_register_or_reuse_the_live_replication_id() -> Result<()> {
+    let (stream, mut peer) = duplex(256);
+    let mut connection = Connection {
+        packets: Packets::new(Box::new(stream) as Socket, 256, Duration::from_secs(1)),
+        version: (8, 4, 0),
+        connection_id: 123,
+        encrypted: false,
+        command_incomplete: false,
+        replication: false,
+    };
+    connection
+        .start_binlog_history("mysql-bin.000001", 4)
+        .await?;
+    let mut header = [0; 4];
+    peer.read_exact(&mut header).await?;
+    let size =
+        usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+    assert_eq!(header[3], 0);
+    let mut packet = vec![0; size];
+    peer.read_exact(&mut packet).await?;
+    assert_eq!(
+        packet[0], 0x12,
+        "first command is BINLOG_DUMP, not REGISTER_SLAVE"
+    );
+    assert_eq!(
+        u32::from_le_bytes(packet[1..5].try_into().expect("position")),
+        4
+    );
+    assert_eq!(
+        u16::from_le_bytes(packet[5..7].try_into().expect("flags")),
+        1
+    );
+    assert_eq!(
+        u32::from_le_bytes(packet[7..11].try_into().expect("server id")),
+        0
+    );
+    assert_eq!(&packet[11..], b"mysql-bin.000001");
+    connection.close().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cancelled_reads_retain_each_header_and_payload_byte() -> Result<()> {
     let (stream, mut peer) = duplex(16);
     let mut packets = Packets::new(stream, 64, Duration::from_secs(1));

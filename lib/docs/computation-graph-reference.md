@@ -486,12 +486,41 @@ and deletion preserve this identity information, even when rows/checkpoints are
 cleared. Stop/restart without reset preserves it. It is separate from
 `ComponentGeneration`.
 
-`QuerySourceProgressResource` reports its owning component's committed input
-progress, not adapter receipt. That can be an original source's position or a
-preceding durable transformer's saved output position. Sources must bind it to
-their immediate consumer; the graph rejects bindings that bypass an intervening
-component. `WalReplaySourceFactory` can resume/tail a supplied log partition and
-reports unavailable history rather than silently skipping it.
+`QuerySourceProgressResource` reports its actual owning component's handled input,
+not adapter receipt. A query or durable transformer publishes its own committed
+position. An ordinary transformer or handled sink can explicitly opt into
+`ComponentRecovery::with_volatile_input_progress`; the graph then publishes after
+handling, all outgoing acceptances and every continuation/completion callback.
+This owner is always volatile. Failed/cancelled work and incomplete cleanup fence
+it; a replacement instance cannot reuse the stopped instance's handled prefix.
+It cannot substitute for component-owned atomic progress, and acceptance-only
+sinks cannot opt in. Query snapshot/skip decisions still use their explicit
+checkpointed-consumer recovery protocol, not this ordinary-input tracker.
+The graph supplies the actual upstream role when interpreting input positions.
+Query metadata inherited through an ordinary transform is causal history, not
+that transform's output counter; distinct emissions must not be discarded as
+duplicate query results. Explicitly validated stateless paths can retain the
+original query's logical position while separately advancing both transport
+positions.
+
+The original single-owner source binding remains guarded. Shared native producers
+instead bind a `ConsumerProgressSet` containing the actual owners for all required
+branches. The graph checks pointer identity and the real data paths, allowing
+identity-preserving stateless intermediates but not arbitrary stateful bypasses.
+Each member retains its own readiness, failure, persistence, logical checkpoint,
+opaque cursor and transport counters. A source-specific `InputPositionPolicy`
+can compare positions without confusing independent bootstrap counters with
+physical source order. Validated relay paths preserve original logical producer
+identity and both transport positions; arbitrary inherited provenance does not.
+
+Membership is immutable for an activation. Reconciliation awaits the producer's
+actual stop before replacing a required owner or changing its path; dropping a
+reader does not retire a consumer. `WalReplaySourceFactory` accepts an optional
+`consumer_progress` checkpoint resource, mutually exclusive with `source_progress`.
+It resumes from the earliest actual persistent checkpoint, preserves the maximum
+observed transport counter, and rejects a configured resume that skips an existing
+member. It reports unavailable history explicitly and never owns partition
+deletion or pruning.
 
 Durable middleware saves its element state, input position and transformed output
 together. The driver calls `Transformer::delivery_completed` only after every

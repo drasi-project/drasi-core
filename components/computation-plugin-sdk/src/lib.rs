@@ -11,8 +11,10 @@ pub mod bootstrap;
 mod component;
 pub mod configuration;
 pub mod consumer;
+pub mod consumer_progress;
 mod control;
 mod export;
+pub mod input_position;
 pub mod metadata;
 pub mod progress;
 pub mod query_snapshots;
@@ -25,6 +27,7 @@ pub use bootstrap::{BootstrapFactory, BootstrapFactoryMetadata, NativeBootstrapP
 pub use component::{NativeComponent, NativeService, NativeSink, NativeSource, NativeTransformer};
 pub use configuration::{ConfigDefinition, ConfigDetails, ConfigOption};
 pub use consumer::{ConsumerMode, NativeConsumer, NativeTransactionalConsumer};
+pub use consumer_progress::NativeConsumerProgress;
 pub use control::{
     ControlDirection, ControlMessage, ControlNotification, ControlSender, ControlTarget,
     NativeControlHandler, SendControl,
@@ -118,6 +121,17 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.recovery(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_consumer_progress_v1(
+        ) -> *const $crate::abi::consumer_progress::PluginConsumerProgressV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.consumer_progress(),
                     Err(_) => std::ptr::null(),
                 }
             }))

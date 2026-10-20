@@ -1202,6 +1202,9 @@ impl ContinuousQueryTransformer {
             })
             .transpose()?;
         let mut progress = input_progress(&input.envelope)?;
+        progress.graph = progress
+            .graph
+            .with_consumer_boundary(&input.envelope, self.source_progress.as_deref())?;
         let transaction_changes = source_transaction.map(|transaction| {
             progress.source_id = transaction.source_id().to_owned();
             transaction.into_changes()
@@ -1217,15 +1220,25 @@ impl ContinuousQueryTransformer {
         } else {
             None
         };
-        let duplicate = self
-            .watermarks
-            .lock()
-            .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
-            .get(&progress.key)
-            .is_some_and(|saved| *saved >= progress.sequence)
-            || saved
-                .as_ref()
-                .is_some_and(|saved| saved.sequence >= progress.sequence);
+        let positioned = self
+            .source_progress
+            .as_ref()
+            .map(|owner| owner.position_handled(&progress.graph, saved.as_ref()))
+            .transpose()?
+            .flatten();
+        let duplicate = match positioned {
+            Some(handled) => handled,
+            None => {
+                self.watermarks
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                    .get(&progress.key)
+                    .is_some_and(|saved| *saved >= progress.sequence)
+                    || saved
+                        .as_ref()
+                        .is_some_and(|saved| saved.sequence >= progress.sequence)
+            }
+        };
         if duplicate {
             if let Some(checkpoint) = query.resources().checkpoint_store() {
                 if progress

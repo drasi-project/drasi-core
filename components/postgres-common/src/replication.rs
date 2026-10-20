@@ -30,6 +30,7 @@ use crate::{
 };
 
 pub mod rows;
+pub mod shared_transactions;
 pub mod transaction;
 pub use transaction::{row_element, Transactions};
 pub type TableKeys = BTreeMap<(String, String), Vec<String>>;

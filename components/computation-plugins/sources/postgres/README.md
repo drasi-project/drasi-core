@@ -1,14 +1,16 @@
 # Native PostgreSQL sources
 
-`drasi-computation-source-postgres` provides two explicit factories through native
-ComputationGraph ABI `1.0.0`, both at implementation/configuration version `1`.
+`drasi-computation-source-postgres` provides four explicit factories through native
+ComputationGraph ABI `1.0.0`, each at implementation/configuration version `1`.
 
 | Factory | Output | Query requirements |
 |---|---|---|
 | `drasi/postgres-transactions` | `SourceTransactionCodec`: complete committed transactions | Atomic persistent query with `source_transactions` enabled |
 | `drasi.postgres/changes` | `GraphChangeCodec`: individual committed row changes | Ordinary query, including memory storage; an actual progress-owner binding is still required |
+| `drasi.postgres/shared-changes` | `GraphChangeCodec`: individual committed row changes | A fixed set of actual ordinary-query owners, including memory storage; independent input-position filtering |
+| `drasi.postgres/shared-transactions` | `SourceTransactionCodec`: complete committed transactions | A fixed set of actual atomic persistent query owners, each with `source_transactions` enabled |
 
-Factory identity selects the contract; neither silently changes the other's
+Factory identity selects the contract; none silently changes another factory's
 schema, checkpoint format or processing guarantees.
 
 The source reuses the PostgreSQL connection, SCRAM, pgoutput decoding, key
@@ -30,17 +32,18 @@ let plugin = drasi_host_sdk::computation::load(path)?;
 ```
 
 Register its source factory in a component batch. Supply `stream` (the explicit
-output stream), `settings` (`PostgresTransactionConfig`), and optional
-`coordinated_snapshot` (default `false`). `settings` contains credentials, so a
-graph specification must use a secret `ConfigurationResolverResource` reference,
-not a literal.
+output stream) and `settings` (`PostgresTransactionConfig`). The single-owner
+factories also accept `coordinated_snapshot` (default `false`). `settings`
+contains credentials, so a graph specification must use a secret
+`ConfigurationResolverResource` reference, not a literal.
 
-The required `source_progress` dependency is a real
+For the single-owner transaction factory, the required `source_progress` dependency is a real
 `QuerySourceProgressResource` for the immediate atomic, persistent query owner.
 The query uses that same actual owner and enables `source_transactions` with
 appropriate limits. Equal graph/query names are not ownership evidence. Every
-branch must lead to that owner; another independent query requires its own
-source/slot.
+branch must lead to that owner. The ordinary single-owner factory also uses
+`source_progress`; the shared-row and shared-transaction factories use
+`consumer_progress`, never both bindings together.
 
 ## Ordinary row queries
 
@@ -81,6 +84,137 @@ missing retained cursors, malformed data and exceeded transaction limits do not
 become reconnect-at-latest fallbacks. Stop cancels and joins an in-flight reconnect.
 This does not change the complete-transaction factory's graph-owned restart policy.
 
+## Shared ordinary row queries
+
+Select `drasi.postgres/shared-changes` for one PostgreSQL source feeding multiple
+ordinary queries in the same DrasiLib ComputationGraph. Its required Checkpoint
+dependency, `consumer_progress`, must contain the real `ConsumerProgressSet`
+bound to this source and every downstream input-progress owner. The graph
+validates actual ownership and branch coverage; matching names, a
+`QuerySourceProgressResource`, or an aggregate checkpoint are not substitutes.
+Construction retains the read capability and its immutable membership without
+reading or subscribing before start.
+
+The configuration uses the ordinary-row fields above, **except
+`coordinated_snapshot` is not accepted**. `persistent=false` makes no
+process-restart claim, even if some members happen to be persistent.
+`persistent=true` requires every member to publish persistent progress and
+requires the existing retained slot and explicit initial LSN.
+
+Replay starts from an actual member's minimum **WAL position**, comparing commit
+LSNs and then offsets within a commit, not logical sequence numbers from
+independently initialized queries. Feedback is the minimum complete-commit floor
+of every member; a partial transaction never acknowledges its unhandled suffix.
+Actual snapshot boundaries between visible commits are carried into later row
+cursors, so moving from a snapshot into a partial transaction does not regress
+the already established coverage floor.
+The native source supplies one stable input-position policy to the host. Each
+real query uses it to skip physically covered replay while still advancing
+transport progress. Replayed or already queued rows therefore do not repeat
+query effects when assigned newer logical and transport counters.
+
+Both emitted counters stay above the maximum of all relevant consumer counters
+and this component's prior allocations, including reconnect and reader
+replacement. One existing owned worker closes its old connection before
+reconnecting, preserves admitted bounds for queued work, and revalidates slot
+retention and database/schema binding. The shared implementation uses the same
+connection, TLS, decoder and row-expansion logic as the single-owner modes.
+
+An entirely fresh, ready group can begin streaming from its configured initial
+slot boundary. Missing first cursors hold feedback at that original boundary;
+the same component can replay it while those original members catch up.
+This is not enrollment of a new consumer. A newly constructed group mixing
+handled and missing cursors fails explicitly rather than starting the missing
+member at `read_lsn`. Failed, reset, removed, rebound or cursor-losing members
+also fence progress. A reset may be adopted on an awaited restart only after the
+actual owner publishes a newer generation's completed, same-binding configured
+snapshot. Unready members cannot advance feedback, and a subscription that
+observed unready state cannot silently resume without an ordered restart.
+Cleanup closes the owned reader and
+subscriptions before restart; only the expected revoked progress capability is
+accepted as shutdown after the worker has actually joined.
+
+For initial data, attach `drasi.postgres/shared-row-bootstrap` from the
+[bootstrap library](../../bootstrappers/postgres) to each actual query, using
+the same source, stream and semantic settings. It supports memory queries
+without claiming persistent state. Each query imports its own temporary exported
+snapshot while the configured live slot remains untouched. The source waits
+for every required owner to complete initialization, then replays from the
+earliest real boundary and filters already covered input independently.
+
+Membership is immutable **per binding**, not limited to the graph's initial
+queries. Late enrollment uses explicit Core reconciliation: stop the prior
+source, drain accepted inputs, replace the actual consumer group, initialize
+the new member, and only then resume the single source. Re-enrolling an existing
+memory query likewise requires the ordered source stop/rewind/resubscribe
+boundary. Directly editing a subscription or dropping a slow owner from a
+snapshot is not supported. Neither factory adopts managed snapshot-slot
+ownership or resets/drops/recreates the configured live slot.
+
+Reconstruction with undrained persistent input-pipe frames is not part of this
+qualification. Rebinding uses Core's drain barrier, which preserves accepted
+rows and exposes their handled counter floors before the new source starts. The
+consumer capability reports handled progress, not counters of still-queued
+frames. This component retains its own allocation bounds across stop/start and
+reconnect, but does not invent that missing host state on cold reconstruction.
+
+## Shared complete transactions
+
+Select `drasi.postgres/shared-transactions` for one source feeding multiple
+transaction-enabled queries. Supply only `stream` and secret `settings`, plus
+the required Checkpoint dependency `consumer_progress` containing the actual
+`Arc<ConsumerProgressSet>`. Every member must be an atomic persistent query;
+membership alone, volatile `input_progress`, or a row-mode configuration does
+not establish that guarantee. Each query enables `source_transactions` with
+limits sufficient for the source's complete groups.
+
+`PostgresTransactionSource::shared_transactions` retains the actual native
+consumer capability, its fixed `consumer_ids`, and one immutable input-position
+policy without reading or subscribing during construction. The implementation
+reuses the existing replication worker, connection, strict transaction decoder,
+mapping, limits, timestamps and `SourceTransactionCodec`; it does not run a
+source or live slot per query. A committed transaction is one input and one
+atomic query evaluation, including multiple updates or insert/delete pairs
+within that transaction. Rejected or incomplete groups expose no row prefix.
+
+The new JSON position contract is deliberately distinct:
+
+| Field | Contract |
+|---|---|
+| `version` | Exactly `1`. |
+| `mode` | `whole_commit` for live transactions; `configured_snapshot` for completed initialization. |
+| `binding` | 32-byte SHA-256 of the domain `drasi.postgres/shared-transactions/v1` followed by a NUL byte and the existing physical source binding. |
+| `commit_lsn` | Positive physical whole-commit LSN or the real exported snapshot boundary. |
+| `sequence` | Positive logical emission counter for a live transaction; zero only for a configured snapshot. |
+
+Unknown fields, managed-slot fields, mismatched bindings, invalid sequences,
+and old row/single-owner transaction formats are rejected. Position bytes retain
+the common 64-KiB limit. The transaction identity remains the actual commit LSN,
+not the independently allocated logical or transport counter.
+
+Replay and feedback use the minimum physical boundary of **every** actual
+member. The selected cursor remains that member's cursor; no aggregate progress
+snapshot or durability is manufactured. Logical and transport emission floors
+include every member's counters and prior allocations retained by this source.
+Each query filters physically covered transactions independently, including a
+later snapshot with unrelated sequence counters. Readiness, persistence, failure
+and reset generation are checked separately for each member.
+
+Attach `drasi.postgres/shared-transaction-bootstrap` to each query when initial
+data is needed. It uses the existing configured slot and separately owned
+temporary snapshot exports, with the matching transaction position contract.
+The row and managed-slot bootstrap factories are not interchangeable with it.
+Persistent incomplete initialization is fenced under `Strict`; an explicitly
+configured `AutoReset` reinitializes the query without modifying the live slot.
+
+Transaction restart is graph-owned: there are no row-mode auto-create,
+start-at-latest or reconnect settings. Stop must join the real worker before
+rewind or membership replacement. The same explicit reconciliation/drain
+boundary described above applies to late enrollment. Qualification includes
+same-instance replay with queued transactions and drained persistent graph
+reconstruction, **not cold reconstruction of undrained persistent input pipes**.
+Old factory identities and their persisted formats remain unchanged.
+
 ## Transaction-source settings
 
 | Settings field | Contract |
@@ -93,14 +227,14 @@ This does not change the complete-transaction factory's graph-owned restart poli
 | `io_timeout_ms` | Positive startup, incomplete-frame, feedback and cleanup deadline. |
 | `feedback_interval_ms` | Positive heartbeat interval, below the server's WAL sender timeout. |
 
-Replay-only mode requires a pre-existing, exclusively owned persistent `pgoutput`
+Replay-only mode requires a pre-existing, exclusively used persistent `pgoutput`
 slot, PostgreSQL 13+, `max_slot_wal_keep_size=-1`, and
 `idle_replication_slot_timeout=0` where supported. Startup rejects unavailable
 positions, temporary slots, changed source bindings and unsafe retention settings.
 Monitor retained WAL disk usage; administrative deletion or storage loss is not
 recoverable through this contract.
 
-`coordinated_snapshot=true` uses the separate
+The single-owner factories' `coordinated_snapshot=true` uses the separate
 [PostgreSQL bootstrap library](../../bootstrappers/postgres). Configure its
 `source`, `stream` and settings for this source and attach it to the same owner
 query. No source-to-bootstrap Rust resource or object crosses the library
@@ -127,19 +261,17 @@ unsupported and fail explicitly.
 
 ## Remaining ordinary-source compatibility boundaries
 
-The actual-owner contract currently permits **one query owner**, not the
-legacy source's one-source/many-query subscription model. Creating one source
-per query is not a claim of fan-out parity. Safe native fan-out needs a host-owned
-set of actual feedback owners, membership/startup fencing, minimum committed
-positions, per-query resume filtering and ordered rewind/subscription changes.
-Existing multi-query legacy consumers must remain legacy until that service is
-available.
+The shared source/bootstrap pair supplies native one-source/many-query
+streaming, unequal initial snapshots, persistent-cursor replay, and ordered
+late enrollment/re-enrollment. The existing single-owner factories retain
+their original guards and contracts; one source per query is not the shared
+implementation. Legacy application configurations still need conversion to
+the actual native owner/group and lifecycle bindings.
 
-Gap-free initial PostgreSQL CDC bootstrap for a query with no checkpoint/atomic
-state store is also not supplied by the standalone SELECT snapshot factory.
-The exported-slot handover still requires actual atomic/persistent initialization
-ownership. Ordinary memory streaming and independently ordered snapshots are
-supported, but are not replacements for that stronger combined use case.
+Gap-free memory initialization uses `drasi.postgres/shared-row-bootstrap`,
+not the standalone SELECT snapshot factory. Memory-query loss requires a new
+ordered snapshot; neither a volatile progress cursor nor an exported snapshot
+is advertised as persistent recovery state.
 
 Ordinary row-mode reconnect defaults match the legacy five-second delay while
 retaining explicit bounded retry and actual-cursor checks. Transaction-mode
@@ -153,13 +285,16 @@ ordinary consumer/API integration remains a separate parity item.
 |---|---|
 | GPU Lab `embedded/src/database.rs` | Uses the native transaction source and coordinated bootstrap factories with the actual persistent query owner. |
 | PostgreSQL `native_transactions/ordinary.rs` qualification | Exercises native ordinary memory rows, persistent row bootstrap/restart, partial-transaction suffix replay, and standalone snapshots with a non-PostgreSQL ingress. |
-| Server `examples/configs/02-sources/postgres-cdc-complete.yaml` | Still legacy: its shared source feeds three queries. Native one-owner instances are not a drop-in fan-out replacement. |
+| PostgreSQL `native_transactions/shared.rs` qualification | Static and rebuilt dynamic libraries run one source with two real queries in DrasiLib; covers both memory runtimes, different persistent row positions/counters, conservative feedback, and reconnect with queued duplicates. |
+| PostgreSQL `native_transactions/shared_bootstrap.rs` qualification | Covers concurrent writes across unequal snapshots, a third query joining through explicit group replacement, queued-input draining/counter preservation, memory re-enrollment, failed/cancelled snapshot cleanup, and configured-slot feedback fences. |
+| PostgreSQL `native_transactions/shared_transactions.rs` qualification | Both runtimes and static/real dynamic libraries exercise whole-transaction fan-out, unrelated physical/logical counters, unequal snapshots, slow-member feedback, queued replay, drained restart, membership replacement, persistent interruption/rebootstrap and actual-owner rejection. |
+| Server `examples/configs/02-sources/postgres-cdc-complete.yaml` | Still legacy: its shared source feeds three queries. The native shared source/bootstrap contract is available; this example's consumer conversion remains separate. |
 | Server Getting Started step 3-6/server configurations | Still legacy ordinary source/bootstrap consumers; their multi-query/lifecycle integration must be converted with the shared feedback/handover services. |
-| Server Trading `trading-sources-only.yaml` | Still legacy, including queries created after source startup; safe late membership and per-query replay/filtering are prerequisites. |
+| Server Trading `trading-sources-only.yaml` | Still legacy, including queries created after source startup; conversion must use explicit native group reconciliation rather than uncoordinated subscription changes. |
 | Server `order-exception-handling.yaml` | Still a mixed-family ordinary configuration, not a native PostgreSQL conversion. |
 | Legacy PostgreSQL library/integration tests | Retained as compatibility assertions, not counted as native consumer migration. |
 
-The first two rows do not establish full PostgreSQL family closure while the
+The qualified rows do not establish full PostgreSQL family closure while the
 remaining supported ordinary-use-case gaps above are open.
 
 ## Build and qualify

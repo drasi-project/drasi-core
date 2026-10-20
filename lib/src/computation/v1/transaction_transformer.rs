@@ -520,54 +520,61 @@ impl LinearTransaction {
         prepared.codec.decode(&prepared.codec.encode(envelope)?)?;
         let output = self
             .store
-            .process_envelope(envelope, |elements, emission| async move {
-                let mut current = envelope.clone();
-                for step in &prepared.steps {
-                    anyhow::ensure!(
-                        step.transformer.descriptor() == &step.descriptor,
-                        "transaction step changed its descriptor"
-                    );
-                    data::validate_schema(step.input.descriptor(), current.changes().schema())?;
-                    let context = TransactionContext::new(
-                        &step.definition.id,
-                        elements.as_ref(),
-                        StreamId::try_new(format!(
-                            "{step_stream_prefix}/{}",
-                            entities::encode_entity_key(step.definition.id.as_str()),
-                        ))?,
-                        emission,
-                    );
-                    current = step
-                        .transformer
-                        .transform_in_transaction(current, &context)
-                        .await
-                        .with_context(|| {
-                            format!("transaction step {} failed", step.definition.id)
-                        })?;
-                    context.validate()?;
-                    data::validate_schema(step.output.descriptor(), current.changes().schema())?;
-                    current = context.finish(current)?;
-                    // Decode through the registered validator before a later step can
-                    // consume records produced with a permissive or foreign validator.
-                    prepared.codec.decode(&prepared.codec.encode(&current)?)?;
-                }
-                let changes = ChangeSet::try_new(
-                    ChangeSetId::try_new(
-                        stream.as_str(),
-                        Bytes::copy_from_slice(&emission.to_be_bytes()),
-                    )?,
-                    current.changes().schema().clone(),
-                    current.changes().operations().to_vec(),
-                )?;
-                let mut system = SystemMetadata::new(stream.clone(), emission);
-                if let Some(timestamp) = envelope.system().timestamp() {
-                    system = system.with_timestamp(timestamp);
-                }
-                if let Some(position) = envelope.system().source_position() {
-                    system = system.with_source_position(position.clone());
-                }
-                Ok(current.derive(emission_id(&stream, emission)?, changes, system))
-            })
+            .process_envelope(
+                envelope,
+                self.progress.as_deref(),
+                |elements, emission| async move {
+                    let mut current = envelope.clone();
+                    for step in &prepared.steps {
+                        anyhow::ensure!(
+                            step.transformer.descriptor() == &step.descriptor,
+                            "transaction step changed its descriptor"
+                        );
+                        data::validate_schema(step.input.descriptor(), current.changes().schema())?;
+                        let context = TransactionContext::new(
+                            &step.definition.id,
+                            elements.as_ref(),
+                            StreamId::try_new(format!(
+                                "{step_stream_prefix}/{}",
+                                entities::encode_entity_key(step.definition.id.as_str()),
+                            ))?,
+                            emission,
+                        );
+                        current = step
+                            .transformer
+                            .transform_in_transaction(current, &context)
+                            .await
+                            .with_context(|| {
+                                format!("transaction step {} failed", step.definition.id)
+                            })?;
+                        context.validate()?;
+                        data::validate_schema(
+                            step.output.descriptor(),
+                            current.changes().schema(),
+                        )?;
+                        current = context.finish(current)?;
+                        // Decode through the registered validator before a later step can
+                        // consume records produced with a permissive or foreign validator.
+                        prepared.codec.decode(&prepared.codec.encode(&current)?)?;
+                    }
+                    let changes = ChangeSet::try_new(
+                        ChangeSetId::try_new(
+                            stream.as_str(),
+                            Bytes::copy_from_slice(&emission.to_be_bytes()),
+                        )?,
+                        current.changes().schema().clone(),
+                        current.changes().operations().to_vec(),
+                    )?;
+                    let mut system = SystemMetadata::new(stream.clone(), emission);
+                    if let Some(timestamp) = envelope.system().timestamp() {
+                        system = system.with_timestamp(timestamp);
+                    }
+                    if let Some(position) = envelope.system().source_position() {
+                        system = system.with_source_position(position.clone());
+                    }
+                    Ok(current.derive(emission_id(&stream, emission)?, changes, system))
+                },
+            )
             .await?;
         if let Some(progress) = &self.progress {
             progress.publish(self.store.progress()?);

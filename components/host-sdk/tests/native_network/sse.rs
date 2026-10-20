@@ -282,7 +282,7 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
             query: "MATCH (r:Room) RETURN r.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("scope.q/out"),
-            outbox_capacity: NonZeroUsize::new(32).unwrap(),
+            outbox_capacity: NonZeroUsize::new(32).expect("nonzero outbox capacity"),
         };
         let query_spec = ComponentSpecification {
             descriptor: query.descriptor(),

@@ -4,6 +4,187 @@
 use super::*;
 use crate::computation::{NativeBootstrapFactories, NativeBootstrapFactory};
 
+/// Ordered child bootstrap resources belonging to one real continuous query.
+///
+/// Canonical recipe: `{"kind":"compositeBootstrap","component":"query",
+/// "providers":["postgres-bootstrap","http-bootstrap"]}`. Declare exactly those
+/// child IDs as Bootstrap resource dependencies and bind the composite to the
+/// query's single `bootstrap` slot. Recovery-bearing children must share the
+/// same actual query progress owner; this recipe creates no aggregate reader.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompositeBootstrapConfig {
+    pub component: ComponentId,
+    pub providers: Vec<ResourceId>,
+}
+
+impl CompositeBootstrapConfig {
+    pub fn validate(
+        &self,
+        specification: &ResourceSpecification,
+        dependencies: &BTreeMap<ResourceId, ResourceRole>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            specification.role == ResourceRole::Bootstrap
+                && specification.ownership == ResourceOwnership::Graph
+                && !self.providers.is_empty()
+                && self.providers.len() <= MAX_COMPOSITE_BOOTSTRAP_PROVIDERS,
+            "composite bootstrap requires a graph-owned Bootstrap resource with bounded nonempty membership"
+        );
+        let expected: BTreeMap<_, _> = self
+            .providers
+            .iter()
+            .map(|id| (id.clone(), ResourceRole::Bootstrap))
+            .collect();
+        anyhow::ensure!(
+            expected.len() == self.providers.len()
+                && !expected.contains_key(&specification.id) && &expected == dependencies,
+            "composite bootstrap must declare exactly its distinct child Bootstrap resources, without self-dependency"
+        );
+        Ok(())
+    }
+
+    pub fn validate_owner(&self, resource: &ResourceId, topology: &DesiredTopology) -> Result<()> {
+        let query = ContinuousQueryFactory::default();
+        for component in &topology.components {
+            if let ComponentConstruction::Factory(spec) = &component.construction {
+                if spec
+                    .dependencies
+                    .values()
+                    .flatten()
+                    .any(|id| id == resource)
+                {
+                    anyhow::ensure!(
+                        spec.descriptor.id() == &self.component
+                            && spec.implementation == query.descriptor().implementation
+                            && spec.dependencies.get("bootstrap")
+                                .is_some_and(|ids| ids.as_slice() == std::slice::from_ref(resource)),
+                        "composite bootstrap may only be bound to its owning continuous query"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resolve(
+        &self,
+        instance: &str,
+        graph: &str,
+        specification: &ResourceSpecification,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<ResourceHandle> {
+        self.validate(
+            specification,
+            &dependencies
+                .iter()
+                .map(|(id, handle)| (id.clone(), handle.role()))
+                .collect(),
+        )?;
+        let providers = self
+            .providers
+            .iter()
+            .map(|id| {
+                let resource = dependencies
+                    .get(id)
+                    .context("composite bootstrap child is unavailable")?
+                    .get::<QueryBootstrapResource>()?;
+                Ok((id.clone(), resource.0.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let provider = Arc::new(CompositeBootstrapProvider::new(
+            instance,
+            graph,
+            self.component.clone(),
+            providers,
+        )?);
+        Ok(ResourceHandle::new(
+            ResourceRole::Bootstrap,
+            Arc::new(QueryBootstrapResource(provider.clone())),
+        )
+        .with_cleanup(provider))
+    }
+}
+
+/// Exact progress resources for one producer's required consumer boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsumerProgressConfig {
+    pub producer: ComponentId,
+    pub consumers: BTreeMap<ComponentId, ResourceId>,
+}
+
+impl ConsumerProgressConfig {
+    pub fn validate(
+        &self,
+        specification: &ResourceSpecification,
+        dependencies: &BTreeMap<ResourceId, ResourceRole>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            specification.role == ResourceRole::Checkpoint
+                && !self.consumers.is_empty()
+                && self.consumers.len() <= MAX_CONSUMER_PROGRESS_MEMBERS,
+            "consumer progress requires a Checkpoint resource with 1..=256 consumers"
+        );
+        anyhow::ensure!(
+            !self.consumers.contains_key(&self.producer)
+                && self
+                    .consumers
+                    .values()
+                    .all(|resource| resource != &specification.id),
+            "consumer progress cannot depend on itself or its producer's input progress"
+        );
+        let expected: BTreeMap<_, _> = self
+            .consumers
+            .values()
+            .map(|resource| (resource.clone(), ResourceRole::Checkpoint))
+            .collect();
+        anyhow::ensure!(
+            expected.len() == self.consumers.len() && dependencies == &expected,
+            "consumer progress must declare one distinct checkpoint dependency per consumer"
+        );
+        Ok(())
+    }
+
+    pub fn resolve(
+        &self,
+        graph: &str,
+        specification: &ResourceSpecification,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<ResourceHandle> {
+        self.validate(
+            specification,
+            &dependencies
+                .iter()
+                .map(|(id, handle)| (id.clone(), handle.role()))
+                .collect(),
+        )?;
+        let owners = self
+            .consumers
+            .iter()
+            .map(|(consumer, resource)| {
+                let owner = dependencies
+                    .get(resource)
+                    .context("consumer progress dependency is unavailable")?
+                    .get::<QuerySourceProgressResource>()?;
+                anyhow::ensure!(
+                    owner.0.component_id() == consumer && owner.0.graph_id() == graph,
+                    "consumer progress dependency belongs to another graph or consumer"
+                );
+                Ok(owner.0.clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ResourceHandle::new(
+            ResourceRole::Checkpoint,
+            Arc::new(ConsumerProgressSet::new(
+                graph,
+                self.producer.clone(),
+                owners,
+            )?),
+        ))
+    }
+}
+
 fn snapshot_timeout_ms() -> u64 {
     300_000
 }

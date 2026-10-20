@@ -25,13 +25,16 @@ use tokio::{
     task::JoinHandle,
 };
 
+mod consumer_snapshot;
 mod factory;
 mod handle;
 mod journal;
+mod progress;
 mod snapshot;
 #[cfg(test)]
 mod tests;
 mod worker;
+pub use consumer_snapshot::{SqliteConsumerSnapshot, SqliteConsumerSnapshots};
 pub use drasi_sqlite_common::SqliteParam;
 pub use factory::SqliteSourceFactory;
 pub use handle::{SqliteHandle, SqliteTransactionHandle};
@@ -67,7 +70,7 @@ pub struct SqliteConfig {
     pub table_keys: Vec<crate::TableKeyConfig>,
     pub output: SqliteOutput,
     /// Opt-in source-owned transaction journal. Requires a file and actual
-    /// persistent consumer progress, supplied to `new_replayable`.
+    /// persistent consumer progress, supplied to a replayable constructor.
     pub replay: Option<SqliteReplayConfig>,
     pub transactions: SourceTransactionLimits,
     pub max_sql_bytes: NonZeroUsize,
@@ -150,8 +153,11 @@ pub struct SqliteSource {
     cleanup_required: bool,
     sequence: Arc<AtomicU64>,
     progress: Option<SourceProgressReader>,
+    consumer_progress: Option<Arc<ConsumerProgressSet>>,
+    position_policy: Option<Arc<InputPositionPolicy>>,
     client_owner: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     snapshot: Option<Arc<SqliteSnapshot>>,
+    consumer_snapshots: Option<Arc<SqliteConsumerSnapshots>>,
 }
 
 impl SqliteSource {
@@ -178,6 +184,31 @@ impl SqliteSource {
         Self::build(id, stream, config, Some(progress.into()))
     }
 
+    /// Replay one journal against every actual persistent consumer. This retains
+    /// the immutable owner set without reading progress or opening SQLite.
+    pub fn new_replayable_with_consumers(
+        id: ComponentId,
+        stream: StreamId,
+        config: SqliteConfig,
+        consumers: Arc<ConsumerProgressSet>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            config.replay.is_some()
+                && config.path.is_some()
+                && config.output == SqliteOutput::Transactions,
+            "SQLite group replay requires a file, journal bounds and complete-transaction output"
+        );
+        anyhow::ensure!(
+            consumers.producer_id() == &id,
+            "SQLite consumer set belongs to another producer"
+        );
+        let policy = journal::position_policy(&id)?;
+        let mut source = Self::build(id, stream, config, None)?;
+        source.consumer_progress = Some(consumers);
+        source.position_policy = Some(policy);
+        Ok(source)
+    }
+
     /// Initialize existing rows before admitting SQL writes. Attach the returned
     /// provider to this consumer with `with_bootstrap`; it uses query-owned state.
     pub fn coordinated(
@@ -190,6 +221,20 @@ impl SqliteSource {
         let snapshot = Arc::new(SqliteSnapshot::new(&source)?);
         source.snapshot = Some(snapshot.clone());
         Ok((source, snapshot))
+    }
+
+    /// Pair each consumer with its own durable initialization, using one shared
+    /// snapshot-worker slot before the live SQL worker may admit writes.
+    pub fn coordinated_with_consumers(
+        id: ComponentId,
+        stream: StreamId,
+        config: SqliteConfig,
+        consumers: Arc<ConsumerProgressSet>,
+    ) -> Result<(Self, Arc<SqliteConsumerSnapshots>)> {
+        let mut source = Self::new_replayable_with_consumers(id, stream, config, consumers)?;
+        let snapshots = Arc::new(SqliteConsumerSnapshots::new(&source)?);
+        source.consumer_snapshots = Some(snapshots.clone());
+        Ok((source, snapshots))
     }
 
     fn build(
@@ -214,8 +259,11 @@ impl SqliteSource {
             cleanup_required: false,
             sequence: Arc::new(AtomicU64::new(0)),
             progress,
+            consumer_progress: None,
+            position_policy: None,
             client_owner: None,
             snapshot: None,
+            consumer_snapshots: None,
         })
     }
 
@@ -269,6 +317,9 @@ impl SqliteSource {
         if let (Some(snapshot), Some(owner)) = (&self.snapshot, &self.client_owner) {
             snapshot.bind_client(owner)?;
         }
+        if let (Some(snapshots), Some(owner)) = (&self.consumer_snapshots, &self.client_owner) {
+            snapshots.bind_client(owner)?;
+        }
         self.commands = client.commands.clone();
         Ok(self)
     }
@@ -301,6 +352,15 @@ impl ComputationComponent for SqliteSource {
         &self.descriptor
     }
     fn recovery_contract(&self) -> ComponentRecovery {
+        if let Some(consumers) = &self.consumer_progress {
+            return ComponentRecovery::admitted(
+                drasi_core::interface::StorageDurability::LOCAL_PROCESS_RESTART,
+            )
+            .with_consumer_positions(
+                consumers.clone(),
+                self.position_policy.as_ref().expect("group policy").clone(),
+            );
+        }
         match &self.progress {
             Some(progress) => ComponentRecovery::admitted(
                 drasi_core::interface::StorageDurability::LOCAL_PROCESS_RESTART,
@@ -312,7 +372,7 @@ impl ComputationComponent for SqliteSource {
     fn configuration(&self) -> Result<serde_json::Value> {
         let mut configuration = serde_json::json!({
             "stream": self.stream.as_str(), "settings": self.config,
-            "coordinated_snapshot": self.snapshot.is_some(),
+            "coordinated_snapshot": self.snapshot.is_some() || self.consumer_snapshots.is_some(),
         });
         if let Some(rest) = &self.rest_api {
             configuration["rest_api"] = serde_json::to_value(rest)?;
@@ -325,6 +385,7 @@ impl ComputationComponent for SqliteSource {
             "native SQLite source requires awaited cleanup before restart"
         );
         self.cleanup_required = true;
+        let mut initialization_lease = None;
         let progress = match &self.progress {
             Some(progress) => {
                 let snapshot = progress.wait_ready().await?;
@@ -345,9 +406,43 @@ impl ComputationComponent for SqliteSource {
                     .as_ref()
                     .map(|provider| provider.live_epoch(&snapshot))
                     .transpose()?;
-                Some((progress.read_only(), snapshot, bootstrap))
+                Some((
+                    progress::Reader::Single(progress.read_only()),
+                    progress::Observed::Single(snapshot),
+                    bootstrap,
+                ))
             }
-            None => None,
+            None => match &self.consumer_progress {
+                Some(consumers) => {
+                    let reader = consumers.read_only();
+                    let snapshot = reader.wait_ready().await?;
+                    for (consumer, state) in &snapshot.consumers {
+                        anyhow::ensure!(state.persistent && state.recovered,
+                            "native SQLite replay requires persistent recovered progress for consumer {consumer}");
+                        self.sequence.fetch_max(
+                            state
+                                .transport_sequences
+                                .get(&self.stream)
+                                .copied()
+                                .unwrap_or(0),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    let bootstrap = if let Some(snapshots) = &self.consumer_snapshots {
+                        let (epoch, lease) = snapshots.live_boundary(&snapshot)?;
+                        initialization_lease = Some(lease);
+                        Some(epoch)
+                    } else {
+                        None
+                    };
+                    Some((
+                        progress::Reader::Group(reader),
+                        progress::Observed::Group(snapshot),
+                        bootstrap,
+                    ))
+                }
+                None => None,
+            },
         };
         self.shutdown.send_replace(false);
         self.rest_shutdown.send_replace(false);
@@ -371,6 +466,7 @@ impl ComputationComponent for SqliteSource {
         self.receiver = Some(output_rx);
         spawn_owned_blocking_worker(&self.worker, move || {
             let _client_owner = client_owner;
+            let _initialization_lease = initialization_lease;
             let result = worker::run(
                 config,
                 source,

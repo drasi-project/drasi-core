@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion,
-    SourceProgressView, WakeupSource,
+    ComponentDescriptor, ComponentId, ConsumerProgressView, InputEnvelope, InputPositionPolicy,
+    OutputEnvelope, SinkBatching, SinkCompletion, SourceProgressView, WakeupSource,
 };
 use drasi_core_types::interface::StorageDurability;
 use std::sync::Arc;
@@ -23,6 +23,17 @@ pub trait NativeComponent: Send + Sync {
     }
     fn requires_readiness_confirmation(&self) -> bool {
         false
+    }
+    fn consumer_progress_reader(&self) -> Option<ConsumerProgressView> {
+        None
+    }
+    /// Actual upstream retention, not a guarantee inferred from consumer states.
+    fn consumer_replay_retention(&self) -> Option<StorageDurability> {
+        None
+    }
+    /// Stable source-defined cursor semantics, independent of mutable processing.
+    fn input_position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
+        None
     }
     async fn start(&mut self) -> anyhow::Result<()>;
     async fn stop(&mut self) -> anyhow::Result<()>;

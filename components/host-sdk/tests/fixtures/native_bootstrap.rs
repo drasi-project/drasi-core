@@ -17,7 +17,7 @@ use std::{
     collections::BTreeMap,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -111,6 +111,7 @@ impl sdk::BootstrapFactory for Factory {
             worker: Mutex::new(None),
             invalid_reader,
             pending: AtomicBool::new(true),
+            prepares: AtomicUsize::new(0),
         }))
     }
 }
@@ -144,6 +145,7 @@ struct Provider {
     worker: Mutex<Option<Worker>>,
     invalid_reader: AtomicBool,
     pending: AtomicBool,
+    prepares: AtomicUsize,
 }
 #[async_trait]
 impl sdk::NativeBootstrapProvider for Provider {
@@ -158,6 +160,7 @@ impl sdk::NativeBootstrapProvider for Provider {
         })
     }
     async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
+        let initial = self.prepares.fetch_add(1, Ordering::SeqCst) == 0;
         if self.config.mode == "change-reader" {
             self.invalid_reader.store(true, Ordering::Release);
         }
@@ -167,6 +170,8 @@ impl sdk::NativeBootstrapProvider for Provider {
         Ok(match self.config.mode.as_str() {
             "reset" => BootstrapPreparation::ResetRequired,
             "refresh" => BootstrapPreparation::RefreshVolatile,
+            "reset-once" if initial => BootstrapPreparation::ResetRequired,
+            "refresh-once" if initial => BootstrapPreparation::RefreshVolatile,
             _ => BootstrapPreparation::Ready,
         })
     }
@@ -178,6 +183,9 @@ impl sdk::NativeBootstrapProvider for Provider {
             state.durability() == self.config.durability,
             "durability was not preserved"
         );
+        if self.config.durability == StorageDurability::VOLATILE {
+            return self.prepare().await;
+        }
         let previous = state.read().await?;
         if previous.as_deref() == Some(b"complete".as_slice()) {
             self.pending.store(false, Ordering::Release);
@@ -265,10 +273,12 @@ impl sdk::NativeBootstrapProvider for Provider {
         &self,
         state: &dyn BootstrapState,
     ) -> anyhow::Result<ComputationBootstrapSnapshot> {
-        anyhow::ensure!(
-            state.read().await?.as_deref() == Some(b"initializing".as_slice()),
-            "snapshot lost initialization state"
-        );
+        if self.config.durability != StorageDurability::VOLATILE {
+            anyhow::ensure!(
+                state.read().await?.as_deref() == Some(b"initializing".as_slice()),
+                "snapshot lost initialization state"
+            );
+        }
         self.snapshot().await
     }
     async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
@@ -280,6 +290,9 @@ impl sdk::NativeBootstrapProvider for Provider {
         }])
     }
     fn completion_state(&self) -> anyhow::Result<Option<Bytes>> {
+        if self.config.durability == StorageDurability::VOLATILE {
+            return Ok(None);
+        }
         Ok(Some(if self.config.mode == "bad-completion" {
             Bytes::from(vec![1; MAX_BOOTSTRAP_STATE_BYTES + 1])
         } else {

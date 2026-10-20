@@ -2,16 +2,18 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::rows::{RowEmission, RowSourceOptions};
+use crate::shared::{self, SharedBinding, SharedMode, SharedUpdates, TransactionEmission};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::GraphChangeCodec;
 use drasi_computation_contracts::{
     workers::{join_owned_worker, spawn_owned_worker, WorkerCompletion},
-    ComponentDescriptor, ComponentId, OutputEnvelope, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, SourceProgressSnapshot, SourceProgressUpdates, SourceProgressView,
-    SourceTransactionCodec, SourceTransactionError, StreamId,
+    ComponentDescriptor, ComponentId, ConsumerProgressSnapshot, ConsumerProgressView,
+    InputPositionPolicy, OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    SourceProgressSnapshot, SourceProgressUpdates, SourceProgressView, SourceTransactionCodec,
+    SourceTransactionError, StreamId,
 };
-use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
+use drasi_computation_plugin_sdk::{NativeComponent, NativeConsumerProgress, NativeSource};
 use drasi_core_types::interface::StorageDurability;
 use drasi_postgres_common::replication::rows::{row_checkpoint, row_live_config, row_position};
 use drasi_postgres_common::{
@@ -38,13 +40,14 @@ use tokio::{
     time::Instant,
 };
 
-/// Emits complete transactions and retains upstream WAL until the bound query's
-/// actual committed progress advances. The host supplies a read-only capability.
+/// Owns replication for the explicit transaction and row modes. Upstream
+/// feedback follows the host-bound consumers' actual handled progress.
 pub struct PostgresTransactionSource {
     descriptor: ComponentDescriptor,
     stream: StreamId,
     config: PostgresTransactionConfig,
-    progress: SourceProgressView,
+    progress: Option<SourceProgressView>,
+    shared: Option<SharedBinding>,
     coordinated_snapshot: bool,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     shutdown: watch::Sender<bool>,
@@ -71,7 +74,8 @@ impl PostgresTransactionSource {
             descriptor: Self::describe(id)?,
             stream,
             config,
-            progress,
+            progress: Some(progress),
+            shared: None,
             coordinated_snapshot,
             receiver: None,
             shutdown: watch::channel(false).0,
@@ -107,6 +111,57 @@ impl PostgresTransactionSource {
                 PipeRequirements::default(),
             )],
         )?)
+    }
+
+    pub fn shared_rows(
+        id: ComponentId,
+        stream: StreamId,
+        config: PostgresTransactionConfig,
+        progress: ConsumerProgressView,
+        consumers: &[ComponentId],
+        options: RowSourceOptions,
+    ) -> Result<Self> {
+        options.validate(false)?;
+        config.validate()?;
+        let shared = SharedBinding::new(&id, progress, consumers)?;
+        Ok(Self {
+            descriptor: Self::describe_rows(id)?,
+            stream,
+            config,
+            progress: None,
+            shared: Some(shared),
+            coordinated_snapshot: false,
+            receiver: None,
+            shutdown: watch::channel(false).0,
+            worker: RwLock::new(None),
+            cleanup_required: false,
+            transport_sequence: Arc::new(AtomicU64::new(0)),
+            rows: Some(options),
+        })
+    }
+
+    pub fn shared_transactions(
+        id: ComponentId,
+        stream: StreamId,
+        config: PostgresTransactionConfig,
+        progress: NativeConsumerProgress,
+    ) -> Result<Self> {
+        config.validate()?;
+        let shared = SharedBinding::transactions(&id, progress)?;
+        Ok(Self {
+            descriptor: Self::describe(id)?,
+            stream,
+            config,
+            progress: None,
+            shared: Some(shared),
+            coordinated_snapshot: false,
+            receiver: None,
+            shutdown: watch::channel(false).0,
+            worker: RwLock::new(None),
+            cleanup_required: false,
+            transport_sequence: Arc::new(AtomicU64::new(0)),
+            rows: None,
+        })
     }
 
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
@@ -145,7 +200,11 @@ impl PostgresTransactionSource {
             );
             self.config.clone()
         };
-        let progress = self.progress.subscribe()?;
+        let progress = self
+            .progress
+            .as_ref()
+            .context("PostgreSQL single-owner reader is missing")?
+            .subscribe()?;
         let mut connection = connect(&config).await?;
         if self.rows.is_some_and(|rows| rows.auto_create_slot)
             && row_position(&snapshot, self.descriptor.id())?.is_none()
@@ -202,20 +261,7 @@ impl PostgresTransactionSource {
             retained <= resume && confirmed <= feedback,
             "requested PostgreSQL cursor is no longer available; explicit recovery is required"
         );
-        let publication = format!(
-            "\"{}\"",
-            config.connection.publication_name.replace('"', "\"\"")
-        );
-        connection
-            .start_replication(
-                &config.connection.slot_name,
-                Some(resume),
-                HashMap::from([
-                    ("proto_version".into(), "1".into()),
-                    ("publication_names".into(), publication.replace('\'', "''")),
-                ]),
-            )
-            .await?;
+        start_replication(&mut connection, &config, resume).await?;
         Ok(Worker {
             connection: Some(connection),
             transactions: Transactions {
@@ -246,8 +292,10 @@ impl PostgresTransactionSource {
                 },
                 filtered: !config.connection.tables.is_empty(),
             },
-            progress,
-            reset_generation: snapshot.reset_generation,
+            progress: WorkerProgress::Single {
+                updates: progress,
+                generation: snapshot.reset_generation,
+            },
             confirmed: feedback,
             next_feedback: Instant::now(),
             config,
@@ -256,11 +304,252 @@ impl PostgresTransactionSource {
                 .rows
                 .map(|_| RowEmission::new(row_resume, feedback, self.transport_sequence.clone())),
             reconnect: self.rows,
+            whole: None,
         })
     }
 
-    async fn join(&mut self) -> Result<()> {
+    async fn prepare_shared(&self, snapshot: ConsumerProgressSnapshot) -> Result<Worker> {
+        let shared = self
+            .shared
+            .as_ref()
+            .context("PostgreSQL consumer binding is missing")?;
+        let options = self
+            .rows
+            .context("PostgreSQL shared source must emit rows")?;
+        let retained_origin = shared.retained_origin(&snapshot, self.descriptor.id())?;
+        let fresh = shared::fresh_group(
+            &snapshot,
+            &shared.expected,
+            self.descriptor.id(),
+            &self.stream,
+            options.persistent,
+            retained_origin,
+        )?;
+        let mut connection = connect(&self.config).await?;
+        if fresh && options.auto_create_slot && retained_origin.is_none() {
+            connection
+                .create_replication_slot(&self.config.connection.slot_name, false)
+                .await?;
+        }
+        validate_retention(&mut connection, &self.config).await?;
+        let (keys, binding) = source_binding(
+            &mut connection,
+            &self.config,
+            self.descriptor.id(),
+            &self.stream,
+        )
+        .await?;
+        let observed = shared::observe(
+            &snapshot,
+            &shared.expected,
+            self.descriptor.id(),
+            &self.stream,
+            binding,
+            options.persistent,
+        )?;
+        anyhow::ensure!(observed.ready, "PostgreSQL shared consumers are not ready");
+        let slot = connection
+            .get_replication_slot_info(&self.config.connection.slot_name)
+            .await?;
+        let slot_confirmed = parse_lsn(&slot.consistent_point)?;
+        let initial = match retained_origin {
+            Some(origin) => origin,
+            None if options.start_from_slot => slot_confirmed,
+            None => parse_lsn(&self.config.start_lsn)?,
+        };
+        let (position, resume, confirmed, previous) = if fresh {
+            anyhow::ensure!(
+                observed.missing && observed.minimum.is_none(),
+                "PostgreSQL fresh consumer state changed"
+            );
+            (None, initial, initial, initial)
+        } else {
+            let minimum = observed
+                .minimum
+                .context("PostgreSQL shared initialization has no minimum cursor")?;
+            let resume = minimum.position.commit_lsn;
+            let previous = minimum.position.feedback_lsn();
+            (
+                Some(minimum.position),
+                resume,
+                minimum.feedback_lsn,
+                previous,
+            )
+        };
+        anyhow::ensure!(
+            slot.output_plugin == "pgoutput"
+                && parse_lsn(
+                    slot.restart_lsn
+                        .as_deref()
+                        .context("slot has no retained WAL")?
+                )? <= resume
+                && slot_confirmed <= confirmed,
+            "PostgreSQL shared cursor is no longer retained; explicit recovery is required"
+        );
+        let progress = SharedUpdates::new(
+            shared,
+            &snapshot,
+            self.descriptor.id(),
+            binding,
+            fresh.then_some(initial),
+        )?;
+        start_replication(&mut connection, &self.config, resume).await?;
+        let decoder_resume = if position
+            .as_ref()
+            .is_some_and(|position| !position.complete())
+        {
+            resume
+                .checked_sub(1)
+                .context("invalid shared partial PostgreSQL transaction")?
+        } else {
+            resume
+        };
+        Ok(Worker {
+            connection: Some(connection),
+            transactions: Transactions {
+                decoder: PgOutputDecoder::strict(self.config.max_protocol_bytes),
+                pending: None,
+                keys,
+                source: self.descriptor.id().clone(),
+                stream: self.stream.clone(),
+                limits: self.config.transactions,
+                binding,
+                managed_slot: None,
+                resume: decoder_resume,
+                transport_sequence: Arc::new(AtomicU64::new(0)),
+                filtered: !self.config.connection.tables.is_empty(),
+            },
+            progress: WorkerProgress::Shared(progress),
+            confirmed,
+            next_feedback: Instant::now(),
+            config: self.config.clone(),
+            persistent: options.persistent,
+            rows: Some(RowEmission::shared(
+                position,
+                previous,
+                self.transport_sequence.clone(),
+                shared.counters.clone(),
+                observed.max_counter,
+                observed.max_lsn.max(resume),
+                observed.boundaries,
+            )),
+            reconnect: Some(options),
+            whole: None,
+        })
+    }
+
+    async fn prepare_shared_transactions(
+        &self,
+        snapshot: ConsumerProgressSnapshot,
+    ) -> Result<Worker> {
+        use drasi_postgres_common::replication::shared_transactions::transaction_binding;
+        let shared = self
+            .shared
+            .as_ref()
+            .context("PostgreSQL consumer binding is missing")?;
+        anyhow::ensure!(
+            shared.mode == SharedMode::Transactions && self.rows.is_none(),
+            "shared PostgreSQL transaction output mode changed"
+        );
+        let retained_origin = shared.retained_origin(&snapshot, self.descriptor.id())?;
+        let fresh = shared::fresh_transactions(
+            &snapshot,
+            &shared.expected,
+            self.descriptor.id(),
+            &self.stream,
+            retained_origin,
+        )?;
+        let mut connection = connect(&self.config).await?;
+        validate_retention(&mut connection, &self.config).await?;
+        let (keys, base) = source_binding(
+            &mut connection,
+            &self.config,
+            self.descriptor.id(),
+            &self.stream,
+        )
+        .await?;
+        let binding = transaction_binding(base);
+        let observed = shared::observe_transactions(
+            &snapshot,
+            &shared.expected,
+            self.descriptor.id(),
+            &self.stream,
+            binding,
+        )?;
+        anyhow::ensure!(
+            observed.ready,
+            "PostgreSQL transaction consumers are not ready"
+        );
+        let initial = retained_origin.unwrap_or(parse_lsn(&self.config.start_lsn)?);
+        let resume = if fresh {
+            anyhow::ensure!(
+                observed.missing && observed.minimum.is_none(),
+                "PostgreSQL fresh transaction consumers changed"
+            );
+            initial
+        } else {
+            observed
+                .minimum
+                .context("PostgreSQL shared transaction initialization has no cursor")?
+                .position
+                .commit_lsn
+        };
+        let slot = connection
+            .get_replication_slot_info(&self.config.connection.slot_name)
+            .await?;
+        anyhow::ensure!(
+            slot.output_plugin == "pgoutput"
+                && parse_lsn(slot.restart_lsn.as_deref().context("slot has no retained WAL")?)? <= resume
+                && parse_lsn(&slot.consistent_point)? <= resume,
+            "PostgreSQL shared whole-commit cursor is no longer retained; explicit recovery is required"
+        );
+        let progress = SharedUpdates::new(
+            shared,
+            &snapshot,
+            self.descriptor.id(),
+            binding,
+            fresh.then_some(initial),
+        )?;
+        let whole = TransactionEmission::new(
+            shared.counters.clone(),
+            self.transport_sequence.clone(),
+            observed.max_counter,
+            observed.max_lsn.max(resume),
+        );
+        start_replication(&mut connection, &self.config, resume).await?;
+        Ok(Worker {
+            connection: Some(connection),
+            transactions: Transactions {
+                decoder: PgOutputDecoder::strict(self.config.max_protocol_bytes),
+                pending: None,
+                keys,
+                source: self.descriptor.id().clone(),
+                stream: self.stream.clone(),
+                limits: self.config.transactions,
+                binding,
+                managed_slot: None,
+                resume,
+                transport_sequence: self.transport_sequence.clone(),
+                filtered: !self.config.connection.tables.is_empty(),
+            },
+            progress: WorkerProgress::SharedTransactions(progress),
+            confirmed: resume,
+            next_feedback: Instant::now(),
+            config: self.config.clone(),
+            persistent: true,
+            rows: None,
+            reconnect: None,
+            whole: Some(whole),
+        })
+    }
+
+    async fn join(&mut self, stopping: bool) -> Result<()> {
         match join_owned_worker(self.worker.get_mut(), self.config.timeout()).await? {
+            WorkerCompletion::Completed(Err(error))
+                if stopping && self.shared.is_some() && consumer_progress_closed(&error) =>
+            {
+                Ok(())
+            }
             WorkerCompletion::Completed(result) => result,
             WorkerCompletion::Cancelled | WorkerCompletion::Absent => Ok(()),
         }
@@ -272,12 +561,32 @@ impl NativeComponent for PostgresTransactionSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
+    fn consumer_progress_reader(&self) -> Option<ConsumerProgressView> {
+        self.shared.as_ref().map(|binding| binding.reader.clone())
+    }
+    fn consumer_replay_retention(&self) -> Option<StorageDurability> {
+        (self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.mode == SharedMode::Transactions)
+            || (self.shared.is_some() && self.rows.is_some_and(|options| options.persistent)))
+        .then_some(StorageDurability::LOCAL_PROCESS_RESTART)
+    }
+    fn input_position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
+        self.shared.as_ref().map(|binding| binding.policy.clone())
+    }
     fn configuration(&self) -> Result<serde_json::Value> {
         let mut value = serde_json::json!({
             "stream": self.stream.as_str(),
             "settings": self.config,
             "coordinated_snapshot": self.coordinated_snapshot,
         });
+        if self.shared.is_some() {
+            value
+                .as_object_mut()
+                .context("PostgreSQL configuration is not an object")?
+                .remove("coordinated_snapshot");
+        }
         if let Some(rows) = self.rows {
             value["persistent"] = rows.persistent.into();
             value["auto_create_slot"] = rows.auto_create_slot.into();
@@ -293,14 +602,33 @@ impl NativeComponent for PostgresTransactionSource {
             "PostgreSQL source requires awaited cleanup before restart"
         );
         self.cleanup_required = true;
-        let progress = self.progress.wait_ready().await?;
-        let mut worker = tokio::time::timeout(self.config.timeout(), self.prepare(progress))
-            .await
-            .context("PostgreSQL startup timed out")??;
+        let mut worker = match (&self.progress, &self.shared) {
+            (Some(progress), None) => {
+                let progress = progress.wait_ready().await?;
+                tokio::time::timeout(self.config.timeout(), self.prepare(progress))
+                    .await
+                    .context("PostgreSQL startup timed out")??
+            }
+            (None, Some(shared)) => {
+                let progress = shared.reader.wait_ready().await?;
+                tokio::time::timeout(self.config.timeout(), async {
+                    match shared.mode {
+                        SharedMode::Rows => self.prepare_shared(progress).await,
+                        SharedMode::Transactions => {
+                            self.prepare_shared_transactions(progress).await
+                        }
+                    }
+                })
+                .await
+                .context("PostgreSQL shared startup timed out")??
+            }
+            _ => anyhow::bail!("PostgreSQL source progress binding is invalid"),
+        };
         let (sender, receiver) = mpsc::channel(1);
         self.receiver = Some(receiver);
         self.shutdown.send_replace(false);
         let mut shutdown = self.shutdown.subscribe();
+        let shared = self.shared.is_some();
         spawn_owned_worker(&self.worker, async move {
             let result = tokio::select! {
                 biased;
@@ -308,7 +636,13 @@ impl NativeComponent for PostgresTransactionSource {
                 result = worker.run(sender) => result,
             };
             if let Err(error) = &result {
-                log::error!("Native PostgreSQL replication stopped: {error:#}");
+                if shared && consumer_progress_closed(error) {
+                    log::debug!(
+                        "PostgreSQL consumer progress fenced; reader requires cleanup: {error:#}"
+                    );
+                } else {
+                    log::error!("Native PostgreSQL replication stopped: {error:#}");
+                }
             }
             result
         })
@@ -317,7 +651,7 @@ impl NativeComponent for PostgresTransactionSource {
     }
     async fn stop(&mut self) -> Result<()> {
         self.shutdown.send_replace(true);
-        self.join().await?;
+        self.join(true).await?;
         self.receiver = None;
         self.cleanup_required = false;
         Ok(())
@@ -327,7 +661,7 @@ impl NativeComponent for PostgresTransactionSource {
 #[async_trait]
 impl NativeSource for PostgresTransactionSource {
     fn recovery_reader(&self) -> Option<SourceProgressView> {
-        Some(self.progress.clone())
+        self.progress.clone()
     }
     fn replay_retention(&self) -> Option<(StorageDurability, ComponentId)> {
         if self.rows.is_some_and(|rows| !rows.persistent) {
@@ -335,7 +669,7 @@ impl NativeSource for PostgresTransactionSource {
         }
         Some((
             StorageDurability::LOCAL_PROCESS_RESTART,
-            self.progress.component_id().clone(),
+            self.progress.as_ref()?.component_id().clone(),
         ))
     }
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
@@ -346,7 +680,7 @@ impl NativeSource for PostgresTransactionSource {
         if let Some(envelope) = receiver.recv().await {
             return Ok(Some(envelope));
         }
-        self.join().await?;
+        self.join(false).await?;
         anyhow::bail!("PostgreSQL replication ended; stop and restart the source")
     }
 }
@@ -361,56 +695,151 @@ impl Drop for PostgresTransactionSource {
     }
 }
 
+// The host revokes this capability before invoking native stop. Other failures
+// propagate, and CLOSED is only accepted by stop after the worker joins.
+fn consumer_progress_closed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<drasi_computation_plugin_sdk::transport::Failure>()
+        .is_some_and(|failure| failure.code == drasi_computation_plugin_sdk::abi::status::CLOSED)
+}
+
+enum WorkerProgress {
+    Single {
+        updates: Box<dyn SourceProgressUpdates>,
+        generation: u64,
+    },
+    Shared(SharedUpdates),
+    SharedTransactions(SharedUpdates),
+}
+
+impl WorkerProgress {
+    async fn changed(&mut self) -> Result<()> {
+        match self {
+            Self::Single { updates, .. } => updates.changed().await,
+            Self::Shared(progress) | Self::SharedTransactions(progress) => {
+                progress.updates.changed().await
+            }
+        }
+    }
+}
+
+async fn start_replication(
+    connection: &mut Connection,
+    config: &PostgresTransactionConfig,
+    resume: u64,
+) -> Result<()> {
+    let publication = format!(
+        "\"{}\"",
+        config.connection.publication_name.replace('"', "\"\"")
+    );
+    connection
+        .start_replication(
+            &config.connection.slot_name,
+            Some(resume),
+            HashMap::from([
+                ("proto_version".into(), "1".into()),
+                ("publication_names".into(), publication.replace('\'', "''")),
+            ]),
+        )
+        .await
+}
+
 struct Worker {
     connection: Option<Connection>,
     transactions: Transactions,
-    progress: Box<dyn SourceProgressUpdates>,
-    reset_generation: u64,
+    progress: WorkerProgress,
     confirmed: u64,
     next_feedback: Instant,
     config: PostgresTransactionConfig,
     persistent: bool,
     rows: Option<RowEmission>,
     reconnect: Option<RowSourceOptions>,
+    whole: Option<TransactionEmission>,
 }
 
 impl Worker {
     async fn feedback(&mut self) -> Result<()> {
-        let snapshot = self.progress.snapshot()?;
-        anyhow::ensure!(
-            snapshot.failure.is_none(),
-            "PostgreSQL consumer progress is fenced"
-        );
-        anyhow::ensure!(
-            snapshot.reset_generation == self.reset_generation,
-            "PostgreSQL consumer was reset; explicit source reconstruction is required"
-        );
-        if snapshot.ready {
-            anyhow::ensure!(
-                !self.persistent || snapshot.persistent,
-                "PostgreSQL consumer lost persistent progress"
-            );
-            let next = if let Some(rows) = &self.rows {
-                rows.confirmed(&snapshot, &self.transactions)?
-            } else {
-                checkpoint(
-                    &snapshot,
-                    &self.transactions.source,
-                    self.transactions.binding,
-                )?
-            };
-            if let Some(next) = next {
+        let next = match &mut self.progress {
+            WorkerProgress::Single {
+                updates,
+                generation,
+            } => {
+                let snapshot = updates.snapshot()?;
                 anyhow::ensure!(
-                    next >= self.confirmed
-                        && next
-                            <= self
-                                .rows
-                                .as_ref()
-                                .map_or(self.transactions.resume, RowEmission::admitted_lsn),
-                    "PostgreSQL committed cursor moved outside the admitted range"
+                    snapshot.failure.is_none(),
+                    "PostgreSQL consumer progress is fenced"
                 );
-                self.confirmed = next;
+                anyhow::ensure!(
+                    snapshot.reset_generation == *generation,
+                    "PostgreSQL consumer was reset; explicit source reconstruction is required"
+                );
+                if snapshot.ready {
+                    anyhow::ensure!(
+                        !self.persistent || snapshot.persistent,
+                        "PostgreSQL consumer lost persistent progress"
+                    );
+                    if let Some(rows) = &self.rows {
+                        rows.confirmed(&snapshot, &self.transactions)?
+                    } else {
+                        checkpoint(
+                            &snapshot,
+                            &self.transactions.source,
+                            self.transactions.binding,
+                        )?
+                    }
+                } else {
+                    None
+                }
             }
+            WorkerProgress::Shared(progress) => {
+                let observed = progress.snapshot(
+                    &self.transactions.source,
+                    &self.transactions.stream,
+                    self.transactions.binding,
+                    self.persistent,
+                )?;
+                let rows = self
+                    .rows
+                    .as_ref()
+                    .context("shared source has no row emissions")?;
+                rows.validate_shared_observation(observed.max_counter, observed.max_lsn)?;
+                if observed.ready {
+                    observed.minimum.map(|minimum| minimum.feedback_lsn)
+                } else {
+                    None
+                }
+            }
+            WorkerProgress::SharedTransactions(progress) => {
+                let observed = progress.transaction_snapshot(
+                    &self.transactions.source,
+                    &self.transactions.stream,
+                    self.transactions.binding,
+                )?;
+                self.whole
+                    .as_ref()
+                    .context("shared source has no whole-transaction emissions")?
+                    .validate_observation(observed.max_counter, observed.max_lsn)?;
+                if observed.ready {
+                    observed.minimum.map(|minimum| minimum.position.commit_lsn)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(next) = next {
+            anyhow::ensure!(
+                next >= self.confirmed
+                    && next
+                        <= self.rows.as_ref().map_or_else(
+                            || self.whole.as_ref().map_or(
+                                self.transactions.resume,
+                                TransactionEmission::admitted_lsn
+                            ),
+                            RowEmission::admitted_lsn,
+                        ),
+                "PostgreSQL committed cursor moved outside the admitted range"
+            );
+            self.confirmed = next;
         }
         let io_deadline = Instant::now() + self.config.timeout();
         let assembly_deadline = self
@@ -486,22 +915,70 @@ impl Worker {
     }
 
     async fn reopen(&mut self) -> Result<()> {
-        let progress = self.progress.snapshot()?;
-        anyhow::ensure!(
-            progress.ready
-                && progress.failure.is_none()
-                && progress.reset_generation == self.reset_generation
-                && (!self.persistent || progress.persistent),
-            "PostgreSQL row owner is not ready for safe reconnection"
-        );
-        let position = row_checkpoint(
-            &progress,
-            &self.transactions.source,
-            self.transactions.binding,
-        )?;
-        let confirmed = position
-            .as_ref()
-            .map_or(self.confirmed, |position| position.feedback_lsn());
+        let (position, confirmed, previous, shared_floor) = match &mut self.progress {
+            WorkerProgress::Single {
+                updates,
+                generation,
+            } => {
+                let progress = updates.snapshot()?;
+                anyhow::ensure!(
+                    progress.ready
+                        && progress.failure.is_none()
+                        && progress.reset_generation == *generation
+                        && (!self.persistent || progress.persistent),
+                    "PostgreSQL row owner is not ready for safe reconnection"
+                );
+                let position = row_checkpoint(
+                    &progress,
+                    &self.transactions.source,
+                    self.transactions.binding,
+                )?;
+                let confirmed = position
+                    .as_ref()
+                    .map_or(self.confirmed, |position| position.feedback_lsn());
+                (position, confirmed, confirmed, None)
+            }
+            WorkerProgress::Shared(progress) => {
+                let observed = progress.snapshot(
+                    &self.transactions.source,
+                    &self.transactions.stream,
+                    self.transactions.binding,
+                    self.persistent,
+                )?;
+                anyhow::ensure!(
+                    observed.ready,
+                    "PostgreSQL shared consumers are not ready for safe reconnection"
+                );
+                self.rows
+                    .as_ref()
+                    .context("shared source has no row emissions")?
+                    .validate_shared_observation(observed.max_counter, observed.max_lsn)?;
+                let (position, confirmed, previous) = match observed.minimum {
+                    Some(minimum) => {
+                        let previous = minimum.position.feedback_lsn();
+                        (Some(minimum.position), minimum.feedback_lsn, previous)
+                    }
+                    None => {
+                        anyhow::ensure!(observed.missing, "PostgreSQL shared minimum is fenced");
+                        let origin = progress.initial_lsn()?;
+                        anyhow::ensure!(
+                            self.confirmed == origin,
+                            "PostgreSQL shared streaming origin is no longer retained"
+                        );
+                        (None, origin, origin)
+                    }
+                };
+                (
+                    position,
+                    confirmed,
+                    previous,
+                    Some((observed.max_counter, observed.max_lsn, observed.boundaries)),
+                )
+            }
+            WorkerProgress::SharedTransactions(_) => {
+                anyhow::bail!("PostgreSQL transaction restart is graph-owned")
+            }
+        };
         anyhow::ensure!(
             confirmed >= self.confirmed,
             "PostgreSQL committed row cursor moved backwards"
@@ -535,20 +1012,7 @@ impl Worker {
                 && parse_lsn(&slot.consistent_point)? <= confirmed,
             "PostgreSQL committed row cursor is no longer retained"
         );
-        let publication = format!(
-            "\"{}\"",
-            self.config.connection.publication_name.replace('"', "\"\"")
-        );
-        connection
-            .start_replication(
-                &self.config.connection.slot_name,
-                Some(resume),
-                HashMap::from([
-                    ("proto_version".into(), "1".into()),
-                    ("publication_names".into(), publication.replace('\'', "''")),
-                ]),
-            )
-            .await?;
+        start_replication(&mut connection, &self.config, resume).await?;
         self.transactions.decoder = PgOutputDecoder::strict(self.config.max_protocol_bytes);
         self.transactions.pending = None;
         self.transactions.keys = keys;
@@ -562,10 +1026,16 @@ impl Worker {
         } else {
             resume
         };
-        self.rows
+        let rows = self
+            .rows
             .as_mut()
-            .context("reconnect is only available for row sources")?
-            .rewind(position, confirmed);
+            .context("reconnect is only available for row sources")?;
+        match shared_floor {
+            Some((counter, lsn, boundaries)) => {
+                rows.rewind_shared(position, previous, counter, lsn, boundaries)?
+            }
+            None => rows.rewind(position, previous),
+        }
         self.connection = Some(connection);
         self.confirmed = confirmed;
         self.next_feedback = Instant::now();
@@ -615,7 +1085,12 @@ impl Worker {
                         BackendMessage::CopyData(data) => match data.first() {
                             Some(b'w') => {
                                 anyhow::ensure!(data.len() > 25, "truncated PostgreSQL XLogData");
-                                if let Some(group) = self.transactions.decode(&data[25..])? {
+                                let group = match &self.whole {
+                                    Some(whole) => self.transactions.decode_with_position(&data[25..], |lsn, binding, managed| whole.position(lsn, binding, managed))?,
+                                    None => self.transactions.decode(&data[25..])?,
+                                };
+                                if let Some(group) = group {
+                                    if let Some(whole) = &self.whole { whole.admit(self.transactions.resume); }
                                     if let Some(rows) = &mut self.rows {
                                         pending = rows.expand(group, &self.transactions)?;
                                     } else {

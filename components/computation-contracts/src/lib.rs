@@ -11,6 +11,7 @@ mod bootstrap;
 #[doc(hidden)]
 pub mod codec;
 mod component_data;
+mod consumer_progress;
 #[doc(hidden)]
 pub mod delivery;
 #[doc(hidden)]
@@ -26,6 +27,7 @@ pub mod exchange;
 #[doc(hidden)]
 pub mod graph_codec;
 mod identity;
+mod input_position;
 mod internal;
 #[doc(hidden)]
 pub mod ports;
@@ -42,12 +44,14 @@ pub mod workers;
 pub use binary_codec::*;
 pub use codec::*;
 pub use component_data::*;
+pub use consumer_progress::*;
 pub use data::*;
 pub use drasi_core_types::{profiling, schema};
 pub use envelope::*;
 pub use error::{ContractError, OperationFailures, Result};
 pub use graph_codec::*;
 pub use identity::*;
+pub use input_position::*;
 pub use ports::*;
 pub use progress::*;
 pub use query_codec::*;

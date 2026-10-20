@@ -7,8 +7,8 @@ use mysql_common::{
     constants::{CapabilityFlags, ColumnType},
     io::ParseBuf,
     packets::{
-        AuthPlugin, AuthSwitchRequest, Column, ComBinlogDump, ComRegisterSlave, ErrPacket,
-        HandshakePacket, HandshakeResponse, SslRequest,
+        AuthPlugin, AuthSwitchRequest, BinlogDumpFlags, Column, ComBinlogDump, ComRegisterSlave,
+        ErrPacket, HandshakePacket, HandshakeResponse, SslRequest,
     },
     proto::MySerialize,
 };
@@ -744,6 +744,20 @@ impl Connection {
         self.command_incomplete = false;
         let mut request = Vec::new();
         ComBinlogDump::new(server_id)
+            .with_filename(file.as_bytes())
+            .with_pos(position)
+            .serialize(&mut request);
+        self.command(&request).await?;
+        self.replication = true;
+        Ok(())
+    }
+
+    pub async fn start_binlog_history(&mut self, file: &str, position: u32) -> Result<()> {
+        // Finite mysqlbinlog-style readers must not register the live source's
+        // server ID and disconnect another consumer's snapshot or replication.
+        let mut request = Vec::new();
+        ComBinlogDump::new(0)
+            .with_flags(BinlogDumpFlags::BINLOG_DUMP_NON_BLOCK)
             .with_filename(file.as_bytes())
             .with_pos(position)
             .serialize(&mut request);

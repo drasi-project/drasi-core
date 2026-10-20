@@ -205,6 +205,8 @@ pub struct NativeComponentProxy {
 pub(super) struct SourceBindings {
     pub(super) admission: Option<(Arc<SourceAdmission>, super::admission::AdmissionBinding)>,
     pub(super) progress: Option<BoundProgress>,
+    pub(super) consumer_progress: Option<BoundConsumerProgress>,
+    pub(super) input_progress: Option<Arc<QuerySourceProgress>>,
 }
 
 pub(super) struct BoundProgress {
@@ -212,6 +214,176 @@ pub(super) struct BoundProgress {
     pub(super) binding: super::progress::ProgressBinding,
     pub(super) extension: abi::recovery::PluginRecoveryV1,
     pub(super) retention: Option<drasi_core::interface::StorageDurability>,
+}
+
+pub(super) struct BoundConsumerProgress {
+    pub(super) owner: Arc<ConsumerProgressSet>,
+    pub(super) binding: super::consumer_progress::ConsumerProgressBinding,
+    pub(super) extension: abi::consumer_progress::PluginConsumerProgressV1,
+    pub(super) retention: Option<drasi_core::interface::StorageDurability>,
+    pub(super) position_policy: Option<Arc<InputPositionPolicy>>,
+}
+
+#[cfg(test)]
+mod consumer_position_tests {
+    use super::super::{tests::consumer_progress_fixture as fixture, NativePlugin};
+    use super::*;
+    use drasi_computation_contracts::MAX_SOURCE_POSITION_BYTES;
+    use drasi_computation_plugin_sdk as sdk;
+    use futures_util::poll;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn consumer_progress_input_policy_is_independent_of_pending_processing_and_component_lifetime(
+    ) -> anyhow::Result<()> {
+        let linked = NativePlugin::from_definition(sdk::PluginDefinition::new(
+            "fixture/consumer-positions",
+            "1",
+            fixture::factories(),
+            vec![GraphChangeCodec::schema()],
+        )?)?;
+        let dynamic = super::super::factory::recovery_tests::sqlite_plugin()?;
+        for plugin in [linked, dynamic] {
+            for role in [ComponentRole::Source, ComponentRole::Transformer] {
+                let factory = plugin
+                    .factories()
+                    .iter()
+                    .find(|factory| {
+                        factory.metadata().role == role
+                            && factory
+                                .metadata()
+                                .implementation
+                                .name
+                                .starts_with("fixture/consumer-progress-")
+                    })
+                    .unwrap();
+                let id = ComponentId::try_new("producer")?;
+                let owner = Arc::new(QuerySourceProgress::new(
+                    "graph",
+                    ComponentId::try_new("query")?,
+                )?);
+                let progress = Arc::new(ConsumerProgressSet::new("graph", id.clone(), [owner])?);
+                let mut proxy = factory.create_component_with_consumer_progress(
+                    id,
+                    serde_json::json!({"mode": "positions"}),
+                    sdk::Scope {
+                        graph_id: "graph".into(),
+                        instance_id: "graph".into(),
+                        generation: 1,
+                    },
+                    progress.clone(),
+                )?;
+                let policy = proxy
+                    .bindings
+                    .consumer_progress
+                    .as_ref()
+                    .unwrap()
+                    .position_policy
+                    .clone()
+                    .unwrap();
+                assert_eq!(policy.key(), &SourceProgressKey::Source("source".into()));
+                assert_eq!(
+                    proxy.recovery_contract(),
+                    ComponentRecovery::default().with_consumer_positions(progress, policy.clone())
+                );
+                proxy.start().await?;
+                let input = InputEnvelope {
+                    port: PortId::try_new("in")?,
+                    envelope: GraphChangeCodec::encode_change(
+                        drasi_core::models::SourceChange::Delete {
+                            metadata: drasi_core::models::ElementMetadata {
+                                reference: drasi_core::models::ElementReference::new(
+                                    "source", "one",
+                                ),
+                                labels: Arc::from([Arc::from("Item")]),
+                                effective_from: 1,
+                            },
+                        },
+                        StreamId::try_new("source/out")?,
+                        1,
+                        None,
+                    )?,
+                };
+                let mut pending = Box::pin(async {
+                    if role == ComponentRole::Source {
+                        proxy.next().await.map(|_| ())
+                    } else {
+                        proxy.transform(input).await.map(|_| ())
+                    }
+                });
+                assert!(poll!(pending.as_mut()).is_pending());
+                assert!(policy.is_after(&[0, 7], &[6, 90])?);
+                assert!(!policy.is_after(&[1, 89], &[6, 90])?);
+                assert!(!policy.is_after(&[1, 90], &[6, 90])?);
+                assert!(policy.is_after(&[2, 1], &[6, 90]).is_err());
+                assert!(policy.is_after(&[0, 1], &vec![0; MAX_SOURCE_POSITION_BYTES])?);
+                assert!(policy
+                    .is_after(&vec![0; MAX_SOURCE_POSITION_BYTES + 1], &[0])
+                    .is_err());
+                assert!(poll!(pending.as_mut()).is_pending());
+                drop(pending);
+                proxy.stop().await?;
+                drop(proxy);
+                // This is an immutable retained comparator, not a live reader;
+                // the graph owns installation/revocation of its input policy.
+                assert!(policy.is_after(&[0, 7], &[6, 90])?);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn consumer_progress_comparison_panic_quarantines_pending_native_processing(
+    ) -> anyhow::Result<()> {
+        let plugin = NativePlugin::from_definition(sdk::PluginDefinition::new(
+            "fixture/position-panic",
+            "1",
+            fixture::factories(),
+            vec![GraphChangeCodec::schema()],
+        )?)?;
+        let id = ComponentId::try_new("producer")?;
+        let progress = Arc::new(ConsumerProgressSet::new(
+            "graph",
+            id.clone(),
+            [Arc::new(QuerySourceProgress::new(
+                "graph",
+                ComponentId::try_new("query")?,
+            )?)],
+        )?);
+        let mut proxy = plugin.factories()[0].create_component_with_consumer_progress(
+            id,
+            serde_json::json!({"mode":"positions"}),
+            sdk::Scope {
+                graph_id: "graph".into(),
+                instance_id: "graph".into(),
+                generation: 1,
+            },
+            progress,
+        )?;
+        let policy = proxy
+            .bindings
+            .consumer_progress
+            .as_ref()
+            .unwrap()
+            .position_policy
+            .clone()
+            .unwrap();
+        proxy.start().await?;
+        let mut pending = Box::pin(proxy.next());
+        assert!(poll!(pending.as_mut()).is_pending());
+        let error = policy.is_after(&[255], &[0]).unwrap_err();
+        assert!(error.downcast_ref::<ComponentPanic>().is_some());
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+            .await?
+            .unwrap_err();
+        assert!(error.chain().any(|cause| cause.is::<ComponentPanic>()));
+        assert!(policy
+            .is_after(&[0, 1], &[0])
+            .unwrap_err()
+            .downcast_ref::<ComponentPanic>()
+            .is_some());
+        proxy.stop().await?;
+        Ok(())
+    }
 }
 
 impl NativeComponentProxy {
@@ -246,6 +418,32 @@ impl NativeComponentProxy {
                 "unsupported native source recovery declaration"
             );
             progress.retention = recovery.retention;
+        }
+        if let Some(progress) = &mut bindings.consumer_progress {
+            let bytes = unsafe {
+                take_reply(progress.extension.inspect.expect("validated")(
+                    inner.raw.state,
+                ))?
+            };
+            let recovery: drasi_computation_plugin_sdk::consumer_progress::InstanceProgress =
+                drasi_computation_plugin_sdk::consumer_progress::decode(&bytes)?;
+            anyhow::ensure!(
+                recovery.version == abi::consumer_progress::VERSION,
+                "unsupported native consumer progress declaration"
+            );
+            progress.retention = recovery.retention;
+            let mut raw = abi::consumer_progress::InputPositionPolicyV1::null();
+            unsafe {
+                take_status(progress.extension.position_policy.expect("validated")(
+                    inner.raw.state,
+                    &mut raw,
+                ))?;
+            }
+            progress.position_policy = unsafe { super::input_position::from_borrowed(raw)? };
+            anyhow::ensure!(
+                progress.position_policy.is_some() == recovery.position_policy,
+                "native producer changed its declared input position policy"
+            );
         }
         Ok(Self {
             inner,
@@ -322,6 +520,10 @@ impl NativeComponentProxy {
     }
     pub(super) fn into_transactional(self) -> anyhow::Result<NativeTransactionalProxy> {
         anyhow::ensure!(
+            self.bindings.input_progress.is_none(),
+            "graph-owned volatile input progress cannot be used inside a transaction"
+        );
+        anyhow::ensure!(
             self.metadata.capabilities.transactional,
             "native component is not a transaction participant"
         );
@@ -352,6 +554,7 @@ impl Drop for NativeComponentProxy {
         self.query_snapshots.take();
         self.bindings.admission.take();
         self.bindings.progress.take();
+        self.bindings.consumer_progress.take();
         self.inner.revoke_control();
     }
 }
@@ -362,16 +565,33 @@ impl ComputationComponent for NativeComponentProxy {
         &self.descriptor
     }
     fn recovery_contract(&self) -> ComponentRecovery {
-        match &self.bindings.progress {
-            Some(progress) => {
-                progress
-                    .retention
-                    .map_or_else(ComponentRecovery::default, |retention| {
-                        ComponentRecovery::admitted(retention)
-                            .replay_until(progress.owner.component_id().clone())
-                    })
+        let recovery = if let Some(progress) = &self.bindings.consumer_progress {
+            let recovery = progress
+                .retention
+                .map_or_else(ComponentRecovery::default, ComponentRecovery::admitted)
+                .with_consumer_progress(progress.owner.clone());
+            match &progress.position_policy {
+                Some(policy) => {
+                    recovery.with_consumer_positions(progress.owner.clone(), policy.clone())
+                }
+                None => recovery,
             }
-            None => ComponentRecovery::default(),
+        } else {
+            match &self.bindings.progress {
+                Some(progress) => {
+                    progress
+                        .retention
+                        .map_or_else(ComponentRecovery::default, |retention| {
+                            ComponentRecovery::admitted(retention)
+                                .replay_until(progress.owner.component_id().clone())
+                        })
+                }
+                None => ComponentRecovery::default(),
+            }
+        };
+        match &self.bindings.input_progress {
+            Some(progress) => recovery.with_volatile_input_progress(progress.clone()),
+            None => recovery,
         }
     }
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
@@ -404,6 +624,12 @@ impl ComputationComponent for NativeComponentProxy {
                 return Err(operation_failure(error.clone()));
             }
         }
+        let activation = self
+            .bindings
+            .consumer_progress
+            .as_ref()
+            .map(|progress| progress.binding.activate())
+            .transpose()?;
         if let Some(binding) = &self.query_snapshots {
             binding.activate()?;
         }
@@ -412,16 +638,24 @@ impl ComputationComponent for NativeComponentProxy {
             if let Some(binding) = &self.query_snapshots {
                 binding.deactivate();
             }
+        } else if let Some(activation) = activation {
+            activation.complete();
         }
         result
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
+        if let Some(progress) = &self.bindings.consumer_progress {
+            progress.binding.deactivate();
+        }
         if let Some(binding) = &self.query_snapshots {
             binding.deactivate();
         }
         self.inner.unit(abi::operation::STOP, &[]).await?;
         if let Some(binding) = &self.query_snapshots {
             binding.ensure_quiesced()?;
+        }
+        if let Some(progress) = &self.bindings.consumer_progress {
+            progress.binding.stopped()?;
         }
         Ok(())
     }

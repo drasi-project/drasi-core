@@ -29,7 +29,7 @@ use drasi_core::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    producer_progress::{GraphInputProgress, INPUT_OWNER_PREFIX},
+    producer_progress::{GraphInputProgress, QueryInputOwner, INPUT_OWNER_PREFIX},
     ChangeEnvelope, ComponentId, EnvelopeCodec, GraphChangeCodec, GraphProducerIdentity,
     GraphProducerProgress, MiddlewareTransformerDefinition, OutputEnvelope, Schema,
     SourceProgressKey, SourceProgressSnapshot, StreamId,
@@ -69,29 +69,6 @@ struct Configuration {
     version: u32,
     definition: serde_json::Value,
     identity: GraphProducerIdentity,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QueryInputOwner {
-    version: u32,
-    identity: super::QueryRecoveryIdentity,
-    generation: u64,
-}
-
-impl QueryInputOwner {
-    fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.version == 1,
-            "unsupported query input identity version"
-        );
-        self.identity.validate()?;
-        anyhow::ensure!(
-            self.identity.incarnation().is_none(),
-            "transaction processing cannot recover through a volatile query"
-        );
-        Ok(())
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -560,7 +537,7 @@ impl TransformStore {
                             anyhow::anyhow!("invalid transactional query input owner")
                         })?,
                 )?;
-                owner.validate()?;
+                owner.validate(true)?;
                 anyhow::ensure!(
                     saved.contains_key(input),
                     "query input owner has no committed position"
@@ -657,74 +634,51 @@ impl TransformStore {
         input: &ChangeEnvelope,
         changes: Vec<SourceChange>,
         pipeline: &SourceMiddlewarePipeline,
+        progress_owner: Option<&super::QuerySourceProgress>,
     ) -> anyhow::Result<Option<ChangeEnvelope>> {
-        let progress = GraphInputProgress::from_envelope(input)?;
+        let progress = GraphInputProgress::from_envelope(input)?
+            .with_consumer_boundary(input, progress_owner)?;
         let receipt = InputReceipt::new(&progress, &changes)?;
         let stream = self.output_stream.clone();
-        self.process_with(progress, receipt, None, |elements, emission| async move {
-            let mut output = Vec::new();
-            for change in changes {
-                let transformed = pipeline.process(change, elements.clone()).await?;
-                super::middleware::remember(elements.as_ref(), &transformed).await?;
-                output.extend(transformed);
-            }
-            Ok(GraphChangeCodec::derive_changes(
-                input, &output, stream, emission,
-            )?)
-        })
+        self.process_with(
+            progress,
+            receipt,
+            None,
+            progress_owner,
+            |elements, emission| async move {
+                let mut output = Vec::new();
+                for change in changes {
+                    let transformed = pipeline.process(change, elements.clone()).await?;
+                    super::middleware::remember(elements.as_ref(), &transformed).await?;
+                    output.extend(transformed);
+                }
+                Ok(GraphChangeCodec::derive_changes(
+                    input, &output, stream, emission,
+                )?)
+            },
+        )
         .await
     }
 
     pub async fn process_envelope<F, Fut>(
         &mut self,
         input: &ChangeEnvelope,
+        progress_owner: Option<&super::QuerySourceProgress>,
         transform: F,
     ) -> anyhow::Result<Option<ChangeEnvelope>>
     where
         F: FnOnce(Arc<dyn ElementIndex>, u64) -> Fut + Send,
         Fut: Future<Output = anyhow::Result<ChangeEnvelope>> + Send,
     {
-        let query_input =
-            input.changes().schema() == super::QueryChangeCodec::schema().descriptor();
-        let immediate_producer = if query_input {
-            GraphProducerProgress::from_query_envelope(input)?
-        } else {
-            GraphProducerProgress::from_envelope(input)?
-        };
-        let (progress, owner) = if immediate_producer.is_some() {
-            (GraphInputProgress::from_envelope(input)?, None)
-        } else if query_input {
-            anyhow::ensure!(
-                !super::QueryChangeCodec::is_snapshot(input) && !super::QueryChangeCodec::is_progress_only(input),
-                "transaction query inputs must be ordinary result events, not snapshot/skip decisions"
-            );
-            let owner = QueryInputOwner {
-                version: 1,
-                identity: super::QueryRecoveryIdentity::from_envelope(input)?,
-                generation: super::QueryChangeCodec::query_generation(input)?,
-            };
-            owner.validate()?;
-            anyhow::ensure!(
-                super::QueryChangeCodec::metadata(input)?.query_id == owner.identity.query_id(),
-                "query input metadata does not match its producer identity"
-            );
-            (
-                GraphInputProgress::from_stream(
-                    input,
-                    super::QueryChangeCodec::query_sequence(input)?,
-                ),
-                Some(owner),
-            )
-        } else if input.changes().schema() == GraphChangeCodec::schema().descriptor() {
-            (GraphInputProgress::from_envelope(input)?, None)
-        } else {
-            (
-                GraphInputProgress::from_stream(input, input.system().sequence()),
-                None,
-            )
-        };
+        let (progress, owner) =
+            GraphInputProgress::from_processing_input(input, progress_owner, None)?;
+        if let Some(owner) = &owner {
+            owner.validate(true)?;
+        }
+        let progress = progress.with_consumer_boundary(input, progress_owner)?;
         let receipt = InputReceipt::from_envelope(&progress, input, &self.codec)?;
-        self.process_with(progress, receipt, owner, transform).await
+        self.process_with(progress, receipt, owner, progress_owner, transform)
+            .await
     }
 
     async fn process_with<F, Fut>(
@@ -732,6 +686,7 @@ impl TransformStore {
         progress: GraphInputProgress,
         receipt: InputReceipt,
         query_owner: Option<QueryInputOwner>,
+        progress_owner: Option<&super::QuerySourceProgress>,
         transform: F,
     ) -> anyhow::Result<Option<ChangeEnvelope>>
     where
@@ -761,7 +716,7 @@ impl TransformStore {
                         .filter(|_| previous.sequence == 1)
                         .ok_or_else(|| anyhow::anyhow!("invalid saved query input owner"))?,
                 )?;
-                previous.validate()?;
+                previous.validate(true)?;
                 anyhow::ensure!(
                     &previous == current,
                     "query input identity or reset generation changed"
@@ -787,7 +742,16 @@ impl TransformStore {
                 "transaction query input has a missing result; replay it before continuing"
             );
         }
-        if saved.is_some_and(|saved| saved.sequence >= progress.sequence) {
+        let positioned = progress_owner
+            .map(|owner| owner.position_handled(&progress, saved.as_ref()))
+            .transpose()?
+            .flatten();
+        let duplicate = positioned.unwrap_or_else(|| {
+            saved
+                .as_ref()
+                .is_some_and(|saved| saved.sequence >= progress.sequence)
+        });
+        if duplicate {
             let replay_sequence = self
                 .state()?
                 .retained

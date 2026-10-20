@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::computation::v1::{
-    BootstrapWatermark, ChangeEnvelope, ComputationBootstrapSnapshot, QueryOutputMetadata,
+    BootstrapWatermark, ChangeEnvelope, ComponentRole, ComputationBootstrapSnapshot,
+    InputPositionComparator, InputPositionPolicy, QueryOutputMetadata,
 };
 use drasi_computation_contracts::exchange::{SourceEvent, SourceEventWrapper};
 use drasi_core::{
@@ -119,6 +120,81 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 1);
     assert_eq!(owner.snapshot().transport_sequences[&stream], 90);
     assert!(owner.snapshot().failure.is_some());
+    query.stop().await?;
+    Ok(())
+}
+
+struct OneBytePosition;
+
+impl InputPositionComparator for OneBytePosition {
+    fn is_after(&self, event: &[u8], handled: &[u8]) -> anyhow::Result<bool> {
+        let ([event], [handled]) = (event, handled) else {
+            anyhow::bail!("invalid one-byte cursor");
+        };
+        Ok(event > handled)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn position_replay_keeps_handled_cursor_and_rejects_new_position_sequence_regression(
+) -> anyhow::Result<()> {
+    let (mut query, owner) = query().await?;
+    let policy = Arc::new(InputPositionPolicy::new(
+        SourceProgressKey::Source("source".into()),
+        Arc::new(OneBytePosition),
+    )?);
+    owner.bind_input_boundary(
+        &ComponentId::try_new("source")?,
+        ComponentRole::Source,
+        Some(policy.clone()),
+        vec![StreamId::try_new("source/out")?],
+    )?;
+    assert!(owner
+        .bind_input_boundary(
+            &ComponentId::try_new("another-producer")?,
+            ComponentRole::Source,
+            Some(policy),
+            vec![StreamId::try_new("source/out")?],
+        )
+        .is_err());
+    query.start().await?;
+    query.transform(event(5, 10, &[5])?).await?;
+    assert!(query.transform(event(100, 11, &[5])?).await?.is_empty());
+    let key = SourceProgressKey::Source("source".into());
+    let stream = StreamId::try_new("source/out")?;
+    assert_eq!(owner.snapshot().checkpoints[&key].sequence, 5);
+    assert_eq!(owner.snapshot().transport_sequences[&stream], 11);
+    assert!(!query.transform(event(101, 12, &[6])?).await?.is_empty());
+    assert!(query.transform(event(4, 13, &[7])?).await.is_err());
+    let state = owner.snapshot();
+    assert_eq!(state.checkpoints[&key].sequence, 101);
+    assert_eq!(
+        state.checkpoints[&key].source_position.as_deref(),
+        Some(&[6][..])
+    );
+    assert_eq!(state.transport_sequences[&stream], 12);
+    assert!(state.failure.is_some());
+    assert!(!state.persistent);
+    query.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn malformed_initial_position_fails_before_becoming_handled() -> anyhow::Result<()> {
+    let (mut query, owner) = query().await?;
+    owner.bind_input_boundary(
+        &ComponentId::try_new("source")?,
+        ComponentRole::Source,
+        Some(Arc::new(InputPositionPolicy::new(
+            SourceProgressKey::Source("source".into()),
+            Arc::new(OneBytePosition),
+        )?)),
+        vec![StreamId::try_new("source/out")?],
+    )?;
+    query.start().await?;
+    assert!(query.transform(event(1, 1, &[])?).await.is_err());
+    assert!(owner.snapshot().checkpoints.is_empty());
+    assert!(owner.snapshot().transport_sequences.is_empty());
     query.stop().await?;
     Ok(())
 }

@@ -13,8 +13,13 @@ use drasi_lib::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod composite_bootstrap_tests;
 mod native;
-pub use native::{NativeBootstrapConfig, NativeQuerySnapshotsConfig};
+pub use native::{
+    CompositeBootstrapConfig, ConsumerProgressConfig, NativeBootstrapConfig,
+    NativeQuerySnapshotsConfig,
+};
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -34,7 +39,9 @@ enum Recipe {
     SharedQos(SharedQosConfig),
     NativeConsumer(NativeConsumerConfig),
     NativeBootstrap(NativeBootstrapConfig),
+    CompositeBootstrap(CompositeBootstrapConfig),
     NativeQuerySnapshots(NativeQuerySnapshotsConfig),
+    ConsumerProgress(ConsumerProgressConfig),
     Middleware,
     QueryMiddleware,
     TransactionalTransformers,
@@ -372,10 +379,15 @@ impl ManagementResourceResolver for HostManagementResources {
                         &BTreeMap::new(),
                     )?;
                 }
+                Recipe::CompositeBootstrap(config) => {
+                    config.validate(resource, &dependencies)?;
+                    config.validate_owner(&resource.id, desired)?;
+                }
                 Recipe::NativeConsumer(config) => {
                     config.validate_dependencies(resource, &dependencies)?
                 }
                 Recipe::NativeQuerySnapshots(config) => config.validate(resource, &dependencies)?,
+                Recipe::ConsumerProgress(config) => config.validate(resource, &dependencies)?,
                 _ => {}
             }
         }
@@ -452,7 +464,13 @@ impl ManagementResourceResolver for HostManagementResources {
                 )
                 .await;
         }
+        if let Recipe::CompositeBootstrap(config) = recipe {
+            return config.resolve(instance, graph, specification, dependencies);
+        }
         if let Recipe::NativeQuerySnapshots(config) = recipe {
+            return config.resolve(graph, specification, dependencies);
+        }
+        if let Recipe::ConsumerProgress(config) = recipe {
             return config.resolve(graph, specification, dependencies);
         }
         anyhow::ensure!(
@@ -509,8 +527,14 @@ impl ManagementResourceResolver for HostManagementResources {
             Recipe::NativeBootstrap(_) => {
                 unreachable!("native bootstrap resolved with dependencies")
             }
+            Recipe::CompositeBootstrap(_) => {
+                unreachable!("composite bootstrap resolved with dependencies")
+            }
             Recipe::NativeQuerySnapshots(_) => {
                 unreachable!("native query snapshots resolved with dependencies")
+            }
+            Recipe::ConsumerProgress(_) => {
+                unreachable!("consumer progress resolved with dependencies")
             }
             Recipe::Middleware => ResourceHandle::new(
                 ResourceRole::Middleware,

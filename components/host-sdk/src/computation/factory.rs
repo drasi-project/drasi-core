@@ -3,7 +3,7 @@
 
 use super::{
     loader::PluginOwner,
-    proxy::{BoundProgress, NativeComponentProxy, SourceBindings},
+    proxy::{BoundConsumerProgress, BoundProgress, NativeComponentProxy, SourceBindings},
 };
 use async_trait::async_trait;
 use drasi_computation_plugin_abi as abi;
@@ -69,6 +69,7 @@ pub struct NativeFactory {
     schemas: Vec<Arc<Schema>>,
     admission: Option<abi::services::PluginServicesV1>,
     recovery: Option<abi::recovery::PluginRecoveryV1>,
+    consumer_progress: Option<abi::consumer_progress::PluginConsumerProgressV1>,
     consumer: Option<(
         drasi_computation_plugin_sdk::ConsumerMode,
         abi::consumer::PluginConsumerV1,
@@ -111,6 +112,18 @@ impl NativeFactory {
                 .dependencies
                 .insert(Arc::from("source_progress"), requirement);
         }
+        if metadata.role == ComponentRole::Transformer
+            || (metadata.role == ComponentRole::Sink
+                && metadata.completion == Some(SinkCompletion::Handled))
+        {
+            let mut requirement = ResourceRequirement::exactly_one::<QuerySourceProgressResource>(
+                ResourceRole::Checkpoint,
+            );
+            requirement.minimum = 0;
+            descriptor
+                .dependencies
+                .insert("input_progress".into(), requirement);
+        }
         Ok(Self {
             descriptor,
             metadata,
@@ -121,6 +134,7 @@ impl NativeFactory {
             schemas,
             admission,
             recovery,
+            consumer_progress: None,
             consumer: None,
             batching: None,
             query_snapshots: None,
@@ -167,12 +181,38 @@ impl NativeFactory {
                     ResourceRole::IndexBackend,
                 ),
             );
+            self.descriptor.dependencies.remove("input_progress");
         }
         self.consumer = consumer;
         Ok(self)
     }
     pub fn consumer_mode(&self) -> Option<drasi_computation_plugin_sdk::ConsumerMode> {
         self.consumer.map(|(mode, _)| mode)
+    }
+    fn supports_input_progress(&self) -> bool {
+        self.descriptor.dependencies.contains_key("input_progress")
+    }
+    pub(super) fn with_consumer_progress(
+        mut self,
+        progress: Option<abi::consumer_progress::PluginConsumerProgressV1>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            progress.is_none()
+                || (matches!(
+                    self.metadata.role,
+                    ComponentRole::Source | ComponentRole::Transformer
+                ) && self.recovery.is_none()
+                    && self.consumer.is_none()),
+            "consumer progress requires a producer without single-owner progress"
+        );
+        if progress.is_some() {
+            self.descriptor.dependencies.insert(
+                "consumer_progress".into(),
+                ResourceRequirement::exactly_one::<ConsumerProgressSet>(ResourceRole::Checkpoint),
+            );
+        }
+        self.consumer_progress = progress;
+        Ok(self)
     }
     pub(super) fn with_batching(
         mut self,
@@ -229,6 +269,8 @@ impl NativeFactory {
             None,
             None,
             true,
+            None,
+            None,
             None,
         )?;
         let response = unsafe {
@@ -295,6 +337,59 @@ impl NativeFactory {
             None,
             false,
             Some(snapshots),
+            None,
+            None,
+        )
+    }
+
+    pub fn create_component_with_consumer_progress(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        progress: Arc<ConsumerProgressSet>,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        self.construct_bound(
+            CreateRequest {
+                id,
+                implementation: self.metadata.implementation.clone(),
+                configuration_version: self.metadata.configuration_version,
+                configuration,
+                scope: Some(scope),
+            },
+            None,
+            None,
+            false,
+            None,
+            Some(progress),
+            None,
+        )
+    }
+
+    /// Opt into graph-owned volatile handled-input tracking. The input owner is
+    /// never passed to the plugin; downstream consumer reads remain independent.
+    pub fn create_component_with_input_progress(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        input_progress: Arc<QuerySourceProgress>,
+        consumer_progress: Option<Arc<ConsumerProgressSet>>,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        self.construct_bound(
+            CreateRequest {
+                id,
+                implementation: self.metadata.implementation.clone(),
+                configuration_version: self.metadata.configuration_version,
+                configuration,
+                scope: Some(scope),
+            },
+            None,
+            None,
+            false,
+            None,
+            consumer_progress,
+            Some(input_progress),
         )
     }
 
@@ -335,8 +430,9 @@ impl NativeFactory {
         admission: Option<Arc<SourceAdmission>>,
         progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<NativeComponentProxy> {
-        self.construct_bound(request, admission, progress, false, None)
+        self.construct_bound(request, admission, progress, false, None, None, None)
     }
+    #[allow(clippy::too_many_arguments)]
     fn construct_bound(
         &self,
         request: CreateRequest,
@@ -344,11 +440,58 @@ impl NativeFactory {
         progress: Option<Arc<QuerySourceProgress>>,
         consumer: bool,
         query_snapshots: Option<Arc<super::NativeQuerySnapshotsResource>>,
+        consumer_progress: Option<Arc<ConsumerProgressSet>>,
+        input_progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<NativeComponentProxy> {
+        if let Some(owner) = &input_progress {
+            anyhow::ensure!(
+                self.supports_input_progress(),
+                "native input progress requires a non-atomic transformer or Handled sink"
+            );
+            anyhow::ensure!(
+                owner.component_id() == &request.id
+                    && request
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.graph_id == owner.graph_id()),
+                "native input progress belongs to a different graph or component"
+            );
+        }
         anyhow::ensure!(
             consumer == self.consumer.is_some(),
             "native consumer requires its host-owned delivery binding"
         );
+        anyhow::ensure!(
+            consumer_progress.is_some() == self.consumer_progress.is_some(),
+            "native producer requires its negotiated consumer progress binding"
+        );
+        anyhow::ensure!(
+            consumer_progress.is_none()
+                || (admission.is_none()
+                    && progress.is_none()
+                    && !consumer
+                    && query_snapshots.is_none()),
+            "native consumer progress cannot be combined with other service bindings"
+        );
+        let consumer_progress = consumer_progress
+            .map(|owner| -> anyhow::Result<_> {
+                anyhow::ensure!(
+                    owner.producer_id() == &request.id
+                        && request
+                            .scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.graph_id == owner.graph_id()),
+                    "native consumer progress belongs to a different graph or producer"
+                );
+                Ok(BoundConsumerProgress {
+                    binding: super::consumer_progress::ConsumerProgressBinding::new(&owner)?,
+                    owner,
+                    extension: self.consumer_progress.expect("validated"),
+                    retention: None,
+                    position_policy: None,
+                })
+            })
+            .transpose()?;
         self.validate_configuration(&request.configuration)?;
         let bytes = wire::encode(&request)?;
         let table = unsafe { &*self.raw.vtable };
@@ -392,7 +535,14 @@ impl NativeFactory {
             })
             .transpose()?;
         unsafe {
-            if let Some(binding) = &query_snapshots {
+            if let Some(progress) = &consumer_progress {
+                take_status(progress.extension.create.expect("validated")(
+                    self.raw.state,
+                    abi::BorrowedBytes::new(&bytes),
+                    &progress.binding.table(),
+                    &mut component,
+                ))?;
+            } else if let Some(binding) = &query_snapshots {
                 take_status(self
                     .query_snapshots
                     .expect("validated")
@@ -446,6 +596,8 @@ impl NativeFactory {
                 SourceBindings {
                     admission: admission.zip(binding),
                     progress,
+                    consumer_progress,
+                    input_progress,
                 },
             )?
         };
@@ -491,6 +643,10 @@ impl ComponentFactory for NativeFactory {
                     && match name.as_ref() {
                         "admission" => self.admission.is_some(),
                         "source_progress" => self.recovery.is_some(),
+                        "input_progress" => self.supports_input_progress(),
+                        "consumer_progress" => {
+                            self.consumer_progress.is_some() && resources.len() == 1
+                        }
                         "consumer" => self.consumer.is_some() && resources.len() == 1,
                         "query_snapshots" => self.query_snapshots.is_some(),
                         _ => false,
@@ -505,6 +661,20 @@ impl ComponentFactory for NativeFactory {
                     .get("consumer")
                     .is_some_and(|ids| ids.len() == 1),
             "native consumer requires one host-owned delivery resource"
+        );
+        anyhow::ensure!(
+            self.consumer_progress.is_none()
+                || specification
+                    .dependencies
+                    .get("consumer_progress")
+                    .is_some_and(|ids| ids.len() == 1),
+            "native producer requires one consumer progress resource"
+        );
+        anyhow::ensure!(
+            self.consumer_progress.is_none()
+                || ["admission", "source_progress"].into_iter().all(|name|
+                    specification.dependencies.get(name).is_none_or(Vec::is_empty)),
+            "native consumer progress cannot be combined with source admission or single-owner progress"
         );
         anyhow::ensure!(
             !["admission", "source_progress"].into_iter().all(|name| {
@@ -606,6 +776,20 @@ impl ComponentFactory for NativeFactory {
         } else {
             None
         };
+        let input_progress = if context
+            .specification
+            .dependencies
+            .contains_key("input_progress")
+        {
+            context
+                .resources::<QuerySourceProgressResource>("input_progress")
+                .map_err(ComponentCreationError::terminal)?
+                .into_iter()
+                .next()
+                .map(|resource| resource.0.clone())
+        } else {
+            None
+        };
         let admission = if context.specification.dependencies.contains_key("admission") {
             let channels = context
                 .resources::<QosChannel>("admission")
@@ -648,6 +832,22 @@ impl ComponentFactory for NativeFactory {
         } else {
             None
         };
+        let consumer_progress = if self.consumer_progress.is_some() {
+            Some(
+                context
+                    .resources::<ConsumerProgressSet>("consumer_progress")
+                    .map_err(ComponentCreationError::terminal)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        ComponentCreationError::terminal(anyhow::anyhow!(
+                            "missing native consumer progress resource"
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
         let proxy = self
             .construct_bound(
                 CreateRequest {
@@ -665,6 +865,8 @@ impl ComponentFactory for NativeFactory {
                 progress,
                 false,
                 snapshots,
+                consumer_progress,
+                input_progress,
             )
             .map_err(|error| {
                 if error

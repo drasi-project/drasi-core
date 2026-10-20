@@ -3,6 +3,7 @@
 
 mod component;
 mod rows;
+mod shared;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
@@ -10,7 +11,8 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, NativeSourceProgress, PluginDefinition,
+    CreatedComponent, Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress,
+    PluginDefinition,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -25,9 +27,13 @@ pub use rows::RowSourceOptions;
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const POSTGRES_SOURCE: &str = "drasi/postgres-transactions";
 pub const POSTGRES_ROWS: &str = "drasi.postgres/changes";
+pub const POSTGRES_SHARED_ROWS: &str = "drasi.postgres/shared-changes";
+pub const POSTGRES_SHARED_TRANSACTIONS: &str = "drasi.postgres/shared-transactions";
 
 pub struct PostgresSourceFactory;
 pub struct PostgresRowsFactory;
+pub struct PostgresSharedRowsFactory;
+pub struct PostgresSharedTransactionsFactory;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,12 +66,117 @@ pub fn plugin() -> Result<PluginDefinition> {
         vec![
             Arc::new(PostgresSourceFactory),
             Arc::new(PostgresRowsFactory),
+            Arc::new(PostgresSharedRowsFactory),
+            Arc::new(PostgresSharedTransactionsFactory),
         ],
         vec![
             SourceTransactionCodec::schema(),
             drasi_computation_contracts::GraphChangeCodec::schema(),
         ],
     )
+}
+
+impl Factory for PostgresSharedTransactionsFactory {
+    fn metadata(&self) -> FactoryMetadata {
+        let mut metadata = PostgresSourceFactory.metadata();
+        metadata.implementation =
+            ImplementationIdentity::try_new(POSTGRES_SHARED_TRANSACTIONS, "1")
+                .expect("constant implementation");
+        metadata.configuration.fields.remove("coordinated_snapshot");
+        metadata
+    }
+    fn supports_consumer_progress(&self) -> bool {
+        true
+    }
+    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
+        anyhow::bail!("shared PostgreSQL transactions require their actual persistent consumer set")
+    }
+    fn create_with_consumer_progress(
+        &self,
+        request: &CreateRequest,
+        _: ControlSender,
+        progress: NativeConsumerProgress,
+    ) -> Result<CreatedComponent> {
+        self.metadata()
+            .configuration
+            .validate(&request.configuration)?;
+        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
+        let scope = request
+            .scope
+            .as_ref()
+            .context("shared PostgreSQL transactions require graph scope")?;
+        anyhow::ensure!(
+            progress.reader().graph_id() == scope.graph_id
+                && progress.reader().producer_id() == &request.id,
+            "PostgreSQL transaction consumers belong to another graph or producer"
+        );
+        Ok(
+            Component::Source(Box::new(PostgresTransactionSource::shared_transactions(
+                request.id.clone(),
+                StreamId::try_new(config.stream)?,
+                config.settings,
+                progress,
+            )?))
+            .into(),
+        )
+    }
+}
+
+impl Factory for PostgresSharedRowsFactory {
+    fn metadata(&self) -> FactoryMetadata {
+        let mut metadata = PostgresRowsFactory.metadata();
+        metadata.implementation = ImplementationIdentity::try_new(POSTGRES_SHARED_ROWS, "1")
+            .expect("constant implementation");
+        metadata.configuration.fields.remove("coordinated_snapshot");
+        metadata
+    }
+    fn supports_consumer_progress(&self) -> bool {
+        true
+    }
+    fn create(
+        &self,
+        _request: &CreateRequest,
+        _control: ControlSender,
+    ) -> Result<CreatedComponent> {
+        anyhow::bail!("shared PostgreSQL rows require their actual fixed consumer progress set")
+    }
+    fn create_with_consumer_progress(
+        &self,
+        request: &CreateRequest,
+        _control: ControlSender,
+        progress: NativeConsumerProgress,
+    ) -> Result<CreatedComponent> {
+        self.metadata()
+            .configuration
+            .validate(&request.configuration)?;
+        let config: RowConfiguration = serde_json::from_value(request.configuration.clone())?;
+        let scope = request
+            .scope
+            .as_ref()
+            .context("shared PostgreSQL rows require graph scope")?;
+        let reader = progress.reader();
+        anyhow::ensure!(
+            reader.graph_id() == scope.graph_id && reader.producer_id() == &request.id,
+            "PostgreSQL consumer progress belongs to another graph or producer"
+        );
+        Ok(
+            Component::Source(Box::new(PostgresTransactionSource::shared_rows(
+                request.id.clone(),
+                StreamId::try_new(config.stream)?,
+                config.settings,
+                reader,
+                progress.consumer_ids(),
+                RowSourceOptions {
+                    persistent: config.persistent,
+                    auto_create_slot: config.auto_create_slot.unwrap_or(!config.persistent),
+                    start_from_slot: config.start_from_slot.unwrap_or(!config.persistent),
+                    reconnect_attempts: config.reconnect_attempts.unwrap_or(1),
+                    reconnect_delay_ms: config.reconnect_delay_ms.unwrap_or(5000),
+                },
+            )?))
+            .into(),
+        )
+    }
 }
 
 impl Factory for PostgresRowsFactory {

@@ -1,6 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::shared::SharedCounters;
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
     exchange::{SourceEvent, SourceEventWrapper},
@@ -11,7 +12,7 @@ use drasi_postgres_common::replication::{
     Transactions,
 };
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -66,6 +67,8 @@ pub(crate) struct RowEmission {
     transport: Arc<AtomicU64>,
     admitted_sequence: u64,
     admitted_lsn: u64,
+    shared: Option<Arc<SharedCounters>>,
+    boundaries: BTreeSet<u64>,
 }
 
 impl RowEmission {
@@ -79,7 +82,26 @@ impl RowEmission {
             resume,
             previous_lsn,
             transport,
+            shared: None,
+            boundaries: BTreeSet::new(),
         }
+    }
+
+    pub fn shared(
+        resume: Option<RowPosition>,
+        previous_lsn: u64,
+        transport: Arc<AtomicU64>,
+        counters: Arc<SharedCounters>,
+        counter_floor: u64,
+        admitted_lsn: u64,
+        boundaries: BTreeSet<u64>,
+    ) -> Self {
+        let mut result = Self::new(resume, previous_lsn, transport);
+        result.sequence = counters.raise(&result.transport, counter_floor, admitted_lsn);
+        result.admitted_sequence = result.admitted_sequence.max(result.sequence);
+        result.shared = Some(counters);
+        result.boundaries = boundaries;
+        result
     }
 
     pub fn confirmed(
@@ -124,11 +146,22 @@ impl RowEmission {
             _ => 0,
         };
         let mut output = VecDeque::new();
+        // A later subscriber snapshot can lie between visible commits. Carry
+        // that real coverage boundary into the next transaction's partial rows.
+        if let Some(boundary) = self.boundaries.range(..commit_lsn).next_back() {
+            self.previous_lsn = self.previous_lsn.max(*boundary);
+        }
         for (offset, change) in changes.into_iter().enumerate().skip(skip) {
-            self.sequence = self
-                .sequence
-                .checked_add(1)
-                .context("PostgreSQL row sequence exhausted")?;
+            self.sequence = match &self.shared {
+                Some(counters) => {
+                    counters.raise(&self.transport, self.sequence, self.admitted_lsn);
+                    counters.allocate(&self.transport)?
+                }
+                None => self
+                    .sequence
+                    .checked_add(1)
+                    .context("PostgreSQL row sequence exhausted")?,
+            };
             let position = RowPosition {
                 version: 1,
                 binding: transaction.binding,
@@ -169,19 +202,65 @@ impl RowEmission {
             self.previous_lsn = commit_lsn;
             self.admitted_sequence = self.admitted_sequence.max(self.sequence);
             self.admitted_lsn = self.admitted_lsn.max(commit_lsn);
+            if let Some(counters) = &self.shared {
+                counters
+                    .admitted_lsn
+                    .fetch_max(commit_lsn, Ordering::Relaxed);
+            }
             self.resume = None;
+            self.boundaries.retain(|boundary| *boundary > commit_lsn);
         }
         Ok(output)
     }
 
     pub fn admitted_lsn(&self) -> u64 {
-        self.admitted_lsn
+        self.shared.as_ref().map_or(self.admitted_lsn, |counters| {
+            counters.admitted_lsn.load(Ordering::Relaxed)
+        })
+    }
+
+    pub fn admitted_sequence(&self) -> u64 {
+        self.shared
+            .as_ref()
+            .map_or(self.admitted_sequence, |counters| {
+                counters.logical.load(Ordering::Relaxed)
+            })
+    }
+
+    pub fn validate_shared_observation(&self, counter: u64, lsn: u64) -> Result<()> {
+        anyhow::ensure!(
+            self.shared.is_some()
+                && counter <= self.admitted_sequence()
+                && lsn <= self.admitted_lsn(),
+            "PostgreSQL shared cursor moved beyond admitted rows"
+        );
+        Ok(())
     }
 
     pub fn rewind(&mut self, position: Option<RowPosition>, previous_lsn: u64) {
         self.sequence = position.as_ref().map_or(0, |position| position.sequence);
         self.resume = position;
         self.previous_lsn = previous_lsn;
+    }
+
+    pub fn rewind_shared(
+        &mut self,
+        position: Option<RowPosition>,
+        previous_lsn: u64,
+        counter_floor: u64,
+        admitted_lsn: u64,
+        boundaries: BTreeSet<u64>,
+    ) -> Result<()> {
+        let counters = self
+            .shared
+            .as_ref()
+            .context("PostgreSQL shared row counters are not bound")?;
+        self.sequence = counters.raise(&self.transport, counter_floor, admitted_lsn);
+        self.admitted_sequence = self.admitted_sequence.max(self.sequence);
+        self.resume = position;
+        self.previous_lsn = previous_lsn;
+        self.boundaries = boundaries;
+        Ok(())
     }
 }
 

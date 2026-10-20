@@ -149,7 +149,60 @@ enter the owning host runtime while being polled; no Tokio handle or Rust query
 object crosses the ABI. This read service is distinct from incoming recovery
 snapshot envelopes and does not provide an atomic snapshot/live subscription.
 
+## Read-only consumer progress
+
+Source and transformer factories may opt into the independent
+`consumer_progress_v1` extension with `supports_consumer_progress()` and
+`create_with_consumer_progress(request, control, NativeConsumerProgress)`.
+Opting in makes the capability required: ordinary unbound creation fails, even
+when an older host does not discover the extension. Existing single-owner
+factories keep their recovery-v1 behavior; advertising both contracts is invalid.
+
+Keep the supplied `NativeConsumerProgress::reader()` and return that exact view
+from `NativeComponent::consumer_progress_reader()`. A newly wrapped view with
+matching graph/producer names is not the same binding. Constructors retain the
+capability without reading mutable progress; snapshot/subscription operations
+become available during `start`. `NativeConsumerProgress::consumer_ids()` exposes
+the validated immutable membership for constructor checks without a progress read.
+Each snapshot includes every fixed consumer's
+independent `SourceProgressSnapshot`, including consumers without checkpoints or
+with failures. The SDK validates membership and retains the existing opaque
+checkpoint encoding. `wait_ready()` / `wait_recovered()` require all members and
+surface failures instead of skipping the slowest or failing consumer.
+
+`NativeComponent::consumer_replay_retention()` optionally declares the actual
+upstream retention. It does not infer durability from the consumer set, promise
+external effects, or replace the Host's actual owner-resource proof. Both the
+reader and retention declaration must remain unchanged during activation.
+
+When replayed events require source-defined ordering, implement
+`NativeComponent::input_position_policy() -> Option<Arc<InputPositionPolicy>>`.
+Construct one immutable policy and return clones of that same Arc. The SDK
+captures it separately from mutable processing state and exports an opaque,
+producer-retained comparator. The declared `SourceProgressKey` identifies the
+consumer checkpoint to compare; `is_after(event, handled)` interprets opaque
+positions, including partitioned positions, without I/O. Each position is bounded
+to `MAX_SOURCE_POSITION_BYTES` (65,536 bytes). Errors remain errors, and comparator
+panics quarantine the native instance and wake pending operations. A policy
+without consumer progress is rejected; absence is valid when logical replay
+identity is already stable. The Host graph owns policy installation/revocation.
+
+The complete snapshot is bounded to 256 members, 4,096 checkpoint/transport entries
+and 1 MiB, with 16 retained subscriptions per binding and one wait per subscription.
+Limits produce errors, never partial snapshots. Cancelling a wait loses no update;
+only a successful snapshot marks its exact observations seen. Stop/drop fences
+pending reads and waits. After successful stop/start, acquire new subscriptions:
+old subscriptions remain closed. Failed/cancelled start or stop cannot be followed
+by a successful restart without completing stop. The transport polls bounded
+watch operations directly, without a forwarding worker or second graph.
+
 ## Scheduling and ownership
+
+Bootstrap preparation may return `RefreshVolatile` or `ResetRequired`. Until a
+snapshot has started, the query may reset its state and call `prepare` again on
+that same provider. A `Ready` result seals preparation until successful stop;
+snapshot startup remains single-use. Failed or cancelled preparation, snapshot
+work or cleanup still requires successful stop before reuse.
 
 The host owns start, data processing, stop and cancellation. Each operation is a
 producer-owned opaque handle with cooperative, nonblocking poll, retained wake

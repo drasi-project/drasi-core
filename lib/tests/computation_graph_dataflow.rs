@@ -414,6 +414,90 @@ async fn fanout_scenario() {
 
 both_tokio_flavors!(fanout_branch_isolation, fanout_scenario);
 
+async fn mixed_multilevel_fanout_scenario() {
+    const INPUTS: u16 = 32;
+    let mut builder = ComputationGraph::builder("mixed-multilevel-fanout")
+        .source(Box::new(FiniteSource::new(
+            "source",
+            (1..=INPUTS)
+                .map(|value| output(root("source", u64::from(value), &[value])))
+                .collect(),
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"));
+    let mut calls = Vec::new();
+    for (producer, transform, factor) in [
+        ("source", "left", 2),
+        ("source", "right", 3),
+        ("left", "child-a", 5),
+        ("left", "child-b", 7),
+    ] {
+        let count = Arc::new(AtomicUsize::new(0));
+        calls.push(count.clone());
+        let mut sequence = 0;
+        builder = builder
+            .transformer(Box::new(NativeTransform::new(transform, move |input| {
+                count.fetch_add(1, Ordering::SeqCst);
+                sequence += 1;
+                let readings: Vec<_> = values(&input.envelope)
+                    .into_iter()
+                    .map(|value| value * factor)
+                    .collect();
+                Ok(vec![output(derived(
+                    &input.envelope,
+                    transform,
+                    sequence,
+                    changes(transform, sequence, &readings),
+                ))])
+            })))
+            .bind_stream(endpoint(transform, "out"), stream(transform))
+            .connect(
+                edge(producer, transform),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            );
+    }
+    let mut observations = Vec::new();
+    for (producer, sink, factor) in [
+        ("left", "left-one", 2),
+        ("left", "left-two", 2),
+        ("right", "right-one", 3),
+        ("right", "right-two", 3),
+        ("child-a", "child-a-sink", 10),
+        ("child-b", "child-b-sink", 14),
+    ] {
+        let received = Received::default();
+        observations.push((producer, sink, factor, received.clone()));
+        builder = builder
+            .sink(Box::new(CollectSink::new(sink, &["in"], received)))
+            .connect(
+                edge(producer, sink),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            );
+    }
+    let mut graph = builder.build().expect("mixed fanout graph");
+    tokio::time::timeout(std::time::Duration::from_secs(5), complete(&mut graph))
+        .await
+        .expect("all subscribers drain");
+    for (producer, sink, factor, received) in observations {
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), usize::from(INPUTS), "{sink}");
+        for (index, input) in received.iter().enumerate() {
+            let sequence = u16::try_from(index + 1).unwrap();
+            assert_eq!(values(&input.envelope), [sequence * factor], "{sink}");
+            assert_eq!(input.envelope.system().sequence(), u64::from(sequence));
+            assert_eq!(input.envelope.system().stream(), &stream(producer));
+        }
+    }
+    for count in calls {
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            usize::from(INPUTS),
+            "a transform executes once per input, not once per subscriber"
+        );
+    }
+}
+
+both_tokio_flavors!(mixed_multilevel_fanout, mixed_multilevel_fanout_scenario);
+
 async fn fanin_scenario() {
     // No cross-stream order is assumed. Both a shared input and distinct input
     // ports must preserve each bound stream's own FIFO, never timestamp order.

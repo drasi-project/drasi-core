@@ -31,6 +31,10 @@ mod bootstrap_tests;
 mod configuration_tests;
 #[path = "../../tests/fixtures/native_consumer.rs"]
 mod consumer_fixture;
+#[path = "../../tests/fixtures/native_consumer_progress.rs"]
+pub(super) mod consumer_progress_fixture;
+#[path = "consumer_progress_tests.rs"]
+mod consumer_progress_tests;
 #[path = "consumer_tests.rs"]
 pub(super) mod consumer_tests;
 

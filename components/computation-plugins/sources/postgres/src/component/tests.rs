@@ -186,6 +186,7 @@ async fn whole_transaction_mapping_is_stable_and_never_publishes_a_prefix() {
         for frame in [begin(), relation(), insert(b"1", b"final")] {
             assert!(transactions.decode(&frame).unwrap().is_none());
         }
+
         let output = transactions.decode(&commit()).unwrap().unwrap();
         let transaction = SourceTransactionCodec::decode(&output.envelope, limits).unwrap();
         let changes = transaction.into_changes();
@@ -204,6 +205,53 @@ async fn whole_transaction_mapping_is_stable_and_never_publishes_a_prefix() {
         transactions.decode(&commit()).is_err(),
         "rejected prefix must never publish"
     );
+}
+
+#[tokio::test]
+async fn shared_transaction_positions_are_allocated_only_for_complete_commits() -> Result<()> {
+    let limits = SourceTransactionLimits {
+        max_changes: NonZeroUsize::new(2).unwrap(),
+        max_bytes: NonZeroUsize::new(4096).unwrap(),
+        max_duration_ms: NonZeroU64::new(1000).unwrap(),
+    };
+    let mut decoder = transactions(limits);
+    let emission = TransactionEmission::new(
+        Arc::default(),
+        decoder.transport_sequence.clone(),
+        20_000,
+        0,
+    );
+    let mut allocations = 0;
+    for frame in [
+        begin(),
+        relation(),
+        insert(b"1", b"first"),
+        insert(b"2", b"second"),
+    ] {
+        assert!(decoder
+            .decode_with_position(&frame, |lsn, binding, managed| {
+                allocations += 1;
+                emission.position(lsn, binding, managed)
+            })?
+            .is_none());
+    }
+    assert_eq!(allocations, 0);
+    let output = decoder
+        .decode_with_position(&commit(), |lsn, binding, managed| {
+            allocations += 1;
+            emission.position(lsn, binding, managed)
+        })?
+        .context("complete transaction")?;
+    assert_eq!(allocations, 1);
+    let transaction = SourceTransactionCodec::decode(&output.envelope, limits)?;
+    let position: drasi_postgres_common::replication::shared_transactions::SharedTransactionPosition =
+        serde_json::from_slice(transaction.position())?;
+    assert_eq!(position.sequence, 20_001);
+    assert_eq!(output.envelope.system().sequence(), 20_001);
+    assert_eq!(position.commit_lsn, 100);
+    assert_eq!(transaction.transaction_id(), 100u64.to_be_bytes());
+    assert_eq!(transaction.into_changes().len(), 2);
+    Ok(())
 }
 
 #[test]
@@ -464,6 +512,142 @@ async fn ordinary_rows_preserve_partial_replay_and_confirm_only_complete_transac
 }
 
 #[tokio::test]
+async fn shared_rows_keep_all_counter_floors_across_rewind_and_worker_replacement() -> Result<()> {
+    use crate::shared::SharedCounters;
+    use drasi_postgres_common::replication::rows::RowPosition;
+    let limits = SourceTransactionLimits {
+        max_changes: NonZeroUsize::new(16).unwrap(),
+        max_bytes: NonZeroUsize::new(65536).unwrap(),
+        max_duration_ms: NonZeroU64::new(1000).unwrap(),
+    };
+    let partial = RowPosition {
+        version: 1,
+        binding: [1; 32],
+        commit_lsn: 100,
+        previous_lsn: 0,
+        offset: Some(0),
+        count: 2,
+        sequence: 2,
+        managed_slot: None,
+    };
+    let emit = |rows: &mut RowEmission| -> Result<_> {
+        let mut transaction = transactions(limits);
+        for frame in [
+            begin(),
+            relation(),
+            insert(b"1", b"one"),
+            insert(b"2", b"two"),
+        ] {
+            transaction.decode(&frame)?;
+        }
+        let group = transaction
+            .decode(&commit())?
+            .context("committed transaction")?;
+        rows.expand(group, &transaction)
+    };
+    let counters = Arc::new(SharedCounters::default());
+    let transport = Arc::new(AtomicU64::new(10_000));
+    let mut rows = RowEmission::shared(
+        Some(partial.clone()),
+        0,
+        transport.clone(),
+        counters.clone(),
+        8_000,
+        200,
+        Default::default(),
+    );
+    for expected in [10_001, 10_002] {
+        let output = emit(&mut rows)?;
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].envelope.system().sequence(), expected);
+        let metadata =
+            GraphChangeCodec::source_metadata(&output[0].envelope)?.context("metadata")?;
+        assert_eq!(metadata.sequence, Some(expected));
+        let position: RowPosition =
+            serde_json::from_slice(&metadata.source_position.context("position")?)?;
+        assert_eq!(position.offset, Some(1));
+        assert_eq!(position.count, 2);
+        assert_eq!(
+            rows.admitted_lsn(),
+            200,
+            "rewind must retain ahead-member/queued admission bounds"
+        );
+        rows.validate_shared_observation(expected, 200)?;
+        assert!(rows.validate_shared_observation(expected + 1, 200).is_err());
+        assert!(rows.validate_shared_observation(expected, 201).is_err());
+        rows.rewind_shared(Some(partial.clone()), 0, 2, 100, Default::default())?;
+    }
+    let mut replacement = RowEmission::shared(
+        Some(partial.clone()),
+        0,
+        transport.clone(),
+        counters,
+        2,
+        100,
+        Default::default(),
+    );
+    assert_eq!(
+        emit(&mut replacement)?[0].envelope.system().sequence(),
+        10_003
+    );
+    replacement.rewind_shared(Some(partial), 0, u64::MAX, 200, Default::default())?;
+    assert!(emit(&mut replacement)
+        .unwrap_err()
+        .to_string()
+        .contains("sequence exhausted"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_rows_preserve_a_later_subscribers_real_snapshot_boundary() -> Result<()> {
+    use crate::shared::SharedCounters;
+    use drasi_postgres_common::replication::rows::RowPosition;
+    let limits = SourceTransactionLimits {
+        max_changes: NonZeroUsize::new(16).unwrap(),
+        max_bytes: NonZeroUsize::new(65536).unwrap(),
+        max_duration_ms: NonZeroU64::new(1000).unwrap(),
+    };
+    let mut transaction = transactions(limits);
+    for frame in [
+        begin(),
+        relation(),
+        insert(b"1", b"one"),
+        insert(b"2", b"two"),
+    ] {
+        transaction.decode(&frame)?;
+    }
+    let group = transaction
+        .decode(&commit())?
+        .context("committed transaction")?;
+    let mut rows = RowEmission::shared(
+        None,
+        50,
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(SharedCounters::default()),
+        0,
+        110,
+        [95, 100, 110].into_iter().collect(),
+    );
+    let output = rows.expand(group, &transaction)?;
+    let metadata =
+        GraphChangeCodec::source_metadata(&output[0].envelope)?.context("row metadata")?;
+    let partial: RowPosition =
+        serde_json::from_slice(&metadata.source_position.context("row cursor")?)?;
+    assert!(!partial.complete());
+    assert_eq!(
+        partial.feedback_lsn(),
+        95,
+        "moving beyond a snapshot must not regress its complete-coverage floor"
+    );
+    assert_eq!(partial.commit_lsn, 100);
+    assert!(
+        partial.feedback_lsn() < partial.commit_lsn,
+        "an equal/future snapshot cannot acknowledge an unhandled suffix"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_worker_enforces_idle_transaction_deadline_without_publishing() -> Result<()> {
     let (client, mut server) = tokio::io::duplex(4096);
     let connect = async {
@@ -528,14 +712,17 @@ async fn native_worker_enforces_idle_transaction_deadline_without_publishing() -
     let mut worker = Worker {
         connection: Some(connection?),
         transactions: transactions(limits),
-        progress: Box::new(watch),
-        reset_generation: 0,
+        progress: WorkerProgress::Single {
+            updates: Box::new(watch),
+            generation: 0,
+        },
         confirmed: 0,
         next_feedback: Instant::now(),
         config,
         persistent: true,
         rows: None,
         reconnect: None,
+        whole: None,
     };
     let mut data = vec![b'w'];
     data.extend([0; 24]);

@@ -95,6 +95,18 @@ struct Paused {
 
 #[async_trait]
 impl ComputationBootstrapProvider for Paused {
+    fn validate_query_scope(
+        &self,
+        instance: &str,
+        graph: &str,
+        component: &ComponentId,
+    ) -> Result<()> {
+        self.inner.validate_query_scope(instance, graph, component)
+    }
+    fn recovery_reader(&self) -> Option<SourceProgressReader> {
+        self.inner.recovery_reader()
+    }
+
     async fn prepare_with_state(&self, state: &dyn BootstrapState) -> Result<BootstrapPreparation> {
         self.inner.prepare_with_state(state).await
     }

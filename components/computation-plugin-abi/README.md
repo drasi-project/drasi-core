@@ -72,6 +72,42 @@ There is no storage I/O, forwarding worker, writable progress object or commit
 operation. Admission and separate replay progress are mutually exclusive bindings.
 An extension without base entry points is malformed, not a legacy fallback.
 
+## Optional consumer progress, version 1
+
+`drasi_computation_plugin_consumer_progress_v1` separately negotiates a producer's
+complete consumer set. `PluginConsumerProgressV1` supplies per-factory discovery,
+construction with `ConsumerProgressV1`, and immutable upstream-retention inspection.
+An advertising factory requires the binding and must reject unbound creation.
+Only source and transformer producers support it; single-owner recovery cannot
+be combined with this capability. Base ABI 1.0, wire 2 and recovery-v1 are unchanged.
+
+The identity fixes the graph, producer and 1-256 distinct consumer IDs. Each
+snapshot carries every member's existing recovery-v1 snapshot as a binary frame,
+preserving opaque positions, readiness, failures, reset generations and durability
+independently. Unknown, duplicate, missing or changed members fail rather than being
+omitted. The **whole set** is bounded to 1 MiB and 4,096 combined checkpoint and
+transport entries. No aggregate cursor or consumer durability is synthesized.
+
+Producer-owned contexts use retain/release; owned subscriptions release once.
+There are at most 16 retained subscriptions per binding and one pending wait each.
+Synchronous snapshot callbacks perform no I/O. Failed encoding observes no member,
+and cancelled or completed waits do not consume updates. Stop fences the binding
+before cleanup, wakes pending waits and permanently revokes that generation's
+subscriptions. A successful restart permits new subscriptions, not rebinding old
+ones. Failed/cancelled activation or cleanup requires successful stop before
+reactivation. Dropping the binding permanently revokes retained readers.
+No forwarding task, graph owner, writable progress object or commit operation
+crosses this interface.
+
+The same extension optionally returns a borrowed `InputPositionPolicyV1`. Its
+producer-retained immutable context describes a validated checkpoint key and
+compares event/handled positions, each at most 65,536 bytes. The callback returns
+one MessagePack boolean; invalid positions and comparison failures/panics remain
+errors. It never borrows mutable component state or performs I/O, so comparisons
+remain available while data processing is pending. The graph owns installation
+and revocation; a retained immutable comparator can outlive the component handle.
+Absence is valid and does not imply any generic ordering.
+
 ## Optional bootstrap and consumer services, version 1
 
 `drasi_computation_plugin_bootstrap_v1` negotiates query-owned bootstrap factories,

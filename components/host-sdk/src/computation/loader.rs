@@ -42,6 +42,7 @@ impl NativePlugin {
                 || Some(exported.configuration()),
                 || Some(exported.batching()),
                 || Some(exported.query_snapshots()),
+                || Some(exported.consumer_progress()),
             )
         }
     }
@@ -113,6 +114,34 @@ impl NativePlugin {
         unsafe { Self::from_entry_points_with_bootstrap(metadata, entry, services, recovery, None) }
     }
 
+    /// Host an independently negotiated, required consumer-progress read service.
+    ///
+    /// # Safety
+    /// All entry points must belong to the same process-pinned binary and obey
+    /// their versioned ownership and callback contracts.
+    pub unsafe fn from_entry_points_with_consumer_progress(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+        recovery: Option<abi::recovery::RecoveryFn>,
+        consumer_progress: Option<abi::consumer_progress::ConsumerProgressFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports(
+                || metadata(),
+                |out| take_status(entry(out)),
+                || services.map(|entry| entry()),
+                || recovery.map(|entry| entry()),
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || consumer_progress.map(|entry| entry()),
+            )
+        }
+    }
+
     /// Host independently negotiated query-owned bootstrap providers.
     ///
     /// # Safety
@@ -177,6 +206,7 @@ impl NativePlugin {
                 || configuration.map(|entry| entry()),
                 || None,
                 || None,
+                || None,
             )
         }
     }
@@ -194,11 +224,15 @@ impl NativePlugin {
         configuration: impl FnOnce() -> Option<*const abi::configuration::ConfigurationMetadataV1>,
         batching: impl FnOnce() -> Option<*const abi::batching::PluginBatchingV1>,
         query_snapshots: impl FnOnce() -> Option<*const abi::query_snapshots::PluginQuerySnapshotsV1>,
+        consumer_progress: impl FnOnce() -> Option<
+            *const abi::consumer_progress::PluginConsumerProgressV1,
+        >,
     ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata())? };
         let mut configurations = unsafe { read_configuration(configuration(), &manifest)? };
         let batching = unsafe { read_batching(batching())? };
         let query_snapshots = unsafe { read_query_snapshots(query_snapshots())? };
+        let consumer_progress = unsafe { read_consumer_progress(consumer_progress())? };
         let consumer = consumer()
             .map(|entry| -> anyhow::Result<_> {
                 let table = *unsafe { checked_table(entry)? };
@@ -358,6 +392,24 @@ impl NativePlugin {
             } else {
                 None
             };
+            let consumer_progress = if let Some(extension) = consumer_progress {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                let declared: drasi_computation_plugin_sdk::consumer_progress::FactoryProgress =
+                    drasi_computation_plugin_sdk::consumer_progress::decode(&response)?;
+                anyhow::ensure!(
+                    declared.version == abi::consumer_progress::VERSION,
+                    "unsupported native factory consumer progress version"
+                );
+                declared.consumer_progress.then_some(extension)
+            } else {
+                None
+            };
             unsafe {
                 take_status(plugin.table().factory.expect("validated")(
                     plugin.raw.state,
@@ -376,6 +428,7 @@ impl NativePlugin {
                     source_progress,
                 )?
                 .with_consumer(consumer_binding)?
+                .with_consumer_progress(consumer_progress)?
                 .with_batching(sink_batching)?
                 .with_query_snapshots(snapshot_reads)?
                 .with_configuration_details(configurations.remove(&metadata.implementation))
@@ -472,6 +525,11 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     }
     .ok()
     .map(|symbol| *symbol);
+    let consumer_progress = unsafe {
+        library.get::<abi::consumer_progress::ConsumerProgressFn>(abi::consumer_progress::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -481,6 +539,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && configuration.is_none()
         && batching.is_none()
         && query_snapshots.is_none()
+        && consumer_progress.is_none()
     {
         return Ok(None);
     }
@@ -503,6 +562,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
             || configuration.map(|entry| entry()),
             || batching.map(|entry| entry()),
             || query_snapshots.map(|entry| entry()),
+            || consumer_progress.map(|entry| entry()),
         )?
     }))
 }
@@ -606,6 +666,26 @@ unsafe fn read_query_snapshots(
         .transpose()
 }
 
+unsafe fn read_consumer_progress(
+    entry: Option<*const abi::consumer_progress::PluginConsumerProgressV1>,
+) -> anyhow::Result<Option<abi::consumer_progress::PluginConsumerProgressV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::consumer_progress::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.create.is_some()
+                    && table.inspect.is_some()
+                    && table.position_policy.is_some(),
+                "incompatible or incomplete native consumer progress extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
 /// Inspect without calling the plugin entry or creating factory handles.
 /// Extension factory catalogues are validated when the plugin is loaded.
 pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<PluginMetadata>> {
@@ -634,6 +714,11 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     }
     .ok()
     .map(|symbol| *symbol);
+    let consumer_progress = unsafe {
+        library.get::<abi::consumer_progress::ConsumerProgressFn>(abi::consumer_progress::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && !has_services
@@ -643,6 +728,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && configuration.is_none()
         && batching.is_none()
         && query_snapshots.is_none()
+        && consumer_progress.is_none()
     {
         return Ok(None);
     }
@@ -654,6 +740,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     unsafe { read_configuration(configuration.map(|entry| entry()), &manifest)? };
     unsafe { read_batching(batching.map(|entry| entry()))? };
     unsafe { read_query_snapshots(query_snapshots.map(|entry| entry()))? };
+    unsafe { read_consumer_progress(consumer_progress.map(|entry| entry()))? };
     let bootstrap = unsafe { read_bootstrap(bootstrap.map(|entry| entry()))? };
     anyhow::ensure!(
         !manifest.factories.is_empty() || bootstrap.is_some(),
@@ -726,6 +813,7 @@ impl RecordValidator for RemoteValidator {
             payload: std::borrow::Cow::Borrowed(&[]),
         })
     }
+
     fn validate(
         &self,
         schema: &SchemaDescriptor,
@@ -744,5 +832,78 @@ impl RecordValidator for RemoteValidator {
             }),
             payload: std::borrow::Cow::Borrowed(payload),
         })
+    }
+}
+
+#[cfg(test)]
+mod consumer_progress_tests {
+    use super::super::tests::consumer_progress_fixture;
+    use super::*;
+
+    #[test]
+    fn consumer_progress_extension_shape_validates_every_required_field() -> anyhow::Result<()> {
+        let export = drasi_computation_plugin_sdk::ExportedPlugin::new(
+            drasi_computation_plugin_sdk::PluginDefinition::new(
+                "fixture/consumer-progress-shape",
+                "1",
+                consumer_progress_fixture::factories(),
+                vec![drasi_lib::computation::v1::GraphChangeCodec::schema()],
+            )?,
+        )?;
+        let table = unsafe { *export.consumer_progress() };
+        assert!(unsafe { read_consumer_progress(None)? }.is_none());
+        assert!(unsafe { read_consumer_progress(Some(std::ptr::null())) }.is_err());
+        assert!(unsafe { read_consumer_progress(Some(&table))? }.is_some());
+        for field in 0..7 {
+            let mut invalid = table;
+            match field {
+                0 => invalid.header.size += 1,
+                1 => invalid.version += 1,
+                2 => invalid.reserved = 1,
+                3 => invalid.factory = None,
+                4 => invalid.create = None,
+                5 => invalid.inspect = None,
+                _ => invalid.position_policy = None,
+            }
+            assert!(unsafe { read_consumer_progress(Some(&invalid)) }.is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consumer_progress_metadata_only_rejects_a_real_malformed_library_without_entry(
+    ) -> anyhow::Result<()> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| workspace.join("target"));
+        let target = if target.is_absolute() {
+            target
+        } else {
+            workspace.join(target)
+        };
+        let path = target.join("debug/examples").join(format!(
+            "{}native_consumer_progress_metadata{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX,
+        ));
+        anyhow::ensure!(
+            path.is_file(),
+            "build drasi-host-sdk --example native_consumer_progress_metadata first"
+        );
+        let library = Arc::new(unsafe { Library::new(path)? });
+        let entered =
+            unsafe { library.get::<unsafe extern "C" fn() -> u8>(b"drasi_fixture_entered\0")? };
+        assert_eq!(unsafe { entered() }, 0);
+        let error = try_read_metadata(library.clone()).expect_err("metadata-only scan must reject");
+        assert!(error.to_string().contains("consumer progress extension"));
+        assert_eq!(unsafe { entered() }, 0);
+        assert!(try_load_library(library.clone()).is_err());
+        assert_eq!(unsafe { entered() }, 0);
+        Ok(())
     }
 }

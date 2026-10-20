@@ -883,8 +883,19 @@ pub(super) fn preview(
             rebind.insert(edge.clone());
         }
     }
+    let consumer_bindings = graph
+        .ids
+        .iter()
+        .filter_map(|(id, index)| {
+            graph.components[*index]
+                .consumer_progress()
+                .transpose()
+                .map(|progress| progress.map(|progress| (id.clone(), progress)))
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
+    let mut feedback_restarts = BTreeSet::new();
     loop {
-        let before = rebind.len();
+        let before = (rebind.len(), restart.len(), reactivate.len(), pause.len());
         for edge in &rebind {
             if graph
                 .observed()
@@ -896,22 +907,65 @@ pub(super) fn preview(
             }
         }
         for edge in new_edges.keys() {
-            if reactivate.contains(&edge.from.component) {
+            if reactivate.contains(&edge.from.component)
+                || [&edge.from.component, &edge.to.component].iter().any(|id| {
+                    feedback_restarts.contains(*id)
+                        && graph
+                            .observed()
+                            .components
+                            .get(*id)
+                            .is_some_and(|state| state.exhausted)
+                })
+            {
                 rebind.insert(edge.clone());
             }
         }
-        if before == rebind.len() {
-            break;
-        }
-    }
-    for edge in rebind.iter().chain(&unbind) {
-        pause.insert(edge.from.component.clone());
-        pause.insert(edge.to.component.clone());
-        if let Some(prior) = old_edges.get(edge) {
-            if !prior.policy.dynamically_replaceable {
-                restart.insert(edge.from.component.clone());
-                restart.insert(edge.to.component.clone());
+        for edge in rebind.iter().chain(&unbind) {
+            pause.insert(edge.from.component.clone());
+            pause.insert(edge.to.component.clone());
+            if let Some(prior) = old_edges.get(edge) {
+                if !prior.policy.dynamically_replaceable {
+                    restart.insert(edge.from.component.clone());
+                    restart.insert(edge.to.component.clone());
+                }
             }
+        }
+        for (producer, progress) in &consumer_bindings {
+            let participants =
+                super::super::consumer_progress::participants(&graph.snapshot, progress);
+            let changed_path = rebind.iter().chain(&unbind).any(|edge| {
+                participants.contains(&edge.from.component)
+                    && !progress.owners().contains_key(&edge.from.component)
+            });
+            let changed_subscription = old.subscriptions != desired.subscriptions
+                && old
+                    .subscriptions
+                    .iter()
+                    .chain(&desired.subscriptions)
+                    .any(|(from, to)| {
+                        participants.contains(from)
+                            && !progress.owners().contains_key(from)
+                            && (old.subscriptions.contains(&(from.clone(), to.clone()))
+                                != desired.subscriptions.contains(&(from.clone(), to.clone())))
+                    });
+            if changed_path
+                || changed_subscription
+                || participants.iter().any(|id| {
+                    replace.contains(id)
+                        || updating.contains(id)
+                        || remove.contains(id)
+                        || restart.contains(id)
+                })
+            {
+                // Parking processing does not stop an owned I/O worker from
+                // acknowledging upstream. Await stop before changing this cut.
+                feedback_restarts.insert(producer.clone());
+                restart.insert(producer.clone());
+                pause.extend(participants);
+            }
+        }
+        if before == (rebind.len(), restart.len(), reactivate.len(), pause.len()) {
+            break;
         }
     }
     pause.extend(
@@ -1684,6 +1738,61 @@ fn prepare(
                 scope,
             )?;
         }
+    }
+    for node in &nodes {
+        let id = node.descriptor.id();
+        let contract = if let Some(component) = components.get(id) {
+            component.recovery_contract()
+        } else if let Some(index) = graph.ids.get(id) {
+            if graph.components[*index].consumer_progress()?.is_none() {
+                continue;
+            }
+            graph.components[*index].recovery_contract()?
+        } else {
+            continue;
+        };
+        let Some(progress) = contract.consumer_progress else {
+            continue;
+        };
+        if progress.producer_id() != id {
+            return Err(topology("consumer progress belongs to another producer"));
+        }
+        let selected =
+            super::super::consumer_progress::participants(&admission_snapshot, &progress);
+        let mut contracts = BTreeMap::new();
+        let mut pending = BTreeSet::new();
+        for participant in selected {
+            let contract = if let Some(component) = components.get(&participant) {
+                if matches!(
+                    component,
+                    Component::Deferred { .. } | Component::Unresolved(_)
+                ) {
+                    pending.insert(participant.clone());
+                }
+                component.recovery_contract()
+            } else if let Some(index) = graph.ids.get(&participant) {
+                if !graph
+                    .observed()
+                    .components
+                    .get(&participant)
+                    .is_some_and(|node| node.realization == RealizationState::Created)
+                {
+                    pending.insert(participant.clone());
+                }
+                graph.components[*index].recovery_contract()?
+            } else {
+                pending.insert(participant.clone());
+                crate::computation::v1::ComponentRecovery::default()
+            };
+            contracts.insert(participant, contract);
+        }
+        super::super::consumer_progress::analyze(
+            &admission_snapshot,
+            &progress,
+            &contracts,
+            &pending,
+        )
+        .validate(true)?;
     }
     if !plan.desired.recovery_requirements.is_empty() {
         let mut snapshot = graph.snapshot.clone();

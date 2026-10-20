@@ -58,6 +58,10 @@ fn table() -> Vec<u8> {
 }
 
 fn frames(value: &[u8], offset: &mut u32) -> Vec<Vec<u8>> {
+    frames_with_gtid(value, offset, &[0; 25])
+}
+
+fn frames_with_gtid(value: &[u8], offset: &mut u32, gtid: &[u8]) -> Vec<Vec<u8>> {
     let mut query = vec![0; 13];
     query[8] = 4;
     query.extend(b"test\0BEGIN");
@@ -66,7 +70,7 @@ fn frames(value: &[u8], offset: &mut u32) -> Vec<Vec<u8>> {
     row.push(value.len() as u8);
     row.extend(value);
     vec![
-        packet(EventType::ANONYMOUS_GTID_EVENT, &[0; 25], offset),
+        packet(EventType::ANONYMOUS_GTID_EVENT, gtid, offset),
         packet(EventType::QUERY_EVENT, &query, offset),
         packet(EventType::TABLE_MAP_EVENT, &table(), offset),
         packet(EventType::WRITE_ROWS_EVENT, &row, offset),
@@ -112,6 +116,56 @@ fn decoder(anchor: Option<Position>) -> Binlog {
     decoder.format = format();
     decoder.described = true;
     decoder
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn transaction_commit_time_not_statement_seconds_orders_snapshot_handover() -> Result<()> {
+    use mysql_common::{binlog::events::GtidEvent, proto::MySerialize};
+    let committed_micros = 1_700_000_000_950_123u64;
+    let mut body = Vec::new();
+    GtidEvent::new([1; 16], 1)
+        .with_immediate_commit_timestamp(committed_micros)
+        .with_original_commit_timestamp(committed_micros)
+        .serialize(&mut body);
+    for output in [MySqlOutput::Changes, MySqlOutput::Transactions] {
+        let mut decoder = decoder(None);
+        decoder.config.output = output;
+        decoder.config.start = super::super::MySqlStartPosition::Snapshot {
+            lock_timeout_ms: std::num::NonZeroU64::new(1000).expect("timeout"),
+        };
+        let messages = frames_with_gtid(b"later", &mut 4, &body);
+        let mut outputs = Vec::new();
+        for message in messages {
+            outputs.extend(decoder.decode(&message)?);
+        }
+        assert_eq!(outputs.len(), 1);
+        let changes = if output == MySqlOutput::Transactions {
+            SourceTransactionCodec::decode(&outputs[0].envelope, decoder.config.transactions)?
+                .into_changes()
+        } else {
+            GraphChangeCodec::decode_changes(&outputs[0].envelope)?
+        };
+        assert_eq!(changes.len(), 1);
+        let SourceChange::Insert { element } = &changes[0] else {
+            anyhow::bail!("expected inserted row");
+        };
+        assert_eq!(
+            element.get_metadata().effective_from,
+            committed_micros / 1000
+        );
+        assert_eq!(
+            outputs[0].envelope.system().timestamp(),
+            DateTime::from_timestamp_micros(committed_micros.try_into()?),
+        );
+    }
+    let mut decoder = decoder(None);
+    decoder.config.start = super::super::MySqlStartPosition::Snapshot {
+        lock_timeout_ms: std::num::NonZeroU64::new(1000).expect("timeout"),
+    };
+    assert!(decoder
+        .decode(&frames(b"no commit time", &mut 4)[0])
+        .is_err());
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

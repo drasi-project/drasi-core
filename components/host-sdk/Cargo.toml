@@ -30,6 +30,7 @@ serde_json = "1.0"
 log = "0.4"
 tracing = "0.1"
 tokio-stream = "0.1"
+futures-util = "0.3"
 indexmap = "2"
 chrono = "0.4"
 sha2 = "0.10"
@@ -57,9 +58,11 @@ workspace = true
 
 [dev-dependencies]
 drasi-computation-bootstrap-http = { workspace = true }
+drasi-computation-bootstrap-postgres = { workspace = true }
 drasi-computation-network-common = { workspace = true, features = ["http-source", "grpc-source", "http-sink", "grpc-sink"] }
 drasi-computation-source-grpc = { workspace = true }
 drasi-computation-source-http = { workspace = true }
+drasi-computation-source-postgres = { workspace = true }
 drasi-computation-sink-http = { workspace = true }
 drasi-computation-sink-grpc = { workspace = true }
 drasi-computation-sink-sse = { workspace = true }
@@ -76,7 +79,6 @@ rmp-serde = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
-futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 serial_test = "3"
 im = "15"
@@ -89,5 +91,11 @@ tonic = "0.14"
 [[example]]
 name = "native_recovery"
 path = "tests/fixtures/native_recovery.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "native_consumer_progress_metadata"
+path = "tests/fixtures/native_consumer_progress_metadata.rs"
 crate-type = ["cdylib"]
 test = false

@@ -46,6 +46,8 @@ use tokio_postgres::{Client, NoTls};
 mod libraries;
 #[path = "native_transactions/ordinary.rs"]
 mod ordinary;
+#[path = "native_transactions/shared.rs"]
+mod shared;
 #[path = "native_transactions/snapshot.rs"]
 mod snapshot;
 #[path = "native_transactions/tls.rs"]

@@ -10,6 +10,7 @@ mod tests;
 
 struct RetainedInput {
     edge: usize,
+    producer_role: super::super::ComponentRole,
     input: InputEnvelope,
     acknowledgement: Option<Box<dyn Acknowledgement>>,
     _work: DeliveryWork,
@@ -45,6 +46,7 @@ impl SinkBatchState {
         // Retain ownership before any validation that may fail.
         self.inputs.push_back(RetainedInput {
             edge: incoming.edge,
+            producer_role: incoming.producer_role,
             input,
             acknowledgement,
             _work: work,
@@ -154,7 +156,12 @@ impl SinkBatchState {
         Ok(())
     }
 
-    async fn flush(&mut self, component: &mut Component, node: &NodeSnapshot) -> GraphResult<()> {
+    async fn flush(
+        &mut self,
+        component: &mut Component,
+        node: &NodeSnapshot,
+        input_progress: &mut Option<Box<input_progress::InputProgress>>,
+    ) -> GraphResult<()> {
         self.flushing = true;
         self.acknowledge().await?;
         while !self.inputs.is_empty() {
@@ -195,23 +202,50 @@ impl SinkBatchState {
                         .saturating_add(retained.input.envelope.changes().operations().len());
                     count += 1;
                 }
-                let batch = self
+                count
+            } else {
+                1
+            };
+            let prepared = input_progress
+                .as_ref()
+                .map(|progress| {
+                    progress.prepare_batch(
+                        self.inputs
+                            .iter()
+                            .take(count)
+                            .map(|input| (&input.input.envelope, input.producer_role)),
+                    )
+                })
+                .transpose()
+                .map_err(|error| component_error(node, "prepare batch input progress", error))?;
+            let is_new = |index: usize| {
+                prepared
+                    .as_ref()
+                    .map_or(true, |inputs| !inputs[index].duplicate)
+            };
+            if use_batch {
+                let batch: Vec<_> = self
                     .inputs
                     .iter()
                     .take(count)
-                    .map(|input| input.input.clone())
+                    .enumerate()
+                    .filter(|(index, _)| is_new(*index))
+                    .map(|(_, input)| input.input.clone())
                     .collect();
-                sink.handle_batch(batch)
-                    .await
-                    .map_err(|error| component_error(node, "handle batch", error))?;
-                count
-            } else {
+                if !batch.is_empty() {
+                    sink.handle_batch(batch)
+                        .await
+                        .map_err(|error| component_error(node, "handle batch", error))?;
+                }
+            } else if is_new(0) {
                 sink.handle(first.input.clone())
                     .await
                     .map_err(|error| component_error(node, "handle", error))?;
-                1
-            };
+            }
             check_descriptor(component, node)?;
+            if let (Some(progress), Some(prepared)) = (input_progress.as_mut(), prepared) {
+                progress.confirm(prepared);
+            }
             self.completed = count;
             self.acknowledge().await?;
         }
@@ -299,6 +333,7 @@ pub(super) async fn run(
     quiesce: &mut watch::Receiver<bool>,
     budget: &NodeWorkBudget,
     retained: &mut Option<Box<SinkBatchState>>,
+    input_progress: &mut Option<Box<input_progress::InputProgress>>,
 ) -> GraphResult<()> {
     if inputs.is_empty() && retained.as_ref().map_or(true, |state| state.is_empty()) {
         cancelled(quiesce).await;
@@ -320,12 +355,12 @@ pub(super) async fn run(
         }
         if *quiesce.borrow() {
             if !state.is_empty() {
-                state.flush(component, node).await?;
+                state.flush(component, node, input_progress).await?;
             }
             return Ok(());
         }
         if state.should_flush(policy) {
-            state.flush(component, node).await?;
+            state.flush(component, node, input_progress).await?;
             continue;
         }
         if state.is_empty()
@@ -390,7 +425,7 @@ pub(super) async fn run(
         };
         let Some(selected) = selected else {
             if !state.is_empty() {
-                state.flush(component, node).await?;
+                state.flush(component, node, input_progress).await?;
             }
             return Ok(());
         };
@@ -410,7 +445,7 @@ pub(super) async fn run(
                 .crosses_boundary(&candidate, policy)
                 .map_err(|error| component_error(node, "measure sink input", error))?
             {
-                state.flush(component, node).await?;
+                state.flush(component, node, input_progress).await?;
                 continue;
             }
         }

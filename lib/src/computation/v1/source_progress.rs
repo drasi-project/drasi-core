@@ -16,13 +16,15 @@ use super::{ComponentId, StreamId};
 use async_trait::async_trait;
 use drasi_core::interface::SourceCheckpoint;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
 use tokio::sync::watch;
+
+const MAX_INPUT_POSITION_BINDINGS: usize = 4096;
 
 pub use drasi_computation_contracts::{
     SourceProgressKey, SourceProgressProvider, SourceProgressSnapshot, SourceProgressUpdates,
@@ -125,11 +127,67 @@ impl SourceProgressReader {
     }
 }
 
+struct InputPositionBinding {
+    role: super::ComponentRole,
+    policy: Option<Arc<super::InputPositionPolicy>>,
+    paths: BTreeSet<Vec<StreamId>>,
+}
+
+pub(super) struct InputBoundary {
+    pub role: super::ComponentRole,
+    pub policy: Option<Arc<super::InputPositionPolicy>>,
+    pub system: Arc<super::SystemMetadata>,
+    pub distinct_ancestor: bool,
+}
+
+struct VolatileWriter {
+    identity: std::sync::Weak<()>,
+    active: bool,
+}
+
+fn position_origin(
+    input: &super::ChangeEnvelope,
+    path: &[StreamId],
+) -> Option<(Arc<super::SystemMetadata>, bool)> {
+    let mut expected = path.iter().rev();
+    let mut next = expected.next()?;
+    let mut current = input.system();
+    let mut ancestor = input.lineage();
+    let mut previous = None;
+    loop {
+        if previous != Some(current.stream()) {
+            if current.stream() != next {
+                return None;
+            }
+            let Some(parent) = expected.next() else {
+                let mut earlier = ancestor;
+                let mut distinct = false;
+                while let Some(parent) = earlier {
+                    if parent.system().stream() != current.stream() {
+                        distinct = true;
+                        break;
+                    }
+                    earlier = parent.parent();
+                }
+                return Some((current.clone(), distinct));
+            };
+            next = parent;
+            previous = Some(current.stream());
+        }
+        let parent = ancestor?;
+        current = parent.system();
+        ancestor = parent.parent();
+    }
+}
+
 pub struct QuerySourceProgress {
     graph_id: Arc<str>,
     query_id: ComponentId,
     state: watch::Sender<Arc<SourceProgressSnapshot>>,
     replay_only: AtomicBool,
+    input_positions: std::sync::RwLock<BTreeMap<ComponentId, InputPositionBinding>>,
+    has_input_positions: AtomicBool,
+    volatile_writer: std::sync::Mutex<Option<VolatileWriter>>,
 }
 
 impl SourceProgressProvider for QuerySourceProgress {
@@ -168,6 +226,9 @@ impl QuerySourceProgress {
             query_id,
             state: watch::channel(Arc::new(SourceProgressSnapshot::default())).0,
             replay_only: AtomicBool::new(false),
+            input_positions: std::sync::RwLock::new(BTreeMap::new()),
+            has_input_positions: AtomicBool::new(false),
+            volatile_writer: std::sync::Mutex::new(None),
         })
     }
     pub fn graph_id(&self) -> &str {
@@ -192,6 +253,215 @@ impl QuerySourceProgress {
     }
     pub fn subscribe(&self) -> watch::Receiver<Arc<SourceProgressSnapshot>> {
         self.state.subscribe()
+    }
+
+    pub(super) fn claim_volatile_writer(&self, identity: &Arc<()>) -> anyhow::Result<()> {
+        let mut writer = self
+            .volatile_writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("volatile input progress ownership is poisoned"))?;
+        anyhow::ensure!(
+            !writer.as_ref().is_some_and(|writer| writer.active),
+            "volatile input progress requires successful cleanup of its previous owner"
+        );
+        let snapshot = self.snapshot();
+        anyhow::ensure!(
+            !snapshot.ready && !snapshot.persistent,
+            "volatile input progress cannot replace an active or persistent publisher"
+        );
+        let same = writer
+            .as_ref()
+            .is_some_and(|writer| writer.identity.ptr_eq(&Arc::downgrade(identity)));
+        if !same {
+            self.publish(SourceProgressSnapshot {
+                reset_generation: snapshot
+                    .reset_generation
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("volatile input generation exhausted"))?,
+                ..Default::default()
+            });
+        } else {
+            self.pending();
+        }
+        *writer = Some(VolatileWriter {
+            identity: Arc::downgrade(identity),
+            active: true,
+        });
+        Ok(())
+    }
+
+    pub(super) fn release_volatile_writer(&self, identity: &Arc<()>) -> anyhow::Result<()> {
+        let mut writer = self
+            .volatile_writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("volatile input progress ownership is poisoned"))?;
+        let writer = writer
+            .as_mut()
+            .filter(|writer| writer.active && writer.identity.ptr_eq(&Arc::downgrade(identity)))
+            .ok_or_else(|| anyhow::anyhow!("volatile input progress owner changed"))?;
+        self.pending();
+        writer.active = false;
+        Ok(())
+    }
+
+    pub(super) fn bind_input_boundary(
+        &self,
+        producer: &ComponentId,
+        role: super::ComponentRole,
+        policy: Option<Arc<super::InputPositionPolicy>>,
+        path: Vec<StreamId>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !path.is_empty(),
+            "input replay position has no validated data path"
+        );
+        if let Some(SourceProgressKey::Stream(stream)) = policy.as_ref().map(|policy| policy.key())
+        {
+            anyhow::ensure!(
+                path.first() == Some(stream),
+                "input replay position stream does not belong to its producer"
+            );
+        }
+        let mut positions = self
+            .input_positions
+            .write()
+            .map_err(|_| anyhow::anyhow!("input position bindings are poisoned"))?;
+        for (bound_producer, bound) in positions.iter() {
+            let previous = bound.policy.as_ref().map(|policy| policy.key());
+            let next = policy.as_ref().map(|policy| policy.key());
+            if bound_producer == producer {
+                anyhow::ensure!(previous == next && bound.role == role,
+                    "producer changed its input replay identity without reconstructing its consumer");
+            } else {
+                anyhow::ensure!(
+                    next.is_none() || previous != next,
+                    "different producers claim the same input replay position"
+                );
+            }
+        }
+        if !positions
+            .get(producer)
+            .is_some_and(|bound| bound.paths.contains(&path))
+        {
+            anyhow::ensure!(
+                positions
+                    .values()
+                    .map(|binding| binding.paths.len())
+                    .sum::<usize>()
+                    < MAX_INPUT_POSITION_BINDINGS,
+                "input replay position binding limit reached"
+            );
+        }
+        // Queued inputs can outlive a producer/path replacement. Retain the
+        // validated old paths, but never promote arbitrary inherited lineage.
+        let binding = positions
+            .entry(producer.clone())
+            .or_insert_with(|| InputPositionBinding {
+                role,
+                policy: policy.clone(),
+                paths: BTreeSet::new(),
+            });
+        binding.policy = policy;
+        binding.paths.insert(path);
+        self.has_input_positions.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(super) fn input_binding(
+        &self,
+        input: &super::ChangeEnvelope,
+        fallback: &SourceProgressKey,
+    ) -> anyhow::Result<Option<InputBoundary>> {
+        if !self.has_input_positions.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let bindings = self
+            .input_positions
+            .read()
+            .map_err(|_| anyhow::anyhow!("input position bindings are poisoned"))?;
+        let mut selected = None;
+        for binding in bindings.values() {
+            for path in &binding.paths {
+                if let Some((system, distinct_ancestor)) = position_origin(input, path) {
+                    anyhow::ensure!(
+                        selected.is_none(),
+                        "input matches more than one producer replay position"
+                    );
+                    selected = Some(InputBoundary {
+                        role: binding.role,
+                        policy: binding.policy.clone(),
+                        system,
+                        distinct_ancestor,
+                    });
+                }
+            }
+        }
+        anyhow::ensure!(
+            selected.is_some()
+                || input.lineage().is_some()
+                || !bindings
+                    .values()
+                    .any(|binding| binding.paths.iter().any(|path| {
+                        path.len() > 1 && path.last() == Some(input.system().stream())
+                    })),
+            "identity-preserving replay path omitted producer provenance"
+        );
+        anyhow::ensure!(
+            selected.is_some()
+                || !bindings.values().any(|binding| {
+                    binding
+                        .policy
+                        .as_ref()
+                        .is_some_and(|policy| policy.key() == fallback)
+                }),
+            "input replay provenance is outside its validated producer path"
+        );
+        Ok(selected)
+    }
+
+    pub(super) fn position_handled(
+        &self,
+        input: &super::producer_progress::GraphInputProgress,
+        checkpoint: Option<&SourceCheckpoint>,
+    ) -> anyhow::Result<Option<bool>> {
+        let Some(policy) = input
+            .positioned
+            .as_ref()
+            .and_then(|position| position.policy.as_ref())
+        else {
+            return Ok(None);
+        };
+        let position = input.position.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("producer omitted its required input replay position")
+        })?;
+        anyhow::ensure!(
+            position.len() <= drasi_computation_contracts::MAX_SOURCE_POSITION_BYTES,
+            "input replay position exceeds the source cursor limit"
+        );
+        let published;
+        let checkpoint = match checkpoint {
+            Some(checkpoint) => Some(checkpoint),
+            None => {
+                published = self.snapshot();
+                published.checkpoints.get(&input.identity)
+            }
+        };
+        let Some(checkpoint) = checkpoint else {
+            anyhow::ensure!(
+                !policy.is_after(position, position)?,
+                "input position ordering must be strictly after, not equal"
+            );
+            return Ok(Some(false));
+        };
+        let handled = checkpoint.source_position.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("handled input has no position for its declared replay policy")
+        })?;
+        let after = policy.is_after(position, handled)?;
+        anyhow::ensure!(
+            !after || input.sequence > checkpoint.sequence,
+            "new source position regressed its logical sequence"
+        );
+        Ok(Some(!after))
     }
     pub async fn wait_recovered(&self) -> anyhow::Result<Arc<SourceProgressSnapshot>> {
         let mut receiver = self.state.subscribe();

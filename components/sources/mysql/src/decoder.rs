@@ -158,6 +158,7 @@ impl MySqlDecoder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn native_snapshot_element(
         &self,
         database: &str,
@@ -165,6 +166,7 @@ impl MySqlDecoder {
         columns: &[mysql_common::packets::Column],
         values: Vec<Value>,
         key_columns: &[String],
+        timestamp: u64,
         max_bytes: usize,
     ) -> Result<Element> {
         use mysql_common::constants::ColumnFlags;
@@ -209,7 +211,7 @@ impl MySqlDecoder {
             metadata: ElementMetadata {
                 reference: ElementReference::new(&self.source_id, &identity),
                 labels: Arc::from([Arc::from(table)]),
-                effective_from: Utc::now().timestamp_millis().try_into()?,
+                effective_from: timestamp,
             },
             properties,
         })

@@ -172,19 +172,7 @@ impl PostgresSnapshot {
         // Live changes use PostgreSQL commit time. Sampling that same clock
         // before the snapshot boundary prevents host clock skew from making
         // subsequent WAL updates/deletes appear older than the initial rows.
-        let rows = connection
-            .query_rows(
-                "SELECT floor(extract(epoch FROM pg_catalog.clock_timestamp()) * 1000)::bigint"
-                    .into(),
-                config.max_protocol_bytes,
-            )
-            .await?;
-        let [row] = rows.as_slice() else {
-            anyhow::bail!("PostgreSQL did not return one snapshot timestamp");
-        };
-        let timestamp = field(row, 0)?
-            .parse::<u64>()
-            .context("invalid PostgreSQL snapshot timestamp")?;
+        let timestamp = snapshot_timestamp(&mut connection, &config).await?;
         state
             .write(Bytes::from(serde_json::to_vec(&handover)?))
             .await?;
@@ -195,53 +183,25 @@ impl PostgresSnapshot {
 
         // No further command may use this connection before the second session
         // imports the exported snapshot: another command invalidates its name.
-        let rows = connection
-            .query_rows(
-                format!(
-                    "CREATE_REPLICATION_SLOT {} LOGICAL pgoutput EXPORT_SNAPSHOT",
-                    handover.slot
-                ),
-                config.max_protocol_bytes,
-            )
-            .await?;
-        let [row] = rows.as_slice() else {
-            anyhow::bail!("PostgreSQL did not return one exported snapshot");
-        };
-        anyhow::ensure!(
-            field(row, 0)? == handover.slot && field(row, 3)? == "pgoutput",
-            "unexpected exported slot identity"
-        );
-        let boundary = parse_lsn(&field(row, 1)?)?;
-        anyhow::ensure!(boundary > 0, "invalid PostgreSQL snapshot boundary");
-        let snapshot = field(row, 2)?;
-        anyhow::ensure!(
-            !snapshot.is_empty()
-                && snapshot
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'),
-            "invalid PostgreSQL exported snapshot name"
-        );
+        let (boundary, snapshot) =
+            export_snapshot(&mut connection, &config, &handover.slot, false).await?;
         let mut reader = connect(&config).await?;
         reader.query_rows(
             format!("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT '{snapshot}'"),
             config.max_protocol_bytes,
         ).await?;
         drop(connection);
-        validate_retention(&mut reader, &config).await?;
-        let tables = snapshot_tables(&mut reader, &config, keys).await?;
         handover.boundary = Some(boundary);
-        let reader = SnapshotReader {
-            connection: reader,
+        let mut reader = SnapshotReader::new(
+            reader,
             config,
-            tables,
-            opened: false,
-            ordinal: 0,
+            keys,
             timestamp,
-            source: self.source.clone(),
-            stream: self.stream.clone(),
-            handover,
-            completed: self.handover.clone(),
-        };
+            self.source.clone(),
+            self.stream.clone(),
+        )
+        .await?;
+        reader.completed = Some((handover, self.handover.clone()));
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::try_unfold(
                 reader,
@@ -404,7 +364,7 @@ struct SnapshotTable {
     keys: Vec<String>,
 }
 
-struct SnapshotReader {
+pub(super) struct SnapshotReader {
     connection: Connection,
     config: PostgresTransactionConfig,
     tables: VecDeque<SnapshotTable>,
@@ -413,12 +373,38 @@ struct SnapshotReader {
     timestamp: u64,
     source: ComponentId,
     stream: StreamId,
-    handover: Handover,
-    completed: Arc<Mutex<Option<Handover>>>,
+    completed: Option<(Handover, Arc<Mutex<Option<Handover>>>)>,
 }
 
 impl SnapshotReader {
-    async fn next(&mut self) -> Result<Option<ChangeEnvelope>> {
+    pub(super) async fn new(
+        mut connection: Connection,
+        config: PostgresTransactionConfig,
+        keys: TableKeys,
+        timestamp: u64,
+        source: ComponentId,
+        stream: StreamId,
+    ) -> Result<Self> {
+        validate_retention(&mut connection, &config).await?;
+        let tables = snapshot_tables(&mut connection, &config, keys).await?;
+        Ok(Self {
+            connection,
+            config,
+            tables,
+            opened: false,
+            ordinal: 0,
+            timestamp,
+            source,
+            stream,
+            completed: None,
+        })
+    }
+
+    pub(super) fn connection(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
+    pub(super) async fn next(&mut self) -> Result<Option<ChangeEnvelope>> {
         loop {
             let Some(table) = self.tables.front() else {
                 tokio::time::timeout(
@@ -427,12 +413,13 @@ impl SnapshotReader {
                         .query_rows("COMMIT".into(), self.config.max_protocol_bytes),
                 )
                 .await??;
-                self.handover.completed = true;
-                *self
-                    .completed
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("PostgreSQL handover poisoned"))? =
-                    Some(self.handover.clone());
+                if let Some((handover, completed)) = &mut self.completed {
+                    handover.completed = true;
+                    *completed
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("PostgreSQL handover poisoned"))? =
+                        Some(handover.clone());
+                }
                 return Ok(None);
             };
             if !self.opened {
@@ -516,11 +503,62 @@ impl SnapshotReader {
     }
 }
 
+pub(super) async fn snapshot_timestamp(
+    connection: &mut Connection,
+    config: &PostgresTransactionConfig,
+) -> Result<u64> {
+    let rows = connection
+        .query_rows(
+            "SELECT floor(extract(epoch FROM pg_catalog.clock_timestamp()) * 1000)::bigint".into(),
+            config.max_protocol_bytes,
+        )
+        .await?;
+    let [row] = rows.as_slice() else {
+        anyhow::bail!("PostgreSQL did not return one snapshot timestamp");
+    };
+    field(row, 0)?
+        .parse::<u64>()
+        .context("invalid PostgreSQL snapshot timestamp")
+}
+
+pub(super) async fn export_snapshot(
+    connection: &mut Connection,
+    config: &PostgresTransactionConfig,
+    slot: &str,
+    temporary: bool,
+) -> Result<(u64, String)> {
+    let temporary = if temporary { " TEMPORARY" } else { "" };
+    let rows = connection
+        .query_rows(
+            format!("CREATE_REPLICATION_SLOT {slot}{temporary} LOGICAL pgoutput EXPORT_SNAPSHOT"),
+            config.max_protocol_bytes,
+        )
+        .await?;
+    let [row] = rows.as_slice() else {
+        anyhow::bail!("PostgreSQL did not return one exported snapshot");
+    };
+    anyhow::ensure!(
+        field(row, 0)? == slot && field(row, 3)? == "pgoutput",
+        "unexpected exported slot identity"
+    );
+    let boundary = parse_lsn(&field(row, 1)?)?;
+    anyhow::ensure!(boundary > 0, "invalid PostgreSQL snapshot boundary");
+    let snapshot = field(row, 2)?;
+    anyhow::ensure!(
+        !snapshot.is_empty()
+            && snapshot
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'),
+        "invalid PostgreSQL exported snapshot name"
+    );
+    Ok((boundary, snapshot))
+}
+
 fn quote(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-async fn validate_snapshot_publication(
+pub(super) async fn validate_snapshot_publication(
     connection: &mut Connection,
     config: &PostgresTransactionConfig,
 ) -> Result<()> {

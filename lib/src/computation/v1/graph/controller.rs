@@ -53,6 +53,8 @@ pub(super) struct InstanceSlot {
     configuration: Mutex<super::CapturedComponentConfiguration>,
     query_api: Mutex<Option<Arc<crate::computation::v1::QueryApi>>>,
     recovery: Mutex<crate::computation::v1::ComponentRecovery>,
+    uses_consumer_progress: std::sync::atomic::AtomicBool,
+    uses_volatile_input_progress: std::sync::atomic::AtomicBool,
     damaged: Mutex<Option<Arc<GraphError>>>,
     handler: Mutex<Option<Arc<dyn crate::computation::v1::ControlHandler>>>,
     requires_readiness: std::sync::atomic::AtomicBool,
@@ -63,6 +65,7 @@ struct Instance {
     sequences: BTreeMap<PortId, u64>,
     inputs: Vec<Incoming>,
     sink_batch: Option<Box<super::sink_batching::SinkBatchState>>,
+    input_progress: Option<Box<super::input_progress::InputProgress>>,
     outputs: Vec<Outgoing>,
     attempted: bool,
 }
@@ -93,6 +96,8 @@ impl InstanceSlot {
             }),
             query_api: Mutex::new(None),
             recovery: Mutex::new(crate::computation::v1::ComponentRecovery::default()),
+            uses_consumer_progress: std::sync::atomic::AtomicBool::new(false),
+            uses_volatile_input_progress: std::sync::atomic::AtomicBool::new(false),
             damaged: Mutex::new(None),
             handler: Mutex::new(None),
             requires_readiness: std::sync::atomic::AtomicBool::new(false),
@@ -101,6 +106,7 @@ impl InstanceSlot {
                 sequences: BTreeMap::new(),
                 inputs: Vec::new(),
                 sink_batch: None,
+                input_progress: None,
                 outputs: Vec::new(),
                 attempted: false,
             })),
@@ -145,6 +151,23 @@ impl InstanceSlot {
                     self.id
                 ))
             })
+    }
+
+    pub(super) fn consumer_progress(
+        &self,
+    ) -> GraphResult<Option<Arc<crate::computation::v1::ConsumerProgressSet>>> {
+        if !self
+            .uses_consumer_progress
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(None);
+        }
+        Ok(self.recovery_contract()?.consumer_progress)
+    }
+
+    pub(super) fn has_volatile_input_progress(&self) -> bool {
+        self.uses_volatile_input_progress
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(super) fn query_api(&self) -> Option<std::sync::Weak<crate::computation::v1::QueryApi>> {
@@ -230,6 +253,14 @@ impl InstanceLease {
                 self.slot.id
             ))
         })? = contract.clone();
+        self.slot.uses_consumer_progress.store(
+            contract.consumer_progress.is_some(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.slot.uses_volatile_input_progress.store(
+            contract.volatile_input_progress.is_some(),
+            std::sync::atomic::Ordering::Release,
+        );
         Ok(contract)
     }
 
@@ -1935,6 +1966,7 @@ fn construct_pipe(
     let provider = graph.providers[&index].clone();
     let resources = graph.resource_handles.clone();
     let edge = edge.clone();
+    let producer_role = graph.nodes[graph.ids[&edge.definition.from.component]].role;
     let identity = super::execution::GraphIdentity {
         graph: graph.snapshot.id.clone(),
         run_epoch: graph.observed().run_epoch,
@@ -1993,7 +2025,7 @@ fn construct_pipe(
                                     })?,
                                 };
                                 let incoming = Incoming {
-                    edge: index, port: edge.definition.to.port.clone(), receiver,
+                    edge: index, producer_role, port: edge.definition.to.port.clone(), receiver,
                     acknowledgement_required: edge.capabilities.supported()
                         .contains(&crate::computation::v1::PipeCapability::ExplicitAcknowledgement),
                     pending: None, exhausted: false, progress,
@@ -3102,6 +3134,10 @@ impl Operations {
                 && !graph.deferred_activation.contains(id)
                 && !self.conflicts(&BTreeSet::from([*index]), true)
                 && binding_dependencies(graph, id).is_empty()
+                && graph
+                    .consumer_progress_validation(id)
+                    .waiting_for()
+                    .is_empty()
                 && !graph.snapshot.edges.iter().any(|edge| {
                     edge.definition.to.component == *id
                         && edge.policy.activation == ActivationCoupling::RequiresRunning
@@ -3404,6 +3440,28 @@ impl Operations {
                 Operation::Start => {
                     let requirement = recovery?;
                     let admission_before = lease.component.recovery_contract();
+                    let captured = lease.slot.recovery_contract()?;
+                    if (admission_before.source_admission.is_some()
+                        || captured.source_admission.is_some()
+                        || admission_before.consumer_progress.is_some()
+                        || captured.consumer_progress.is_some()
+                        || admission_before.volatile_input_progress.is_some()
+                        || captured.volatile_input_progress.is_some())
+                        && admission_before != captured
+                    {
+                        return Err(component_error(
+                            &node,
+                            "validate progress binding",
+                            anyhow::anyhow!("bound progress changed before activation"),
+                        ));
+                    }
+                    super::input_progress::validate(&admission_before, &node, &graph_id).map_err(
+                        |source| component_error(&node, "validate input progress", source),
+                    )?;
+                    super::consumer_progress::bind_positions(
+                        &admission_before,
+                        &admission_snapshot,
+                    )?;
                     let expected = if requirement.is_some() {
                         Some(lease.slot.recovery_contract()?)
                     } else {
@@ -3438,7 +3496,7 @@ impl Operations {
                             {
                                 return Err(component_error(
                                     &node,
-                                    "validate admission",
+                                    "validate recovery binding",
                                     super::emission_error(
                                         &node,
                                         "source admission output is not bound",
@@ -3448,6 +3506,19 @@ impl Operations {
                             }
                         }
                     }
+                    super::input_progress::InputProgress::configure(
+                        &mut lease.input_progress,
+                        admission_before.volatile_input_progress.as_ref(),
+                    )
+                    .map_err(|source| component_error(&node, "configure input progress", source))?;
+                    let progress_fence = if let Some(progress) = &mut lease.input_progress {
+                        progress.start().map_err(|source| {
+                            component_error(&node, "start input progress", source)
+                        })?;
+                        Some(progress.fence())
+                    } else {
+                        None
+                    };
                     lease.attempted = true;
                     if let Some(control) = peer_control {
                         lease.component.bind_control(control);
@@ -3472,7 +3543,11 @@ impl Operations {
                     }
                     let actual = lease.refresh_recovery()?;
                     if (admission_before.source_admission.is_some()
-                        || actual.source_admission.is_some())
+                        || actual.source_admission.is_some()
+                        || admission_before.consumer_progress.is_some()
+                        || actual.consumer_progress.is_some()
+                        || admission_before.volatile_input_progress.is_some()
+                        || actual.volatile_input_progress.is_some())
                         && admission_before != actual
                     {
                         return Err(component_error(
@@ -3480,7 +3555,7 @@ impl Operations {
                             "validate admission",
                             super::emission_error(
                                 &node,
-                                "source admission changed during activation",
+                                "admission or input/consumer progress changed during activation",
                             )
                             .into(),
                         ));
@@ -3512,18 +3587,31 @@ impl Operations {
                         }
                     }
                     lease.refresh_control();
-                    check_descriptor(&lease.component, &node)
+                    check_descriptor(&lease.component, &node)?;
+                    if let Some(progress) = &lease.input_progress {
+                        progress.ready();
+                    }
+                    if let Some(fence) = progress_fence {
+                        fence.completed();
+                    }
+                    Ok(())
                 }
                 Operation::Process => {
                     recovery?;
+                    super::consumer_progress::bind_positions(
+                        &lease.slot.recovery_contract()?,
+                        &admission_snapshot,
+                    )?;
                     let Instance {
                         component,
                         sequences,
                         inputs,
                         outputs,
                         sink_batch,
+                        input_progress,
                         ..
                     } = &mut *lease;
+                    let progress_fence = input_progress.as_ref().map(|progress| progress.fence());
                     super::bind_output_destinations(
                         component,
                         &node,
@@ -3533,7 +3621,7 @@ impl Operations {
                     )
                     .await?;
                     let budget = super::NodeWorkBudget::default();
-                    budget
+                    let result = budget
                         .run(run_node(
                             component,
                             &node,
@@ -3548,10 +3636,21 @@ impl Operations {
                             },
                             &budget,
                             sink_batch,
+                            input_progress,
                         ))
-                        .await
+                        .await;
+                    if result.is_ok() {
+                        if let Some(fence) = progress_fence {
+                            fence.completed();
+                        }
+                    }
+                    result
                 }
                 Operation::Stop => tokio::time::timeout(timeout, async {
+                    let progress_fence = lease
+                        .input_progress
+                        .as_ref()
+                        .map(|progress| progress.fence());
                     if lease.attempted {
                         lease
                             .component
@@ -3571,6 +3670,14 @@ impl Operations {
                             .deprovision()
                             .await
                             .map_err(|source| component_error(&node, "deprovision", source))?;
+                    }
+                    if let Some(progress) = &mut lease.input_progress {
+                        progress.stopped().map_err(|source| {
+                            component_error(&node, "stop input progress", source)
+                        })?;
+                    }
+                    if let Some(fence) = progress_fence {
+                        fence.completed();
                     }
                     Ok(())
                 })
@@ -3696,6 +3803,7 @@ impl Operations {
             let id = node.descriptor.id();
             let observed = graph.observed();
             let current = &observed.components[id];
+            let consumer_waits = graph.consumer_progress_validation(id).waiting_for();
             let outcome = if graph.component_retired(id) {
                 Some(StartOutcome::NotRequested)
             } else if let Some(cause) = graph.components[index].damage() {
@@ -3717,6 +3825,11 @@ impl Operations {
                     || !graph.snapshot.lifecycle_policies[id].auto_start)
             {
                 Some(StartOutcome::NotRequested)
+            } else if !consumer_waits.is_empty() {
+                self.pending_auto_start.insert(index, group.force);
+                Some(StartOutcome::Blocked {
+                    dependencies: consumer_waits.into_iter().collect(),
+                })
             } else if !binding_dependencies(graph, id).is_empty() {
                 self.pending_auto_start.insert(index, group.force);
                 Some(StartOutcome::Blocked {
@@ -5461,6 +5574,26 @@ fn handle_command<'a>(
                         } else { Ok(()) }
                     }).and_then(|_| {
                         if subscriptions {
+                            let previous: BTreeSet<_> = old.iter().cloned().collect();
+                            let proposed: BTreeSet<_> = connections.iter().cloned().collect();
+                            let changed: Vec<_> = previous.symmetric_difference(&proposed).collect();
+                            if !changed.is_empty() {
+                                for slot in &graph.components {
+                                    if let Some(progress) = slot.consumer_progress()? {
+                                        let participants = super::consumer_progress::participants(
+                                            &graph.snapshot, &progress,
+                                        );
+                                        if changed.iter().any(|(from, _)| {
+                                            participants.contains(from)
+                                                && !progress.owners().contains_key(from)
+                                        }) {
+                                            return Err(topology(
+                                                "consumer-progress subscriptions require reconciled lifecycle changes",
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                             for (from, _) in &connections {
                                 if let Some(index) = graph.ids.get(from) {
                                     if graph.components[*index].recovery_contract()?.source_admission.is_some() {

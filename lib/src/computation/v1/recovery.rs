@@ -84,7 +84,10 @@ pub struct ComponentRecovery {
     pub(crate) processing: ProcessingRecovery,
     pub(crate) publication: Option<StorageDurability>,
     pub(crate) committed_progress: Option<Arc<QuerySourceProgress>>,
+    pub(crate) volatile_input_progress: Option<Arc<QuerySourceProgress>>,
     pub(crate) replay_progress: Option<Arc<QuerySourceProgress>>,
+    pub(crate) consumer_progress: Option<Arc<super::ConsumerProgressSet>>,
+    pub(crate) consumer_positions: Option<Arc<super::InputPositionPolicy>>,
     pub(crate) source_admission: Option<Arc<super::SourceAdmission>>,
     pub(crate) output_bindings: Option<Arc<super::output_bindings::OutputBindingState>>,
     pub(crate) delivery: Option<Arc<super::DeliveryRetirementState>>,
@@ -105,7 +108,21 @@ impl PartialEq for ComponentRecovery {
             && self.processing == other.processing
             && self.publication == other.publication
             && same(&self.committed_progress, &other.committed_progress)
+            && same(
+                &self.volatile_input_progress,
+                &other.volatile_input_progress,
+            )
             && same(&self.replay_progress, &other.replay_progress)
+            && match (&self.consumer_progress, &other.consumer_progress) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.consumer_positions, &other.consumer_positions) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
             && match (&self.output_bindings, &other.output_bindings) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -184,6 +201,42 @@ impl ComponentRecovery {
     /// A replaying source must hold this same resource, not a matching name.
     pub fn with_committed_progress(mut self, progress: Arc<QuerySourceProgress>) -> Self {
         self.committed_progress = Some(progress);
+        self
+    }
+
+    /// Let the graph publish this instance's completed inputs in memory.
+    /// Only transformers and Handled sinks may opt in. Publication follows all
+    /// output delivery/continuation hooks, not queue acceptance, and is fenced
+    /// by failed or interrupted processing and lifecycle operations. This is
+    /// neither component-owned atomic progress nor persistent recovery.
+    pub fn with_volatile_input_progress(mut self, progress: Arc<QuerySourceProgress>) -> Self {
+        self.volatile_input_progress = Some(progress);
+        self
+    }
+
+    pub(crate) fn handled_input_progress(&self) -> Option<&Arc<QuerySourceProgress>> {
+        self.committed_progress
+            .as_ref()
+            .or(self.volatile_input_progress.as_ref())
+    }
+
+    /// The actual owners whose committed input is observed by this producer.
+    /// This supplies no aggregate cursor, durability or external-effect guarantee.
+    /// The graph validates every required branch and the exact owner resources.
+    pub fn with_consumer_progress(mut self, consumers: Arc<super::ConsumerProgressSet>) -> Self {
+        self.consumer_progress = Some(consumers);
+        self
+    }
+
+    /// Supply source-defined replay filtering for these actual input owners.
+    /// Logical/transport counters never substitute for opaque cursor ordering.
+    pub fn with_consumer_positions(
+        mut self,
+        consumers: Arc<super::ConsumerProgressSet>,
+        policy: Arc<super::InputPositionPolicy>,
+    ) -> Self {
+        self.consumer_progress = Some(consumers);
+        self.consumer_positions = Some(policy);
         self
     }
 

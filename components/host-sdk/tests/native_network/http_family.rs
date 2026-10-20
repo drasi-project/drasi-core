@@ -290,11 +290,12 @@ async fn rest() -> Result<RestServer> {
     ) -> StatusCode {
         let body =
             serde_json::from_slice(&body).unwrap_or_else(|_| json!(String::from_utf8_lossy(&body)));
-        state
-            .requests
-            .lock()
-            .unwrap()
-            .push((method, uri.path().to_owned(), headers, body));
+        state.requests.lock().expect("HTTP capture lock").push((
+            method,
+            uri.path().to_owned(),
+            headers,
+            body,
+        ));
         state.arrived.notify_one();
         StatusCode::OK
     }

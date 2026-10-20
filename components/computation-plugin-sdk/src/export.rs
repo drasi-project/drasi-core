@@ -6,8 +6,8 @@ use crate::{
     NativeSink as EnvelopeSink, NativeSource as EnvelopeSource, NativeTransformer as Transformer,
 };
 use drasi_computation_contracts::{
-    BinaryEnvelopeCodec, PluginIdentity, PortDirection, Record, RecordImage, RecordReference,
-    Schema, SourceProgressView, WakeupSource,
+    BinaryEnvelopeCodec, ConsumerProgressView, PluginIdentity, PortDirection, Record, RecordImage,
+    RecordReference, Schema, SourceProgressView, WakeupSource,
 };
 use std::{
     ffi::c_void,
@@ -57,6 +57,18 @@ pub trait Factory: Send + Sync + 'static {
     }
     fn supports_source_progress(&self) -> bool {
         false
+    }
+    fn supports_consumer_progress(&self) -> bool {
+        false
+    }
+    fn create_with_consumer_progress(
+        &self,
+        request: &CreateRequest,
+        control: ControlSender,
+        progress: crate::NativeConsumerProgress,
+    ) -> anyhow::Result<CreatedComponent> {
+        let _ = (request, control, progress);
+        anyhow::bail!("factory does not implement consumer progress")
     }
     fn create_with_progress(
         &self,
@@ -353,6 +365,9 @@ impl ExportedPlugin {
     pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
         &PLUGIN_RECOVERY
     }
+    pub fn consumer_progress(&self) -> *const abi::consumer_progress::PluginConsumerProgressV1 {
+        &PLUGIN_CONSUMER_PROGRESS
+    }
     pub fn bootstrap(&self) -> *const abi::bootstrap::PluginBootstrapV1 {
         &PLUGIN_BOOTSTRAP
     }
@@ -494,6 +509,17 @@ static PLUGIN_RECOVERY: abi::recovery::PluginRecoveryV1 = abi::recovery::PluginR
     create: Some(create_component_with_progress),
     inspect: Some(inspect_recovery),
 };
+
+static PLUGIN_CONSUMER_PROGRESS: abi::consumer_progress::PluginConsumerProgressV1 =
+    abi::consumer_progress::PluginConsumerProgressV1 {
+        header: Header::new::<abi::consumer_progress::PluginConsumerProgressV1>(),
+        version: abi::consumer_progress::VERSION,
+        reserved: 0,
+        factory: Some(factory_consumer_progress),
+        create: Some(create_component_with_consumer_progress),
+        inspect: Some(inspect_consumer_progress),
+        position_policy: Some(input_position_policy),
+    };
 
 static PLUGIN_BOOTSTRAP: abi::bootstrap::PluginBootstrapV1 = abi::bootstrap::PluginBootstrapV1 {
     header: Header::new::<abi::bootstrap::PluginBootstrapV1>(),
@@ -740,6 +766,34 @@ unsafe extern "C" fn factory_recovery(state: *mut c_void, index: u32) -> Reply {
     })
 }
 
+unsafe extern "C" fn factory_consumer_progress(state: *mut c_void, index: u32) -> Reply {
+    transport::reply_boundary(|| {
+        use drasi_computation_contracts::ComponentRole;
+        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let factory = state
+            .definition
+            .factories
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native consumer progress factory"))?;
+        let consumer_progress = factory.supports_consumer_progress();
+        if consumer_progress
+            && (!matches!(
+                state.definition.metadata.factories[index as usize].role,
+                ComponentRole::Source | ComponentRole::Transformer
+            ) || factory.supports_source_progress())
+        {
+            return Err(Failure::protocol(
+                "consumer progress requires a producer without single-owner progress",
+            ));
+        }
+        crate::consumer_progress::encode(&crate::consumer_progress::FactoryProgress {
+            version: abi::consumer_progress::VERSION,
+            consumer_progress,
+        })
+        .map_err(Failure::from)
+    })
+}
+
 unsafe extern "C" fn factory_services(state: *mut c_void, index: u32) -> Reply {
     transport::reply_boundary(|| {
         let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
@@ -868,6 +922,9 @@ struct Instance {
     batching: bool,
     progress: Option<SourceProgressView>,
     recovery: Option<crate::progress::InstanceRecovery>,
+    consumer_progress: Option<ConsumerProgressView>,
+    consumer_recovery: Option<crate::consumer_progress::InstanceProgress>,
+    input_position_policy: Option<crate::input_position::ExportedInputPositionPolicy>,
     consumer: Option<Box<crate::consumer::ConsumerState>>,
 }
 
@@ -900,6 +957,54 @@ fn source_recovery(
     })
 }
 
+fn consumer_recovery(
+    component: &Component,
+    progress: &ConsumerProgressView,
+    position_policy: bool,
+) -> anyhow::Result<crate::consumer_progress::InstanceProgress> {
+    anyhow::ensure!(
+        matches!(
+            component,
+            Component::Source(_) | Component::Transformer(_) | Component::Transactional(_)
+        ),
+        "consumer progress requires a source or transformer"
+    );
+    if let Component::Source(source) = component {
+        anyhow::ensure!(
+            source.recovery_reader().is_none() && source.replay_retention().is_none(),
+            "native producer cannot combine consumer and single-owner progress"
+        );
+    }
+    anyhow::ensure!(
+        component
+            .base()
+            .consumer_progress_reader()
+            .is_some_and(|reader| reader.same_binding(progress)),
+        "native producer must use its actual negotiated consumer progress reader"
+    );
+    Ok(crate::consumer_progress::InstanceProgress {
+        version: abi::consumer_progress::VERSION,
+        retention: component.base().consumer_replay_retention(),
+        position_policy,
+    })
+}
+
+fn validate_position_policy(
+    component: &Component,
+    expected: &Option<crate::input_position::ExportedInputPositionPolicy>,
+) -> anyhow::Result<()> {
+    let actual = component.base().input_position_policy();
+    anyhow::ensure!(
+        match (expected, &actual) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => expected.is_policy(actual),
+            _ => false,
+        },
+        "native producer changed its captured input position policy"
+    );
+    Ok(())
+}
+
 unsafe extern "C" fn create_component(
     state: *mut c_void,
     input: BorrowedBytes,
@@ -909,6 +1014,7 @@ unsafe extern "C" fn create_component(
         create_component_with_services(
             state,
             input,
+            std::ptr::null(),
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null(),
@@ -929,6 +1035,7 @@ unsafe extern "C" fn create_component_with_admission(
             state,
             input,
             admission,
+            std::ptr::null(),
             std::ptr::null(),
             std::ptr::null(),
             false,
@@ -953,6 +1060,30 @@ unsafe extern "C" fn create_component_with_progress(
             std::ptr::null(),
             progress,
             std::ptr::null(),
+            std::ptr::null(),
+            false,
+            out,
+        )
+    }
+}
+
+unsafe extern "C" fn create_component_with_consumer_progress(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    progress: *const abi::consumer_progress::ConsumerProgressV1,
+    out: *mut abi::ComponentHandle,
+) -> Status {
+    if progress.is_null() {
+        return transport::status_result(Err(Failure::protocol("missing consumer progress")));
+    }
+    unsafe {
+        create_component_with_services(
+            state,
+            input,
+            std::ptr::null(),
+            std::ptr::null(),
+            progress,
+            std::ptr::null(),
             false,
             out,
         )
@@ -974,6 +1105,7 @@ unsafe extern "C" fn create_component_with_query_snapshots(
             input,
             std::ptr::null(),
             std::ptr::null(),
+            std::ptr::null(),
             snapshots,
             false,
             out,
@@ -993,17 +1125,20 @@ unsafe extern "C" fn create_component_with_consumer(
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null(),
+            std::ptr::null(),
             true,
             out,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn create_component_with_services(
     state: *mut c_void,
     input: BorrowedBytes,
     admission: *const abi::services::SourceAdmissionV1,
     progress: *const abi::recovery::SourceProgressV1,
+    consumer_progress: *const abi::consumer_progress::ConsumerProgressV1,
     snapshots: *const abi::query_snapshots::QuerySnapshotsV1,
     consumer_bound: bool,
     out: *mut abi::ComponentHandle,
@@ -1034,13 +1169,18 @@ unsafe fn create_component_with_services(
             }
             let control = ControlSender::default();
             let factory = &state.plugin.definition.factories[state.index];
+            anyhow::ensure!(
+                factory.supports_consumer_progress() != consumer_progress.is_null(),
+                "native producer requires its negotiated consumer progress binding"
+            );
             let consumer_mode = factory.consumer_mode();
             anyhow::ensure!(
                 consumer_bound == consumer_mode.is_some(),
                 "native consumer requires its negotiated host-owned delivery service"
             );
             anyhow::ensure!(
-                !consumer_bound || (admission.is_null() && progress.is_null()),
+                !consumer_bound
+                    || (admission.is_null() && progress.is_null() && consumer_progress.is_null()),
                 "native consumer cannot bind source admission or progress"
             );
             if let Some(mode) = consumer_mode {
@@ -1060,7 +1200,37 @@ unsafe fn create_component_with_services(
                     crate::NativeAdmission::from_borrowed(admission, state.plugin.codec.clone())?
                 })
             };
-            let (created, progress) = if !snapshots.is_null() {
+            let (created, progress, consumer_progress) = if !consumer_progress.is_null() {
+                anyhow::ensure!(
+                    admission.is_null()
+                        && progress.is_null()
+                        && snapshots.is_null()
+                        && !consumer_bound
+                        && !factory.supports_source_progress()
+                        && matches!(
+                            metadata.role,
+                            drasi_computation_contracts::ComponentRole::Source
+                                | drasi_computation_contracts::ComponentRole::Transformer
+                        ),
+                    "unsupported or conflicting native consumer progress binding"
+                );
+                let capability =
+                    unsafe { crate::NativeConsumerProgress::from_borrowed(consumer_progress)? };
+                let reader = capability.reader();
+                anyhow::ensure!(
+                    request
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.graph_id == reader.graph_id())
+                        && &request.id == reader.producer_id(),
+                    "native consumer progress belongs to a different graph or producer"
+                );
+                (
+                    factory.create_with_consumer_progress(&request, control.clone(), capability)?,
+                    None,
+                    Some(reader),
+                )
+            } else if !snapshots.is_null() {
                 anyhow::ensure!(
                     admission.is_null()
                         && progress.is_null()
@@ -1077,10 +1247,12 @@ unsafe fn create_component_with_services(
                         Some(snapshots),
                     )?,
                     None,
+                    None,
                 )
             } else if progress.is_null() {
                 (
                     factory.create_with_admission(&request, control.clone(), service)?,
+                    None,
                     None,
                 )
             } else {
@@ -1103,9 +1275,17 @@ unsafe fn create_component_with_services(
                 (
                     factory.create_with_progress(&request, control.clone(), capability)?,
                     Some(reader),
+                    None,
                 )
             };
             let component = created.component;
+            anyhow::ensure!(
+                consumer_progress.is_some()
+                    || (component.base().consumer_progress_reader().is_none()
+                        && component.base().consumer_replay_retention().is_none()
+                        && component.base().input_position_policy().is_none()),
+                "native consumer progress requires its negotiated service"
+            );
             metadata.validate_instance(component.base().descriptor(), &request.id)?;
             let role = match &component {
                 Component::Source(source) => {
@@ -1204,6 +1384,21 @@ unsafe fn create_component_with_services(
                 .as_ref()
                 .map(|progress| source_recovery(&component, progress))
                 .transpose()?;
+            let damaged = Arc::new(transport::PanicState::default());
+            let input_position_policy = component
+                .base()
+                .input_position_policy()
+                .map(|policy| {
+                    crate::input_position::ExportedInputPositionPolicy::new(policy, damaged.clone())
+                })
+                .transpose()?;
+            validate_position_policy(&component, &input_position_policy)?;
+            let consumer_recovery = consumer_progress
+                .as_ref()
+                .map(|progress| {
+                    consumer_recovery(&component, progress, input_position_policy.is_some())
+                })
+                .transpose()?;
             let consumer = consumer_mode
                 .map(|mode| {
                     crate::consumer::ConsumerState::new(
@@ -1227,11 +1422,14 @@ unsafe fn create_component_with_services(
                 wakeup,
                 busy: AtomicBool::new(false),
                 running: AtomicBool::new(false),
-                damaged: Arc::new(transport::PanicState::default()),
+                damaged,
                 admission: !admission.is_null(),
                 batching: factory.supports_sink_batching(),
                 progress,
                 recovery,
+                consumer_progress,
+                consumer_recovery,
+                input_position_policy,
                 consumer,
             }))
         };
@@ -1274,6 +1472,35 @@ unsafe extern "C" fn inspect_recovery(state: *mut c_void) -> Reply {
             Failure::new(abi::status::UNSUPPORTED, "source progress is not bound")
         })?;
         crate::progress::encode(recovery).map_err(Failure::from)
+    })
+}
+unsafe extern "C" fn inspect_consumer_progress(state: *mut c_void) -> Reply {
+    transport::reply_boundary(|| {
+        let instance = unsafe { state_ref::<Arc<Instance>>(state)? };
+        let progress = instance.consumer_recovery.as_ref().ok_or_else(|| {
+            Failure::new(abi::status::UNSUPPORTED, "consumer progress is not bound")
+        })?;
+        crate::consumer_progress::encode(progress).map_err(Failure::from)
+    })
+}
+unsafe extern "C" fn input_position_policy(
+    state: *mut c_void,
+    out: *mut abi::consumer_progress::InputPositionPolicyV1,
+) -> Status {
+    transport::status_boundary(|| {
+        require_output(out)?;
+        let instance = unsafe { state_ref::<Arc<Instance>>(state)? };
+        if instance.consumer_progress.is_none() {
+            return Err(Failure::new(
+                abi::status::UNSUPPORTED,
+                "consumer progress is not bound",
+            ));
+        }
+        let policy = instance.input_position_policy.as_ref().map_or_else(
+            abi::consumer_progress::InputPositionPolicyV1::null,
+            crate::input_position::ExportedInputPositionPolicy::table,
+        );
+        unsafe { transport::write_out(out, policy) }
     })
 }
 unsafe extern "C" fn configuration(state: *mut c_void) -> Reply {
@@ -1511,6 +1738,17 @@ async fn execute(
                     "native source changed its negotiated recovery contract"
                 );
             }
+            if let Some(progress) = &instance.consumer_progress {
+                anyhow::ensure!(
+                    Some(consumer_recovery(
+                        &component,
+                        progress,
+                        instance.input_position_policy.is_some()
+                    )?) == instance.consumer_recovery,
+                    "native producer changed its negotiated consumer progress contract"
+                );
+                validate_position_policy(&component, &instance.input_position_policy)?;
+            }
             component.base_mut().start().await?;
             instance.running.store(true, Ordering::Release);
             if let Some(progress) = &instance.progress {
@@ -1518,6 +1756,17 @@ async fn execute(
                     Some(source_recovery(&component, progress)?) == instance.recovery,
                     "native source changed its recovery contract during activation"
                 );
+            }
+            if let Some(progress) = &instance.consumer_progress {
+                anyhow::ensure!(
+                    Some(consumer_recovery(
+                        &component,
+                        progress,
+                        instance.input_position_policy.is_some()
+                    )?) == instance.consumer_recovery,
+                    "native producer changed its consumer progress contract during activation"
+                );
+                validate_position_policy(&component, &instance.input_position_policy)?;
             }
         }
         STOP => {

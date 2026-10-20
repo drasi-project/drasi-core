@@ -55,6 +55,24 @@ impl Default for SqliteSourceFactory {
                 },
                 dependencies: BTreeMap::from([
                     (
+                        Arc::from("consumer_snapshots"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<SqliteConsumerSnapshots>(
+                                ResourceRole::Bootstrap,
+                            )
+                        },
+                    ),
+                    (
+                        Arc::from("consumer_progress"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<ConsumerProgressSet>(
+                                ResourceRole::Checkpoint,
+                            )
+                        },
+                    ),
+                    (
                         Arc::from("snapshot"),
                         ResourceRequirement {
                             minimum: 0,
@@ -90,6 +108,28 @@ impl ComponentFactory for SqliteSourceFactory {
         &self.descriptor
     }
     fn validate(&self, specification: &ComponentSpecification) -> Result<()> {
+        let bound = |name: &str| {
+            specification
+                .dependencies
+                .get(name)
+                .is_some_and(|ids| !ids.is_empty())
+        };
+        anyhow::ensure!(
+            !(bound("source_progress") && bound("consumer_progress")),
+            "SQLite single-owner and consumer-group progress are mutually exclusive"
+        );
+        anyhow::ensure!(
+            !(bound("snapshot") && bound("consumer_snapshots")),
+            "SQLite single-owner and consumer-group snapshots are mutually exclusive"
+        );
+        anyhow::ensure!(
+            !bound("snapshot") || bound("source_progress"),
+            "SQLite paired snapshot requires its single-owner progress"
+        );
+        anyhow::ensure!(
+            !bound("consumer_snapshots") || bound("consumer_progress"),
+            "SQLite shared snapshots require their consumer group"
+        );
         if let Some(ConfigurationValue::Literal(value)) =
             specification.configuration.get("rest_api")
         {
@@ -106,19 +146,11 @@ impl ComponentFactory for SqliteSourceFactory {
         };
         if let Some(coordinated) = coordinated {
             anyhow::ensure!(
-                coordinated
-                    == specification
-                        .dependencies
-                        .get("snapshot")
-                        .is_some_and(|ids| !ids.is_empty()),
+                coordinated == (bound("snapshot") || bound("consumer_snapshots")),
                 "coordinated SQLite mode requires its paired snapshot resource"
             );
             anyhow::ensure!(
-                !coordinated
-                    || specification
-                        .dependencies
-                        .get("source_progress")
-                        .is_some_and(|ids| !ids.is_empty()),
+                !coordinated || bound("source_progress") || bound("consumer_progress"),
                 "coordinated SQLite initialization requires persistent source progress"
             );
         }
@@ -140,11 +172,7 @@ impl ComponentFactory for SqliteSourceFactory {
                 "native SQLite output schema does not match settings"
             );
             anyhow::ensure!(
-                config.replay.is_some()
-                    == specification
-                        .dependencies
-                        .get("source_progress")
-                        .is_some_and(|resources| !resources.is_empty()),
+                config.replay.is_some() == (bound("source_progress") || bound("consumer_progress")),
                 "native SQLite replay settings and progress resource must be configured together"
             );
         } else {
@@ -183,6 +211,21 @@ impl ComponentFactory for SqliteSourceFactory {
                 );
             }
         }
+        for resource in specification
+            .dependencies
+            .get("consumer_progress")
+            .into_iter()
+            .flatten()
+        {
+            if let Some(handle) = resources.get(resource) {
+                let consumers = handle.get::<ConsumerProgressSet>()?;
+                anyhow::ensure!(
+                    consumers.graph_id() == graph_id
+                        && consumers.producer_id() == specification.descriptor.id(),
+                    "native SQLite consumer set belongs to another graph or producer"
+                );
+            }
+        }
         Ok(())
     }
     async fn create(
@@ -213,12 +256,27 @@ impl ComponentFactory for SqliteSourceFactory {
             } else {
                 None
             };
+            let consumers = if context
+                .specification
+                .dependencies
+                .contains_key("consumer_progress")
+            {
+                context
+                    .resources::<ConsumerProgressSet>("consumer_progress")?
+                    .pop()
+            } else {
+                None
+            };
             anyhow::ensure!(
-                config.replay.is_some() == progress.is_some(),
+                !(progress.is_some() && consumers.is_some()),
+                "SQLite single-owner and consumer-group progress are mutually exclusive"
+            );
+            anyhow::ensure!(
+                config.replay.is_some() == (progress.is_some() || consumers.is_some()),
                 "native SQLite replay requires its actual consumer progress"
             );
-            let mut source = match progress {
-                Some(progress) => {
+            let mut source = match (progress, consumers) {
+                (Some(progress), None) => {
                     anyhow::ensure!(
                         progress.0.graph_id() == context.graph_id.as_ref(),
                         "native SQLite progress belongs to another graph"
@@ -230,11 +288,24 @@ impl ComponentFactory for SqliteSourceFactory {
                         progress.0.clone(),
                     )?
                 }
-                None => SqliteSource::new(
+                (None, Some(consumers)) => {
+                    anyhow::ensure!(
+                        consumers.graph_id() == context.graph_id.as_ref(),
+                        "SQLite consumer progress belongs to another graph"
+                    );
+                    SqliteSource::new_replayable_with_consumers(
+                        context.component_id.clone(),
+                        StreamId::try_new(stream)?,
+                        config,
+                        consumers,
+                    )?
+                }
+                (None, None) => SqliteSource::new(
                     context.component_id.clone(),
                     StreamId::try_new(stream)?,
                     config,
                 )?,
+                _ => unreachable!("exclusive progress validated"),
             };
             if let Some(rest) = context.configuration().get("rest_api") {
                 source = source.with_rest_api(serde_json::from_value(rest.clone())?)?;
@@ -254,13 +325,32 @@ impl ComponentFactory for SqliteSourceFactory {
             } else {
                 None
             };
+            let consumer_snapshots = if context
+                .specification
+                .dependencies
+                .contains_key("consumer_snapshots")
+            {
+                context
+                    .resources::<SqliteConsumerSnapshots>("consumer_snapshots")?
+                    .pop()
+            } else {
+                None
+            };
             anyhow::ensure!(
-                coordinated == snapshot.is_some(),
+                !(snapshot.is_some() && consumer_snapshots.is_some()),
+                "SQLite single-owner and consumer-group snapshots are mutually exclusive"
+            );
+            anyhow::ensure!(
+                coordinated == (snapshot.is_some() || consumer_snapshots.is_some()),
                 "SQLite snapshot configuration/resource mismatch"
             );
             if let Some(snapshot) = snapshot {
                 snapshot.validate_source(&source)?;
                 source.snapshot = Some(snapshot);
+            }
+            if let Some(snapshots) = consumer_snapshots {
+                snapshots.validate_source(&source)?;
+                source.consumer_snapshots = Some(snapshots);
             }
             let client = context
                 .resources::<SqliteClientResource>("client")?

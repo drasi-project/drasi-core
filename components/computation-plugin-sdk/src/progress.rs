@@ -51,9 +51,30 @@ impl ProgressIdentity {
 }
 
 #[derive(Serialize, Deserialize)]
-enum Key {
+pub(crate) enum Key {
     Source(String),
     Stream(StreamId),
+}
+
+impl From<&SourceProgressKey> for Key {
+    fn from(key: &SourceProgressKey) -> Self {
+        match key {
+            SourceProgressKey::Source(source) => Self::Source(source.clone()),
+            SourceProgressKey::Stream(stream) => Self::Stream(stream.clone()),
+        }
+    }
+}
+
+impl Key {
+    pub(crate) fn into_key(self) -> anyhow::Result<SourceProgressKey> {
+        Ok(match self {
+            Self::Source(source) => {
+                ComponentId::try_new(source.as_str())?;
+                SourceProgressKey::Source(source)
+            }
+            Self::Stream(stream) => SourceProgressKey::Stream(stream),
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -132,10 +153,7 @@ pub fn encode_snapshot(snapshot: &SourceProgressSnapshot) -> anyhow::Result<Vec<
             .checkpoints
             .iter()
             .map(|(key, checkpoint)| Checkpoint {
-                key: match key {
-                    SourceProgressKey::Source(source) => Key::Source(source.clone()),
-                    SourceProgressKey::Stream(stream) => Key::Stream(stream.clone()),
-                },
+                key: Key::from(key),
                 sequence: checkpoint.sequence,
                 position: checkpoint
                     .source_position
@@ -164,13 +182,7 @@ pub fn decode_snapshot(bytes: &[u8]) -> anyhow::Result<Arc<SourceProgressSnapsho
     );
     let mut checkpoints = BTreeMap::new();
     for checkpoint in snapshot.checkpoints {
-        let key = match checkpoint.key {
-            Key::Source(source) => {
-                ComponentId::try_new(source.as_str())?;
-                SourceProgressKey::Source(source)
-            }
-            Key::Stream(stream) => SourceProgressKey::Stream(stream),
-        };
+        let key = checkpoint.key.into_key()?;
         anyhow::ensure!(
             checkpoints
                 .insert(

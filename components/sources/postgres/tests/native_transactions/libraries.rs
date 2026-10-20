@@ -64,10 +64,37 @@ pub(super) fn plugins(dynamic: bool) -> Result<Plugins> {
             )?,
         }
     };
-    assert_eq!(plugins.source.factories().len(), 2);
+    assert_eq!(
+        plugins
+            .source
+            .factories()
+            .iter()
+            .map(|factory| factory.metadata().implementation.name.as_ref())
+            .collect::<Vec<_>>(),
+        [
+            "drasi/postgres-transactions",
+            "drasi.postgres/changes",
+            "drasi.postgres/shared-changes",
+            "drasi.postgres/shared-transactions"
+        ],
+    );
     assert!(plugins.source.bootstrap_factories().is_empty());
     assert!(plugins.bootstrap.factories().is_empty());
-    assert_eq!(plugins.bootstrap.bootstrap_factories().len(), 3);
+    assert_eq!(
+        plugins
+            .bootstrap
+            .bootstrap_factories()
+            .iter()
+            .map(|factory| factory.metadata().implementation.name.as_ref())
+            .collect::<Vec<_>>(),
+        [
+            "drasi.postgres/coordinated-bootstrap",
+            "drasi.postgres/snapshot",
+            "drasi.postgres/coordinated-row-bootstrap",
+            "drasi.postgres/shared-row-bootstrap",
+            "drasi.postgres/shared-transaction-bootstrap"
+        ],
+    );
     assert_eq!(plugins.sink.factories().len(), 1);
     assert!(plugins.sink.bootstrap_factories().is_empty());
     assert_eq!(

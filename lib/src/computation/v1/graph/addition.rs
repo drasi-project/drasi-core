@@ -895,6 +895,21 @@ pub(super) fn insert(
             "an addition can declare only its own non-self input subscriptions",
         ));
     }
+    if !addition.bindings.subscriptions.is_empty() {
+        for slot in &graph.components {
+            if let Some(progress) = slot.consumer_progress()? {
+                let participants =
+                    super::consumer_progress::participants(&graph.snapshot, &progress);
+                if addition.bindings.subscriptions.iter().any(|(from, _)| {
+                    participants.contains(from) && !progress.owners().contains_key(from)
+                }) {
+                    return Err(topology(
+                        "consumer-progress subscriptions require reconciled lifecycle changes",
+                    ));
+                }
+            }
+        }
+    }
     let expected = match &addition.definition.construction {
         ComponentConstruction::External { binding } => Some(binding),
         ComponentConstruction::Factory(_) => None,

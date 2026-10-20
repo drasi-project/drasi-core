@@ -17,6 +17,7 @@ mod binlog;
 mod catalog;
 mod connection;
 mod factory;
+mod progress;
 mod snapshot;
 mod source;
 #[cfg(test)]

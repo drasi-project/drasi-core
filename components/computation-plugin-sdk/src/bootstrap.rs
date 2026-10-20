@@ -286,6 +286,7 @@ struct Instance {
     busy: AtomicBool,
     cleanup_required: AtomicBool,
     prepared: AtomicBool,
+    reprepare_allowed: AtomicBool,
     started: AtomicBool,
     ended: AtomicBool,
     damaged: AtomicBool,
@@ -340,7 +341,9 @@ impl Instance {
         match code {
             PREPARE => {
                 anyhow::ensure!(
-                    !self.prepared.load(Ordering::Acquire),
+                    !self.prepared.load(Ordering::Acquire)
+                        || (self.reprepare_allowed.load(Ordering::Acquire)
+                            && !self.started.load(Ordering::Acquire)),
                     "bootstrap already prepared"
                 );
                 self.validate_reader()?;
@@ -350,6 +353,10 @@ impl Instance {
                 };
                 self.validate_reader()?;
                 let pending = self.provider.has_pending_snapshot()?;
+                self.reprepare_allowed.store(
+                    preparation != BootstrapPreparation::Ready,
+                    Ordering::Release,
+                );
                 self.prepared.store(true, Ordering::Release);
                 encode(&Prepared {
                     preparation: preparation.into(),
@@ -452,6 +459,7 @@ impl Instance {
                 self.cancel(0)?;
                 self.provider.stop().await?;
                 self.prepared.store(false, Ordering::Release);
+                self.reprepare_allowed.store(false, Ordering::Release);
                 self.started.store(false, Ordering::Release);
                 self.ended.store(false, Ordering::Release);
                 self.cleanup_required.store(false, Ordering::Release);
@@ -504,6 +512,7 @@ pub(crate) fn export_provider(
             busy: AtomicBool::new(false),
             cleanup_required: AtomicBool::new(false),
             prepared: AtomicBool::new(false),
+            reprepare_allowed: AtomicBool::new(false),
             started: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             damaged: AtomicBool::new(false),
@@ -606,6 +615,90 @@ unsafe extern "C" fn begin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RetryPreparation {
+        initial: BootstrapPreparation,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl NativeBootstrapProvider for RetryPreparation {
+        async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
+            Ok(if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.initial
+            } else {
+                BootstrapPreparation::Ready
+            })
+        }
+        async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+            Ok(ComputationBootstrapSnapshot {
+                changes: Box::pin(futures_util::stream::empty()),
+                watermarks: Vec::new(),
+            })
+        }
+    }
+    async fn invoke<T: serde::de::DeserializeOwned>(
+        provider: &BootstrapHandle,
+        code: u32,
+    ) -> anyhow::Result<T> {
+        let mut operation = abi::OperationHandle::null();
+        let operation = unsafe {
+            transport::take_status((*provider.vtable).begin.expect("fixture callback")(
+                provider.state,
+                code,
+                0,
+                std::ptr::null(),
+                &mut operation,
+            ))?;
+            transport::OperationFuture::new(operation)?
+        };
+        decode(&operation.await?)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bootstrap_non_ready_reprepare_is_allowed_only_before_ready_or_snapshot(
+    ) -> anyhow::Result<()> {
+        for initial in [
+            BootstrapPreparation::RefreshVolatile,
+            BootstrapPreparation::ResetRequired,
+        ] {
+            for snapshot_first in [false, true] {
+                let provider = export_provider(
+                    Arc::new(RetryPreparation {
+                        initial,
+                        calls: std::sync::atomic::AtomicUsize::new(0),
+                    }),
+                    Arc::new(wire::codec(&[
+                        drasi_computation_contracts::GraphChangeCodec::schema(),
+                    ])?),
+                    None,
+                );
+                let first: Prepared = invoke(&provider, PREPARE).await?;
+                assert_eq!(BootstrapPreparation::from(first.preparation), initial);
+                if snapshot_first {
+                    let _: SnapshotStarted = invoke(&provider, SNAPSHOT).await?;
+                } else {
+                    let second: Prepared = invoke(&provider, PREPARE).await?;
+                    assert_eq!(
+                        BootstrapPreparation::from(second.preparation),
+                        BootstrapPreparation::Ready
+                    );
+                }
+                assert!(invoke::<Prepared>(&provider, PREPARE).await.is_err());
+                assert!(invoke::<SnapshotStarted>(&provider, SNAPSHOT)
+                    .await
+                    .is_err());
+                invoke::<()>(&provider, STOP).await?;
+                let prepared: Prepared = invoke(&provider, PREPARE).await?;
+                assert_eq!(
+                    BootstrapPreparation::from(prepared.preparation),
+                    BootstrapPreparation::Ready
+                );
+                invoke::<()>(&provider, STOP).await?;
+                unsafe { (*provider.vtable).release.expect("fixture release")(provider.state) };
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn bootstrap_wire_bounds_and_distinct_checkpoint_namespaces() -> anyhow::Result<()> {

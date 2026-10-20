@@ -60,6 +60,7 @@ struct Pending {
     began: bool,
     builder: Option<SourceTransactionBuilder>,
     digest: Option<Sha256>,
+    commit_time: Option<DateTime<Utc>>,
 }
 
 struct Table {
@@ -96,6 +97,11 @@ pub(super) struct Start {
     pub offset: u32,
     pub anchor: Option<Position>,
     pub sequence: Arc<AtomicU64>,
+}
+
+pub(super) enum HistoryMode {
+    Live,
+    Verify,
 }
 
 impl Binlog {
@@ -144,13 +150,19 @@ impl Binlog {
         config: &MySqlConfig,
         file: &str,
         boundary: u32,
+        mode: HistoryMode,
     ) -> Result<(FormatDescriptionEvent<'static>, [u8; 32])> {
         connection
             .execute("SET @master_binlog_checksum='CRC32'")
             .await?;
-        connection
-            .start_binlog(config.connection.server_id.get(), file, 4)
-            .await?;
+        match mode {
+            HistoryMode::Live => {
+                connection
+                    .start_binlog(config.connection.server_id.get(), file, 4)
+                    .await?;
+            }
+            HistoryMode::Verify => connection.start_binlog_history(file, 4).await?,
+        }
         let mut format = FormatDescriptionEvent::new(BinlogVersion::Version4).with_footer(
             BinlogEventFooter::new(BinlogChecksumAlg::BINLOG_CHECKSUM_ALG_CRC32),
         );
@@ -208,6 +220,9 @@ impl Binlog {
 
     pub fn ready(&self) -> bool {
         self.described
+    }
+    pub(super) fn has_replay_anchor(&self) -> bool {
+        self.anchor.is_some()
     }
     pub fn deadline(&self) -> Option<Instant> {
         self.pending.as_ref().and_then(|pending| {
@@ -352,6 +367,7 @@ impl Binlog {
                 began: false,
                 builder,
                 digest: self.config.replay.map(|_| Sha256::new()),
+                commit_time: None,
             });
         }
         let pending = self
@@ -367,7 +383,33 @@ impl Binlog {
         }
         let mut output = Vec::new();
         let mut output_bytes = 0usize;
-        match event.read_data()?.context("unknown MySQL event")? {
+        let data = event.read_data()?.context("unknown MySQL event")?;
+        let commit_timestamp = match &data {
+            EventData::GtidEvent(gtid) => Some(gtid.immediate_commit_timestamp()),
+            EventData::AnonymousGtidEvent(gtid) => Some(gtid.0.immediate_commit_timestamp()),
+            _ => None,
+        };
+        if let Some(timestamp) = commit_timestamp {
+            if timestamp != 0 {
+                pending.commit_time = Some(
+                    DateTime::from_timestamp_micros(
+                        timestamp
+                            .try_into()
+                            .context("MySQL commit timestamp exceeds signed time")?,
+                    )
+                    .context("invalid MySQL commit timestamp")?,
+                );
+            } else {
+                anyhow::ensure!(
+                    !matches!(
+                        self.config.start,
+                        super::MySqlStartPosition::Snapshot { .. }
+                    ),
+                    "MySQL snapshot handover requires transaction commit timestamps"
+                );
+            }
+        }
+        match data {
             EventData::GtidEvent(_)
             | EventData::AnonymousGtidEvent(_)
             | EventData::RowsQueryEvent(_) => {}
@@ -448,7 +490,10 @@ impl Binlog {
                         .map(|column| column.name.clone())
                         .collect::<Vec<_>>();
                     let decoder = crate::decoder::MySqlDecoder::new(self.source.as_str(), &[]);
-                    let timestamp = u64::from(event.header().timestamp()) * 1000;
+                    let event_time = pending
+                        .commit_time
+                        .unwrap_or(time(event.header().timestamp())?);
+                    let timestamp: u64 = event_time.timestamp_millis().try_into()?;
                     let map = |row: &mysql_common::binlog::row::BinlogRow| {
                         catalog::validate_row(columns, row)?;
                         decoder.native_element(
@@ -492,7 +537,7 @@ impl Binlog {
                                     change,
                                     self.stream.clone(),
                                     next(&self.sequence)?,
-                                    Some(time(event.header().timestamp())?),
+                                    Some(event_time),
                                 )?;
                                 output_bytes = output_bytes
                                     .checked_add(envelope_bytes(&envelope)?)
@@ -527,6 +572,7 @@ impl Binlog {
         let Some(builder) = pending.builder else {
             return Ok(None);
         };
+        let timestamp = pending.commit_time.unwrap_or(time(timestamp)?);
         let position = Position {
             version: 1,
             binding: self.binding,
@@ -557,14 +603,9 @@ impl Binlog {
         );
         let transport = next(&self.sequence)?;
         let envelope = if self.config.replay.is_some() {
-            transaction.into_replay_envelope(
-                self.stream.clone(),
-                logical,
-                transport,
-                time(timestamp)?,
-            )?
+            transaction.into_replay_envelope(self.stream.clone(), logical, transport, timestamp)?
         } else {
-            transaction.into_envelope(self.stream.clone(), transport, time(timestamp)?)?
+            transaction.into_envelope(self.stream.clone(), transport, timestamp)?
         };
         self.admitted = logical;
         Ok(Some(OutputEnvelope {

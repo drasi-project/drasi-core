@@ -39,6 +39,26 @@ pub struct Transactions {
 
 impl Transactions {
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<OutputEnvelope>> {
+        self.decode_with_position(data, |commit_lsn, binding, managed_slot| {
+            Ok((
+                serde_json::to_vec(&Position {
+                    version: 1,
+                    binding,
+                    commit_lsn,
+                    managed_slot: managed_slot.map(str::to_owned),
+                })?,
+                commit_lsn,
+            ))
+        })
+    }
+
+    /// Reuse complete-transaction decoding/assembly with an explicitly selected
+    /// cursor and logical sequence. The physical transaction identity is unchanged.
+    pub fn decode_with_position(
+        &mut self,
+        data: &[u8],
+        mut position: impl FnMut(u64, [u8; 32], Option<&str>) -> Result<(Vec<u8>, u64)>,
+    ) -> Result<Option<OutputEnvelope>> {
         let Some(message) = self.decoder.decode_message(data)? else {
             return Ok(None);
         };
@@ -55,15 +75,11 @@ impl Transactions {
                 if info.commit_lsn <= self.resume {
                     return Ok(None);
                 }
-                let position = Position {
-                    version: 1,
-                    binding: self.binding,
-                    commit_lsn: info.commit_lsn,
-                    managed_slot: self.managed_slot.clone(),
-                };
+                let (position, logical) =
+                    position(info.commit_lsn, self.binding, self.managed_slot.as_deref())?;
                 let transaction = builder.commit(
                     Bytes::copy_from_slice(&info.commit_lsn.to_be_bytes()),
-                    Bytes::from(serde_json::to_vec(&position)?),
+                    Bytes::from(position),
                 )?;
                 let transport = self
                     .transport_sequence
@@ -74,7 +90,7 @@ impl Transactions {
                     + 1;
                 let envelope = transaction.into_replay_envelope(
                     self.stream.clone(),
-                    info.commit_lsn,
+                    logical,
                     transport,
                     info.commit_timestamp,
                 )?;

@@ -9,6 +9,7 @@ use drasi_lib::computation::v1::{
 };
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::mysql::Mysql;
+mod shared;
 mod snapshot;
 
 pub(super) fn config(port: u16, output: MySqlOutput) -> MySqlConfig {
@@ -510,6 +511,7 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
         &cursor.columns,
         row,
         &["id".into()],
+        element.get_metadata().effective_from,
         database.settings.max_protocol_bytes.get(),
     )?;
     assert_eq!(initial.get_reference(), element.get_reference());

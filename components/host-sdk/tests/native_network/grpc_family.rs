@@ -35,7 +35,7 @@ impl reaction::reaction_service_server::ReactionService for Recorder {
         self.0
             .requests
             .lock()
-            .unwrap()
+            .expect("gRPC capture lock")
             .push((request.metadata().clone(), request.into_inner()));
         self.0.entered.notify_one();
         if self.0.gated.load(Ordering::SeqCst) > 0 {

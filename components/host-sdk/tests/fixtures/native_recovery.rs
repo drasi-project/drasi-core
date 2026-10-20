@@ -6,6 +6,7 @@
 
 mod native_bootstrap;
 mod native_consumer;
+mod native_consumer_progress;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -182,10 +183,13 @@ sdk::export_computation_plugin!(sdk::PluginDefinition::new(
     "fixture/native-recovery",
     env!("CARGO_PKG_VERSION"),
     vec![
-        Arc::new(SqliteFactory),
+        Arc::new(SqliteFactory) as Arc<dyn Factory>,
         Arc::new(native_consumer::Factory(sdk::ConsumerMode::External)),
         Arc::new(native_consumer::Factory(sdk::ConsumerMode::Transactional)),
-    ],
+    ]
+    .into_iter()
+    .chain(native_consumer_progress::factories())
+    .collect(),
     vec![GraphChangeCodec::schema(), SourceTransactionCodec::schema()],
 )
 .and_then(|definition| definition.with_bootstrap_factories(vec![

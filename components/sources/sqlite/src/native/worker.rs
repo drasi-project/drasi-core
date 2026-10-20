@@ -3,14 +3,15 @@
 
 use super::{
     handle::{Command, TransactionCommand},
-    journal::Handover,
+    journal::{GroupHandover, Handover},
+    progress::{Observed, Reader as ProgressReader},
     SqliteConfig, SqliteOutput, SqliteParam, SqliteRow,
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use drasi_computation_contracts::{
-    ChangeEnvelope, ComponentId, GraphChangeCodec, OutputEnvelope, PortId,
+    ChangeEnvelope, ComponentId, ConsumerProgressView, GraphChangeCodec, OutputEnvelope, PortId,
     PreparedSourceTransaction, SourceProgressSnapshot, SourceProgressView,
     SourceTransactionBuilder, SourceTransactionLimits, StreamId,
 };
@@ -739,7 +740,7 @@ impl Database {
             .transpose()
     }
 
-    fn feedback(&mut self, snapshot: &SourceProgressSnapshot) -> Result<()> {
+    fn feedback(&mut self, snapshot: &Observed) -> Result<()> {
         let Some(journal) = self.journal.as_mut() else {
             return Ok(());
         };
@@ -929,7 +930,10 @@ pub(super) fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
             &database.config,
             work.source.clone(),
             &work.stream,
-            (&work.owner, &work.progress),
+            (
+                &ProgressReader::Single(work.owner.clone()),
+                &Observed::Single(work.progress.clone()),
+            ),
             schema,
             Some(work.handover.epoch),
         )
@@ -938,6 +942,42 @@ pub(super) fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
         journal.head == 0 && journal.retired == 0,
         "native SQLite cannot replace an initialized source with a fresh snapshot"
     );
+    if !snapshot_rows(
+        &database,
+        &work.source,
+        &work.stream,
+        &work.outputs,
+        &mut work.shutdown,
+        None,
+    )? {
+        return Ok(None);
+    }
+    work.handover.completed = true;
+    Ok(Some(work.handover))
+}
+
+fn validate_snapshot_owner(owner: &SourceProgressSnapshot, generation: u64) -> Result<()> {
+    anyhow::ensure!(
+        owner.recovered
+            && owner.persistent
+            && owner.failure.is_none()
+            && owner.reset_generation == generation,
+        "native SQLite snapshot consumer is failed, reset or not persistently recovered"
+    );
+    Ok(())
+}
+
+fn snapshot_rows(
+    database: &Database,
+    source: &ComponentId,
+    stream: &StreamId,
+    outputs: &mpsc::Sender<ChangeEnvelope>,
+    shutdown: &mut watch::Receiver<bool>,
+    progress: Option<(&SourceProgressView, u64)>,
+) -> Result<bool> {
+    let mut progress = progress
+        .map(|(owner, generation)| Ok::<_, anyhow::Error>((owner.subscribe()?, generation)))
+        .transpose()?;
     let deadline = database.begin()?;
     let (tables, timestamp) = {
         let capture = database
@@ -954,12 +994,12 @@ pub(super) fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
     for (name, table) in tables {
         let outcome = drasi_sqlite_common::read_table(
             &database.connection,
-            work.source.as_str(),
+            source.as_str(),
             &name,
             &table,
             timestamp,
             |element| {
-                if *work.shutdown.borrow() {
+                if *shutdown.borrow() {
                     return Ok(std::ops::ControlFlow::Break(()));
                 }
                 database.check_capture()?;
@@ -973,16 +1013,31 @@ pub(super) fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
                     .checked_add(1)
                     .context("SQLite snapshot ordinal exhausted")?;
                 let change =
-                    GraphChangeCodec::encode_change(change, work.stream.clone(), ordinal, None)?;
-                let sent = runtime.block_on(async {
-                tokio::time::timeout_at(deadline, async {
-                    tokio::select! {
-                        biased;
-                        _ = work.shutdown.wait_for(|stopped| *stopped) => Ok(false),
-                        result = work.outputs.send(change) => result.map(|_| true).context("SQLite snapshot receiver closed"),
-                    }
-                }).await.context("native SQLite snapshot deadline exceeded")?
-            })?;
+                    GraphChangeCodec::encode_change(change, stream.clone(), ordinal, None)?;
+                let sent =
+                    runtime.block_on(async {
+                        tokio::time::timeout_at(deadline, async {
+                        loop {
+                            if let Some((progress, generation)) = &mut progress {
+                                validate_snapshot_owner(progress.snapshot()?.as_ref(), *generation)?;
+                            }
+                            tokio::select! {
+                                biased;
+                                _ = shutdown.wait_for(|stopped| *stopped) => return Ok::<_, anyhow::Error>(false),
+                                result = async {
+                                    match &mut progress {
+                                        Some((progress, _)) => progress.changed().await,
+                                        None => std::future::pending().await,
+                                    }
+                                } => { result?; },
+                                permit = outputs.reserve() => {
+                                    permit.context("SQLite snapshot receiver closed")?.send(change);
+                                    return Ok(true);
+                                },
+                            }
+                        }
+                    }).await.context("native SQLite snapshot deadline exceeded")?
+                    })?;
                 if !sent {
                     return Ok(std::ops::ControlFlow::Break(()));
                 }
@@ -991,16 +1046,102 @@ pub(super) fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
         )?;
         if outcome.is_break() {
             database.rollback()?;
-            return Ok(None);
+            return Ok(false);
         }
     }
     database.check_capture()?;
     database.rollback()?;
+    if let Some((progress, generation)) = &mut progress {
+        validate_snapshot_owner(progress.snapshot()?.as_ref(), *generation)?;
+    }
+    Ok(!*shutdown.borrow())
+}
+
+pub(super) struct GroupSnapshotWork {
+    pub source: ComponentId,
+    pub stream: StreamId,
+    pub config: SqliteConfig,
+    pub consumers: ConsumerProgressView,
+    pub member: SourceProgressView,
+    pub generation: u64,
+    pub previous: Option<GroupHandover>,
+    pub prepared: oneshot::Sender<GroupHandover>,
+    pub proceed: oneshot::Receiver<()>,
+    pub outputs: mpsc::Sender<ChangeEnvelope>,
+    pub shutdown: watch::Receiver<bool>,
+}
+
+pub(super) fn group_snapshot(mut work: GroupSnapshotWork) -> Result<Option<GroupHandover>> {
+    let database = Database::open(work.config, work.source.clone(), work.shutdown.clone())?;
     if *work.shutdown.borrow() {
         return Ok(None);
     }
-    work.handover.completed = true;
-    Ok(Some(work.handover))
+    validate_snapshot_owner(work.member.snapshot()?.as_ref(), work.generation)?;
+    let binding = super::journal::group_binding(
+        &database.config,
+        &work.source,
+        &work.stream,
+        &work.consumers,
+        true,
+    )?;
+    let mut handover = database.internal(|connection| {
+        super::journal::plan_group_snapshot(
+            connection,
+            &binding,
+            work.member.component_id(),
+            work.previous.as_ref(),
+        )
+    })?;
+    if work.prepared.send(handover.clone()).is_err() {
+        return Ok(None);
+    }
+    let proceed = tokio::runtime::Handle::current().block_on(async {
+        tokio::select! {
+            biased;
+            _ = work.shutdown.wait_for(|stopped| *stopped) => false,
+            result = &mut work.proceed => result.is_ok(),
+        }
+    });
+    if !proceed {
+        return Ok(None);
+    }
+    validate_snapshot_owner(work.member.snapshot()?.as_ref(), work.generation)?;
+    let schema = database.schema()?;
+    let observed = Observed::Group(work.consumers.snapshot()?);
+    let journal = database.internal(|connection| {
+        let journal = super::journal::Journal::open_mode(
+            connection,
+            &database.config,
+            work.source.clone(),
+            &work.stream,
+            (&ProgressReader::Group(work.consumers.clone()), &observed),
+            schema,
+            Some(handover.epoch),
+            true,
+        )?;
+        anyhow::ensure!(
+            journal.head == handover.sequence,
+            "SQLite snapshot boundary changed while recording initialization"
+        );
+        super::journal::enroll_group_snapshot(connection, &handover)?;
+        Ok(journal)
+    })?;
+    anyhow::ensure!(
+        journal.epoch == handover.epoch,
+        "SQLite snapshot journal epoch changed"
+    );
+    if !snapshot_rows(
+        &database,
+        &work.source,
+        &work.stream,
+        &work.outputs,
+        &mut work.shutdown,
+        Some((&work.member, work.generation)),
+    )? {
+        return Ok(None);
+    }
+    handover.completed = true;
+    Ok(Some(handover))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1013,11 +1154,7 @@ pub(super) fn run(
     outputs: mpsc::Sender<OutputEnvelope>,
     mut shutdown: watch::Receiver<bool>,
     ready: oneshot::Sender<()>,
-    progress: Option<(
-        SourceProgressView,
-        Arc<SourceProgressSnapshot>,
-        Option<uuid::Uuid>,
-    )>,
+    progress: Option<(ProgressReader, Observed, Option<uuid::Uuid>)>,
 ) -> Result<()> {
     let mut updates = progress
         .as_ref()
@@ -1043,7 +1180,7 @@ pub(super) fn run(
     let mut pending = None;
     loop {
         if let Some(progress) = &mut updates {
-            database.feedback(progress.snapshot()?.as_ref())?;
+            database.feedback(&progress.snapshot()?)?;
         }
         if pending.is_none() {
             pending = database.replay(&stream, &sequence)?;
@@ -1064,6 +1201,12 @@ pub(super) fn run(
         });
         let command = match wake {
             Wake::Stop | Wake::Command(None) => {
+                if let Some(updates) = &mut updates {
+                    let snapshot = updates.snapshot()?;
+                    if matches!(&snapshot, Observed::Group(_)) && snapshot.ready() {
+                        database.feedback(&snapshot)?;
+                    }
+                }
                 if pending.is_some() && database.journal.is_none() {
                     log::warn!("Stopping volatile native SQLite output; committed changes are not replayable");
                 }
@@ -1144,6 +1287,11 @@ pub(super) fn run(
                 let mut output = None;
                 if matches!(result, Ok(true)) {
                     result = (|| {
+                        if let (Some(updates), Some(journal)) = (&mut updates, &database.journal) {
+                            if matches!(updates, super::progress::Updates::Group(_)) {
+                                journal.position(&updates.snapshot()?)?;
+                            }
+                        }
                         let sequence = if database.journal.is_some() {
                             0
                         } else {

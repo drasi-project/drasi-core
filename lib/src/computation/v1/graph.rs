@@ -34,6 +34,8 @@ mod execution;
 pub(crate) use addition::RejectedResources;
 pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
 pub use configuration::{CapturedComponentConfiguration, GraphConfigurationSnapshot};
+mod consumer_progress;
+mod input_progress;
 mod recovery;
 mod registry;
 mod resource_tasks;
@@ -1561,7 +1563,102 @@ impl ComputationGraph {
         ))
     }
 
+    fn consumer_progress_validation(
+        &self,
+        component: &ComponentId,
+    ) -> consumer_progress::Validation {
+        let Some(index) = self.ids.get(component) else {
+            return consumer_progress::Validation::failed(topology(
+                "consumer progress producer is not declared",
+            ));
+        };
+        let progress = match self.components[*index].consumer_progress() {
+            Ok(Some(progress)) => progress,
+            Ok(None) => return consumer_progress::Validation::default(),
+            Err(error) => return consumer_progress::Validation::failed(error),
+        };
+        if progress.producer_id() != component {
+            return consumer_progress::Validation::failed(topology(
+                "consumer progress belongs to another producer",
+            ));
+        }
+        let observed = self.observed();
+        let selected = consumer_progress::participants(&self.snapshot, &progress);
+        let mut contracts = BTreeMap::new();
+        let mut pending = BTreeSet::new();
+        for id in selected.iter().cloned() {
+            let Some(index) = self.ids.get(&id) else {
+                pending.insert(id);
+                continue;
+            };
+            let constructed = if observed
+                .components
+                .get(&id)
+                .is_some_and(|node| node.realization == super::RealizationState::Created)
+            {
+                true
+            } else {
+                match self.components[*index].is_constructed() {
+                    Ok(constructed) => constructed,
+                    Err(GraphError::OperationInProgress) => false,
+                    Err(error) => return consumer_progress::Validation::failed(error),
+                }
+            };
+            if !constructed {
+                pending.insert(id);
+                continue;
+            }
+            match self.components[*index].recovery_contract() {
+                Ok(contract) => {
+                    contracts.insert(id, contract);
+                }
+                Err(error) => return consumer_progress::Validation::failed(error),
+            }
+        }
+        let mut validation =
+            consumer_progress::analyze(&self.snapshot, &progress, &contracts, &pending);
+        for edge in self.snapshot.edges.iter().filter(|edge| {
+            selected.contains(&edge.definition.from.component)
+                && !progress
+                    .owners()
+                    .contains_key(&edge.definition.from.component)
+        }) {
+            if !observed
+                .relationships
+                .get(&edge.definition)
+                .is_some_and(|edge| edge.binding == super::BindingState::Bound)
+            {
+                validation.wait_for(edge.definition.to.component.clone());
+            }
+        }
+        for edge in self.snapshot.unbound_relationships.iter().filter(|edge| {
+            selected.contains(&edge.definition.from.component)
+                && !progress
+                    .owners()
+                    .contains_key(&edge.definition.from.component)
+        }) {
+            validation.wait_for(edge.definition.to.component.clone());
+        }
+        for node in self.snapshot.nodes.iter().filter(|node| {
+            selected.contains(node.descriptor.id())
+                && !progress.owners().contains_key(node.descriptor.id())
+        }) {
+            if node.descriptor.ports().iter().any(|port| {
+                port.direction() == super::PortDirection::Output
+                    && !node.output_streams.contains_key(port.id())
+            }) {
+                validation.wait_for(node.descriptor.id().clone());
+            }
+        }
+        validation
+    }
+
     fn validate_recovery(&self, allow_unconstructed: bool) -> GraphResult<()> {
+        for component in self.ids.keys() {
+            self.validate_input_progress(component)?;
+            self.consumer_progress_validation(component)
+                .validate(allow_unconstructed)?;
+        }
         for requirement in &self.snapshot.recovery_requirements {
             if requirement.guarantees.is_empty() || !self.ids.contains_key(&requirement.consumer) {
                 return Err(topology(
@@ -1589,6 +1686,9 @@ impl ComputationGraph {
         &self,
         component: &ComponentId,
     ) -> GraphResult<Option<super::RecoveryRequirement>> {
+        self.validate_input_progress(component)?;
+        self.consumer_progress_validation(component)
+            .validate(false)?;
         let mut selected = None;
         for requirement in &self.snapshot.recovery_requirements {
             if !recovery::participants(&requirement.consumer, self.snapshot.data_connections())
@@ -1600,6 +1700,22 @@ impl ComputationGraph {
             selected = Some(requirement.clone());
         }
         Ok(selected)
+    }
+
+    fn validate_input_progress(&self, component: &ComponentId) -> GraphResult<()> {
+        let index = self.ids[component];
+        let slot = &self.components[index];
+        if slot.has_volatile_input_progress() {
+            input_progress::validate(
+                &slot.recovery_contract()?,
+                &self.nodes[index],
+                &self.snapshot.id,
+            )
+            .map_err(|source| {
+                component_error(&self.nodes[index], "validate input progress", source)
+            })?;
+        }
+        Ok(())
     }
 
     fn transitive_source_recovery(&self, component: &ComponentId) -> GraphResult<bool> {
@@ -1952,6 +2068,7 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 
 struct Incoming {
     edge: usize,
+    producer_role: super::ComponentRole,
     port: PortId,
     receiver: Box<dyn EnvelopeReceiver>,
     acknowledgement_required: bool,
@@ -2228,9 +2345,16 @@ fn validate_source_progress(
     let Component::Source(source) = component else {
         return Ok(());
     };
-    if source.admission().is_some() && source.recovery_progress().is_some() {
+    let consumers = source.recovery_contract().consumer_progress;
+    if source.admission().is_some() && (source.recovery_progress().is_some() || consumers.is_some())
+    {
         return Err(topology(
             "source admission cannot also own a separate replay boundary",
+        ));
+    }
+    if consumers.is_some() && source.recovery_progress().is_some() {
+        return Err(topology(
+            "source cannot bind both a single replay owner and a consumer progress set",
         ));
     }
     if let Some(progress) = source.recovery_progress() {
@@ -2430,6 +2554,7 @@ async fn run_node(
     routing: SourceRouting<'_>,
     budget: &NodeWorkBudget,
     sink_batch: &mut Option<Box<sink_batching::SinkBatchState>>,
+    input_progress: &mut Option<Box<input_progress::InputProgress>>,
 ) -> GraphResult<()> {
     validate_source_progress(
         component,
@@ -2443,7 +2568,13 @@ async fn run_node(
             .map_err(|error| component_error(node, "sink batch policy", error))?;
         if batching.is_some() || sink_batch.is_some() {
             return Box::pin(sink_batching::run(
-                component, node, inputs, quiesce, budget, sink_batch,
+                component,
+                node,
+                inputs,
+                quiesce,
+                budget,
+                sink_batch,
+                input_progress,
             ))
             .await;
         }
@@ -2493,6 +2624,7 @@ async fn run_node(
         }
         let mut acknowledgement = None;
         let mut consumed = None;
+        let mut handled_input = None;
         let mut emissions = match component {
             Component::Source(source) => {
                 match tokio::select! {
@@ -2623,8 +2755,22 @@ async fn run_node(
                     port: incoming.port.clone(),
                     envelope,
                 };
+                let producer_role = incoming.producer_role;
                 // At most one pending receive per edge, no forwarding tasks or hidden queues.
                 receivers.push(receive(incoming));
+                if let Some(progress) = input_progress {
+                    let prepared =
+                        progress
+                            .prepare(&input.envelope, producer_role)
+                            .map_err(|source| {
+                                component_error(node, "prepare input progress", source)
+                            })?;
+                    let duplicate = prepared.duplicate;
+                    handled_input = Some(prepared);
+                    if duplicate {
+                        break 'input_work Vec::new();
+                    }
+                }
                 match component {
                     Component::Transformer(transformer) | Component::Query(transformer) => {
                         transformer
@@ -2646,6 +2792,9 @@ async fn run_node(
             }
         };
         loop {
+            if handled_input.as_ref().is_some_and(|input| input.duplicate) {
+                break;
+            }
             check_descriptor(component, node)?;
             validate_emissions(node, sequences, &emissions)?;
             // The input/continuation already paid for its first forward.
@@ -2720,6 +2869,9 @@ async fn run_node(
                 Some(next) => emissions = next,
                 None => break,
             }
+        }
+        if let (Some(progress), Some(input)) = (input_progress.as_mut(), handled_input) {
+            progress.confirm([*input]);
         }
         if let Some((edge, acknowledgement)) = acknowledgement {
             acknowledgement

@@ -109,6 +109,7 @@ pub struct MySqlSnapshot {
     stream: StreamId,
     config: MySqlConfig,
     progress: SourceProgressReader,
+    shared_binding: bool,
     shared: Arc<Shared>,
 }
 
@@ -130,6 +131,7 @@ impl MySqlSnapshot {
             stream,
             config,
             progress: progress.into(),
+            shared_binding: false,
             shared: Arc::new(Shared {
                 worker: RwLock::new(None),
                 run: Mutex::new(None),
@@ -141,6 +143,53 @@ impl MySqlSnapshot {
         })
     }
 
+    pub fn for_consumer_group(
+        source: ComponentId,
+        stream: StreamId,
+        config: MySqlConfig,
+        consumers: &Arc<ConsumerProgressSet>,
+        consumer: &ComponentId,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            consumers.producer_id() == &source,
+            "MySQL bootstrap consumer set belongs to another producer"
+        );
+        let owner = consumers
+            .owners()
+            .get(consumer)
+            .context("MySQL bootstrap consumer is not a member of its producer group")?;
+        let mut snapshot = Self::new(source, stream, config, owner.clone())?;
+        snapshot.shared_binding = true;
+        Ok(snapshot)
+    }
+
+    pub fn consumer_id(&self) -> &ComponentId {
+        self.progress.component_id()
+    }
+
+    pub(super) fn validate_consumer_source(
+        &self,
+        source: &ComponentId,
+        stream: &StreamId,
+        config: &MySqlConfig,
+        consumers: &ConsumerProgressSet,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.shared_binding
+                && &self.source == source
+                && &self.stream == stream
+                && consumers.producer_id() == source
+                && consumers.graph_id() == self.progress.graph_id()
+                && self
+                    .progress
+                    .local_owner()
+                    .is_some_and(|owner| consumers.owns(&owner))
+                && serde_json::to_value(&self.config)? == serde_json::to_value(config)?,
+            "MySQL snapshot does not match its shared source and actual consumer"
+        );
+        Ok(())
+    }
+
     pub(super) fn validate_source(
         &self,
         source: &ComponentId,
@@ -149,7 +198,8 @@ impl MySqlSnapshot {
         progress: &SourceProgressReader,
     ) -> Result<()> {
         anyhow::ensure!(
-            &self.source == source
+            !self.shared_binding
+                && &self.source == source
                 && &self.stream == stream
                 && self.progress.same_owner(progress)
                 && serde_json::to_value(&self.config)? == serde_json::to_value(config)?,
@@ -160,7 +210,11 @@ impl MySqlSnapshot {
 
     fn scope(&self) -> Result<[u8; 32]> {
         Ok(Sha256::digest(serde_json::to_vec(&(
-            "mysql-snapshot-v1",
+            if self.shared_binding {
+                "mysql-consumer-snapshot-v1"
+            } else {
+                "mysql-snapshot-v1"
+            },
             &self.config.connection.database,
             &self.config.tables,
             self.source.as_str(),
@@ -212,6 +266,23 @@ impl Drop for Reader {
 
 #[async_trait]
 impl ComputationBootstrapProvider for MySqlSnapshot {
+    fn validate_query_scope(
+        &self,
+        _instance_id: &str,
+        graph_id: &str,
+        component_id: &ComponentId,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.progress.graph_id() == graph_id && self.progress.component_id() == component_id,
+            "MySQL bootstrap belongs to another graph or query"
+        );
+        Ok(())
+    }
+
+    fn recovery_reader(&self) -> Option<SourceProgressReader> {
+        Some(self.progress.clone())
+    }
+
     async fn prepare_with_state(&self, state: &dyn BootstrapState) -> Result<BootstrapPreparation> {
         let _guard = self.shared.lifecycle.lock().await;
         anyhow::ensure!(
@@ -328,6 +399,7 @@ impl ComputationBootstrapProvider for MySqlSnapshot {
             stream: self.stream.clone(),
             config: self.config.clone(),
             owner: self.progress.clone(),
+            shared_binding: self.shared_binding,
             handover,
             ready: Some(ready),
             control: None,
@@ -433,6 +505,7 @@ struct Work {
     stream: StreamId,
     config: MySqlConfig,
     owner: SourceProgressReader,
+    shared_binding: bool,
     handover: Handover,
     ready: Option<oneshot::Sender<()>>,
     control: Option<Connection>,
@@ -475,6 +548,13 @@ impl Work {
             );
             self.sessions.push(connection);
         }
+        let clock = self.sessions[1]
+            .query("SELECT CAST(FLOOR(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6))*1000) AS UNSIGNED)")
+            .await?;
+        let [clock] = clock.values.as_slice() else {
+            anyhow::bail!("MySQL snapshot clock is unavailable");
+        };
+        let timestamp: u64 = catalog::field(clock, 0)?.parse()?;
         let MySqlStartPosition::Snapshot { lock_timeout_ms } = self.config.start else {
             anyhow::bail!("snapshot locking was not enabled");
         };
@@ -489,17 +569,35 @@ impl Work {
             .context("missing MySQL readiness sender")?
             .send(())
             .map_err(|_| anyhow::anyhow!("MySQL snapshot caller cancelled"))?;
-        let binding = source::source_binding(
-            &self.config,
-            self.server.as_deref().context("missing server")?,
-            &tables,
-            &self.source,
-            &self.stream,
-            Some(&self.owner),
-        )?;
+        let server = self.server.as_deref().context("missing server")?;
+        let binding = if self.shared_binding {
+            source::shared_source_binding(
+                &self.config,
+                server,
+                &tables,
+                &self.source,
+                &self.stream,
+                self.owner.graph_id(),
+            )?
+        } else {
+            source::source_binding(
+                &self.config,
+                server,
+                &tables,
+                &self.source,
+                &self.stream,
+                Some(&self.owner),
+            )?
+        };
         let (_, digest) = tokio::time::timeout(
             self.config.timeout(),
-            binlog::Binlog::snapshot_history(&mut self.sessions[0], &self.config, &file, boundary),
+            binlog::Binlog::snapshot_history(
+                &mut self.sessions[0],
+                &self.config,
+                &file,
+                boundary,
+                binlog::HistoryMode::Verify,
+            ),
         )
         .await
         .context("MySQL snapshot history verification timed out")??;
@@ -530,6 +628,7 @@ impl Work {
                     &cursor.columns,
                     values,
                     &keys,
+                    timestamp,
                     self.config.max_protocol_bytes.get(),
                 )?;
                 sequence = sequence

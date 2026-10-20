@@ -19,6 +19,8 @@ use std::{
 };
 use tokio::time::timeout;
 
+#[path = "native/consumers.rs"]
+mod consumers;
 #[path = "native/progress.rs"]
 mod progress;
 #[path = "native/rest.rs"]

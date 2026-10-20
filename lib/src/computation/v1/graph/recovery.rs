@@ -233,7 +233,29 @@ pub(super) fn assess(
                     );
                 }
                 if admitted {
-                    if let Some(consumer) = &contract.replay_until {
+                    let consumers: Vec<_> = match &contract.consumer_progress {
+                        Some(progress) => progress
+                            .owners()
+                            .iter()
+                            .filter(|(id, _)| report.participants.contains(*id))
+                            .map(|(id, owner)| (id, Some(owner)))
+                            .collect(),
+                        None => contract
+                            .replay_until
+                            .as_ref()
+                            .map(|consumer| (consumer, contract.replay_progress.as_ref()))
+                            .into_iter()
+                            .collect(),
+                    };
+                    if contract.consumer_progress.is_some() && consumers.is_empty() {
+                        issue(
+                            &mut report,
+                            participant.clone(),
+                            *guarantee,
+                            RecoveryIncompatibility::ReplayConsumerOutsidePath,
+                        );
+                    }
+                    for (consumer, supplied) in consumers {
                         if !report.participants.contains(consumer) || consumer == id {
                             issue(
                                 &mut report,
@@ -255,9 +277,8 @@ pub(super) fn assess(
                             let actual = contracts
                                 .get(consumer)
                                 .and_then(|owner| owner.committed_progress.as_ref());
-                            let same_resource = actual
-                                .zip(contract.replay_progress.as_ref())
-                                .is_some_and(|(actual, supplied)| {
+                            let same_resource =
+                                actual.zip(supplied).is_some_and(|(actual, supplied)| {
                                     Arc::ptr_eq(actual, supplied)
                                         && actual.graph_id() == snapshot.id.as_ref()
                                         && actual.component_id() == consumer

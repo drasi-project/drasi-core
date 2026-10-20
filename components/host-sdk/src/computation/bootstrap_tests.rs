@@ -293,6 +293,176 @@ async fn native_bootstrap_bounds_errors_and_panics_require_cleanup() -> anyhow::
     Ok(())
 }
 
+fn reprepare_factories() -> anyhow::Result<Vec<Arc<NativeBootstrapFactory>>> {
+    let linked = NativePlugin::from_definition(sdk::PluginDefinition::new_with_bootstrap(
+        "fixture/bootstrap-reprepare",
+        "1",
+        vec![],
+        vec![Arc::new(bootstrap_fixture::Factory { progress: false })],
+        vec![GraphChangeCodec::schema()],
+    )?)?;
+    let dynamic = super::super::factory::recovery_tests::sqlite_plugin()?;
+    Ok(vec![
+        linked.bootstrap_factories()[0].clone(),
+        dynamic.bootstrap_factories()[0].clone(),
+    ])
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_bootstrap_non_ready_reprepares_without_stop_static_and_dynamic(
+) -> anyhow::Result<()> {
+    for factory in reprepare_factories()? {
+        for (mode, initial) in [
+            ("refresh-once", BootstrapPreparation::RefreshVolatile),
+            ("reset-once", BootstrapPreparation::ResetRequired),
+        ] {
+            for stateful in [false, true] {
+                let provider = factory.create_provider(
+                    ComponentId::try_new("bootstrap")?,
+                    json!({"mode":mode,"count":2}),
+                    None,
+                    None,
+                )?;
+                let before_reset = State::default();
+                let after_reset = State::default();
+                let preparation = if stateful {
+                    provider.prepare_with_state(&before_reset).await?
+                } else {
+                    provider.prepare().await?
+                };
+                assert_eq!(preparation, initial);
+                assert!(provider.has_pending_snapshot()?);
+                let preparation = if stateful {
+                    provider.prepare_with_state(&after_reset).await?
+                } else {
+                    provider.prepare().await?
+                };
+                assert_eq!(preparation, BootstrapPreparation::Ready);
+                let mut snapshot = if stateful {
+                    assert_eq!(before_reset.writes.load(Ordering::SeqCst), 1);
+                    assert_eq!(after_reset.writes.load(Ordering::SeqCst), 1);
+                    provider.snapshot_with_state(&after_reset).await?
+                } else {
+                    provider.snapshot().await?
+                };
+                let mut count = 0;
+                while let Some(value) = snapshot.changes.next().await {
+                    assert_eq!(value?.changes().operations().len(), 1);
+                    count += 1;
+                }
+                assert_eq!(count, 2);
+                provider.complete_snapshot().await?;
+                provider.stop().await?;
+                assert_eq!(provider.prepare().await?, BootstrapPreparation::Ready);
+                assert!(
+                    provider.prepare().await.is_err(),
+                    "duplicate Ready preparation must fail"
+                );
+                assert!(
+                    provider.snapshot().await.is_err(),
+                    "invalid preparation still requires cleanup"
+                );
+                provider.stop().await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_bootstrap_non_ready_retry_preserves_snapshot_and_cancellation_guards(
+) -> anyhow::Result<()> {
+    for factory in reprepare_factories()? {
+        for (mode, initial) in [
+            ("refresh", BootstrapPreparation::RefreshVolatile),
+            ("reset", BootstrapPreparation::ResetRequired),
+        ] {
+            let provider = factory.create_provider(
+                ComponentId::try_new("bootstrap")?,
+                json!({"mode":mode}),
+                None,
+                None,
+            )?;
+            assert_eq!(provider.prepare().await?, initial);
+            assert_eq!(provider.prepare().await?, initial);
+            let snapshot = provider.snapshot().await?;
+            assert!(
+                provider.prepare().await.is_err(),
+                "a started snapshot cannot be re-prepared"
+            );
+            assert!(
+                provider.snapshot().await.is_err(),
+                "a snapshot remains single-use"
+            );
+            drop(snapshot);
+            provider.stop().await?;
+        }
+        let provider = factory.create_provider(
+            ComponentId::try_new("bootstrap")?,
+            json!({"mode":"refresh-once"}),
+            None,
+            None,
+        )?;
+        assert_eq!(
+            provider.prepare().await?,
+            BootstrapPreparation::RefreshVolatile
+        );
+        let pending = State {
+            pending_write: true,
+            ..Default::default()
+        };
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            provider.prepare_with_state(&pending)
+        )
+        .await
+        .is_err());
+        assert_eq!(pending.writes.load(Ordering::SeqCst), 1);
+        assert!(
+            provider.prepare().await.is_err(),
+            "cancelled retry must not become reusable"
+        );
+        assert!(provider.snapshot().await.is_err());
+        provider.stop().await?;
+        assert_eq!(provider.prepare().await?, BootstrapPreparation::Ready);
+        provider.stop().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_bootstrap_non_ready_query_reset_reprepares_static_and_dynamic() -> anyhow::Result<()>
+{
+    for factory in reprepare_factories()? {
+        for mode in ["refresh-once", "reset-once"] {
+            let owner = progress();
+            let bootstrap = factory.create_provider(
+                ComponentId::try_new("bootstrap")?,
+                json!({"mode":mode, "count":2, "durability":StorageDurability::VOLATILE}),
+                None,
+                None,
+            )?;
+            let mut query = ContinuousQueryTransformer::new_with_options(
+                definition(),
+                Arc::new(drasi_core::computation::InMemoryComputationProvider),
+                QueryOptions {
+                    recovery: QueryRecoveryPolicy::AutoReset,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .with_bootstrap(bootstrap)
+            .with_source_progress(owner.clone())?;
+            query.start().await?;
+            assert_eq!(query.results().snapshot()?.rows.len(), 2);
+            assert!(owner.snapshot().bootstrap_complete);
+            assert!(!owner.snapshot().persistent);
+            query.stop().await?;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn native_bootstrap_preparation_choices_and_protocol_order_are_explicit() -> anyhow::Result<()>
 {

@@ -16,12 +16,12 @@ checks every native library independently, including its build dependencies.
 | Role | Crate | Component kind | Hosting |
 |---|---|---|---|
 | Bootstrap | [drasi-computation-bootstrap-http](bootstrappers/http) | `drasi.network/http-bootstrap` | Dynamic or Rust SDK |
-| Bootstrap | [drasi-computation-bootstrap-postgres](bootstrappers/postgres) | `drasi.postgres/coordinated-bootstrap`, `drasi.postgres/coordinated-row-bootstrap`, `drasi.postgres/snapshot` | Dynamic or Rust SDK |
+| Bootstrap | [drasi-computation-bootstrap-postgres](bootstrappers/postgres) | `drasi.postgres/coordinated-bootstrap`, `drasi.postgres/coordinated-row-bootstrap`, `drasi.postgres/shared-row-bootstrap`, `drasi.postgres/shared-transaction-bootstrap`, `drasi.postgres/snapshot` | Dynamic or Rust SDK |
 | Bootstrap | [drasi-computation-bootstrap-sqlite](bootstrappers/sqlite) | `drasi.sqlite/file-bootstrap` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-counter](sources/counter) | `drasi.standard/volatile-counter` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-http](sources/http) | `drasi.network/http-source` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-grpc](sources/grpc) | `drasi.network/grpc-source` | Dynamic or Rust SDK |
-| Source | [drasi-computation-source-postgres](sources/postgres) | `drasi/postgres-transactions`, `drasi.postgres/changes` | Dynamic or Rust SDK |
+| Source | [drasi-computation-source-postgres](sources/postgres) | `drasi/postgres-transactions`, `drasi.postgres/changes`, `drasi.postgres/shared-changes`, `drasi.postgres/shared-transactions` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-bridge](sources/bridge) | `drasi.bridge/source` | Static Rust factory |
 | Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
@@ -95,9 +95,19 @@ loading an older native ABI 1.0 library remains supported.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI remains **1.0.0**, with optional batching and query-snapshot
-extensions rather than changes to its base tables. Its version is independent of
+The native plugin ABI remains **1.0.0**, with optional batching, query-snapshot
+and consumer-progress/cursor-policy extensions rather than changes to its base
+tables. Its version is independent of
 the workspace package version and the legacy Source/Reaction ABI.
+
+Recovery-aware fan-out binds every actual required consumer independently.
+Native producers using `consumer_progress_v1` receive the exact read-only set,
+not a fabricated aggregate query checkpoint. Ordinary standalone transformers
+and handled sinks may opt into host-only volatile `input_progress`; transaction
+participation remains a separate mode and does not make that tracker persistent.
+The [Host resource guide](../host-sdk/README.md#native-producer-consumer-progress)
+describes both slots and the managed `consumerProgress` recipe. Neither is needed
+for ordinary non-replay graph fan-out.
 
 ## Migrating from the bundled libraries
 

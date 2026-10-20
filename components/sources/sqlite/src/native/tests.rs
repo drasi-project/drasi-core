@@ -41,6 +41,157 @@ async fn no_output(source: &mut SqliteSource) {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn shared_factory_requires_exact_scope_resources_and_exclusive_progress() -> Result<()> {
+    use std::collections::BTreeMap;
+    let directory = tempfile::tempdir()?;
+    let mut settings = config(SqliteOutput::Transactions);
+    settings.path = Some(directory.path().join("source.db"));
+    settings.replay = Some(SqliteReplayConfig {
+        max_transactions: NonZeroUsize::new(8).unwrap(),
+        max_bytes: NonZeroUsize::new(1 << 20).unwrap(),
+    });
+    let id = |name| ComponentId::try_new(name).unwrap();
+    let owner = Arc::new(QuerySourceProgress::new("graph", id("query"))?);
+    let consumers = Arc::new(ConsumerProgressSet::new(
+        "graph",
+        id("sqlite"),
+        [owner.clone()],
+    )?);
+    let (producer, snapshots) = SqliteSource::coordinated_with_consumers(
+        id("sqlite"),
+        StreamId::try_new("changes")?,
+        settings.clone(),
+        consumers.clone(),
+    )?;
+    assert_eq!(
+        producer.recovery_contract(),
+        producer.recovery_contract(),
+        "cursor policy must be stable"
+    );
+    assert!(
+        !settings.path.as_ref().unwrap().exists(),
+        "construction must not touch SQLite"
+    );
+    assert!(snapshots.for_consumer(&id("missing")).is_err());
+    let snapshot = snapshots.for_consumer(&id("query"))?;
+    snapshot.validate_query_scope("instance", "graph", &id("query"))?;
+    assert!(snapshot
+        .validate_query_scope("instance", "wrong", &id("query"))
+        .is_err());
+    assert!(snapshot
+        .validate_query_scope("instance", "graph", &id("other"))
+        .is_err());
+    let substitute = Arc::new(ConsumerProgressSet::new("graph", id("sqlite"), [owner])?);
+    let substitute_source = SqliteSource::new_replayable_with_consumers(
+        id("sqlite"),
+        StreamId::try_new("changes")?,
+        settings.clone(),
+        substitute,
+    )?;
+    assert!(snapshots.validate_source(&substitute_source).is_err());
+    let client = Arc::new(SqliteClientResource::new(id("sqlite"), settings.clone())?);
+    let factory = SqliteSourceFactory::default();
+    let mut specification = ComponentSpecification {
+        descriptor: producer.descriptor().clone(),
+        role: ComponentRole::Source,
+        completion: None,
+        implementation: factory.descriptor().implementation.clone(),
+        configuration_version: 1,
+        configuration: producer
+            .configuration()?
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    Arc::from(key.as_str()),
+                    ConfigurationValue::Literal(value.clone()),
+                )
+            })
+            .collect(),
+        dependencies: BTreeMap::from([
+            (Arc::from("client"), vec![ResourceId::try_new("client")?]),
+            (
+                Arc::from("consumer_progress"),
+                vec![ResourceId::try_new("consumers")?],
+            ),
+            (
+                Arc::from("consumer_snapshots"),
+                vec![ResourceId::try_new("snapshots")?],
+            ),
+        ]),
+    };
+    let mut declarations = BTreeMap::new();
+    let mut resources = BTreeMap::new();
+    for (name, role, handle) in [
+        (
+            "client",
+            ResourceRole::Component,
+            ResourceHandle::new(ResourceRole::Component, client),
+        ),
+        (
+            "consumers",
+            ResourceRole::Checkpoint,
+            ResourceHandle::new(ResourceRole::Checkpoint, consumers),
+        ),
+        (
+            "snapshots",
+            ResourceRole::Bootstrap,
+            ResourceHandle::new(ResourceRole::Bootstrap, snapshots),
+        ),
+    ] {
+        let resource = ResourceId::try_new(name)?;
+        declarations.insert(
+            resource.clone(),
+            ResourceSpecification {
+                id: resource.clone(),
+                role,
+                ownership: ResourceOwnership::Borrowed,
+                binding: name.into(),
+            },
+        );
+        resources.insert(resource, handle);
+    }
+    factory.validate(&specification)?;
+    factory.validate_scope("graph", &specification, &declarations, &resources)?;
+    assert!(factory
+        .validate_scope("wrong", &specification, &declarations, &resources)
+        .is_err());
+    specification.dependencies.insert(
+        "source_progress".into(),
+        vec![ResourceId::try_new("single")?],
+    );
+    assert!(factory.validate(&specification).is_err());
+    specification.dependencies.remove("source_progress");
+    specification.dependencies.insert(
+        "snapshot".into(),
+        vec![ResourceId::try_new("single-snapshot")?],
+    );
+    assert!(factory.validate(&specification).is_err());
+    Ok(())
+}
+
+#[test]
+fn shared_cursor_order_validates_journal_epochs_and_logical_positions() -> Result<()> {
+    let source = ComponentId::try_new("source")?;
+    let policy = journal::position_policy(&source)?;
+    let epoch = uuid::Uuid::new_v4();
+    let first = journal::identity(epoch, 2)?;
+    let next = journal::identity(epoch, 10)?;
+    assert!(policy.is_after(&next, &first)?);
+    assert!(!policy.is_after(&first, &next)?);
+    assert!(!policy.is_after(&first, &first)?);
+    assert!(policy
+        .is_after(&next, &journal::identity(uuid::Uuid::new_v4(), 2)?)
+        .is_err());
+    assert!(policy.is_after(b"invalid", &first).is_err());
+    assert!(policy
+        .is_after(br#"{"version":2,"epoch":"invalid","sequence":1}"#, &first)
+        .is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn native_configuration_and_factory_reject_incompatible_bounds_and_resources() -> Result<()> {
     for invalid in [
         "commands",

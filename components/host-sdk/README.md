@@ -23,6 +23,75 @@ cannot substitute a producer's shared transaction group for the consumer's
 own per-operation transaction. Component specifications bind this resource
 under `consumer`. Actual constructed storage must meet the requested guarantee.
 
+## Native producer consumer progress
+
+Native standalone transformers and ordinary **Handled** sinks may
+additionally bind an optional `input_progress` dependency. It is a `Checkpoint`
+resource containing `QuerySourceProgressResource` for that exact graph/component.
+The Host attaches `ComponentRecovery::with_volatile_input_progress`; the graph,
+not the proxy or plugin, publishes completed input after handling and output
+completion. The owner remains volatile (`persistent=false`) and implies neither
+restart durability nor a remote transaction. Accepted sinks, sources, services,
+transaction participants and consumer-wrapper factories cannot opt into this
+tracker. A transformer factory may also support transaction participation; that
+capability does not prevent tracking its separately constructed standalone
+instances. An instance with this tracker cannot be converted into a transaction
+participant. Omitting it preserves the ordinary fast path.
+
+`NativeFactory::create_component_with_input_progress(id, configuration, scope,
+input_owner, optional_consumer_set)` provides programmatic construction.
+An upstream-facing input owner and downstream `consumer_progress` readers are
+different resources and may coexist on a transformer. Only the latter crosses
+the native interface; `input_progress` never reaches the plugin.
+
+Native source/transformer factories advertising `consumer_progress_v1` require
+one `consumer_progress` dependency: a `Checkpoint` resource containing the actual
+`Arc<ConsumerProgressSet>`, not names, a synthetic aggregate or a single-owner
+wrapper. Programmatic construction uses
+`NativeFactory::create_component_with_consumer_progress(id, configuration, scope, set)`.
+Graph/producer identity and exact plugin-side reader binding are checked.
+Single-owner progress and source admission cannot be supplied alongside this
+binding. Non-opt-in factories keep their existing construction and processing.
+
+The Host attaches the actual set with `ComponentRecovery::with_consumer_progress`.
+An optional immutable native cursor comparator is captured separately and attached
+with `with_consumer_positions`. It interprets bounded source positions, not a
+generic minimum scalar, and can run while source/transformer processing is pending.
+Its opaque handle remains producer-owned; no Rust comparator or storage pointer
+crosses the ABI. Explicit upstream retention is preserved independently and is
+not proof of every consumer's durability or of an external effect.
+
+Snapshots retain every member's own state and enforce whole-set limits (256
+members, 4,096 entries, 1 MiB). Independent subscriptions are bounded to 16; failed
+encoding and cancelled waits consume no observations. Stop/drop wakes and fences
+old subscriptions, and cancelled/failed cleanup cannot become a successful restart.
+Only successful stop/start allows fresh subscriptions. These services use the
+hosting graph's actual resources; they neither create a graph nor independently
+establish graph-wide fan-out/recovery guarantees.
+
+Managed construction uses the `consumerProgress` resource recipe:
+
+```yaml
+kind: consumerProgress
+producer: input
+consumers:
+  left: left-progress
+  right: right-progress
+```
+
+Declare it as a `Checkpoint` resource, with exactly `left-progress` and
+`right-progress` as `Checkpoint` resource dependencies. Each member is a
+`sourceProgress` recipe for the corresponding actual component. Bind the set to
+the producer's `consumer_progress` slot. A query binds its own member resource to
+`source_progress`; an eligible native transformer/handled sink binds it to
+`input_progress`. Matching names alone do not establish ownership. A transformer's
+own input owner is separate from the set observing its downstream consumers.
+
+Secret-bearing native configuration uses canonical component specifications with
+`ConfigurationValue` references to declared configuration resources. Server's
+readable graph `config` object contains literal values; embedding a reference-like
+object there does not turn it into a reference or bypass secret validation.
+
 ## Managed native bootstrap
 
 `nativeBootstrap` recipes create one graph-owned `Bootstrap` resource for the

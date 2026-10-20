@@ -251,6 +251,8 @@ mod inspection;
 pub use inspection::*;
 mod inventory;
 pub use inventory::*;
+mod composite_bootstrap;
+mod consumer_progress;
 mod journal_budget;
 mod qos_pipe;
 mod query_bootstrap;
@@ -259,6 +261,7 @@ mod retained_pipe;
 mod retained_store;
 mod source_progress;
 mod wal_source;
+pub use consumer_progress::*;
 pub use source_progress::*;
 
 pub use binary_codec::{
@@ -269,6 +272,10 @@ pub use bounded_pipe::*;
 pub use broadcast_pipe::*;
 pub use codec::*;
 pub use component::*;
+pub use composite_bootstrap::{
+    CompositeBootstrapProvider, MAX_COMPOSITE_BOOTSTRAP_PROVIDERS,
+    MAX_COMPOSITE_BOOTSTRAP_WATERMARKS,
+};
 pub use consumer_recovery::*;
 pub use data::*;
 pub use envelope::*;

@@ -42,6 +42,7 @@ pub struct WalReplaySource {
     producer_sequence: u64,
     pending: VecDeque<(u64, SourceChange)>,
     progress: Option<Arc<QuerySourceProgress>>,
+    consumers: Option<Arc<ConsumerProgressSet>>,
 }
 
 fn descriptor(id: ComponentId) -> ComponentDescriptor {
@@ -73,11 +74,23 @@ impl WalReplaySource {
             producer_sequence: 0,
             pending: VecDeque::new(),
             progress: None,
+            consumers: None,
         }
     }
     pub fn with_source_progress(mut self, progress: Arc<QuerySourceProgress>) -> Self {
         self.progress = Some(progress);
         self
+    }
+    pub fn with_consumer_progress(
+        mut self,
+        consumers: Arc<ConsumerProgressSet>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.progress.is_none() && consumers.producer_id() == self.descriptor.id(),
+            "WAL consumer progress must belong to this producer and cannot replace a single owner"
+        );
+        self.consumers = Some(consumers);
+        Ok(self)
     }
     async fn read(&mut self) -> anyhow::Result<()> {
         let next = self
@@ -106,7 +119,18 @@ impl ComputationComponent for WalReplaySource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
+    fn recovery_contract(&self) -> ComponentRecovery {
+        self.consumers
+            .as_ref()
+            .map_or_else(ComponentRecovery::default, |consumers| {
+                ComponentRecovery::default().with_consumer_progress(consumers.clone())
+            })
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.progress.is_none() || self.consumers.is_none(),
+            "WAL source cannot bind both single-owner and consumer-set progress"
+        );
         self.pending.clear();
         self.cursor = self.resume;
         if let Some(progress) = &self.progress {
@@ -131,6 +155,39 @@ impl ComputationComponent for WalReplaySource {
             }
             let transport = snapshot.transport_sequences.get(&self.stream);
             self.producer_sequence = self.producer_sequence.max(transport.copied().unwrap_or(0));
+        }
+        if let Some(consumers) = &self.consumers {
+            let snapshot = consumers.read_only().wait_ready().await?;
+            let key = SourceProgressKey::Source(self.resource.partition.clone());
+            let mut required = None;
+            for (consumer, state) in &snapshot.consumers {
+                anyhow::ensure!(
+                    state.persistent,
+                    "WAL resume requires persistent committed progress for every consumer"
+                );
+                let checkpoint = state.checkpoints.get(&key);
+                if let Some(checkpoint) = checkpoint {
+                    anyhow::ensure!(
+                        self.resume <= checkpoint.sequence,
+                        "WAL resume position exceeds consumer {consumer}'s committed boundary"
+                    );
+                } else if consumers.owners()[consumer].replay_only() && self.resume != 0 {
+                    anyhow::bail!(
+                        "WAL resume exceeds uninitialized consumer {consumer}'s boundary"
+                    );
+                }
+                let position = checkpoint.map_or(self.resume, |checkpoint| checkpoint.sequence);
+                required = Some(required.map_or(position, |current: u64| current.min(position)));
+                self.producer_sequence = self.producer_sequence.max(
+                    state
+                        .transport_sequences
+                        .get(&self.stream)
+                        .copied()
+                        .unwrap_or(0),
+                );
+            }
+            self.cursor =
+                required.ok_or_else(|| anyhow::anyhow!("WAL consumer membership is empty"))?;
         }
         self.read().await
     }
@@ -234,6 +291,15 @@ impl Default for WalReplaySourceFactory {
                             )
                         },
                     ),
+                    (
+                        Arc::from("consumer_progress"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<ConsumerProgressSet>(
+                                ResourceRole::Checkpoint,
+                            )
+                        },
+                    ),
                 ]),
             },
         }
@@ -265,9 +331,35 @@ impl ComponentFactory for WalReplaySourceFactory {
                 }
             }
         }
+        for id in spec
+            .dependencies
+            .get("consumer_progress")
+            .into_iter()
+            .flatten()
+        {
+            if let Some(handle) = resources.get(id) {
+                let progress = handle.get::<ConsumerProgressSet>()?;
+                anyhow::ensure!(
+                    progress.graph_id() == graph_id
+                        && progress.producer_id() == spec.descriptor.id(),
+                    "WAL consumer progress belongs to another graph or producer"
+                );
+            }
+        }
         Ok(())
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !spec
+                .dependencies
+                .get("source_progress")
+                .is_some_and(|items| !items.is_empty())
+                || !spec
+                    .dependencies
+                    .get("consumer_progress")
+                    .is_some_and(|items| !items.is_empty()),
+            "WAL source cannot bind both single-owner and consumer-set progress"
+        );
         if spec.descriptor != descriptor(spec.descriptor.id().clone()) {
             anyhow::bail!("invalid WAL source ports/schema");
         }
@@ -331,6 +423,26 @@ impl ComponentFactory for WalReplaySourceFactory {
                     )));
                 }
                 source = source.with_source_progress(progress.0.clone());
+            }
+        }
+        if context
+            .specification
+            .dependencies
+            .contains_key("consumer_progress")
+        {
+            if let Some(consumers) = context
+                .resources::<ConsumerProgressSet>("consumer_progress")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+            {
+                if consumers.graph_id() != context.graph_id.as_ref() {
+                    return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                        "WAL consumer progress belongs to another graph"
+                    )));
+                }
+                source = source
+                    .with_consumer_progress(consumers)
+                    .map_err(ComponentCreationError::terminal)?;
             }
         }
         Ok(ConstructedComponent::source(Box::new(source)))

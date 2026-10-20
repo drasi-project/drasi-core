@@ -36,6 +36,7 @@ pub mod batching;
 pub mod bootstrap;
 pub mod configuration;
 pub mod consumer;
+pub mod consumer_progress;
 pub mod query_snapshots;
 pub mod recovery;
 pub mod services;

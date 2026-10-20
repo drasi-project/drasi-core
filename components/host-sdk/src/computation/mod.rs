@@ -13,8 +13,10 @@
 mod admission;
 mod bootstrap;
 mod consumer;
+mod consumer_progress;
 mod control;
 mod factory;
+mod input_position;
 mod loader;
 mod progress;
 mod proxy;

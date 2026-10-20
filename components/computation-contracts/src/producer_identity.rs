@@ -140,6 +140,38 @@ impl GraphProducerProgress {
         envelope: &ChangeEnvelope,
         allow_query_ancestor: bool,
     ) -> anyhow::Result<(Option<Self>, bool)> {
+        Self::read_at(
+            envelope,
+            envelope.system().stream(),
+            envelope.lineage(),
+            allow_query_ancestor,
+        )
+    }
+
+    /// Read a producer boundary already selected from this envelope's lineage.
+    /// The caller must separately validate the identity-preserving graph path.
+    /// Later producer markers cannot be mistaken for this boundary's progress.
+    pub fn read_boundary(
+        envelope: &ChangeEnvelope,
+        boundary: &Arc<crate::SystemMetadata>,
+    ) -> anyhow::Result<(Option<Self>, bool)> {
+        let mut system = envelope.system();
+        let mut ancestor = envelope.lineage();
+        while !Arc::ptr_eq(system, boundary) {
+            let parent = ancestor
+                .ok_or_else(|| anyhow::anyhow!("producer boundary is outside envelope lineage"))?;
+            system = parent.system();
+            ancestor = parent.parent();
+        }
+        Self::read_at(envelope, system.stream(), ancestor, false)
+    }
+
+    fn read_at(
+        envelope: &ChangeEnvelope,
+        stream: &StreamId,
+        ancestor: Option<&Arc<crate::Lineage>>,
+        allow_query_ancestor: bool,
+    ) -> anyhow::Result<(Option<Self>, bool)> {
         let Some(entry) = envelope
             .annotations()
             .entries()
@@ -160,21 +192,20 @@ impl GraphProducerProgress {
             progress.sequence > 0 && progress.identity.component_id.as_str() == entry.contributor(),
             "graph producer progress does not identify the immediate producer"
         );
-        if progress.identity.stream != *envelope.system().stream()
-            && (allow_query_ancestor || has_ancestor_stream(envelope, &progress.identity.stream))
+        if progress.identity.stream != *stream
+            && (allow_query_ancestor || has_ancestor_stream(ancestor, &progress.identity.stream))
         {
             return Ok((None, !progress.identity.persistent));
         }
         anyhow::ensure!(
-            progress.identity.stream == *envelope.system().stream(),
+            progress.identity.stream == *stream,
             "graph producer progress does not identify the immediate producer"
         );
         Ok((Some(progress), false))
     }
 }
 
-fn has_ancestor_stream(envelope: &ChangeEnvelope, stream: &StreamId) -> bool {
-    let mut ancestor = envelope.lineage();
+fn has_ancestor_stream(mut ancestor: Option<&Arc<crate::Lineage>>, stream: &StreamId) -> bool {
     while let Some(entry) = ancestor {
         if entry.system().stream() == stream {
             return true;

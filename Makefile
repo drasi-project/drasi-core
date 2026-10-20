@@ -79,7 +79,7 @@ build-test-plugins: build-native-plugins
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
-	cargo build -p drasi-host-sdk --example native_recovery
+	cargo build -p drasi-host-sdk --example native_recovery --example native_consumer_progress_metadata
 	cargo build -p drasi-instance-host --example instance_host_fixture --features drasi-instance-host/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="

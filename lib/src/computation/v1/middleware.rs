@@ -467,7 +467,12 @@ impl MiddlewareTransformer {
         let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
         if let Some(durable) = &mut self.durable {
             let output = durable
-                .process(&input.envelope, changes, &self.pipeline)
+                .process(
+                    &input.envelope,
+                    changes,
+                    &self.pipeline,
+                    self.source_progress.as_deref(),
+                )
                 .await?;
             self.publish_progress()?;
             return Ok(output.map_or_else(Vec::new, |envelope| self.outputs(envelope)));
