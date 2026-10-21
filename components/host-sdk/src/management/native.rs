@@ -325,6 +325,8 @@ pub struct NativeBootstrapConfig {
     pub configuration: BTreeMap<Arc<str>, ConfigurationValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_progress: Option<ResourceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bootstrap: Option<ResourceId>,
 }
 
 impl NativeBootstrapConfig {
@@ -355,14 +357,62 @@ impl NativeBootstrapConfig {
             );
             expected.insert(progress.clone(), ResourceRole::Checkpoint);
         }
+        if let Some(source) = &self.source_bootstrap {
+            anyhow::ensure!(
+                self.source_progress.is_some() && !expected.contains_key(source),
+                "paired native bootstrap requires separate coordinator and query progress resources"
+            );
+            expected.insert(source.clone(), ResourceRole::Bootstrap);
+        }
         anyhow::ensure!(
-            *dependencies == expected,
+            !expected.contains_key(&specification.id) && *dependencies == expected,
             "native bootstrap must declare exactly its progress and configuration dependencies"
         );
         Ok(())
     }
 
     pub fn validate_owner(&self, resource: &ResourceId, topology: &DesiredTopology) -> Result<()> {
+        if let Some(source) = &self.source_bootstrap {
+            let recipe: Recipe = serde_json::from_value(
+                topology
+                    .resource_configurations
+                    .get(source)
+                    .context("paired source bootstrap recipe is unavailable")?
+                    .clone(),
+            )?;
+            let Recipe::NativeSourceBootstrap(source) = recipe else {
+                anyhow::bail!("paired native bootstrap requires a native source coordinator");
+            };
+            let progress = self
+                .source_progress
+                .as_ref()
+                .context("missing paired query progress")?;
+            if let Some(single) = source.source_progress {
+                anyhow::ensure!(
+                    &single == progress,
+                    "paired bootstrap declares a different progress owner"
+                );
+            } else {
+                let group = source
+                    .consumer_progress
+                    .context("missing source bootstrap group")?;
+                let recipe: Recipe = serde_json::from_value(
+                    topology
+                        .resource_configurations
+                        .get(&group)
+                        .context("paired source consumer progress recipe is unavailable")?
+                        .clone(),
+                )?;
+                let Recipe::ConsumerProgress(group) = recipe else {
+                    anyhow::bail!("paired source bootstrap requires actual consumer progress");
+                };
+                anyhow::ensure!(
+                    group.producer == source.component
+                        && group.consumers.get(&self.component) == Some(progress),
+                    "paired bootstrap query is not a declared source consumer"
+                );
+            }
+        }
         let query = ContinuousQueryFactory::default();
         for component in &topology.components {
             if let ComponentConstruction::Factory(spec) = &component.construction {
@@ -410,6 +460,10 @@ impl NativeBootstrapConfig {
             metadata.source_progress == self.source_progress.is_some(),
             "native bootstrap source progress binding mismatch"
         );
+        anyhow::ensure!(
+            factory.requires_source_bootstrap() == self.source_bootstrap.is_some(),
+            "native bootstrap source coordinator binding mismatch"
+        );
         crate::computation::runtime_configuration_schema(&metadata.configuration).validate_values(
             &self.configuration,
             declarations,
@@ -453,18 +507,28 @@ impl NativeBootstrapConfig {
             crate::computation::runtime_configuration_schema(&factory.metadata().configuration)
                 .resolve_values(&self.configuration, dependencies)
                 .await?;
-        let provider = factory.create_query_provider(
-            self.component.clone(),
-            serde_json::to_value(configuration)?,
-            drasi_computation_plugin_sdk::Scope {
-                instance_id: instance.into(),
-                graph_id: graph.into(),
-                // Resource owners have no component generation. Bootstrap-v1
-                // separately fences each live snapshot generation.
-                generation: 0,
-            },
-            progress,
-        )?;
+        let scope = drasi_computation_plugin_sdk::Scope {
+            instance_id: instance.into(),
+            graph_id: graph.into(),
+            // Resource owners have no component generation. Bootstrap-v1
+            // separately fences each live snapshot generation.
+            generation: 0,
+        };
+        let configuration = serde_json::to_value(configuration)?;
+        let provider = if let Some(source) = &self.source_bootstrap {
+            factory.create_paired_query_provider(
+                self.component.clone(),
+                configuration,
+                scope,
+                progress.context("paired query progress is unavailable")?,
+                dependencies
+                    .get(source)
+                    .context("source bootstrap coordinator is unavailable")?
+                    .get::<crate::computation::NativeSourceBootstrapResource>()?,
+            )?
+        } else {
+            factory.create_query_provider(self.component.clone(), configuration, scope, progress)?
+        };
         Ok(ResourceHandle::new(
             ResourceRole::Bootstrap,
             Arc::new(QueryBootstrapResource(provider.clone())),

@@ -1,7 +1,9 @@
 # The drasi-lib developer guide
 
-**API baseline: 20 October 2026, Core
-[`54735c05`](https://github.com/drasi-project/drasi-core/commit/54735c056ca45bd784462cd462c14f0a514de442).**
+**Development API snapshot: 21 October 2026.** This guide describes the current
+checkout, including the native MySQL/SQLite and shared Host additions. Use
+matching Core/Server sources and rebuilt plugin libraries; an older published
+commit or registry binary does not contain all of these interfaces.
 
 **drasi-lib is an embedded data-processing runtime for Rust applications.**
 You connect **components** into a **computation graph** to ingest data, transform it,
@@ -1278,9 +1280,11 @@ Native plugins and in-process components use the same graph-owned processing
 contracts. Dynamic packaging is optional; a statically linked native factory
 also works. Choose the actual native implementation for an integration rather
 than assuming every connector package exposes every execution mode.
-For databases, the native SQLite source used in Part III captures writes
-through its own handle; PostgreSQL's native transaction source uses a replication
-protocol. Those are different capture boundaries, not interchangeable APIs.
+For databases, SQLite captures writes through its source-owned connection,
+whereas PostgreSQL and MySQL use replication protocols. Those are different
+capture boundaries, not interchangeable APIs. The Stockroom lesson keeps its
+direct Rust SQLite handle; separately hosted SQLite sources can expose the
+existing REST interface. Neither introduces a general SQL API on DrasiLib.
 
 These are native component surfaces, rather than a count of every historical
 connector package. Some are dynamically packaged; others are statically linked
@@ -1294,9 +1298,11 @@ Rust components:
 | gRPC source/sink | Native graph-change ingress and query-result egress | Explicit transport acceptance and configured handling policies |
 | SSE sink | Live query-result notifications to browser/stream clients | Volatile acceptance; reconnecting clients need a current view |
 | Capture sink | Graph-change envelopes written to a file | Write/flush completion; it consumes graph changes, not query rows |
-| SQLite source | Changes committed through the native SQL handle | Optional journal and coordinated snapshots for one owner or an explicit group of persistent owners |
+| SQLite source/bootstrap | Committed changes through the original Rust handle/callbacks or source-owned REST; file or paired initial loading | Ordinary changes/transactions, or journal-backed single/shared persistent owners; file initialization requires quiescent writers |
 | PostgreSQL sources | Committed row changes or complete transactions, selected by factory | Configured-slot shared recovery or the distinct single-owner modes; whole-transaction queries require atomic persistent progress |
-| MySQL source | Complete binlog transactions | Retained binlog history and coordinated snapshots for actual persistent consumer owners |
+| MySQL source/bootstrap | Ordinary rows, complete transactions, or explicit MySQL 5.7 positional rows; coordinated or standalone initial loading | Actual single/fixed-member progress, partial-row replay and retained history; positional rows do not claim FULL metadata, coordinated snapshots or commit clocks |
+| MySQL stored-procedure sink | Parameterized actions for query changes | Handled after actual command responses; owned cancellation/cleanup, but no exactly-once effects or blind retry of a submitted call |
+| SQL Server source/bootstrap/sink | Native CDC, standalone/coordinated loading and parameterized procedures are implemented | Real-database qualification is deferred; permission, large sink-batch and orphan-marker gaps remain. Do not select it as a qualified production replacement. |
 | Middleware transformer | Parsing, mapping, relabeling and other graph-change normalization | Memory, durable, or transactional configuration |
 | Inter-instance bridge source/sink | Data between independently owned instances | Explicit volatile or durable receiver-admission profile |
 
@@ -1309,15 +1315,22 @@ Database capture requires its source-specific setup:
 
 | Integration | Native interface | What the host must supply |
 |---|---|---|
-| [SQLite](../../../components/sources/sqlite/README.md#native-computationgraph-component) | `drasi_source_sqlite::native::SqliteSource` | Its owned SQL handle; replay needs the actual persistent owner or consumer set, plus paired providers for initial snapshots |
+| [SQLite](../../../components/computation-plugins/sources/sqlite/README.md) | Independent source/bootstrap libraries and the preserved `drasi_source_sqlite::native::SqliteSource` Rust API | Source-owned SQL/REST; actual persistent owner/set for replay; `nativeSourceBootstrap` and per-query providers for paired initialization |
 | [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md) | Independent native source and bootstrap factories | Matching row/transaction modes, explicit publication/slot settings and actual owners; shared row mode also supports memory queries without a process-restart guarantee |
-| [MySQL](../../../components/sources/mysql/README.md#native-computationgraph-source) | Native binlog transaction source | Its documented binlog/identity settings and the actual persistent owner or consumer set, with matching snapshots |
+| [MySQL](../../../components/computation-plugins/sources/mysql/README.md) | Independent source, bootstrap and stored-procedure libraries | Choose row/transaction/positional semantics explicitly; supply actual owners, binlog retention and matching bootstrap resources where supported |
+| [SQL Server](../../../components/computation-plugins/sources/mssql/README.md) | Independent native libraries, not yet database-qualified | Explicit CDC/permission setup; coordinated snapshots require a pre-provisioned marker and locking contract. Qualification remains deferred. |
 
-The MySQL and SQLite **source** APIs above are native Rust implementations;
-their shared-recovery support does not imply completed dynamic source packaging
-or Server registration. Native database schema-discovery integration also
-remains separate work. Consult the selected family's documentation rather than
-assuming that its ordinary plugin and native source have identical surfaces.
+The selected MySQL and SQLite source/bootstrap/sink roles have actual static,
+rebuilt-dynamic and Server qualification on both Tokio runtimes. SQLite has no
+legacy reaction to migrate. Source data schemas use the ordinary DrasiLib/Server
+inspection APIs through a separate native read capability.
+
+Choose a MySQL positional factory explicitly when using limited-metadata
+binlogs. Its `@N` properties, matching-catalog history checks and checkpoint
+namespace differ from the FULL-metadata factories. A parsed GTID start does not
+make file-bound partial cursors failover-portable. Stored-procedure templates
+bind values rather than interpolate SQL; errors and uncertain submitted effects
+are not silently dropped or blindly retried.
 
 The HTTP lesson receives changes another application supplies. A database CDC
 plugin instead detects committed changes through its database protocol. Choosing
@@ -1885,6 +1898,14 @@ forwarding before stop hooks. A timeout reports unfinished work. It does not
 mean that a write rolled back or that the application may open another owner
 of the same resource.
 
+Shared producers may still need their consumers' actual progress while draining.
+The runtime keeps those owners and read capabilities alive until producer cleanup
+finishes. For example, stopping SQLite closes new HTTP admission but drains
+already accepted requests through its existing worker. Cancelling a stop waiter
+does not abandon the accepted stop operation or authorize a replacement owner.
+Unrelated cleanup remains independent; a failed producer is not permission to
+retire the owners it still needs.
+
 Deprovision is not a pause button. Similarly, a configuration change that
 removes a component is not an ordinary stop; its recovery obligations need
 separate consideration in Chapter 17.
@@ -2092,6 +2113,13 @@ description does not validate incoming bytes.
 execution role. Resource observations must identify actual provider handles,
 not infer sharing from names or paths. A newer complete resource observation
 replaces the previous inventory, including when the new inventory is empty.
+
+For data discovery, await `DrasiLib::get_source_schema` or `get_graph_schema`.
+Supported native database sources report actual captured tables/fields/types,
+not their factory's configuration schema. Reads remain available while `next()`
+waits for data. A source without a schema capability can report no schema;
+failed or retired reads remain errors, and an old read cannot describe a
+replacement as though it were the old source.
 
 Configuration snapshots can contain sensitive values, even when ordinary
 topology inspection is safe to expose. Protect administrative endpoints,
@@ -2541,8 +2569,10 @@ Choose the source's shared interface and matching initialization contract:
 |---|---|
 | PostgreSQL rows | `drasi.postgres/shared-changes` with one `drasi.postgres/shared-row-bootstrap` per query; memory or persistent progress as configured |
 | PostgreSQL whole transactions | `drasi.postgres/shared-transactions` with one `drasi.postgres/shared-transaction-bootstrap` per query; every query must be atomic, persistent and transaction-enabled |
-| MySQL | `MySqlSource::coordinated_consumers` supplies a source and per-query snapshots for the actual persistent owners |
-| SQLite | `SqliteSource::coordinated_with_consumers` supplies a source and shared snapshot service; `for_consumer` returns each actual query's provider |
+| MySQL rows | `drasi.mysql/shared-changes` with one `drasi.mysql/shared-row-bootstrap` per query; memory or persistent owners as configured |
+| MySQL whole transactions | `drasi.mysql/shared-transactions` with one `drasi.mysql/shared-transaction-bootstrap` per query; actual atomic persistent owners |
+| MySQL positional rows | `drasi.mysql/shared-positional-changes` preserves real per-query row checkpoints, but has no coordinated snapshot or commit-clock claim |
+| SQLite | `drasi.sqlite/shared-transactions` with source-owned coordination and one `drasi.sqlite/shared-bootstrap` per actual persistent query owner |
 
 PostgreSQL's shared providers use independent temporary exported snapshots.
 They do not reset, recreate or claim managed ownership of the configured live
@@ -2554,9 +2584,29 @@ The existing Stockroom lesson deliberately keeps its single-owner
 `SqliteSource::coordinated` path. Shared modes have their own source identities
 and recovery records; do not reopen single-owner state as shared state.
 See the [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md#shared-ordinary-row-queries),
-[MySQL](../../../components/sources/mysql/README.md#shared-consumer-recovery) and
-[SQLite](../../../components/sources/sqlite/README.md#shared-native-recovery)
+[MySQL](../../../components/computation-plugins/sources/mysql/README.md#row-recovery) and
+[SQLite](../../../components/computation-plugins/sources/sqlite/README.md#rust-handles-and-internal-coordination)
 contracts for retention and enrollment rules.
+
+#### Pair separately loaded SQLite components
+
+Paired initialization must use the actual source's worker coordination and
+journal, not another connection found by database path. Set
+`coordinated_snapshot: true` on a replay/shared SQLite source and bind one
+graph-owned source/bootstrap coordinator. Each query gets a separate provider
+for its actual progress owner. The source library owns the engine; the bootstrap
+library acquires its existing provider through the narrow native interface.
+
+Bootstrap readers can inspect the real members before live-source readiness.
+Live processing keeps its own separately activated reader binding. A matching
+name is not proof that either reader belongs to the right owner. Chapter 16
+shows the resource relationships.
+
+The independent `drasi.sqlite/file-bootstrap` remains useful for ordinary
+loading with quiescent writers. It has no source-journal watermark and cannot
+replace coordinated persistent initialization. This internal pairing does not
+expose SQL reads or writes through DrasiLib; original Rust handles/callbacks and
+the source's REST API remain the application interfaces.
 
 #### Combine initial data from multiple inputs
 
@@ -2593,6 +2643,11 @@ Dropping the snapshot stream must cancel its work. A provider with auxiliary
 workers must implement `stop` and await them before query storage is released.
 Retain incomplete cleanup after timeout or cancellation, and reject a second
 snapshot owner until cleanup succeeds.
+
+A successfully stopped paired provider can be replaced even if its old handle
+is retained. That handle must not resume or cancel the replacement. Conversely,
+dropping an active or failed-cleanup handle is not evidence that its workers
+finished. A rejected replacement must leave a valid stopped original usable.
 
 Verified retirement needs a stronger held lifecycle than a sampled successful
 stop. `freeze_for_retirement` prevents reuse while a configuration removal is
@@ -3380,7 +3435,12 @@ deliberately stops before handling the retained output:
 Alert retained but not handled. Restart without --hold-alerts to complete it.
 ```
 
-Use Ctrl-C and restart without the hold option:
+Use Ctrl-C. In this deliberately held mode, Stockroom drains and stops its
+source and query first, explicitly interrupts the held consumer, then awaits
+terminal cleanup. It reports the interruption rather than calling it successful
+delivery; the journal remains pending. Normal runs use graceful shutdown.
+
+Restart without the hold option:
 
 ```sh
 cargo run --locked --features persistence -- --state ./state/held
@@ -3749,6 +3809,32 @@ Changing a secret does not automatically refresh existing network connections.
 Define reconnect or refresh behavior in the component's lifecycle.
 Use a test memory secret store only when its volatility is acceptable.
 
+#### Refresh native credentials on each start
+
+Factories opting into `activation_credentials_v1` can bind the Host's
+`NativeIdentityResource` under their optional `identity` slot. The resource role
+is `Identity`, and its concrete type matters: another Identity resource is not
+interchangeable. Static applications can wrap their actual `IdentityProvider`;
+Host and Server use a `nativeIdentity` recipe containing the already loaded
+provider's `PluginConfiguration`.
+
+This path resolves credentials on **every start**, not during component
+construction. Injected providers take precedence over configured providers;
+literal-only startup is unchanged when no identity resource is bound.
+Configured secret references remain references in saved definitions. The
+MySQL and SQL Server procedure factories supply their exact configured hostname
+and port; the Host provider returns bounded username/password or token data.
+Certificates, provider errors and oversized credentials are rejected before
+native startup, without falling back to literals or a previous credential.
+
+Only private activation state receives the acquired values. The component's
+declared configuration, graph identity and saved recipe remain unchanged.
+Changing an ordinary `ConfigurationValue` secret reference alone does not enable
+this refresh behavior; use the explicit identity resource. It also does not
+reauthenticate an already open connection without the documented stop/start.
+See the [Host identity recipe](../../../components/host-sdk/README.md#native-activation-identity).
+Consumer-wrapper factories currently reject this dependency rather than ignore it.
+
 **Summary.** Factories describe how to construct components; resource recipes
 describe how to obtain their real dependencies. Keep configuration, identity,
 and ownership separate. The application can now be represented as reconstructible
@@ -3836,7 +3922,7 @@ another resolver must preserve those checks.
 
 #### Declare shared progress and composed bootstrap resources
 
-Host SDK and Server resolvers support two distinct resource recipes. A
+Host SDK and Server resolvers distinguish progress from initialization. A
 `consumerProgress` recipe groups the downstream owners of **one producer**;
 a `compositeBootstrap` recipe groups the initializers of **one query**.
 These JSON objects are recipe configurations, not complete graph definitions.
@@ -3892,6 +3978,34 @@ and factory metadata. App setup submits one batch through the existing
 shared PostgreSQL sources and one HTTP source, with PG/HTTP initialization
 where needed. Repeating a matching setup is idempotent; a partial or conflicting
 bundle is an explicit error, not implicit membership replacement.
+
+#### Declare source-owned database initialization
+
+For paired SQLite loading, `nativeSourceBootstrap` creates a graph-owned
+Bootstrap resource using the **source** factory's actual identity and canonical
+configuration, including plugin provenance. It depends on either the actual
+single `sourceProgress` resource or the fixed `consumerProgress` resource, plus
+any declared configuration dependencies.
+
+| Binding | Required relationship |
+|---|---|
+| Source `source_bootstrap` | The coordinator resource; keep the source's normal progress dependency too |
+| Per-query `nativeBootstrap` | `sourceBootstrap` names that coordinator; `sourceProgress` names the query's actual owner |
+| Query `bootstrap` and `source_progress` | The paired provider and that same query progress resource |
+
+Each paired bootstrap resource declares its coordinator as a Bootstrap dependency
+and its query owner as a Checkpoint dependency. The source and provider
+configuration/scope must match the coordinator, and the Host validates actual
+owner identity rather than IDs or paths. Resource dependency order keeps the
+coordinator alive through source/provider cleanup.
+
+Use the [Host coordination recipe](../../../components/host-sdk/README.md#internal-native-sourcebootstrap-coordination)
+and the loaded factories' metadata, not handwritten guesses about provenance.
+In the matching Server checkout, `examples/native-sqlite.rs` generates file,
+single-owner and shared definitions; `examples/native-mysql.rs` generates the
+MySQL deployment. SQL Server's generator is available but its database
+qualification remains deferred. These are separate Server consumers, not extra
+Stockroom lessons or a new database-access API.
 
 #### Enable management at the host boundary
 
@@ -4532,14 +4646,19 @@ storage ownership:
 | Consumer progress set | `NativeConsumerProgress` exposes each required actual owner separately; membership is fixed per binding |
 | Input-position comparison | One retained immutable source-defined policy for independent replay filtering, not a generic minimum sequence |
 | Query bootstrap | A query-owned provider with bounded snapshot/state operations and awaited cleanup |
+| Source data schema | Independent `SourceSchemaReader` over actual source data; bounded and fenced across activation changes |
+| Source/bootstrap coordination | The source-owned engine lends a provider for an actual query owner; no SQL or general-purpose service API |
+| Activation credentials | Host resolves the actual identity provider for each start and supplies ephemeral credentials; no provider trait or acquired secret enters saved configuration |
 
 Consumer progress and its optional position policy use the separate
 `drasi_computation_plugin_consumer_progress_v1` extension. Base ABI `1.0.0`,
 wire `2` and the existing recovery interface are unchanged. Opt-in producer
 factories require the actual `consumer_progress` resource and cannot mix it
 with single-owner progress or source admission. Constructors retain the
-capability without reading/subscribing until start; stop revokes old readers
-and cleanup must finish before restart. The graph validates the complete path.
+capability without reading/subscribing until start. Stop fences new work but
+keeps readers needed by accepted operations until owned cleanup succeeds; only
+then are those readers retired. A coordinator's separate bootstrap bindings can
+be active before the live source starts. The graph validates the complete path.
 
 Admission mode has no alternate `next` publication path. A progress reader
 does not itself guarantee source retention. A transaction participant may not
@@ -4742,13 +4861,15 @@ The book supplies the application path; the reference supplies the catalog.
 | Retain transport and retry identity | `QosChannel`, `SourceAdmission`, `RetainedPipe`; [QoS guide](../computation-graph-qos.md) |
 | Share source recovery | `ConsumerProgressSet`, `InputPositionPolicy`; [Host bindings and recipes](../../../components/host-sdk/README.md#native-producer-consumer-progress) |
 | Combine initial snapshots | `CompositeBootstrapProvider`; [query bootstrap contracts](../../src/computation/v1/query_bootstrap.rs) |
+| Pair source-owned initialization | `NativeSourceBootstrapResource`; [Host coordination recipes](../../../components/host-sdk/README.md#internal-native-sourcebootstrap-coordination) |
+| Refresh native login credentials | `NativeIdentityResource`, `nativeIdentity`; [activation identity](../../../components/host-sdk/README.md#native-activation-identity) |
 | Track ordinary handled input | `ComponentRecovery::with_volatile_input_progress`; [input-progress cases](../../tests/computation_input_progress.rs) |
 | Recover a result view | `QueryReplayTransformer`, `CheckpointedSink`, `ConsumerProgressStore` |
 | Complete consumer work | `DeliveryRunner`; [persistent Stockroom](stockroom/src/persistence.rs) |
 | Preserve transactions | `SourceTransactionBuilder`, `TransactionTransformer`, `SharedStorageGroup`; [transaction guide](../computation-graph-transactions.md) |
 | Supply state and credentials | `state_store`, `identity`, `secret_store`, `wal`; `ComputationIndexProvider` in `drasi-core` |
 | Save desired configuration | `management`; [managed configuration](../managed-configuration.md) |
-| Inspect and observe | `ComputationInspector`, `ComponentGraphView`, `observability`, `metrics`, `profiling` |
+| Inspect and observe | `ComputationInspector`, `ComponentGraphView`, `DrasiLib::get_source_schema`, `get_graph_schema`, `observability`, `metrics`, `profiling` |
 | Handle public failures | `DrasiError`, `error::OperationFailures`, `GraphError`, lifecycle reports |
 | Package native code | [Native plugin SDK](../../../components/computation-plugin-sdk/README.md) and [Host SDK](../../../components/host-sdk/README.md) |
 | Host independent processes | [Instance host](../../../components/instance-host/README.md) and [bridges](../../../components/computation-plugins/common/bridge/README.md) |
@@ -4795,6 +4916,12 @@ than query-language writes to an external database.
 The parsers share an evaluator but are not promises of the entire Neo4j or
 ISO GQL product surface. Validate the actual query at construction and keep
 a regression test for expressions your application relies on.
+
+Variable-length relationship patterns such as `[:DEPENDS_ON*1..3]` are not a
+qualified traversal feature in this checkout: some forms parse, but the current
+match planner discards their hop bounds. Use supported fixed-length patterns
+instead; [CW-13](../computation-graph-remaining-work.md#cw-13) tracks explicit
+rejection or correct execution rather than silently treating them as one edge.
 
 ### Values and comparisons
 

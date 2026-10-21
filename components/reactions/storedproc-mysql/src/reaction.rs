@@ -140,31 +140,15 @@ impl MySqlStoredProcReaction {
         after: Option<&Value>,
         data: Option<&Value>,
     ) -> Value {
-        let mut context = serde_json::Map::new();
-        context.insert("query_id".to_string(), json!(query_id));
-        context.insert("query_name".to_string(), json!(query_id));
-        context.insert(
-            "operation".to_string(),
-            json!(operation.as_str().to_uppercase()),
-        );
-        context.insert("timestamp".to_string(), json!(timestamp));
-        context.insert(
-            "metadata".to_string(),
-            json!(metadata
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<serde_json::Map<_, _>>()),
-        );
-        if let Some(before) = before {
-            context.insert("before".to_string(), before.clone());
-        }
-        if let Some(after) = after {
-            context.insert("after".to_string(), after.clone());
-        }
-        if let Some(data) = data {
-            context.insert("data".to_string(), data.clone());
-        }
-        Value::Object(context)
+        drasi_mysql_common::storedproc::build_context(
+            query_id,
+            &operation.as_str().to_uppercase(),
+            timestamp,
+            metadata,
+            before,
+            after,
+            data,
+        )
     }
 
     /// Spawn the processing task that renders and executes commands.

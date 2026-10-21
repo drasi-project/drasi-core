@@ -2,10 +2,10 @@
 
 **Status: stages 0-5 are complete for their stated scope, including the
 controlled performance comparison and Server configuration/API consolidation.
-Stage 6 remains in progress: the named HTTP/gRPC/SSE/PostgreSQL, generic fan-out
+Stage 6 remains in progress: the named HTTP/gRPC/SSE/PostgreSQL/MySQL/SQLite, generic fan-out
 and real-consumer slices are qualified, but the full native-only inventory and
 old-consumer cutover are not complete. Stages 7-9 remain pending.**
-**Updated: 20 October 2026.**
+**Updated: 21 October 2026.**
 **Code baseline:** Core `e900b70d932e350d4d1ec7acb36ae2ba3cbf913c`
 (guide refresh over implementation `54735c056ca45bd784462cd462c14f0a514de442`),
 Server `15dafa225ac76ba9868452a7082f693027621ad7`, plus the current
@@ -13,7 +13,7 @@ Server `15dafa225ac76ba9868452a7082f693027621ad7`, plus the current
 Test-infra is at `e4636204982a461fbfefd637ade22be9ac617071`; Learning is at
 `5320f0b8ae06fa8789edf7ec4c763939ebb599d6`.
 
-**Priority change - user directed, 19 October:** complete the HTTP source,
+**Earlier priority change - user directed, 19 October:** complete the HTTP source,
 reaction and bootstrap, gRPC source and reaction, existing SSE reaction/sink,
 and PostgreSQL source, bootstrap and stored-procedure reaction end to end.
 Review and reuse the legacy implementations and their behavioral assertions.
@@ -21,6 +21,49 @@ Preserve static linking and dynamic loading inside the hosting instance's
 ComputationGraph. Other connector families, application/SQLite migration and
 general cleanup are paused unless strictly required by these components.
 This overrides the earlier execution order and explicitly includes SSE.
+
+**Current database priority - user directed, 20 October:** complete MySQL and
+SQL Server source, bootstrapper and stored-procedure sink, plus SQLite source and
+bootstrapper, in parallel. Preserve working legacy capabilities and compare them
+explicitly with the native implementations. A library build or test-count match
+does not close a family: actual-service, static/dynamic, both-runtime and Server
+coverage must include functional, failure, cancellation, restart and cleanup
+behavior. Missing modes remain completion blockers.
+
+**SQLite boundary decision - user approved:** preserve the original
+plugin-specific Rust handles, transaction callbacks and REST API. Do not add a
+public DrasiLib SQL read/write API. Shared work is limited to actual
+source/bootstrap ownership coordination and a separate read-only source-schema
+capability. The source library owns the shared initialization engine; the paired
+bootstrap library acquires its existing provider, not another SQL worker.
+
+The current database changes are uncommitted work. Shared schema/coordination
+and shutdown ownership fixes are implemented and qualified. SQLite's selected
+source/bootstrap scope is complete, preserving its original Rust/REST behavior
+with real static/dynamic and Server coverage. MySQL's selected source,
+bootstrapper and stored-procedure sink scope is also complete. Its qualification
+includes the explicit legacy 5.7 positional-metadata CDC profile, SQL-role
+charset/version compatibility, per-start identity-provider refresh, persistent
+and partial-row recovery, and nonce-verified session cleanup across server
+restarts. Existing FULL-metadata/coordinated factories retain their stricter
+requirements; positional factories do not advertise those stronger guarantees.
+The final MySQL Host, Server and CLI runs passed after correcting fixture volume
+teardown. Only positively attributed unused fixture volumes were reclaimed;
+the earlier disk-full run remains failed environment evidence, not a pass.
+SQL Server's three roles compile and load. Bounded CDC paging, owned snapshot
+streaming, exact payload-byte accounting and activation credentials have reached
+a unit-tested checkpoint (97 unit tests and four non-database Host checks).
+Capture-table permission parity, large sink batches and orphan-marker cleanup
+remain incomplete, and actual database tests remain unqualified.
+The exact legacy `mcr.microsoft.com/mssql/server:2022-latest` image
+also exited with SIGSEGV under local amd64 emulation before SQL readiness; the
+blocker is executing SQL Server here, not finding an existing Docker image.
+The user explicitly deferred SQL Server qualification and kept that family
+incomplete. Finish coherent implementation/unit/lint checkpoints without more
+environment attempts, retain the unqualified real-database scenarios, and
+continue MySQL/SQLite/shared work independently.
+Kafka/Kubernetes and general cleanup
+remain outside this active database slice; no SQLite reaction was invented.
 
 ## Execution record
 
@@ -32,7 +75,7 @@ This overrides the earlier execution order and explicitly includes SSE.
 | 3 | Completed: explicit dependency waits, deferred query/resource construction, automatic activation, explicit-stop preservation, waiting-graph startup/reconstruction, Server diagnostics and live native-factory registration. Named lifecycle, recovery, public-API and real-library checks pass. This is not qualification of every connector or deployment profile. |
 | 4 | Completed: query/pipeline/source-subscription mode switches, old namespace/hash support and provider/cleanup fallbacks are removed. Functional, recovery, real-plugin, Server, responsiveness, lint and controlled performance checks pass; architecture artifacts are refreshed. |
 | 5 | Completed: one explicit `instances` layout, no first-instance routes or configuration DTO aliases, canonical persistence, store-owned generated IDs, and updated consumers. The full Server matrix, current client builds and selected real browser/dataflow checks pass, with the pre-existing Learning Trading unused-local limitation recorded below. |
-| 6 | Partly complete. Prioritized native network/PG implementations, generic fan-out, composed bootstrap and selected real consumers have recorded static/dynamic proof. Remaining selected families, native source-schema discovery, MySQL/SQLite live/coordinated packaging and old consumers still prevent full closure. Other families remain paused under the last execution priority. Kafka/SQLite reactions and functional gRPC bootstrap remain excluded. |
+| 6 | Partly complete. Prioritized network/PG slices, MySQL's selected source/bootstrap/sink scope, SQLite's source/bootstrap scope, generic fan-out, composed bootstrap and selected real consumers have static/dynamic proof. Shared per-start credentials are implemented. Deferred/incomplete SQL Server work, other selected families and old consumers still prevent closure. Kafka/SQLite reactions and functional gRPC bootstrap remain excluded. |
 | 7-9 | Pending: old-stack retirement, surviving-code cleanup, and integrated qualification. |
 
 **Current four-family status, 20 October:** HTTP/gRPC now have independent native
@@ -75,7 +118,8 @@ flavors. Fresh isolated GPU live qualification also covers concurrent
 snapshot/CDC, atomic multi-table writes, rollback exclusion, graceful restart,
 offline writes and abrupt runtime loss without changing the managed slot.
 The seven selected PostgreSQL Server configurations and actual Trading conversion
-are complete, as recorded below; runtime source-schema discovery remains open.
+are complete, as recorded below; remaining family source-schema discovery and
+consumer qualification remain open.
 Cold reconstruction with undrained
 persistent input-pipe frames is not established by the successful reconciled-drain
 scenarios. Stage 6 is not complete.

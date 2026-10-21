@@ -29,6 +29,8 @@ mod bootstrap_fixture;
 mod bootstrap_tests;
 #[path = "configuration_tests.rs"]
 mod configuration_tests;
+#[path = "source_schema_tests.rs"]
+mod source_schema_tests;
 #[path = "../../tests/fixtures/native_consumer.rs"]
 mod consumer_fixture;
 #[path = "../../tests/fixtures/native_consumer_progress.rs"]

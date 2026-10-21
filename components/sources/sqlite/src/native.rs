@@ -5,79 +5,33 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use drasi_lib::{
-    computation::v1::*,
-    context::workers::{
-        join_owned_worker_gracefully, spawn_owned_blocking_worker, spawn_owned_worker,
-        WorkerCompletion,
-    },
-};
-use serde::{Deserialize, Serialize};
+use drasi_lib::computation::v1::*;
+use serde::Deserialize;
 use std::{
     net::SocketAddr,
-    num::{NonZeroU64, NonZeroUsize},
-    path::PathBuf,
     sync::{atomic::AtomicU64, Arc},
+};
+#[cfg(test)]
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tokio::{
-    sync::{mpsc, oneshot, watch, RwLock},
-    task::JoinHandle,
-};
+use tokio::sync::{mpsc, RwLock};
 
 mod consumer_snapshot;
 mod factory;
-mod handle;
-mod journal;
-mod progress;
 mod snapshot;
 #[cfg(test)]
 mod tests;
-mod worker;
 pub use consumer_snapshot::{SqliteConsumerSnapshot, SqliteConsumerSnapshots};
-pub use drasi_sqlite_common::SqliteParam;
+use drasi_sqlite_common::native::runtime::{SqliteRuntime, StartContext};
+use drasi_sqlite_common::native::{handle, journal, progress};
+pub use drasi_sqlite_common::native::{
+    SqliteConfig, SqliteOutput, SqliteParam, SqliteReplayConfig, SqliteRow,
+};
 pub use factory::SqliteSourceFactory;
 pub use handle::{SqliteHandle, SqliteTransactionHandle};
 pub use snapshot::SqliteSnapshot;
-pub type SqliteRow = serde_json::Map<String, serde_json::Value>;
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SqliteOutput {
-    /// Ordinary graph changes. No durable source replay or atomic query visibility.
-    Changes,
-    /// Complete source transactions, for an explicitly transaction-enabled query.
-    Transactions,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SqliteReplayConfig {
-    pub max_transactions: NonZeroUsize,
-    pub max_bytes: NonZeroUsize,
-}
-
-/// Explicit bounds apply to SQL admission, captured transactions and read results.
-/// Neither output mode enables persistent delivery by itself.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SqliteConfig {
-    pub path: Option<PathBuf>,
-    /// Empty means all ordinary main-database tables.
-    pub tables: Vec<String>,
-    /// Explicit element-key columns; otherwise use the primary key or rowid.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub table_keys: Vec<crate::TableKeyConfig>,
-    pub output: SqliteOutput,
-    /// Opt-in source-owned transaction journal. Requires a file and actual
-    /// persistent consumer progress, supplied to a replayable constructor.
-    pub replay: Option<SqliteReplayConfig>,
-    pub transactions: SourceTransactionLimits,
-    pub max_sql_bytes: NonZeroUsize,
-    pub command_capacity: NonZeroUsize,
-    pub output_capacity: NonZeroUsize,
-    pub shutdown_timeout_ms: NonZeroU64,
-}
 
 /// Explicit application access to a factory-created source. A client can be bound
 /// to only one source owner, including that owner's unfinished database worker.
@@ -103,53 +57,14 @@ impl SqliteClientResource {
     }
 }
 
-impl SqliteConfig {
-    fn validate(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.command_capacity.get() <= tokio::sync::Semaphore::MAX_PERMITS
-                && self.output_capacity.get() <= tokio::sync::Semaphore::MAX_PERMITS,
-            "SQLite channel capacity exceeds Tokio's supported bound"
-        );
-        anyhow::ensure!(
-            self.transactions.max_duration_ms.get() <= i32::MAX as u64,
-            "SQLite transaction duration exceeds its busy-timeout bound"
-        );
-        anyhow::ensure!(
-            self.command_capacity.get() >= 2,
-            "SQLite command capacity must be at least two"
-        );
-        anyhow::ensure!(
-            self.max_sql_bytes.get() <= i32::MAX as usize
-                && self.transactions.max_bytes.get() <= i32::MAX as usize,
-            "SQLite byte limits must fit signed 32-bit lengths"
-        );
-        drasi_sqlite_common::validate_selection(&self.tables, &self.table_keys)?;
-        tokio::time::Instant::now()
-            .checked_add(self.transactions.duration())
-            .context("SQLite transaction deadline is not representable")?;
-        tokio::time::Instant::now()
-            .checked_add(self.timeout())
-            .context("SQLite cleanup deadline is not representable")?;
-        Ok(())
-    }
-    fn timeout(&self) -> Duration {
-        Duration::from_millis(self.shutdown_timeout_ms.get())
-    }
-}
-
 /// Direct ComputationGraph source with a single owned SQLite connection.
 pub struct SqliteSource {
     descriptor: ComponentDescriptor,
     stream: StreamId,
     config: SqliteConfig,
     commands: Arc<RwLock<Option<mpsc::Sender<handle::Command>>>>,
-    receiver: Option<mpsc::Receiver<OutputEnvelope>>,
-    shutdown: watch::Sender<bool>,
-    worker: RwLock<Option<JoinHandle<Result<()>>>>,
+    runtime: SqliteRuntime,
     rest_api: Option<crate::RestApiConfig>,
-    rest_address: Option<SocketAddr>,
-    rest_worker: RwLock<Option<JoinHandle<Result<()>>>>,
-    rest_shutdown: watch::Sender<bool>,
     cleanup_required: bool,
     sequence: Arc<AtomicU64>,
     progress: Option<SourceProgressReader>,
@@ -244,18 +159,15 @@ impl SqliteSource {
         progress: Option<SourceProgressReader>,
     ) -> Result<Self> {
         config.validate()?;
+        let commands = Arc::new(RwLock::new(None));
+        let runtime = SqliteRuntime::new(commands.clone(), config.timeout());
         Ok(Self {
             descriptor: Self::describe(id, config.output)?,
             stream,
             config,
-            commands: Arc::new(RwLock::new(None)),
-            receiver: None,
-            shutdown: watch::channel(false).0,
-            worker: RwLock::new(None),
+            commands,
+            runtime,
             rest_api: None,
-            rest_address: None,
-            rest_worker: RwLock::new(None),
-            rest_shutdown: watch::channel(false).0,
             cleanup_required: false,
             sequence: Arc::new(AtomicU64::new(0)),
             progress,
@@ -298,7 +210,7 @@ impl SqliteSource {
     }
 
     pub fn bound_rest_address(&self) -> Option<SocketAddr> {
-        self.rest_address
+        self.runtime.bound_rest_address()
     }
 
     pub fn with_client_resource(mut self, client: Arc<SqliteClientResource>) -> Result<Self> {
@@ -320,29 +232,9 @@ impl SqliteSource {
         if let (Some(snapshots), Some(owner)) = (&self.consumer_snapshots, &self.client_owner) {
             snapshots.bind_client(owner)?;
         }
+        self.runtime.bind_commands(client.commands.clone())?;
         self.commands = client.commands.clone();
         Ok(self)
-    }
-
-    async fn join(&mut self) -> Result<()> {
-        match join_owned_worker_gracefully(self.worker.get_mut(), self.config.timeout()).await? {
-            WorkerCompletion::Completed(result) => result,
-            WorkerCompletion::Absent => Ok(()),
-            WorkerCompletion::Cancelled => anyhow::bail!("native SQLite worker was cancelled"),
-        }
-    }
-
-    async fn join_rest(&mut self) -> Result<()> {
-        let result =
-            join_owned_worker_gracefully(self.rest_worker.get_mut(), self.config.timeout()).await;
-        if self.rest_worker.get_mut().is_none() {
-            self.rest_address = None;
-        }
-        match result? {
-            WorkerCompletion::Completed(result) => result,
-            WorkerCompletion::Absent => Ok(()),
-            WorkerCompletion::Cancelled => anyhow::bail!("native SQLite REST worker was cancelled"),
-        }
     }
 }
 
@@ -350,6 +242,9 @@ impl SqliteSource {
 impl ComputationComponent for SqliteSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+    fn source_schema_reader(&self) -> Option<Arc<dyn SourceSchemaReader>> {
+        Some(self.runtime.source_schema_reader())
     }
     fn recovery_contract(&self) -> ComponentRecovery {
         if let Some(consumers) = &self.consumer_progress {
@@ -401,11 +296,13 @@ impl ComputationComponent for SqliteSource {
                         .unwrap_or(0),
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                let bootstrap = self
-                    .snapshot
-                    .as_ref()
-                    .map(|provider| provider.live_epoch(&snapshot))
-                    .transpose()?;
+                let bootstrap = if let Some(provider) = &self.snapshot {
+                    let (epoch, lease) = provider.live_boundary(&snapshot)?;
+                    initialization_lease = Some(lease);
+                    Some(epoch)
+                } else {
+                    None
+                };
                 Some((
                     progress::Reader::Single(progress.read_only()),
                     progress::Observed::Single(snapshot),
@@ -444,83 +341,22 @@ impl ComputationComponent for SqliteSource {
                 None => None,
             },
         };
-        self.shutdown.send_replace(false);
-        self.rest_shutdown.send_replace(false);
-        let listener = match &self.rest_api {
-            Some(rest) => Some(
-                tokio::net::TcpListener::bind((rest.host.as_str(), rest.port))
-                    .await
-                    .context("native SQLite REST listener could not bind")?,
-            ),
-            None => None,
-        };
-        let (commands, receiver) = mpsc::channel(self.config.command_capacity.get());
-        let (outputs, output_rx) = mpsc::channel(self.config.output_capacity.get());
-        let (ready, readiness) = oneshot::channel();
-        let config = self.config.clone();
-        let source = self.descriptor.id().clone();
-        let stream = self.stream.clone();
-        let sequence = self.sequence.clone();
-        let database_shutdown = self.shutdown.subscribe();
-        let client_owner = self.client_owner.clone();
-        self.receiver = Some(output_rx);
-        spawn_owned_blocking_worker(&self.worker, move || {
-            let _client_owner = client_owner;
-            let _initialization_lease = initialization_lease;
-            let result = worker::run(
-                config,
-                source,
-                stream,
-                sequence,
-                receiver,
-                outputs,
-                database_shutdown,
-                ready,
-                progress,
-            );
-            if let Err(error) = &result {
-                log::error!("Native SQLite worker failed: {error:#}");
-            }
-            result
-        })
-        .await?;
-        if readiness.await.is_err() {
-            self.join().await?;
-            anyhow::bail!("native SQLite worker exited before readiness");
-        }
-        *self.commands.write().await = Some(commands);
-        if let Some(listener) = listener {
-            let address = listener.local_addr()?;
-            let handle = self.handle().bind_to_current_worker().await?;
-            let tables = (!self.config.tables.is_empty()).then(|| self.config.tables.clone());
-            let keys = self.config.table_keys.clone();
-            let rest_shutdown = self.rest_shutdown.subscribe();
-            let client_owner = self.client_owner.clone();
-            let registered = spawn_owned_worker(&self.rest_worker, async move {
-                let _client_owner = client_owner;
-                crate::rest_api::run_rest_api(listener, handle, tables, keys, rest_shutdown)
-                    .await
-                    .map_err(Into::into)
-            })
-            .await;
-            if let Err(error) = registered {
-                self.commands.write().await.take();
-                self.rest_shutdown.send_replace(true);
-                self.shutdown.send_replace(true);
-                return Err(error.into());
-            }
-            self.rest_address = Some(address);
-        }
-        Ok(())
+        self.runtime
+            .start(
+                StartContext {
+                    source: self.descriptor.id().clone(),
+                    stream: self.stream.clone(),
+                    config: self.config.clone(),
+                    sequence: self.sequence.clone(),
+                    rest_api: self.rest_api.clone(),
+                    progress,
+                },
+                Arc::new((self.client_owner.clone(), initialization_lease)),
+            )
+            .await
     }
     async fn stop(&mut self) -> Result<()> {
-        self.commands.write().await.take();
-        self.rest_shutdown.send_replace(true);
-        // Accepted HTTP requests retain their bound SQL client until REST drains.
-        self.join_rest().await?;
-        self.shutdown.send_replace(true);
-        self.join().await?;
-        self.receiver = None;
+        self.runtime.stop().await?;
         self.cleanup_required = false;
         Ok(())
     }
@@ -537,52 +373,6 @@ impl EnvelopeSource for SqliteSource {
             .and_then(SourceProgressReader::local_owner)
     }
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
-        let receiver = self
-            .receiver
-            .as_mut()
-            .context("native SQLite source is not running")?;
-        let rest = self
-            .rest_worker
-            .get_mut()
-            .as_mut()
-            .filter(|_| !*self.rest_shutdown.borrow());
-        let (output, rest_finished) = if let Some(rest) = rest {
-            tokio::select! {
-                output = receiver.recv() => (output, None),
-                result = rest => (None, Some(result)),
-            }
-        } else {
-            (receiver.recv().await, None)
-        };
-        if let Some(result) = rest_finished {
-            self.rest_worker.get_mut().take();
-            self.rest_address = None;
-            self.commands.write().await.take();
-            self.rest_shutdown.send_replace(true);
-            self.shutdown.send_replace(true);
-            result.context("native SQLite REST worker failed")??;
-            anyhow::bail!("native SQLite REST worker ended unexpectedly");
-        }
-        if let Some(output) = output {
-            return Ok(Some(output));
-        }
-        self.commands.write().await.take();
-        self.rest_shutdown.send_replace(true);
-        self.shutdown.send_replace(true);
-        self.join().await?;
-        anyhow::bail!("native SQLite worker ended; stop and restart the source")
-    }
-}
-
-impl Drop for SqliteSource {
-    fn drop(&mut self) {
-        self.rest_shutdown.send_replace(true);
-        self.shutdown.send_replace(true);
-        if self.worker.get_mut().is_some() {
-            log::warn!("Native SQLite source dropped without awaited database cleanup");
-        }
-        if self.rest_worker.get_mut().is_some() {
-            log::warn!("Native SQLite source dropped without awaited REST cleanup");
-        }
+        self.runtime.next().await
     }
 }

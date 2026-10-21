@@ -18,7 +18,7 @@ use crate::config::{MsSqlSourceConfig, TableKeyConfig};
 use crate::error::{MsSqlError, PrimaryKeyError};
 use crate::types::{extract_column_value, value_to_string};
 use anyhow::{anyhow, Result};
-use drasi_core::models::ElementValue;
+use drasi_core_types::models::ElementValue;
 use log::warn;
 use std::collections::HashMap;
 use tiberius::{Client, Row};

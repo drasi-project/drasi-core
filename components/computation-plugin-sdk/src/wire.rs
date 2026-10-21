@@ -48,6 +48,10 @@ pub struct CreateRequest {
     pub configuration_version: u32,
     pub configuration: serde_json::Value,
     pub scope: Option<Scope>,
+    /// Local SDK annotation set only by the negotiated activation-credentials
+    /// creation envelope. Not a new field in the frozen base wire request.
+    #[serde(skip)]
+    pub activation_credentials_bound: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

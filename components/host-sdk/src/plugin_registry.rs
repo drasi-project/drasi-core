@@ -243,6 +243,36 @@ impl PluginRegistry {
         Ok(factories)
     }
 
+    /// Already loaded descriptors only; no provider construction or credentials.
+    pub fn computation_identity_providers(&self) -> crate::computation::NativeIdentityProviders {
+        self.identity_providers
+            .iter()
+            .map(|(kind, registration)| (kind.clone(), registration.descriptor.clone()))
+            .collect()
+    }
+
+    /// Snapshot the loaded source coordinator factories without caching live resources.
+    pub fn computation_source_bootstrap_factories(
+        &self,
+    ) -> anyhow::Result<crate::computation::NativeSourceBootstrapFactories> {
+        let mut factories = crate::computation::NativeSourceBootstrapFactories::new();
+        for plugin in self.computation_plugins.values() {
+            for factory in plugin
+                .factories()
+                .iter()
+                .filter(|factory| factory.supports_source_bootstrap())
+            {
+                anyhow::ensure!(
+                    factories
+                        .insert(factory.metadata().implementation.clone(), factory.clone())
+                        .is_none(),
+                    "native source bootstrap factory is already registered"
+                );
+            }
+        }
+        Ok(factories)
+    }
+
     pub fn transactional_transformer_registry(
         &self,
         middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,

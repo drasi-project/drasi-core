@@ -201,23 +201,6 @@ impl MySqlExecutor {
 
     /// Convert JSON value to MySQL Value
     fn json_to_mysql_value(&self, value: &Value) -> mysql_async::Value {
-        match value {
-            Value::Null => mysql_async::Value::NULL,
-            Value::Bool(b) => mysql_async::Value::Int(*b as i64),
-            Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    mysql_async::Value::Int(i)
-                } else if let Some(f) = n.as_f64() {
-                    mysql_async::Value::Double(f)
-                } else {
-                    mysql_async::Value::Bytes(n.to_string().into_bytes())
-                }
-            }
-            Value::String(s) => mysql_async::Value::Bytes(s.as_bytes().to_vec()),
-            Value::Array(_) | Value::Object(_) => {
-                // For complex types, serialize as JSON string
-                mysql_async::Value::Bytes(value.to_string().into_bytes())
-            }
-        }
+        drasi_mysql_common::storedproc::parameter(value)
     }
 }

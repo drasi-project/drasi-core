@@ -1,8 +1,10 @@
 # ComponentGraph and ComputationGraph
 
-**Current snapshot: 20 October 2026.** Comparison of the
-[ComponentGraph-based implementation][old-core] with
-[current Core][current-core] and [Server][current-server].
+**Development snapshot: 21 October 2026.** Comparison of the
+[ComponentGraph-based implementation][old-core] with the current Core and
+matching Server checkouts, including the native database and shared-host
+additions. This is a working-tree capability comparison, not a published-release
+or full-workspace qualification claim.
 
 ## The main difference
 
@@ -51,13 +53,14 @@ the older source/reaction interfaces.
 | Several processing steps in one transaction | Atomic query evaluation existed. | Selected stateful processing steps can run in one ordered transaction, committing their state, input progress and final output together. |
 | Whole database transactions | Database changes were supplied as individual source events. | Supported sources deliver a complete committed transaction as one query input. The query can publish the final result instead of an intermediate half-transfer. |
 | Initial data from several providers | Initial loading was coordinated through source-specific subscription and bootstrap paths. | The query owns preparation, loading and handover. Multiple real providers can be composed with separate initialization state and checked completion, including PostgreSQL plus HTTP. |
+| SQLite snapshot/live ownership | The ordinary bootstrapper opened a separate read-only file connection; direct Rust source handles and REST supplied the write path. | Independently loaded paired bootstrappers can use the actual source-owned snapshot/journal engine and query owners. Standalone file loading remains available; no public DrasiLib SQL read/write API is added. |
 | Checking recovery promises | Guarantees depended on the selected source/query/reaction implementations and settings. | The graph checks actual processing owners, storage, connections and completion behavior before accepting a requested recovery guarantee. A flag or matching resource name is not enough. |
 
 ## Managing, hosting and using applications
 
 | Area | ComponentGraph-based implementation | ComputationGraph |
 |---|---|---|
-| Ownership and cleanup | Each manager coordinated its component type and associated tasks. | Components, connections and declared resources follow a common ownership model. Cleanup remains owned after a caller stops waiting, and unfinished work stays visible. |
+| Ownership and cleanup | Each manager coordinated its component type and associated tasks. | Components, connections and declared resources follow a common ownership model. Producers drain before their actual progress owners retire; accepted stop operations survive cancelled waiters. Failed cleanup remains owned without blocking unrelated cleanup unnecessarily. |
 | Missing dependencies | Startup and dependency handling were spread across the specialized managers. | Valid declarations can wait for missing sources, resources, factories or connections and activate when they arrive, while respecting an explicit stop. |
 | Live changes | Managers supplied category-specific update and removal behavior. | Updates check that the expected application version is still current, coordinate affected resources and protect pending work. Unrelated instances stay unchanged. This is not rollback of external effects. |
 | Failure handling | Reporting and recovery behavior depended on the manager/component path. | Supported returned errors and catchable failures leave the failed component inspectable, preserve causes and prevent reuse of a damaged instance. Healthy unrelated branches can continue. |
@@ -65,6 +68,9 @@ the older source/reaction interfaces.
 | Configuration administration | There was no equivalent native service for saving and administering complete application definitions. | The configuration store supports encrypted definitions, controlled cleanup of request records, deletion of saved configurations only when their version matches, and changing encryption keys. These operations do not delete or rewind processing data. |
 | Plugin model | Plugins implemented the older source, reaction, bootstrap and provider interfaces. | Independently built native plugins can supply sources, processing steps, sinks, services and initialization providers. The host drives their operations; the plugin does not create another graph executor. |
 | Smaller plugin dependencies | Component plugins used the older library/SDK integration. | Native component libraries use shared data contracts without pulling in the query engine or parsers. Load the particular libraries an application needs rather than a combined bundle. |
+| Database component availability | MySQL, SQL Server and SQLite used the ordinary source/bootstrap/reaction interfaces; their supported roles differed. | Independent MySQL source/bootstrap/stored-procedure libraries and SQLite source/bootstrap libraries have real static/dynamic and Server qualification. SQL Server libraries exist but remain incomplete and unqualified against a real database. |
+| Source data discovery | Sources could report best-effort data schemas through the ordinary source interface. | Native sources can expose bounded, asynchronous data-schema readers while data processing is pending. Reads are fenced across stop/replacement and use the same DrasiLib/Server inspection surface, not factory configuration schemas. |
+| Credential refresh | Supported ordinary reactions resolved their identity provider on each start. | Native factories can opt into an actual Host identity resource resolved on every activation, preserving provider precedence without caching stale credentials or changing saved configuration. This preserves a legacy capability rather than inventing one. |
 | Separate-process hosting | Applications could arrange their own processes and connections. | The host can own child and grandchild DrasiLib processes, track their failures and connect them through explicit data/control links, including authenticated encrypted links and selected saved-delivery modes. |
 | Inspection and query access | ComponentGraph supplied shared metadata and asynchronously received manager/component status updates. | The running graph publishes coherent status and dependency information. Native queries use the same result-reading surface; Server streams begin with current rows, then subsequent changes, including after reconnect. |
 | Server configuration | Configuration and routes included older single-instance and component-family forms. | Server uses explicit instances and supports native component/resource definitions, batch creation and metadata-derived configuration. Secret settings can remain references rather than copied values. |
@@ -101,12 +107,20 @@ Code references: [old settings recovery][old-hash-error] and [current recovery][
 
 ## Current limits
 
-- **Native replacement is incomplete.** Remaining connector families,
-  MySQL/SQLite source packaging, native database schema discovery and some
-  standard Server deployments still need work. Older interfaces currently run
-  through graph-owned adapters.
+- **Native replacement is incomplete.** Other selected families and old
+  consumers remain. SQL Server has deferred real-database qualification and
+  outstanding permission, large sink-batch and orphan-marker gaps. Older
+  interfaces still run through graph-owned adapters.
+- **Database modes have explicit limits.** MySQL 5.7 positional factories retain
+  their own metadata/history profile; they do not claim the stronger factories'
+  coordinated snapshots, commit clocks or whole-transaction query visibility.
+  Standalone SQLite file initialization requires quiescent writers. Parameterized
+  procedure calls do not become exactly-once external effects.
 - **Query processing is still built in**, not an independently loadable query
   plugin. Some reusable processing capabilities still require Rust-level setup.
+- **Variable-length relationship execution is unfinished.** Some patterns parse,
+  but their hop bounds are discarded by the current single-edge planner. Parsed
+  syntax must not be mistaken for working multi-hop execution.
 - **Recovery guarantees remain specific.** Shared-source restart with undrained
   persistent input queues is not qualified. HTTP snapshots/live prices and SSE
   notifications do not gain durable replay merely by being connected to the graph.
@@ -126,8 +140,6 @@ query investigations and the other open items; this comparison does not claim
 that every defect in the old system has been fixed.
 
 [old-core]: https://github.com/drasi-project/drasi-core/tree/261b8d40d35ce203a7f4aaae0028956d76a8def4
-[current-core]: https://github.com/drasi-project/drasi-core/tree/e900b70d932e350d4d1ec7acb36ae2ba3cbf913c
-[current-server]: https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7
 [old-hash-error]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/manager.rs#L1969-L2017
 [query-code]: ../src/computation/v1/query.rs
 [old-ordering]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/priority_queue.rs#L47-L53

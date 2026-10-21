@@ -1,11 +1,15 @@
 # Maintaining ComputationGraph
 
-**Implementation baseline: 20 October 2026 development checkout, `agentofreality-parallel-computation-graph`.**
+**Development snapshot: 21 October 2026, `agentofreality-parallel-computation-graph`.**
 
-The current-code descriptions were checked against Core
-[`54735c05`](https://github.com/drasi-project/drasi-core/commit/54735c056ca45bd784462cd462c14f0a514de442),
-with matching Server integration at
-[`15dafa2`](https://github.com/drasi-project/drasi-server/commit/15dafa225ac76ba9868452a7082f693027621ad7).
+This guide describes the current Core and matching Server checkouts, including
+the native database, inspection, coordination and activation-credential changes.
+Core base
+[`fc201f77`](https://github.com/drasi-project/drasi-core/commit/fc201f771199a5c365d2eb0e5757f8f9dafcef57)
+and Server base
+[`15dafa2`](https://github.com/drasi-project/drasi-server/commit/15dafa225ac76ba9868452a7082f693027621ad7)
+identify the starting revisions, not all of the working-tree additions or a
+published-release qualification.
 
 This guide is for engineers changing Drasi itself: its runtime, query execution,
 storage integration, component lifecycle or plugin hosting. For building a
@@ -86,6 +90,13 @@ requirement in the old product. A source can feed several transformers/queries;
 a transformer can feed several transformers and sinks. One producer is reused,
 while each required consumer keeps its own progress owner and recovery boundary.
 This is separate from choosing a multicast journal for the connecting pipes.
+
+The selected MySQL source/bootstrap/stored-procedure and SQLite source/bootstrap
+libraries now use the native ABI through static and dynamic hosting. Their common
+crates preserve reusable protocol, mapping, SQL and worker logic; the old Rust
+entry points remain thin consumers where still required. This does not complete
+old-stack retirement. SQL Server has native implementations, but its remaining
+parity gaps and user-deferred real-database qualification stay open.
 
 For the previous design, read the pinned
 [ComponentGraph module](https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/component_graph/mod.rs),
@@ -643,6 +654,14 @@ Use [query fault tests](../tests/computation_query_faults.rs) and
 [query recovery tests](../tests/computation_query_recovery.rs) when changing
 these boundaries, not only happy-path result tests.
 
+Accepted syntax is not an execution guarantee. `VariableLengthMatch` in the
+[AST](../../query-ast/src/ast.rs) carries hop bounds accepted by both parsers,
+but [match-path planning](../../core/src/path_solver/match_path.rs) currently
+reduces the relationship to a single slot without those bounds. Keep
+[CW-13](computation-graph-remaining-work.md#cw-13) open until unsupported forms
+are rejected or the requested bounds are executed correctly; do not present
+this as a native graph capability or a fixed ComponentGraph defect.
+
 ### Mutation integrity uses source time
 
 The shared evaluator admits mutations by source-scoped element identity and
@@ -724,6 +743,49 @@ boundary; [`query_recovery.rs`](../src/computation/v1/query_recovery.rs) applies
 it during recovery. Dropping a snapshot stream requests cancellation, but
 query cleanup must still await the provider's stop hook before releasing storage.
 The rows are not one fictitious source transaction.
+
+### Paired bootstrap borrows the source's actual engine
+
+SQLite's separately loaded source and paired bootstrap libraries use the narrow
+`bootstrap_coordination_v1` extension. One graph-owned
+`NativeSourceBootstrapResource` holds the actual source-factory coordinator.
+Its role is Bootstrap, but its concrete type is not `QueryBootstrapResource`.
+There is no path-global registry, copied coordinator, forwarding worker or
+application SQL service.
+
+`SourceBootstrapProgress` supplies the actual single owner or fixed group and all
+actual member readers. Those bootstrap bindings are active under the resource
+lifecycle before live-source readiness. `SourceBootstrapLiveProgress` is the
+source's separate normally activated binding. The Host checks actual owner/group
+identity; the SDK checks that the source and provider return their negotiated
+views. Matching IDs, paths or reconstructed member maps are insufficient.
+
+The source's `source_bootstrap` slot and each paired `nativeBootstrap` resource
+depend on that coordinator. The latter also names the query's actual
+`sourceProgress`. Source ID, implementation, resolved configuration and
+instance/graph scope must agree. A new component generation may legitimately
+retain the same coordinator resource; generation zero on a resource is not a
+reason to accept a foreign source or reject every replacement.
+
+The source library constructs the provider. The independent bootstrap library
+validates its pairing and transfers that original bootstrap handle, preserving
+PREPARE/SNAPSHOT/NEXT/COMPLETE/STOP and query-owned initialization state.
+Constructors do no reads/subscriptions/network I/O.
+
+Exported-instance ownership belongs to the SDK; real worker/client/snapshot/live
+leases remain in the family engine. Cleanup obligations survive dropped handles
+in bounded state records without owner-reference cycles. Failed or cancelled
+START/STOP cannot authorize a new source/provider. A stopped provider can be
+superseded while its old handle remains, but only after replacement construction
+and reader/scope validation succeed; a rejected replacement leaves the original
+usable. A retired old handle cannot restart or cancel the replacement.
+
+See the [SDK coordination contract](../../components/computation-plugin-sdk/src/bootstrap_coordination.rs),
+[exported lifetime guards](../../components/computation-plugin-sdk/src/export/bootstrap_coordination.rs),
+[Host resource](../../components/host-sdk/src/computation/bootstrap_coordination.rs)
+and [recipe validation](../../components/host-sdk/src/management/bootstrap_coordination.rs).
+Do not add a second family export-token map that can retire the old provider
+before SDK validation finishes.
 
 ### Composite bootstrap retains the actual child lifecycles
 
@@ -1101,6 +1163,27 @@ work from its subsequently joined cleanup. Completed cleanup is not rollback,
 and an interrupted generation requires explicit reconstruction with a changed
 specification rather than stop/start reuse.
 
+Terminal instance shutdown must preserve that graceful boundary before final
+driver cancellation once deployment is complete. Cancelling query processing
+first can fence an actual progress owner while an upstream database worker still
+needs it. Interrupted deployment keeps its cancellation path and all startup/
+cleanup causes; it is not converted into a successful graceful shutdown.
+
+Cleanup ordering uses captured **actual progress-owner dependencies**, not every
+data edge or all same-named resources. Stop the producer before retiring the
+query/consumer owners it reads. A failed or timed-out producer stop retains those
+owners and its original typed cause, while unrelated hooks can still run even
+under a small cleanup budget. Do not launch all stop hooks concurrently or
+serialize unrelated cleanup behind one failed branch.
+
+At the native boundary, `NativeComponentProxy` retains the accepted STOP
+operation across cancelled/timed-out waits and fences new component/control
+work. Retry polls that operation rather than starting another stop. Its reader
+bindings remain active while accepted SQL/HTTP work drains, and retire only
+after confirmed successful cleanup. A CLOSED capability or malformed nonempty
+unit reply is an error, not proof of drain. Coordinator cleanup follows the
+same rule for its separate bootstrap readers.
+
 `GraphControl::cancel()` and dropping a run force the whole graph; they can
 interrupt writes, fence owners and require reconstruction. Idle `next`/receive/service waits still have
 their cancellation contract, and unfinished construction/start may be cancelled.
@@ -1300,7 +1383,9 @@ not storage writers. Constructors retain it without reading or subscribing
 before start. Bounds include 256 members, 4,096 checkpoint/transport entries,
 a 1-MiB encoded progress frame and 16 retained subscriptions. Failed encoding
 must not consume an observation; a cancelled wait must not consume a publication.
-Stop revokes old readers, and successful cleanup precedes new subscriptions.
+Accepted STOP retains readers needed for drain; successful owned cleanup
+precedes revocation and new subscriptions. Cancelling the caller's wait does not
+revoke the capability underneath still-running work.
 
 The source returns one stable immutable position-policy handle. Comparisons
 can run outside the component's mutable-operation lock, including while an I/O
@@ -1343,6 +1428,48 @@ data-only contracts remain in
 Keep the [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
 ordinary SDK wire contracts separate.
 
+### Activation credentials preserve per-start identity behavior
+
+`activation_credentials_v1` is an optional extension over the frozen base
+ABI `1.0.0` and envelope wire `2`. An opted-in factory describes its hostname/
+port context without I/O. The Host binds an actual `NativeIdentityResource`
+under `identity`; it keeps ordinary identity-provider traits and provider
+construction outside the native library.
+
+`nativeIdentity` recipes use the existing loaded provider catalogue and
+`PluginConfiguration`/descriptor validation. Injected providers take precedence
+over configured providers; errors never fall through to a lower-priority
+provider or literals. Without the binding, literal-only behavior is unchanged.
+Configured provider construction, secret resolution and credential acquisition
+occur on each activation. Constructor-resolved component configuration references
+alone do not implement refresh.
+
+The separately negotiated construction envelope sets
+`CreateRequest::activation_credentials_bound`; the Rust marker is serde-skipped
+and cannot be enabled through the base wire request. Bound construction may omit
+literal credentials, but cannot substitute dummy values or perform a credential
+read. Host resolution supplies exactly hostname/port; generation/scope checks
+remain internal rather than changing custom providers' context.
+
+`NativeComponent::start_with_credentials` receives bounded ephemeral
+username/password or token data through the normal START operation. Preserve its
+busy, panic, progress-activation, schema-generation and cleanup guards. Rejected,
+oversized or certificate credentials fail before native startup; cancelled
+resolution cannot later start a replacement. Credential fields are bounded to
+64 KiB, diagnostics are redacted, and acquired values belong only to private
+activation state, never immutable `configuration()` or saved recipes.
+
+The same actual Identity resource is required for a coordinated source and its
+coordinator. This does not add bootstrap authentication to a connector by itself.
+Consumer-wrapper factories currently reject the binding; do not advertise a
+capability that a different creation path would silently ignore.
+
+See the [SDK contract](../../components/computation-plugin-sdk/src/activation_credentials.rs),
+[Host resolution](../../components/host-sdk/src/computation/activation_credentials.rs)
+and [shared recipe](../../components/host-sdk/src/management/identity.rs).
+Prove rotation against a real database after changing its password/token source
+on the same stopped/restarted component, not merely by constructing a new object.
+
 A trait implemented by an in-process Rust component does not automatically
 exist across FFI. Test separately built libraries and actual capability
 negotiation, not just Rust mocks in one binary.
@@ -1353,8 +1480,10 @@ negotiation, not just Rust mocks in one binary.
 |---|---|
 | [PostgreSQL shared rows](../../components/computation-plugins/sources/postgres/README.md#shared-ordinary-row-queries) | Independent memory/persistent owners, row-position filtering and per-query configured-slot snapshots; memory mode makes no process-restart promise |
 | [PostgreSQL shared transactions](../../components/computation-plugins/sources/postgres/README.md#shared-complete-transactions) | Whole committed inputs for actual atomic persistent transaction-enabled queries; distinct source/bootstrap identities and whole-commit positions |
-| [MySQL](../../components/sources/mysql/README.md#shared-consumer-recovery) | One native Rust live worker, persistent consumer sets and per-query snapshots; finite unregistered history readers avoid live replication-ID collisions |
-| [SQLite](../../components/sources/sqlite/README.md#shared-native-recovery) | Existing transaction journal, oldest-member replay/pruning and serialized snapshots; bounded enrollment metadata includes retired identities |
+| [MySQL named/transaction modes](../../components/computation-plugins/sources/mysql/README.md) | Independent source/bootstrap/sink libraries; actual single/fixed-member owners, ordinary/whole-transaction modes, partial-row recovery, standalone loading, schema and per-start sink identity |
+| [MySQL positional modes](../../components/computation-plugins/sources/mysql/README.md#mysql-57-and-limited-metadata) | Explicit 5.7 `@N` projection and distinct checkpoint bindings; finite history/catalog preflight before effects, without fabricated FULL metadata, commit clocks, coordinated snapshots or whole-transaction query visibility |
+| [SQLite](../../components/computation-plugins/sources/sqlite/README.md) | Independent source/file/paired-bootstrap factories reuse the actual bounded worker, journal and serialized snapshot engine; original Rust callbacks/REST remain, with no public DrasiLib SQL API |
+| [SQL Server](../../components/computation-plugins/sources/mssql/README.md) | Source/bootstrap/sink implementations and bounded paging/streaming compile; real-database qualification is explicitly deferred and permission, large sink-batch and orphan-marker gaps remain |
 | [WAL replay](../src/computation/v1/wal_source.rs) | Actual shared-owner resume and typed factory binding; no new WAL pruning/deletion policy |
 
 PostgreSQL's shared bootstrap providers use temporary export/import resources,
@@ -1364,11 +1493,22 @@ distinct; a new factory identity is not permission to reinterpret stored state.
 Strict interrupted persistent bootstrap remains fenced unless an explicit
 recovery policy permits the supported reset.
 
-MySQL snapshot timestamps use a server clock sampled before acquisition;
-live events use precise immediate commit timestamps where required. Regressing
-to coarse statement seconds can silently reject valid post-snapshot updates.
+Coordinated FULL-metadata MySQL snapshots use a server clock sampled before
+acquisition; live events use precise immediate commit timestamps where required.
+Regressing to coarse statement seconds can silently reject valid post-snapshot
+updates. Positional mode instead uses its documented processing-time/profile
+contract and does not pretend those stronger clocks exist. Historical charset,
+signedness and name changes must be rejected before query sequences, output or
+procedure effects; unlogged selected-data DDL is outside that profile.
 SQLite cannot prune a lagging member's history or remove its enrollment merely
 because a reader disappeared.
+
+Remote SQL cleanup needs positive session ownership. MySQL verifies a fresh
+handshake nonce through account-scoped connection attributes before KILL on the
+same control connection; reconnect repeats the proof. A persistent server UUID
+and saved numeric connection ID are insufficient after a same-data-directory
+restart. Missing or denied proof is rejected before accepting SQL work, not
+treated as permission to kill another session.
 
 Server's canonical definitions now cover seven PostgreSQL configurations and
 Trading's actual 11-query group with two shared PG sources, one HTTP source and
@@ -1378,10 +1518,17 @@ Provisioning installs the complete fixed-member bundle in one existing batch,
 then its SSE reaction; partial/conflicting bundles fail explicitly. See the
 [Server recipes and qualification tools](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/postgres).
 
-This does not close native schema discovery, MySQL/SQLite dynamic **source**
-packaging and Server registration, cold undrained-input reconstruction, or the
-rest of cleanup stage 6 and stages 7 through 9. HTTP snapshots/live prices have
-no added durable or atomic replay guarantee.
+The matching Server checkout also contains metadata-driven MySQL and SQLite
+generators and real source/query/procedure-or-REST consumers, with actual schema,
+credential rotation, saved references and reconstruction coverage. SQL Server's
+generator/metadata checks are not database qualification. The
+[native inventory](../../components/computation-plugins/README.md) links the
+role-specific libraries and supported modes.
+
+This does not close cold undrained-input reconstruction, other selected families,
+old-consumer retirement or cleanup stages 6 through 9. HTTP snapshots/live prices
+gain no durable or atomic replay guarantee, and a handled procedure call is not
+an exactly-once external effect.
 
 ## Inspection and diagnosing a running system
 
@@ -1403,6 +1550,24 @@ not a hard-coded factory name. Inspect
 [`query_api.rs`](../src/computation/v1/query_api.rs) when a native query is
 missing from ordinary query APIs. Result reads do not create another evaluator;
 live ordinary subscriptions require the actual outlet/catalog connection.
+
+Source data discovery has its own asynchronous `SourceSchemaReader`, shared
+through `drasi-computation-contracts`. Capture its stable reader at component
+construction without I/O; populate the actual catalog/worker view at activation.
+Returning a reader only after startup is too late for SDK capability capture.
+The graph owns the reader and publishes weak generation-fenced references;
+`DrasiLib::get_source_schema`, `get_graph_schema` and the SourceManager facade
+use it without locking a pending `next()` operation.
+
+The optional `source_schema_v1` ABI bounds the complete MessagePack reply to
+1 MiB and a read to 30 seconds, with one active read slot per activation.
+Stop/removal wakes retired reads; an old guard cannot clear a new activation's
+slot or retarget its worker. Unsupported/no-schema and an actual failed read are
+different outcomes. Never substitute a factory configuration schema or empty
+success for a catalog error. See the
+[SDK read lifecycle](../../components/computation-plugin-sdk/src/export/source_schema.rs),
+[Host reader](../../components/host-sdk/src/computation/source_schema.rs) and
+[Core inspection](../src/computation/runtime/inspection.rs).
 
 Public errors preserve internal causes through
 [`error.rs`](../src/error.rs), rather than reducing them to formatted strings.
@@ -1431,6 +1596,8 @@ Use failure phase, generation and the relevant progress boundary together:
 | Shared CDC will not start or acknowledge further history | Every actual member's readiness, failure, reset generation and source cursor; then owner/path validation and source cleanup |
 | A mixed bootstrap will not restart | Each child's preparation outcome, same-query owner binding, namespaced state and retained cleanup; do not silently reset persistent state |
 | Replacement cannot acquire storage or a port | Previous generation's cleanup/retirement owner and retained worker joins |
+| Native schema is missing or stale | Construction-time reader capture, actual catalog generation, and read-side stop/replacement fencing; not configuration-schema metadata |
+| Restart still uses an expired credential | Negotiated `identity` resource and per-start provider/context resolution, not a construction-only password reference |
 
 Logs and metrics complement these publications. The relevant paths are
 [`observability/tracing_layer.rs`](../src/observability/tracing_layer.rs),
@@ -1515,6 +1682,12 @@ cargo test --locked -p drasi-lib --no-default-features \
 ```
 
 These commands are examples of targeted selection, not the complete CI gate.
+The two unchanged assertions
+`duplicate_ports_and_empty_graph_are_rejected` and
+`whole_topology_preflight_rejects_invalid_structure_before_any_side_effects`
+still conflict with supported empty/deferred construction and remain tracked
+under [CW-37](computation-graph-remaining-work.md#cw-37). Excluding them is not a
+passing full-workspace lifecycle run.
 Tests involving source/reaction crates that depend on drasi-lib belong in
 [`lib-integration-tests`](../../lib-integration-tests), avoiding dependency
 cycles. Backend injection can be tested from `lib` with its existing backend
@@ -1537,6 +1710,30 @@ and SQLite [consumer enrollment](../../components/sources/sqlite/tests/native/co
 Check unequal snapshot positions and unrelated counters, the slow member's
 retention floor, exact transaction effects, failure/cancellation, and explicit
 replacement. Passing row fan-out does not qualify whole-transaction fan-out.
+
+Database migration qualification is per role and capability, not package count.
+MySQL requires source, bootstrapper and stored-procedure sink; SQLite requires
+source/bootstrapper and has no legacy reaction to port. Compare original
+builders/configuration, keys/types, initialization, progress, effects and cleanup
+assertions with the actual new path. A safer explicit failure or new profile is
+not permission to silently omit a working legacy mode.
+
+Use [MySQL Host cases](../../components/host-sdk/tests/native_mysql_components.rs),
+[SQLite Host cases](../../components/host-sdk/tests/native_sqlite_components.rs),
+the [activation tests](../../components/host-sdk/src/computation/activation_credentials_tests.rs)
+and [coordination cases](../../components/host-sdk/src/computation/bootstrap_coordination_tests.rs).
+Rebuild actual libraries before dynamic runs and record their hashes. Cover both
+Tokio flavors and real Server result/effect routes, secret rotation, partial
+history, stale handles and failed/cancelled cleanup. Keep SQL Server's enabled
+but unrun database scenarios explicitly unqualified under its deferral; unit,
+metadata and compile-only checks do not replace them.
+
+Test infrastructure is owned work too. Record exact container/mount/anonymous-
+volume ownership before removal; final normal and failed-start disposal must
+remove and verify only those owned resources. Intermediate restart fixtures keep
+their data until final scope cleanup. Never prune unknown/shared/demo volumes to
+make a test pass. Disk exhaustion and database readiness failures remain failed
+environment evidence until the complete gate reruns successfully.
 
 Before a cross-cutting change is considered qualified, consult
 [`run-runtime-parity.sh`](../tests/run-runtime-parity.sh) and its

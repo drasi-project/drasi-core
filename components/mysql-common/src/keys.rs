@@ -14,7 +14,7 @@
 
 //! Key formatting and identifier helpers for MySQL plugins.
 
-use drasi_core::models::ElementValue;
+use drasi_core_types::models::ElementValue;
 
 /// Native identity shared by initial loading and live changes; legacy IDs are unchanged.
 pub fn transaction_element_id(

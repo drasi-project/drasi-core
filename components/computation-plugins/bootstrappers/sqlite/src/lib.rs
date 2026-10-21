@@ -1,6 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+mod coordinated;
 mod snapshot;
 
 use anyhow::{Context, Result};
@@ -14,6 +15,9 @@ use drasi_computation_plugin_sdk::{
 use serde::Deserialize;
 use std::sync::Arc;
 
+pub use coordinated::{
+    CoordinatedBootstrapFactory, SharedBootstrapFactory, COORDINATED_BOOTSTRAP, SHARED_BOOTSTRAP,
+};
 pub use drasi_computation_plugin_sdk::NativeBootstrapProvider;
 pub use drasi_sqlite_common::TableKeyConfig;
 pub use snapshot::{SqliteBootstrapConfig, SqliteBootstrapProvider};
@@ -36,7 +40,11 @@ pub fn plugin() -> Result<PluginDefinition> {
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
         Vec::new(),
-        vec![Arc::new(FileBootstrapFactory)],
+        vec![
+            Arc::new(FileBootstrapFactory),
+            Arc::new(CoordinatedBootstrapFactory),
+            Arc::new(SharedBootstrapFactory),
+        ],
         vec![GraphChangeCodec::schema()],
     )
 }
@@ -96,6 +104,7 @@ mod tests {
 
     fn request() -> Result<CreateRequest> {
         Ok(CreateRequest {
+            activation_credentials_bound: false,
             id: ComponentId::try_new("query")?,
             implementation: FileBootstrapFactory.metadata().implementation,
             configuration_version: 1,

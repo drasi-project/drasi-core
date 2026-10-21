@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ConsumerProgressView, InputEnvelope, InputPositionPolicy,
-    OutputEnvelope, SinkBatching, SinkCompletion, SourceProgressView, WakeupSource,
+    OutputEnvelope, SinkBatching, SinkCompletion, SourceProgressView, SourceSchemaReader,
+    WakeupSource,
 };
 use drasi_core_types::interface::StorageDurability;
 use std::sync::Arc;
@@ -36,11 +37,25 @@ pub trait NativeComponent: Send + Sync {
         None
     }
     async fn start(&mut self) -> anyhow::Result<()>;
+    /// Called instead of `start` by the normal owned START operation when an
+    /// identity resource was bound at construction. Never update configuration
+    /// with these ephemeral values or fall back to literal authentication.
+    async fn start_with_credentials(
+        &mut self,
+        _credentials: crate::ActivationCredentials,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("component does not implement activation credentials")
+    }
     async fn stop(&mut self) -> anyhow::Result<()>;
 }
 
 #[async_trait]
 pub trait NativeSource: NativeComponent {
+    /// An independent reader of the live source's data schema. Obtaining the
+    /// reader performs no I/O and must not acquire the source processing lock.
+    fn source_schema_reader(&self) -> Option<Arc<dyn SourceSchemaReader>> {
+        None
+    }
     fn recovery_reader(&self) -> Option<SourceProgressView> {
         None
     }

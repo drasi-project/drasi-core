@@ -202,6 +202,7 @@ impl EnvelopeSink for DurableAlerts {
 pub(super) struct PersistentStockroom {
     core: DrasiLib,
     sql: SqliteHandle,
+    hold: bool,
     #[cfg(test)]
     results: QueryResults,
     #[cfg(test)]
@@ -421,6 +422,7 @@ impl PersistentStockroom {
         Ok(Self {
             core,
             sql,
+            hold,
             #[cfg(test)]
             results,
             #[cfg(test)]
@@ -431,6 +433,51 @@ impl PersistentStockroom {
             runner,
             last_file: None,
         })
+    }
+
+    async fn finish<T>(&self, work: anyhow::Result<T>) -> anyhow::Result<T> {
+        if !self.hold {
+            return finish(&self.core, work).await;
+        }
+        let interruption = async {
+            let control = self.core.computation_control()?;
+            let revision = control.desired_snapshot().revision;
+            let stopped = control
+                .stop_components(
+                    revision,
+                    GraphSelection::Exact(vec![
+                        ComponentId::try_new("inventory")?,
+                        ComponentId::try_new("low-stock")?,
+                    ]),
+                )
+                .await?;
+            if stopped.summary != OperationSummary::Completed {
+                return Err(LifecycleReportError::Stop(stopped).into());
+            }
+            // Drain actual input owners before interrupting the deliberately held sink.
+            let forced = control
+                .force_cancel_components(revision, GraphSelection::All)
+                .await?;
+            if forced.cleanup.summary != OperationSummary::Completed {
+                return Err(LifecycleReportError::Stop(forced.cleanup).into());
+            }
+            println!("Held alert handling interrupted; pending output remains saved for restart.");
+            Ok(())
+        };
+        let interruption = tokio::time::timeout(Duration::from_secs(10), interruption)
+            .await
+            .context("timed out preparing the held-alert restart")
+            .and_then(|result| result);
+        let work = match (work, interruption) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(drasi_lib::error::OperationFailures::new(
+                "Stockroom work and held-alert interruption failed",
+                vec![error, cleanup],
+            )
+            .into()),
+        };
+        finish(&self.core, work).await
     }
 
     async fn apply_file(&mut self, path: &Path) -> anyhow::Result<bool> {
@@ -542,7 +589,7 @@ pub(super) async fn run(
         }
         Err(error) => Err(error),
     };
-    finish(&app.core, work).await
+    app.finish(work).await
 }
 
 #[cfg(test)]
@@ -608,7 +655,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await?;
+        app.finish(work).await?;
         drop(app);
 
         let mut app = PersistentStockroom::open(directory.path(), false).await?;
@@ -652,7 +699,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await
+        app.finish(work).await
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -685,7 +732,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await?;
+        app.finish(work).await?;
         drop(app);
 
         let mut app = PersistentStockroom::open(directory.path(), false).await?;
@@ -709,7 +756,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await?;
+        app.finish(work).await?;
         drop(app);
 
         let mut app = PersistentStockroom::open(directory.path(), false).await?;
@@ -742,7 +789,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await
+        app.finish(work).await
     }
 
     #[test]

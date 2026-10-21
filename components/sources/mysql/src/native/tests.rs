@@ -9,6 +9,7 @@ use drasi_lib::computation::v1::{
 };
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::mysql::Mysql;
+mod rows;
 mod shared;
 mod snapshot;
 
@@ -26,6 +27,7 @@ pub(super) fn config(port: u16, output: MySqlOutput) -> MySqlConfig {
             heartbeat_interval_ms: NonZeroU64::new(100).unwrap(),
         },
         tables: vec!["items".into()],
+        table_keys: Vec::new(),
         start: MySqlStartPosition::End,
         output,
         replay: None,

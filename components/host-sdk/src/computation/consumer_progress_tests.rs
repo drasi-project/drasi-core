@@ -301,10 +301,10 @@ async fn consumer_progress_rejects_missing_substituted_conflicting_and_mutating_
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn consumer_progress_failed_and_cancelled_lifecycle_requires_successful_cleanup(
+async fn failed_and_cancelled_lifecycle_requires_successful_cleanup(
+    plugin: Arc<NativePlugin>,
 ) -> anyhow::Result<()> {
-    let factory = factory(plugin()?.as_ref(), ComponentRole::Source);
+    let factory = factory(plugin.as_ref(), ComponentRole::Source);
     for mode in [
         "start-fail-once",
         "start-pending-once",
@@ -334,6 +334,15 @@ async fn consumer_progress_failed_and_cancelled_lifecycle_requires_successful_cl
             "{mode} must not hide incomplete cleanup"
         );
         proxy.stop().await?;
+        if mode == "stop-pending-once" {
+            proxy.stop().await?;
+            control(
+                &proxy,
+                "expect-calls",
+                json!({"starts":1,"stops":1,"transforms":0,"completions":0}),
+            )
+            .await?;
+        }
         proxy.start().await?;
         control(&proxy, "snapshot", Value::Null).await?;
         proxy.stop().await?;
@@ -344,6 +353,30 @@ async fn consumer_progress_failed_and_cancelled_lifecycle_requires_successful_cl
     drop(start);
     closed(&control(&proxy, "snapshot", Value::Null).await.unwrap_err());
     proxy.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn consumer_progress_failed_and_cancelled_lifecycle_requires_successful_cleanup(
+) -> anyhow::Result<()> {
+    for plugin in [
+        plugin()?,
+        super::super::factory::recovery_tests::sqlite_plugin()?,
+    ] {
+        failed_and_cancelled_lifecycle_requires_successful_cleanup(plugin).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consumer_progress_failed_and_cancelled_lifecycle_requires_successful_cleanup_multi_thread(
+) -> anyhow::Result<()> {
+    for plugin in [
+        plugin()?,
+        super::super::factory::recovery_tests::sqlite_plugin()?,
+    ] {
+        failed_and_cancelled_lifecycle_requires_successful_cleanup(plugin).await?;
+    }
     Ok(())
 }
 
@@ -610,6 +643,7 @@ fn consumer_progress_sdk_rejects_unbound_base_creation_even_without_host_negotia
             &mut factory,
         ))?;
         let request = sdk::CreateRequest {
+            activation_credentials_bound: false,
             id: id("producer"),
             implementation: fixture::Factory(ComponentRole::Source, false)
                 .metadata()

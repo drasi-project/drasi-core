@@ -10,8 +10,10 @@
 //! graph execution manager, or task-local transfer between runtimes. The graph
 //! owns scheduling and cancellation of every operation.
 
+mod activation_credentials;
 mod admission;
 mod bootstrap;
+mod bootstrap_coordination;
 mod consumer;
 mod consumer_progress;
 mod control;
@@ -21,9 +23,14 @@ mod loader;
 mod progress;
 mod proxy;
 mod query_snapshots;
+mod source_schema;
 mod transaction;
 
+pub use activation_credentials::{NativeIdentityProviders, NativeIdentityResource};
 pub use bootstrap::{NativeBootstrapFactories, NativeBootstrapFactory, NativeBootstrapProxy};
+pub use bootstrap_coordination::{
+    NativeSourceBootstrapFactories, NativeSourceBootstrapProgress, NativeSourceBootstrapResource,
+};
 pub use consumer::{NativeConsumerProxy, NativeConsumerResource};
 /// Native computation ABI version this host loads.
 pub use drasi_computation_plugin_abi::ABI_VERSION;
@@ -48,5 +55,7 @@ pub struct NativeConsumerFactoryMetadata {
     pub mode: drasi_computation_plugin_sdk::ConsumerMode,
 }
 
+#[cfg(test)]
+mod activation_credentials_tests;
 #[cfg(test)]
 mod tests;

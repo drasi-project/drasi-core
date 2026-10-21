@@ -6,7 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
-       build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network \
+       build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
        publish-all publish-all-dry-run \
@@ -21,9 +21,12 @@ help:
 	@echo "  build-native-plugins      - Build all independent native plugin libraries"
 	@echo "  build-native-standard-plugins - Build counter, middleware, capture and arithmetic plugins"
 	@echo "  build-native-network-plugins - Build native HTTP/gRPC/SSE and HTTP bootstrap plugins"
+	@echo "  build-native-mysql-plugins - Build native MySQL source, bootstrap and stored-procedure sink"
 	@echo "  build-native-postgres-plugins - Build native PostgreSQL source, bootstrap and stored-procedure sink"
-	@echo "  build-native-sqlite-plugins - Build the native SQLite file bootstrap plugin"
+	@echo "  build-native-sqlite-plugins - Build native SQLite source and bootstrap plugins"
 	@echo "  test-native-network       - Build native network plugins and run wire/loopback tests"
+	@echo "  test-native-mysql         - Build native MySQL plugins and run isolated Podman consumer tests"
+	@echo "  test-native-sqlite        - Build native SQLite plugins and run Host component tests"
 	@echo "  check-native-dependencies - Reject runtime/query-engine dependencies in native plugin builds"
 	@echo "  build-plugins             - Build all dynamic plugins (debug)"
 	@echo "  build-plugins-release     - Build all dynamic plugins (release)"
@@ -63,13 +66,19 @@ NATIVE_NETWORK_PACKAGES := drasi-computation-source-http \
                           drasi-computation-sink-grpc \
                           drasi-computation-sink-sse \
                           drasi-computation-bootstrap-http
+NATIVE_MYSQL_PACKAGES := drasi-computation-source-mysql \
+                        drasi-computation-bootstrap-mysql \
+                        drasi-computation-sink-storedproc-mysql
+NATIVE_MSSQL_PACKAGES := drasi-computation-source-mssql \
+                        drasi-computation-bootstrap-mssql \
+                        drasi-computation-sink-storedproc-mssql
 NATIVE_POSTGRES_PACKAGES := drasi-computation-source-postgres \
                            drasi-computation-bootstrap-postgres \
                            drasi-computation-sink-storedproc-postgres
-NATIVE_SQLITE_PACKAGES := drasi-computation-bootstrap-sqlite
+NATIVE_SQLITE_PACKAGES := drasi-computation-bootstrap-sqlite drasi-computation-source-sqlite
 TEST_PLUGIN_NAMES := drasi_source_mock drasi_reaction_log drasi_reaction_sse \
                      drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile \
-                     $(subst -,_,$(NATIVE_STANDARD_PACKAGES) $(NATIVE_NETWORK_PACKAGES) $(NATIVE_POSTGRES_PACKAGES) $(NATIVE_SQLITE_PACKAGES))
+                     $(subst -,_,$(NATIVE_STANDARD_PACKAGES) $(NATIVE_NETWORK_PACKAGES) $(NATIVE_MYSQL_PACKAGES) $(NATIVE_MSSQL_PACKAGES) $(NATIVE_POSTGRES_PACKAGES) $(NATIVE_SQLITE_PACKAGES))
 
 build-test-plugins: build-native-plugins
 	@echo "=== Building cdylib test plugins ==="
@@ -79,7 +88,9 @@ build-test-plugins: build-native-plugins
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
-	cargo build -p drasi-host-sdk --example native_recovery --example native_consumer_progress_metadata
+	cargo build -p drasi-host-sdk --example native_recovery --example native_consumer_progress_metadata \
+		--example native_bootstrap_coordination_metadata --example native_bootstrap_coordination_partial \
+		--example native_activation_credentials
 	cargo build -p drasi-instance-host --example instance_host_fixture --features drasi-instance-host/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
@@ -99,10 +110,10 @@ build-test-plugins: build-native-plugins
 # Build test plugins, then run host-sdk integration tests.
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
-	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire -- --test-threads=1
+	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test native_sqlite_components -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
-build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-postgres-plugins build-native-sqlite-plugins
+build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-mssql-plugins build-native-postgres-plugins build-native-sqlite-plugins
 
 check-native-dependencies:
 	python3 ci/check_native_dependencies.py
@@ -113,6 +124,16 @@ build-native-standard-plugins:
 build-native-network-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_NETWORK_PACKAGES),-p $(package)) --features dynamic-plugin
 
+build-native-mysql-plugins:
+	cargo build --lib $(foreach package,$(NATIVE_MYSQL_PACKAGES),-p $(package)) --features dynamic-plugin
+
+build-native-mssql-plugins:
+	cargo build --lib $(foreach package,$(NATIVE_MSSQL_PACKAGES),-p $(package)) --features dynamic-plugin
+
+test-native-mssql: build-native-mssql-plugins
+	cargo test $(foreach package,$(NATIVE_MSSQL_PACKAGES),-p $(package)) --lib
+	DRASI_NATIVE_PLUGIN_DIR="$(abspath $(PLUGIN_TARGET_DIR))/debug" cargo test -p drasi-host-sdk --test native_mssql_components -- --test-threads=1
+
 build-native-postgres-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_POSTGRES_PACKAGES),-p $(package)) --features dynamic-plugin
 
@@ -122,6 +143,14 @@ build-native-sqlite-plugins:
 test-native-network: build-native-network-plugins
 	cargo test -p drasi-computation-network-common -p drasi-computation-sink-sse
 	cargo test -p drasi-host-sdk --test native_network_loopback --test native_network_wire
+
+test-native-mysql: build-native-mysql-plugins
+	cargo test $(foreach package,$(NATIVE_MYSQL_PACKAGES),-p $(package)) --lib
+	DRASI_NATIVE_PLUGIN_DIR="$(abspath $(PLUGIN_TARGET_DIR))/debug" cargo test -p drasi-host-sdk --test native_mysql_components -- --include-ignored --test-threads=1
+
+test-native-sqlite: build-native-sqlite-plugins
+	cargo test $(foreach package,$(NATIVE_SQLITE_PACKAGES),-p $(package)) --lib
+	DRASI_NATIVE_PLUGIN_DIR="$(abspath $(PLUGIN_TARGET_DIR))/debug" cargo test -p drasi-host-sdk --test native_sqlite_components -- --test-threads=1
 
 # Deterministic cross-cdylib layout-mismatch regression for issue #602.
 #

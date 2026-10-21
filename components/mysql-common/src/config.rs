@@ -73,7 +73,8 @@ pub enum SslMode {
 ///
 /// Maps a table name to the columns that form its primary key,
 /// used to generate deterministic element IDs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableKeyConfig {
     pub table: String,
     pub key_columns: Vec<String>,

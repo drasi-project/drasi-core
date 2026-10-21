@@ -276,6 +276,7 @@ mod tests {
     {
         use drasi_computation_plugin_sdk::Scope;
         let request = CreateRequest {
+            activation_credentials_bound: false,
             id: ComponentId::try_new("query")?,
             implementation: StandalonePostgresBootstrapFactory.metadata().implementation,
             configuration_version: 1,

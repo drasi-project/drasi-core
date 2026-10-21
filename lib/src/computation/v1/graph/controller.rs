@@ -52,8 +52,10 @@ pub(super) struct InstanceSlot {
     value: Mutex<Option<Instance>>,
     configuration: Mutex<super::CapturedComponentConfiguration>,
     query_api: Mutex<Option<Arc<crate::computation::v1::QueryApi>>>,
+    source_schema_reader: Mutex<Option<Arc<dyn crate::computation::v1::SourceSchemaReader>>>,
     recovery: Mutex<crate::computation::v1::ComponentRecovery>,
     uses_consumer_progress: std::sync::atomic::AtomicBool,
+    uses_replay_progress: std::sync::atomic::AtomicBool,
     uses_volatile_input_progress: std::sync::atomic::AtomicBool,
     damaged: Mutex<Option<Arc<GraphError>>>,
     handler: Mutex<Option<Arc<dyn crate::computation::v1::ControlHandler>>>,
@@ -95,8 +97,10 @@ impl InstanceSlot {
                 reason: "component metadata has not been captured".into(),
             }),
             query_api: Mutex::new(None),
+            source_schema_reader: Mutex::new(None),
             recovery: Mutex::new(crate::computation::v1::ComponentRecovery::default()),
             uses_consumer_progress: std::sync::atomic::AtomicBool::new(false),
+            uses_replay_progress: std::sync::atomic::AtomicBool::new(false),
             uses_volatile_input_progress: std::sync::atomic::AtomicBool::new(false),
             damaged: Mutex::new(None),
             handler: Mutex::new(None),
@@ -188,6 +192,19 @@ impl InstanceSlot {
         ))
     }
 
+    pub(super) fn source_schema_reader(
+        &self,
+    ) -> Option<std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>> {
+        self.source_schema_reader
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!("Source schema publication is poisoned: {}", self.id);
+                error.into_inner()
+            })
+            .as_ref()
+            .map(Arc::downgrade)
+    }
+
     pub(super) fn quarantine(&self, error: GraphError) -> Arc<GraphError> {
         let mut damaged = self
             .damaged
@@ -257,6 +274,10 @@ impl InstanceLease {
             contract.consumer_progress.is_some(),
             std::sync::atomic::Ordering::Release,
         );
+        self.slot.uses_replay_progress.store(
+            contract.replay_progress.is_some(),
+            std::sync::atomic::Ordering::Release,
+        );
         self.slot.uses_volatile_input_progress.store(
             contract.volatile_input_progress.is_some(),
             std::sync::atomic::Ordering::Release,
@@ -270,6 +291,14 @@ impl InstanceLease {
             log::error!("Query API publication is poisoned: {}", self.slot.id);
             error.into_inner()
         }) = self.component.query_api();
+        *self
+            .slot
+            .source_schema_reader
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!("Source schema publication is poisoned: {}", self.slot.id);
+                error.into_inner()
+            }) = self.component.source_schema_reader();
         let captured =
             self.component
                 .capture_configuration()
@@ -333,6 +362,14 @@ impl Drop for InstanceLease {
                 .lock()
                 .unwrap_or_else(|error| {
                     log::error!("Retiring poisoned query API: {}", self.slot.id);
+                    error.into_inner()
+                })
+                .take();
+            self.slot
+                .source_schema_reader
+                .lock()
+                .unwrap_or_else(|error| {
+                    log::error!("Retiring poisoned source schema reader: {}", self.slot.id);
                     error.into_inner()
                 })
                 .take();
@@ -4262,6 +4299,27 @@ impl Operations {
     }
 
     fn advance_stop(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
+        let failed: BTreeMap<_, _> = self
+            .stopping
+            .iter()
+            .flat_map(|group| group.outcomes.iter())
+            .filter_map(|(id, outcome)| match outcome {
+                StopOutcome::StopFailed(failure) => Some((graph.ids[id], failure.clone())),
+                _ => None,
+            })
+            .collect();
+        let blocked = cleanup_blockers(graph, &failed.keys().copied().collect())?;
+        for group in &mut self.stopping {
+            for (&index, &producer) in &blocked {
+                if group.pending.remove(&index) {
+                    let id = graph.nodes[index].descriptor.id().clone();
+                    group.outcomes.insert(
+                        id,
+                        StopOutcome::StopFailed(failed[&producer].clone()),
+                    );
+                }
+            }
+        }
         let pending: BTreeSet<_> = self
             .stopping
             .iter()
@@ -5840,6 +5898,41 @@ fn handle_command<'a>(
     .boxed()
 }
 
+fn cleanup_blockers(
+    graph: &ComputationGraph,
+    unfinished: &BTreeSet<usize>,
+) -> GraphResult<BTreeMap<usize, usize>> {
+    let mut blocked = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+    let mut pending: VecDeque<_> = unfinished.iter().map(|&index| (index, index)).collect();
+    while let Some((index, producer)) = pending.pop_front() {
+        if !visited.insert(index) {
+            continue;
+        }
+        let slot = &graph.components[index];
+        if !slot.uses_consumer_progress.load(std::sync::atomic::Ordering::Acquire)
+            && !slot.uses_replay_progress.load(std::sync::atomic::Ordering::Acquire)
+        {
+            continue;
+        }
+        let contract = slot.recovery_contract()?;
+        let owners = contract.replay_progress.iter().chain(
+            contract.consumer_progress.iter().flat_map(|group| group.owners().values()),
+        );
+        for owner in owners {
+            if owner.graph_id() != graph.snapshot.id.as_ref() {
+                continue;
+            }
+            if let Some(&owner_index) = graph.ids.get(owner.component_id()) {
+                if owner_index != index && blocked.insert(owner_index, producer).is_none() {
+                    pending.push_back((owner_index, producer));
+                }
+            }
+        }
+    }
+    Ok(blocked)
+}
+
 pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
     mark_cleanup_required(&graph.observed);
     graph.tasks.cancel();
@@ -5955,6 +6048,7 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
     let mut operations = Operations::default();
     let controls = PipeGuard(BTreeMap::new());
     let mut pending = BTreeSet::new();
+    let mut unfinished = BTreeSet::new();
     for index in graph.order.iter().copied() {
         let slot = &graph.components[index];
         if let Some(cause) = slot.damage() {
@@ -5977,28 +6071,43 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
         let lease = match slot.take() {
             Ok(lease) => lease,
             Err(error) => {
+                unfinished.insert(index);
                 errors.push(error);
                 continue;
             }
         };
-        if lease.attempted && !joined_stops.contains(&index) {
-            pending.insert(index);
-        }
-    }
-    // Data work is joined before these hooks. Shared graph resources remain
-    // owned until every user is cleaned up; data edges are not resource leases.
-    for &index in &graph.order {
-        if pending.remove(&index) {
-            if let Err(error) = operations.launch(graph, index, Operation::Stop) {
-                errors.push(error);
+        if lease.attempted {
+            unfinished.insert(index);
+            if !joined_stops.contains(&index) {
+                pending.insert(index);
             }
         }
     }
+    // Producers can still drain accepted work in stop(). Keep their downstream
+    // progress owners alive until that cleanup succeeds, including across retry.
     let join_budget = graph
         .cleanup_timeout
         .saturating_add(std::time::Duration::from_millis(10));
     let deadline = tokio::time::Instant::now() + join_budget;
-    while !operations.futures.is_empty() {
+    loop {
+        let blocked = match cleanup_blockers(graph, &unfinished) {
+            Ok(blocked) => blocked,
+            Err(error) => {
+                errors.push(error);
+                break;
+            }
+        };
+        for &index in &graph.order {
+            if pending.contains(&index) && !blocked.contains_key(&index) {
+                pending.remove(&index);
+                if let Err(error) = operations.launch(graph, index, Operation::Stop) {
+                    errors.push(error);
+                }
+            }
+        }
+        if operations.futures.is_empty() {
+            break;
+        }
         let completion = match tokio::time::timeout_at(deadline, operations.futures.next()).await {
             Ok(completion) => completion,
             Err(_) => {
@@ -6018,8 +6127,11 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
             break;
         };
         let index = completion.index;
+        let stopped = matches!(&completion.result, Ok(Ok(())));
         if let Err(error) = operations.complete(graph, completion, &controls) {
             errors.push(error);
+        } else if stopped {
+            unfinished.remove(&index);
         }
         if let Some(failure) = graph.observed().components[graph.nodes[index].descriptor.id()]
             .failure

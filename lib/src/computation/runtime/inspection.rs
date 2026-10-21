@@ -476,9 +476,78 @@ impl Runtime {
         id: &str,
     ) -> anyhow::Result<Option<crate::schema::SourceSchema>> {
         let publication = self.control()?.registry_snapshot();
-        self.component_observation_at(&publication, id, "source")?;
-        Ok(self
-            .records_at(&publication)
+        self.source_schema_at(&publication, id).await
+    }
+
+    pub(super) fn ensure_source_schema_current(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        let expected = self.component_observation_at(publication, id, "source")?;
+        let control = self.control()?;
+        let current = control.registry_snapshot();
+        let observed = self
+            .component_observation_at(&current, id, "source")
+            .map_err(|_| GraphError::StaleGeneration)?;
+        anyhow::ensure!(
+            observed.generation == expected.generation && observed.operation == expected.operation,
+            GraphError::StaleGeneration
+        );
+        let component = ComponentId::try_new(id)?;
+        let reader = publication.source_schema_reader(&component)?;
+        let current_reader = current.source_schema_reader(&component)?;
+        anyhow::ensure!(
+            match (&reader, &current_reader) {
+                (Some(reader), Some(current)) => Arc::ptr_eq(reader, current),
+                (None, None) => true,
+                _ => false,
+            },
+            GraphError::StaleGeneration
+        );
+        if reader.is_some() {
+            anyhow::ensure!(
+                observed.lifecycle != ComponentLifecycle::Stopping
+                    && !matches!(
+                        control.state(),
+                        GraphState::Stopping
+                            | GraphState::Completed
+                            | GraphState::Cancelled
+                            | GraphState::Failed
+                            | GraphState::CleanupRequired
+                    ),
+                GraphError::StaleGeneration
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) async fn source_schema_at(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::schema::SourceSchema>> {
+        self.component_observation_at(publication, id, "source")?;
+        let control = self.control()?;
+        let mut publications = control.subscribe_registry();
+        if let Some(reader) = publication.source_schema_reader(&ComponentId::try_new(id)?)? {
+            let read = reader.describe_schema();
+            tokio::pin!(read);
+            loop {
+                self.ensure_source_schema_current(publication, id)?;
+                tokio::select! {
+                    result = &mut read => {
+                        self.ensure_source_schema_current(publication, id)?;
+                        return result;
+                    }
+                    result = publications.changed() => {
+                        result.map_err(|_| GraphError::StaleGeneration)?;
+                    }
+                }
+            }
+        }
+        let schema = self
+            .records_at(publication)
             .await?
             .get(id)
             .and_then(|record| {
@@ -487,7 +556,9 @@ impl Runtime {
                 } else {
                     None
                 }
-            }))
+            });
+        self.ensure_source_schema_current(publication, id)?;
+        Ok(schema)
     }
 
     pub(crate) async fn query_configurations(&self) -> anyhow::Result<Vec<QueryConfig>> {

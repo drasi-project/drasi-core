@@ -250,9 +250,15 @@ impl sdk::NativeComponent for Producer {
     async fn stop(&mut self) -> Result<()> {
         self.stops += 1;
         self.commands.stops.fetch_add(1, Ordering::SeqCst);
+        if self.mode.starts_with("stop-") {
+            self.commands.reader.snapshot()?;
+        }
         match self.mode.as_str() {
             "stop-fail-once" if self.stops == 1 => anyhow::bail!("fixture cleanup failed"),
-            "stop-pending-once" if self.stops == 1 => std::future::pending::<()>().await,
+            "stop-pending-once" if self.stops == 1 => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                self.commands.reader.snapshot()?;
+            }
             _ => {}
         }
         self.started = false;

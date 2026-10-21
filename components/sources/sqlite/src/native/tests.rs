@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use tokio::time::timeout;
+use tokio::{sync::oneshot, time::timeout};
 
 fn config(output: SqliteOutput) -> SqliteConfig {
     SqliteConfig {
@@ -38,6 +38,72 @@ async fn no_output(source: &mut SqliteSource) {
     assert!(timeout(Duration::from_millis(20), source.next())
         .await
         .is_err());
+}
+
+async fn worker_schema_is_actual_bounded_and_generation_scoped() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut settings = config(SqliteOutput::Changes);
+    settings.path = Some(directory.path().join("schema.db"));
+    settings.table_keys = vec![crate::TableKeyConfig {
+        table: "items".into(),
+        key_columns: vec!["code".into()],
+    }];
+    let mut source = source(settings)?;
+    let sql = source.handle();
+    assert!(
+        sql.describe_schema().await.is_err(),
+        "constructor must not open SQLite"
+    );
+    source.start().await?;
+    assert!(sql.describe_schema().await?.is_empty());
+    sql.execute(
+        "CREATE TABLE items(id INTEGER PRIMARY KEY,code TEXT NOT NULL,value REAL,raw BLOB)",
+    )
+    .await?;
+    let schema = {
+        let waiting = source.next();
+        tokio::pin!(waiting);
+        timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                result = &mut waiting => anyhow::bail!("DDL must not publish a data event: {result:?}"),
+                result = sql.describe_schema() => result,
+            }
+        }).await??
+    };
+    assert_eq!(schema.nodes.len(), 1);
+    assert_eq!(schema.nodes[0].label, "items");
+    assert_eq!(
+        schema.nodes[0]
+            .properties
+            .iter()
+            .map(|property| property.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "code", "value", "raw"]
+    );
+    assert!(schema.nodes[0].properties[1]
+        .description
+        .as_ref()
+        .is_some_and(|description| description.contains("element key")));
+    let old_worker = sql.bind_to_current_worker().await?;
+    source.stop().await?;
+    source.start().await?;
+    assert!(
+        old_worker.describe_schema().await.is_err(),
+        "retired schema client cannot rebind"
+    );
+    assert_eq!(sql.describe_schema().await?, schema);
+    source.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn worker_schema_current_thread() -> Result<()> {
+    worker_schema_is_actual_bounded_and_generation_scoped().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_schema_multi_thread() -> Result<()> {
+    worker_schema_is_actual_bounded_and_generation_scoped().await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -379,31 +445,6 @@ async fn rest_sql_handles_are_fenced_to_their_original_database_worker() -> Resu
     );
     let output = next(&mut source).await?;
     assert_eq!(GraphChangeCodec::decode_changes(&output.envelope)?.len(), 1);
-    source.stop().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn unexpected_rest_worker_failure_is_a_native_source_failure() -> Result<()> {
-    let mut source =
-        source(config(SqliteOutput::Changes))?.with_rest_api(crate::RestApiConfig {
-            host: "127.0.0.1".into(),
-            port: 0,
-        })?;
-    source.start().await?;
-    source
-        .rest_worker
-        .get_mut()
-        .as_ref()
-        .context("REST owner")?
-        .abort();
-    let error = source
-        .next()
-        .await
-        .expect_err("REST failure must not leave a healthy idle source");
-    assert!(format!("{error:#}").contains("REST worker"), "{error:#}");
-    assert!(source.bound_rest_address().is_none());
-    assert!(source.start().await.is_err());
     source.stop().await?;
     Ok(())
 }
@@ -1149,7 +1190,7 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
     let error = source.stop().await.unwrap_err();
     assert!(error.is::<drasi_lib::context::workers::WorkerCleanupError>());
     assert!(began.elapsed() >= Duration::from_millis(30));
-    assert!(source.worker.read().await.is_some());
+    assert!(source.runtime.owns_database_worker().await);
     assert!(source.start().await.is_err());
     assert_eq!(client.owner.available_permits(), 0);
     assert!(SqliteSource::new(

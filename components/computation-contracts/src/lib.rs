@@ -37,6 +37,7 @@ mod progress;
 pub mod query_codec;
 mod query_identity;
 mod snapshot;
+mod source_schema;
 #[doc(hidden)]
 pub mod source_transaction;
 pub mod workers;
@@ -56,6 +57,7 @@ pub use ports::*;
 pub use progress::*;
 pub use query_codec::*;
 pub use snapshot::*;
+pub use source_schema::SourceSchemaReader;
 pub use source_transaction::*;
 
 /// Maximum opaque source cursor size, shared by plugin and runtime validation.

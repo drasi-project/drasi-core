@@ -15,6 +15,7 @@ fn configuration() -> Value {
 }
 fn request() -> Result<CreateRequest> {
     Ok(CreateRequest {
+        activation_credentials_bound: false,
         id: ComponentId::try_new("query")?,
         implementation: HttpBootstrapFactory.metadata().implementation,
         configuration_version: 1,

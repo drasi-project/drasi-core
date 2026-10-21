@@ -109,8 +109,10 @@ impl SourceManager {
         self.runtime.source_info(&id).await
     }
 
+    /// Inspect native or legacy source-data schemas. Unsupported discovery returns
+    /// `None`; discovery and lifecycle errors remain errors.
     pub async fn get_source_schema(&self, id: String) -> Result<Option<SourceSchema>> {
-        Ok(self.runtime.source(&id).await?.describe_schema())
+        self.runtime.source_schema(&id).await
     }
 
     pub async fn teardown_source(&self, id: String, cleanup: bool) -> Result<()> {

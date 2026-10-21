@@ -24,6 +24,8 @@ pub(crate) struct GraphRegistrySnapshot {
     resources: BTreeMap<ResourceId, specification::WeakResourceHandle>,
     configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
     query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
+    source_schema_readers:
+        BTreeMap<ComponentId, std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>>,
     deferred_activation: BTreeSet<ComponentId>,
 }
 
@@ -34,6 +36,10 @@ impl GraphRegistrySnapshot {
         resources: &BTreeMap<ResourceId, ResourceHandle>,
         configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
         query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
+        source_schema_readers: BTreeMap<
+            ComponentId,
+            std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>,
+        >,
         deferred_activation: BTreeSet<ComponentId>,
     ) -> Self {
         Self {
@@ -41,6 +47,7 @@ impl GraphRegistrySnapshot {
             observed,
             configurations,
             query_apis,
+            source_schema_readers,
             deferred_activation,
             resources: resources
                 .iter()
@@ -85,6 +92,16 @@ impl GraphRegistrySnapshot {
     pub(crate) fn activation_is_deferred(&self, id: &ComponentId) -> bool {
         self.deferred_activation.contains(id)
     }
+
+    pub(crate) fn source_schema_reader(
+        &self,
+        id: &ComponentId,
+    ) -> GraphResult<Option<Arc<dyn crate::computation::v1::SourceSchemaReader>>> {
+        self.source_schema_readers
+            .get(id)
+            .map(|reader| reader.upgrade().ok_or(GraphError::StaleGeneration))
+            .transpose()
+    }
 }
 
 pub(super) fn publish(graph: &ComputationGraph) {
@@ -108,6 +125,15 @@ pub(super) fn publish(graph: &ComputationGraph) {
                         .map(|api| (id.clone(), api))
                 })
                 .collect(),
+            graph
+                .ids
+                .iter()
+                .filter_map(|(id, index)| {
+                    graph.components[*index]
+                        .source_schema_reader()
+                        .map(|reader| (id.clone(), reader))
+                })
+                .collect(),
             graph.deferred_activation.clone(),
         )));
 }
@@ -126,6 +152,10 @@ pub(super) fn publish_observed(
 impl GraphControl {
     pub(crate) fn registry_snapshot(&self) -> Arc<GraphRegistrySnapshot> {
         self.registry.borrow().clone()
+    }
+
+    pub(crate) fn subscribe_registry(&self) -> watch::Receiver<Arc<GraphRegistrySnapshot>> {
+        self.registry.clone()
     }
 
     /// Capture topology and component configuration from one graph publication.

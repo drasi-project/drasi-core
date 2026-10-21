@@ -2,6 +2,20 @@
 
 Provides a snapshot of MySQL tables for initial query bootstrap.
 
+For independent native ComputationGraph hosting, use
+[`drasi-computation-bootstrap-mysql`](../../computation-plugins/bootstrappers/mysql/README.md).
+Its coordinated factories reuse the owned snapshot engine from `drasi-mysql-common`, with
+actual query progress and bounded query-owned handover state, rather than this
+legacy adapter. Its single/shared transaction and ordinary row factories match
+the corresponding native source modes. Memory row queries reinitialize without
+fabricating durable checkpoints. Coordinated initialization explicitly requires
+InnoDB and brief read-lock privileges. The separate native `drasi.mysql/snapshot`
+factory preserves SELECT-only standalone loading, requested-label filtering,
+views and manual table keys on MySQL 5.7.9+ without claiming a gap-free live
+handover. SQL text conversion is not restricted to raw-binlog character sets.
+Owned native cleanup verifies account-scoped handshake attributes before killing
+any session; the native guide describes that prerequisite.
+
 ## Example
 
 ```rust

@@ -9,7 +9,10 @@ use drasi_computation_plugin_sdk::{
     wire::{self, InstanceMetadata},
 };
 use drasi_lib::computation::v1::*;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use super::{
     control::{self, ControlBinding},
@@ -87,6 +90,7 @@ pub(super) struct RemoteComponent {
     raw: abi::ComponentHandle,
     _plugin: Arc<PluginOwner>,
     pub(super) control: Mutex<ControlBinding>,
+    stopping: AtomicBool,
 }
 unsafe impl Send for RemoteComponent {}
 unsafe impl Sync for RemoteComponent {}
@@ -109,6 +113,7 @@ impl RemoteComponent {
             raw,
             _plugin: plugin,
             control: Mutex::new(ControlBinding::default()),
+            stopping: AtomicBool::new(false),
         })
     }
     fn table(&self) -> &abi::ComponentVTable {
@@ -144,6 +149,9 @@ impl RemoteComponent {
         input: &[u8],
         transaction: Option<&abi::Transaction>,
     ) -> anyhow::Result<OperationFuture> {
+        if code != abi::operation::STOP && self.stopping.load(Ordering::Acquire) {
+            return Err(operation_failure(Failure::closed()));
+        }
         anyhow::ensure!(
             input.len() <= abi::MAX_MESSAGE_BYTES,
             "native operation input exceeds size limit"
@@ -199,6 +207,18 @@ pub struct NativeComponentProxy {
     bindings: SourceBindings,
     batching: Option<abi::batching::PluginBatchingV1>,
     query_snapshots: Option<super::query_snapshots::QuerySnapshotsBinding>,
+    source_schema: Option<Arc<super::source_schema::NativeSourceSchemaReader>>,
+    identity: Option<(
+        Arc<super::NativeIdentityResource>,
+        drasi_computation_plugin_sdk::ActivationCredentialContext,
+    )>,
+    stop: tokio::sync::Mutex<StopState>,
+}
+
+#[derive(Default)]
+struct StopState {
+    operation: Option<OperationFuture>,
+    completed: bool,
 }
 
 #[derive(Default)]
@@ -455,7 +475,36 @@ impl NativeComponentProxy {
             bindings,
             batching: None,
             query_snapshots: None,
+            source_schema: None,
+            identity: None,
+            stop: tokio::sync::Mutex::new(StopState::default()),
         })
+    }
+    pub(super) fn with_source_schema(
+        mut self,
+        extension: Option<abi::source_schema::PluginSourceSchemaV1>,
+    ) -> anyhow::Result<Self> {
+        self.source_schema = extension
+            .map(|extension| {
+                super::source_schema::NativeSourceSchemaReader::bind(
+                    &self.inner,
+                    extension,
+                    self.metadata.role,
+                )
+            })
+            .transpose()?
+            .flatten();
+        Ok(self)
+    }
+    pub(super) fn with_identity(
+        mut self,
+        identity: Option<(
+            Arc<super::NativeIdentityResource>,
+            drasi_computation_plugin_sdk::ActivationCredentialContext,
+        )>,
+    ) -> Self {
+        self.identity = identity;
+        self
     }
     pub(super) fn with_query_snapshots(
         mut self,
@@ -551,6 +600,9 @@ impl NativeComponentProxy {
 }
 impl Drop for NativeComponentProxy {
     fn drop(&mut self) {
+        if let Some(schema) = self.source_schema.take() {
+            schema.retire();
+        }
         self.query_snapshots.take();
         self.bindings.admission.take();
         self.bindings.progress.take();
@@ -563,6 +615,11 @@ impl Drop for NativeComponentProxy {
 impl ComputationComponent for NativeComponentProxy {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+    fn source_schema_reader(&self) -> Option<Arc<dyn SourceSchemaReader>> {
+        self.source_schema
+            .as_ref()
+            .map(|reader| reader.clone() as Arc<dyn SourceSchemaReader>)
     }
     fn recovery_contract(&self) -> ComponentRecovery {
         let recovery = if let Some(progress) = &self.bindings.consumer_progress {
@@ -614,6 +671,10 @@ impl ComputationComponent for NativeComponentProxy {
         self.metadata.capabilities.readiness
     }
     async fn start(&mut self) -> anyhow::Result<()> {
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(operation_failure(Failure::closed()));
+        }
+        *self.stop.get_mut() = StopState::default();
         {
             let binding = self
                 .inner
@@ -624,6 +685,15 @@ impl ComputationComponent for NativeComponentProxy {
                 return Err(operation_failure(error.clone()));
             }
         }
+        // Caller-owned resolution is cancelled with this activation. Nothing is
+        // cached on the proxy or sent to native code until resolution succeeds.
+        let credentials = match &self.identity {
+            Some((identity, endpoint)) => wire::encode(&identity.resolve(endpoint).await?)?,
+            None => Vec::new(),
+        };
+        if self.inner.stopping.load(Ordering::Acquire) {
+            return Err(operation_failure(Failure::closed()));
+        }
         let activation = self
             .bindings
             .consumer_progress
@@ -633,7 +703,7 @@ impl ComputationComponent for NativeComponentProxy {
         if let Some(binding) = &self.query_snapshots {
             binding.activate()?;
         }
-        let result = self.inner.unit(abi::operation::START, &[]).await;
+        let result = self.inner.unit(abi::operation::START, &credentials).await;
         if result.is_err() {
             if let Some(binding) = &self.query_snapshots {
                 binding.deactivate();
@@ -644,19 +714,41 @@ impl ComputationComponent for NativeComponentProxy {
         result
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
+        self.inner.stopping.store(true, Ordering::Release);
+        if !self.stop.get_mut().completed {
+            if self.stop.get_mut().operation.is_none() {
+                self.stop.get_mut().operation =
+                    Some(self.inner.begin(abi::operation::STOP, &[], None)?);
+            }
+            // Retain the accepted STOP and its readers across caller cancellation
+            // or timeout. A retry polls this same operation.
+            let result = self
+                .stop
+                .get_mut()
+                .operation
+                .as_mut()
+                .expect("owned stop operation")
+                .await;
+            self.stop.get_mut().operation.take();
+            anyhow::ensure!(
+                result.map_err(operation_failure)?.is_empty(),
+                "native unit operation returned unexpected data"
+            );
+            self.stop.get_mut().completed = true;
+        }
         if let Some(progress) = &self.bindings.consumer_progress {
             progress.binding.deactivate();
         }
         if let Some(binding) = &self.query_snapshots {
             binding.deactivate();
         }
-        self.inner.unit(abi::operation::STOP, &[]).await?;
         if let Some(binding) = &self.query_snapshots {
             binding.ensure_quiesced()?;
         }
         if let Some(progress) = &self.bindings.consumer_progress {
             progress.binding.stopped()?;
         }
+        self.inner.stopping.store(false, Ordering::Release);
         Ok(())
     }
 }

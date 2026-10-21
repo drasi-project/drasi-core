@@ -37,6 +37,9 @@ use tokio::sync::{mpsc, Notify};
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
 
+#[path = "source_schema_tests.rs"]
+mod source_schema_tests;
+
 #[derive(Default)]
 struct PeerControl {
     messages: StdMutex<Vec<PeerMessage>>,
@@ -180,6 +183,7 @@ impl EnvelopeSource for UnboundNativeSource {
 
 #[derive(Default)]
 struct SourceControl {
+    schema: StdMutex<Option<crate::schema::SourceSchema>>,
     resource_observers: StdMutex<Vec<Arc<dyn crate::context::ComponentResourceObserver>>>,
     updates: StdMutex<Option<crate::channels::ComponentUpdateSender>>,
     initializations: AtomicUsize,
@@ -797,6 +801,9 @@ impl Source for ControlledSource {
     }
     fn type_name(&self) -> &str {
         "controlled"
+    }
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
+        self.control.schema.lock().unwrap().clone()
     }
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()

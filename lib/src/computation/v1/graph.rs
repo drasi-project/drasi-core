@@ -474,6 +474,18 @@ impl Component {
         }
     }
 
+    fn source_schema_reader(&self) -> Option<Arc<dyn super::SourceSchemaReader>> {
+        match self {
+            Self::Source(component) => component.source_schema_reader(),
+            Self::Transformer(component) | Self::Query(component) => {
+                component.source_schema_reader()
+            }
+            Self::Sink(component) => component.source_schema_reader(),
+            Self::Service(component) => component.source_schema_reader(),
+            Self::Deferred { .. } | Self::Unresolved(_) => None,
+        }
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         match self {
             Self::Source(component) => component.descriptor(),
@@ -1200,6 +1212,13 @@ impl ComputationGraphBuilder {
             ids.iter()
                 .filter_map(|(id, index)| {
                     components[*index].query_api().map(|api| (id.clone(), api))
+                })
+                .collect(),
+            ids.iter()
+                .filter_map(|(id, index)| {
+                    components[*index]
+                        .source_schema_reader()
+                        .map(|reader| (id.clone(), reader))
                 })
                 .collect(),
             BTreeSet::new(),

@@ -76,6 +76,9 @@ pub struct NativeFactory {
     )>,
     batching: Option<abi::batching::PluginBatchingV1>,
     query_snapshots: Option<abi::query_snapshots::PluginQuerySnapshotsV1>,
+    source_schema: Option<abi::source_schema::PluginSourceSchemaV1>,
+    bootstrap_coordination: Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
+    activation_credentials: Option<abi::activation_credentials::PluginActivationCredentialsV1>,
 }
 unsafe impl Send for NativeFactory {}
 unsafe impl Sync for NativeFactory {}
@@ -138,10 +141,149 @@ impl NativeFactory {
             consumer: None,
             batching: None,
             query_snapshots: None,
+            source_schema: None,
+            bootstrap_coordination: None,
+            activation_credentials: None,
         })
     }
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
+    }
+    pub(super) fn with_activation_credentials(
+        mut self,
+        extension: Option<abi::activation_credentials::PluginActivationCredentialsV1>,
+    ) -> anyhow::Result<Self> {
+        if let Some(extension) = extension {
+            let response = unsafe {
+                drasi_computation_plugin_sdk::transport::take_reply(extension
+                    .factory
+                    .expect("validated")(
+                    self.raw.state
+                ))?
+            };
+            if wire::decode::<bool>(&response)? {
+                let mut requirement = ResourceRequirement::exactly_one::<
+                    super::NativeIdentityResource,
+                >(ResourceRole::Identity);
+                requirement.minimum = 0;
+                self.descriptor
+                    .dependencies
+                    .insert("identity".into(), requirement);
+                self.activation_credentials = Some(extension);
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn supports_activation_credentials(&self) -> bool {
+        self.activation_credentials.is_some()
+    }
+
+    pub fn create_component_with_identity(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        identity: Arc<super::NativeIdentityResource>,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        self.construct_bound_with_identity(
+            CreateRequest {
+                id,
+                implementation: self.metadata.implementation.clone(),
+                configuration_version: self.metadata.configuration_version,
+                configuration,
+                scope: None,
+                activation_credentials_bound: false,
+            },
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            Some(identity),
+        )
+    }
+    pub(super) fn with_bootstrap_coordination(
+        mut self,
+        extension: Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            extension.is_none()
+                || (self.metadata.role == ComponentRole::Source
+                    && (self.recovery.is_some() ^ self.consumer_progress.is_some())),
+            "source bootstrap coordination requires one negotiated source progress mode"
+        );
+        if extension.is_some() {
+            let mut requirement = ResourceRequirement::exactly_one::<
+                super::NativeSourceBootstrapResource,
+            >(ResourceRole::Bootstrap);
+            requirement.minimum = 0;
+            self.descriptor
+                .dependencies
+                .insert("source_bootstrap".into(), requirement);
+        }
+        self.bootstrap_coordination = extension;
+        Ok(self)
+    }
+    pub fn supports_source_bootstrap(&self) -> bool {
+        self.bootstrap_coordination.is_some()
+    }
+    pub fn source_bootstrap_uses_consumer_progress(&self) -> bool {
+        self.consumer_progress.is_some()
+    }
+    pub fn create_source_bootstrap(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        progress: super::NativeSourceBootstrapProgress,
+    ) -> anyhow::Result<Arc<super::NativeSourceBootstrapResource>> {
+        self.create_source_bootstrap_with_identity(id, configuration, scope, progress, None)
+    }
+    pub fn create_source_bootstrap_with_identity(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        progress: super::NativeSourceBootstrapProgress,
+        identity: Option<Arc<super::NativeIdentityResource>>,
+    ) -> anyhow::Result<Arc<super::NativeSourceBootstrapResource>> {
+        anyhow::ensure!(
+            identity.is_none() || self.activation_credentials.is_some(),
+            "source bootstrap identity requires activation credentials"
+        );
+        let extension = self
+            .bootstrap_coordination
+            .ok_or_else(|| anyhow::anyhow!("native factory has no source bootstrap coordinator"))?;
+        anyhow::ensure!(
+            matches!(&progress, super::NativeSourceBootstrapProgress::Shared(_))
+                == self.consumer_progress.is_some(),
+            "source bootstrap progress mode does not match its source factory"
+        );
+        self.validate_configuration(&configuration)?;
+        super::NativeSourceBootstrapResource::create(
+            CreateRequest {
+                activation_credentials_bound: identity.is_some(),
+                id,
+                configuration,
+                scope: Some(scope),
+                implementation: self.metadata.implementation.clone(),
+                configuration_version: self.metadata.configuration_version,
+            },
+            progress,
+            extension,
+            self.raw.state,
+            self._plugin.clone(),
+            identity,
+        )
+    }
+    pub(super) fn with_source_schema(
+        mut self,
+        extension: Option<abi::source_schema::PluginSourceSchemaV1>,
+    ) -> Self {
+        self.source_schema = extension;
+        self
     }
     pub(super) fn with_configuration_details(
         mut self,
@@ -260,6 +402,7 @@ impl NativeFactory {
             .ok_or_else(|| anyhow::anyhow!("native factory has no consumer service"))?;
         let component = self.construct_bound(
             CreateRequest {
+                activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -269,6 +412,7 @@ impl NativeFactory {
             None,
             None,
             true,
+            None,
             None,
             None,
             None,
@@ -307,6 +451,7 @@ impl NativeFactory {
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct(
             CreateRequest {
+                activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -327,6 +472,7 @@ impl NativeFactory {
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct_bound(
             CreateRequest {
+                activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -337,6 +483,7 @@ impl NativeFactory {
             None,
             false,
             Some(snapshots),
+            None,
             None,
             None,
         )
@@ -351,6 +498,7 @@ impl NativeFactory {
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct_bound(
             CreateRequest {
+                activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -363,6 +511,38 @@ impl NativeFactory {
             None,
             Some(progress),
             None,
+            None,
+        )
+    }
+
+    pub fn create_component_with_source_bootstrap(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        coordinator: Arc<super::NativeSourceBootstrapResource>,
+        progress: super::NativeSourceBootstrapProgress,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        let (single, shared) = match progress {
+            super::NativeSourceBootstrapProgress::Single(owner) => (Some(owner), None),
+            super::NativeSourceBootstrapProgress::Shared(owners) => (None, Some(owners)),
+        };
+        self.construct_bound(
+            CreateRequest {
+                activation_credentials_bound: false,
+                id,
+                implementation: self.metadata.implementation.clone(),
+                configuration_version: self.metadata.configuration_version,
+                configuration,
+                scope: Some(scope),
+            },
+            None,
+            single,
+            false,
+            None,
+            shared,
+            None,
+            Some(coordinator),
         )
     }
 
@@ -378,6 +558,7 @@ impl NativeFactory {
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct_bound(
             CreateRequest {
+                activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -390,6 +571,7 @@ impl NativeFactory {
             None,
             consumer_progress,
             Some(input_progress),
+            None,
         )
     }
 
@@ -430,7 +612,7 @@ impl NativeFactory {
         admission: Option<Arc<SourceAdmission>>,
         progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<NativeComponentProxy> {
-        self.construct_bound(request, admission, progress, false, None, None, None)
+        self.construct_bound(request, admission, progress, false, None, None, None, None)
     }
     #[allow(clippy::too_many_arguments)]
     fn construct_bound(
@@ -442,7 +624,35 @@ impl NativeFactory {
         query_snapshots: Option<Arc<super::NativeQuerySnapshotsResource>>,
         consumer_progress: Option<Arc<ConsumerProgressSet>>,
         input_progress: Option<Arc<QuerySourceProgress>>,
+        source_bootstrap: Option<Arc<super::NativeSourceBootstrapResource>>,
     ) -> anyhow::Result<NativeComponentProxy> {
+        self.construct_bound_with_identity(
+            request,
+            admission,
+            progress,
+            consumer,
+            query_snapshots,
+            consumer_progress,
+            input_progress,
+            source_bootstrap,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn construct_bound_with_identity(
+        &self,
+        mut request: CreateRequest,
+        admission: Option<Arc<SourceAdmission>>,
+        progress: Option<Arc<QuerySourceProgress>>,
+        consumer: bool,
+        query_snapshots: Option<Arc<super::NativeQuerySnapshotsResource>>,
+        consumer_progress: Option<Arc<ConsumerProgressSet>>,
+        input_progress: Option<Arc<QuerySourceProgress>>,
+        source_bootstrap: Option<Arc<super::NativeSourceBootstrapResource>>,
+        identity: Option<Arc<super::NativeIdentityResource>>,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        request.activation_credentials_bound = identity.is_some();
         if let Some(owner) = &input_progress {
             anyhow::ensure!(
                 self.supports_input_progress(),
@@ -493,7 +703,33 @@ impl NativeFactory {
             })
             .transpose()?;
         self.validate_configuration(&request.configuration)?;
-        let bytes = wire::encode(&request)?;
+        let activation_identity = identity
+            .map(|resource| -> anyhow::Result<_> {
+                let extension = self.activation_credentials.ok_or_else(|| {
+                    anyhow::anyhow!("native factory has no activation-credentials extension")
+                })?;
+                let request_bytes = wire::encode(&request)?;
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .context
+                        .expect("validated")(
+                        self.raw.state,
+                        abi::BorrowedBytes::new(&request_bytes),
+                    ))?
+                };
+                let endpoint: drasi_computation_plugin_sdk::ActivationCredentialContext =
+                    wire::decode(&response)?;
+                endpoint.validate()?;
+                Ok((resource, endpoint))
+            })
+            .transpose()?;
+        let bytes = if activation_identity.is_some() {
+            drasi_computation_plugin_sdk::activation_credentials::encode_bound_create_request(
+                &request,
+            )?
+        } else {
+            wire::encode(&request)?
+        };
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
         let query_snapshots = query_snapshots
@@ -535,7 +771,39 @@ impl NativeFactory {
             })
             .transpose()?;
         unsafe {
-            if let Some(progress) = &consumer_progress {
+            if let Some(coordinator) = &source_bootstrap {
+                anyhow::ensure!(
+                    admission.is_none() && !consumer && query_snapshots.is_none(),
+                    "source bootstrap cannot be combined with unrelated service bindings"
+                );
+                let extension = self.bootstrap_coordination.ok_or_else(|| {
+                    anyhow::anyhow!("source bootstrap coordinator was not negotiated")
+                })?;
+                coordinator.validate_factory(self.raw.state, &self._plugin)?;
+                coordinator.validate_identity(
+                    activation_identity.as_ref().map(|(resource, _)| resource),
+                )?;
+                let single = progress.as_ref().map(|progress| progress.binding.table());
+                let shared = consumer_progress
+                    .as_ref()
+                    .map(|progress| progress.binding.table());
+                coordinator.with_source(
+                    &request,
+                    progress.as_ref().map(|progress| &progress.owner),
+                    consumer_progress.as_ref().map(|progress| &progress.owner),
+                    |coordinator| {
+                        take_status(extension.create_source.expect("validated")(
+                            self.raw.state,
+                            abi::BorrowedBytes::new(&bytes),
+                            coordinator,
+                            single.as_ref().map_or(std::ptr::null(), |table| table),
+                            shared.as_ref().map_or(std::ptr::null(), |table| table),
+                            &mut component,
+                        ))?;
+                        Ok(())
+                    },
+                )?;
+            } else if let Some(progress) = &consumer_progress {
                 take_status(progress.extension.create.expect("validated")(
                     self.raw.state,
                     abi::BorrowedBytes::new(&bytes),
@@ -605,7 +873,10 @@ impl NativeFactory {
             Some(extension) => component.with_batching(extension),
             None => Ok(component),
         }?;
-        Ok(component.with_query_snapshots(query_snapshots))
+        component
+            .with_identity(activation_identity)
+            .with_query_snapshots(query_snapshots)
+            .with_source_schema(self.source_schema)
     }
 }
 impl Drop for NativeFactory {
@@ -643,12 +914,16 @@ impl ComponentFactory for NativeFactory {
                     && match name.as_ref() {
                         "admission" => self.admission.is_some(),
                         "source_progress" => self.recovery.is_some(),
+                        "source_bootstrap" => self.bootstrap_coordination.is_some(),
                         "input_progress" => self.supports_input_progress(),
                         "consumer_progress" => {
                             self.consumer_progress.is_some() && resources.len() == 1
                         }
                         "consumer" => self.consumer.is_some() && resources.len() == 1,
                         "query_snapshots" => self.query_snapshots.is_some(),
+                        "identity" => {
+                            self.activation_credentials.is_some() && self.consumer.is_none()
+                        }
                         _ => false,
                     }
             }),
@@ -662,6 +937,28 @@ impl ComponentFactory for NativeFactory {
                     .is_some_and(|ids| ids.len() == 1),
             "native consumer requires one host-owned delivery resource"
         );
+        if specification
+            .dependencies
+            .get("source_bootstrap")
+            .is_some_and(|ids| !ids.is_empty())
+        {
+            let slot = if self.consumer_progress.is_some() {
+                "consumer_progress"
+            } else {
+                "source_progress"
+            };
+            anyhow::ensure!(
+                specification
+                    .dependencies
+                    .get(slot)
+                    .is_some_and(|ids| ids.len() == 1)
+                    && specification
+                        .dependencies
+                        .get("admission")
+                        .is_none_or(Vec::is_empty),
+                "source bootstrap requires exactly its live progress dependency"
+            );
+        }
         anyhow::ensure!(
             self.consumer_progress.is_none()
                 || specification
@@ -848,9 +1145,32 @@ impl ComponentFactory for NativeFactory {
         } else {
             None
         };
+        let source_bootstrap = if context
+            .specification
+            .dependencies
+            .contains_key("source_bootstrap")
+        {
+            context
+                .resources::<super::NativeSourceBootstrapResource>("source_bootstrap")
+                .map_err(ComponentCreationError::terminal)?
+                .into_iter()
+                .next()
+        } else {
+            None
+        };
+        let identity = if context.specification.dependencies.contains_key("identity") {
+            context
+                .resources::<super::NativeIdentityResource>("identity")
+                .map_err(ComponentCreationError::terminal)?
+                .into_iter()
+                .next()
+        } else {
+            None
+        };
         let proxy = self
-            .construct_bound(
+            .construct_bound_with_identity(
                 CreateRequest {
+                    activation_credentials_bound: false,
                     id: context.component_id,
                     implementation: context.specification.implementation.clone(),
                     configuration_version: context.specification.configuration_version,
@@ -867,6 +1187,8 @@ impl ComponentFactory for NativeFactory {
                 snapshots,
                 consumer_progress,
                 input_progress,
+                source_bootstrap,
+                identity,
             )
             .map_err(|error| {
                 if error

@@ -258,6 +258,8 @@ or arbitrary storage owners. Current native extension contracts include:
 | Admission | Bounded publication through the actual outgoing journal, stable identity and uncertain outcomes | Arbitrary storage access or destination completion |
 | Read-only source progress | Committed positions and cancellation-safe subscriptions | Permission for the plugin to advance another owner's progress |
 | Bootstrap | Query-owned providers, bounded snapshot polling and borrowed initialization-state requests | A second bootstrap executor or partial snapshots treated as complete |
+| Source/bootstrap coordination | One actual source-owned initialization engine and query-scoped bootstrap handles, with graph-owned resource lifetime | Application SQL access, a path-global registry or a separate copied database worker |
+| Source data schema | Bounded reads of the active source's actual catalog, independent of pending data processing | SQL reads/writes or substitution of factory configuration metadata |
 | Handled consumers | Existing delivery runner, retries and completion state; borrowed transactional state when selected | An independent plugin commit or atomic remote effects |
 
 The current transactional participant has no commit operation. The actual

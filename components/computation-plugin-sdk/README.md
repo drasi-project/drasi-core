@@ -96,6 +96,38 @@ typed object-field contract, not arbitrary JSON Schema: it checks required keys,
 allowed additional fields and field types. The constructor validates any further
 domain-specific constraints. Secret fields require host-side unresolved references.
 
+## Optional activation credentials
+
+Factories may opt into `activation_credentials_v1` by implementing
+`supports_activation_credentials() -> bool` and the pure
+`activation_credential_context(&CreateRequest) -> Result<ActivationCredentialContext>`.
+The latter returns the configured `hostname` and `port`, performs no I/O, and
+receives `activation_credentials_bound=true`. It must not require literal
+authentication when that marker is set. Make literal auth fields optional in
+the metadata schema and enforce their conditional requirements in construction.
+
+`CreateRequest::activation_credentials_bound` is a local, serde-skipped SDK
+annotation. The separately negotiated versioned creation envelope sets it for
+existing factory callbacks, including progress and coordinated-source creation.
+Ordinary Rust request literals set it to `false`; the base request encoding,
+base ABI 1.0.0 layouts, and wire version 2 remain unchanged.
+
+Implement `NativeComponent::start_with_credentials(ActivationCredentials)` for
+the bound path. It runs **inside the normal START operation**, with the same
+ownership, busy/role gates, panic containment, progress activation, schema
+generation and retained STOP cleanup as `start()`. The DTO distinguishes
+`UsernamePassword` from `Token`; certificate credentials are explicitly rejected
+by the Host before startup. Credential fields are bounded to 64 KiB and Debug
+redacts both usernames and secrets. Bound startup failures are sanitized at
+the ABI boundary.
+
+Keep acquired credentials transient. Do not modify `configuration()`, captured
+configuration, source identity or the constructor recipe, and do not fall back
+to literals after a provider failure. Unbound instances still use the unchanged
+literal `start()` path. Authentication is not a processing RPC. The SDK cannot
+make a connector's detached startup tasks safe: connector startup must remain
+cancellation-safe under the existing operation-ownership contract.
+
 ## Configuration descriptions
 
 The optional `configuration-v1` entry point publishes field descriptions, defaults,
@@ -125,6 +157,22 @@ The independent network components describe their actual supported choices:
 gRPC source `adaptiveEnabled` allows only `false`, while gRPC sink `batchSize`
 is bounded to `1..=65536`. Optional capabilities are negotiated separately;
 configuration descriptions alone do not enable them.
+
+## Read-only source data schemas
+
+`NativeSource::source_schema_reader()` may return an independent
+`SourceSchemaReader` over the source's actual catalog or bounded worker. Obtaining
+the reader is configuration-only; it must not perform I/O or acquire the mutable
+source processing lock. Reads must remain possible while `next()` is pending.
+This is data-schema discovery, not the factory's configuration schema.
+
+The optional `source_schema_v1` extension carries a bounded MessagePack
+`Option<SourceSchema>` without changing ABI 1.0.0 or envelope wire version 2.
+The SDK permits one schema read per source at a time, limits replies to 1 MiB
+and reads to 30 seconds, and rejects results from stopped or replaced
+activations. Cancellation releases the read slot. Actual failures remain errors;
+older libraries without the extension simply have no native schema reader.
+This interface exposes no SQL execution, database query or transaction methods.
 
 ## Read-only query snapshots
 
@@ -478,6 +526,35 @@ CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo build -p drasi-host-sdk --example n
 
 This proves the read-only service, not production database plugin registration.
 The same test-only library also supplies the synthetic bootstrap fixtures below.
+
+## Internal source/bootstrap coordination
+
+The optional `bootstrap_coordination_v1` extension pairs a source with query-owned
+bootstrap providers when initialization must share the source's actual engine
+and leases. It is not a general plugin service or application SQL API.
+
+The source factory constructs one `NativeSourceBootstrapCoordinator` without I/O.
+Its `SourceBootstrapProgress` contains either the actual single owner or the
+fixed consumer group and all actual member readers. These bootstrap readers are
+active under the coordinator resource lifecycle, even before the live source is
+ready. `create_source` receives the separately negotiated
+`SourceBootstrapLiveProgress`; the returned source must use that exact live view,
+not substitute the bootstrap view. Both refer to the same underlying owners,
+which the Host verifies by identity.
+
+Source and paired bootstrap resources depend on this graph-owned coordinator.
+The source library alone owns its snapshot/live worker coordination. A paired
+bootstrap factory validates `NativeSourceBootstrap::metadata()` and calls
+`open()` to transfer the original source-allocated bootstrap handle. Existing
+preparation, bounded snapshot polling, completion-state and awaited-stop
+operations remain unchanged; no extra snapshot executor or SQL worker is added.
+
+The binding preserves source/configuration/instance/graph identity. A component
+generation may change while the coordinator resource remains valid, but a second
+source instance cannot acquire it until the old instance releases its ownership.
+Resource retirement permanently fences new acquisitions; cancelled or failed
+cleanup does not authorize revoking readers or discarding worker leases.
+Ordinary factories and standalone file bootstrap need no coordinator.
 
 ## Optional query-owned bootstrap
 

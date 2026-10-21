@@ -124,6 +124,16 @@ pub trait NativeBootstrapProvider: Send + Sync {
 
 pub trait BootstrapFactory: Send + Sync + 'static {
     fn metadata(&self) -> BootstrapFactoryMetadata;
+    fn requires_source_bootstrap(&self) -> bool {
+        false
+    }
+    fn create_with_source_bootstrap(
+        &self,
+        _request: &CreateRequest,
+        _source: crate::NativeSourceBootstrap,
+    ) -> anyhow::Result<crate::LinkedBootstrapProvider> {
+        anyhow::bail!("bootstrap factory does not implement source pairing")
+    }
     /// Configuration only. A progress binding, when declared, is the actual
     /// query-owned reader; it is not a private checkpoint store.
     fn create(

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use super::{ChangeEnvelope, ComponentDescriptor, PortId};
 
 pub use drasi_computation_contracts::{
-    InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, WakeupSource,
+    InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, SourceSchemaReader, WakeupSource,
 };
 
 /// Host-owned component lifecycle, independent of legacy Source/Reaction contexts.
@@ -43,6 +43,12 @@ pub trait ComputationComponent: Send + Sync {
     /// Publish read-only query capabilities at construction/reconfiguration
     /// boundaries. Non-query components do not expose a query API.
     fn query_api(&self) -> Option<std::sync::Arc<super::QueryApi>> {
+        None
+    }
+    /// Publish optional source-data schema inspection independently of mutable
+    /// processing. The graph captures this handle at construction/reconfiguration;
+    /// the getter must not perform discovery or other network I/O.
+    fn source_schema_reader(&self) -> Option<std::sync::Arc<dyn SourceSchemaReader>> {
         None
     }
     /// Configuration values, not live processing state. Identity, lifecycle

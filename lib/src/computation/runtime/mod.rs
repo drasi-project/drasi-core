@@ -1991,30 +1991,27 @@ impl Runtime {
         }
     }
     pub(crate) async fn graph_schema(&self) -> anyhow::Result<crate::schema::GraphSchema> {
-        let records: Vec<_> = self.current_records().await?.values().cloned().collect();
+        let publication = self.control()?.registry_snapshot();
+        let sources: Vec<_> = publication
+            .desired
+            .nodes
+            .iter()
+            .filter(|node| {
+                Self::public_component_kind(&publication.desired, node) == Some("source")
+                    && node.descriptor.id().as_str() != crate::sources::COMPONENT_GRAPH_SOURCE_ID
+            })
+            .map(|node| node.descriptor.id().as_str())
+            .collect();
         let mut schema = crate::schema::GraphSchema::default();
-        for record in &records {
-            if let Value::Source(source) = &record.value {
-                if source.source.id() == crate::sources::COMPONENT_GRAPH_SOURCE_ID {
-                    continue;
-                }
-                if let Some(source_schema) = source
-                    .source
-                    .describe_schema()
-                    .filter(|schema| !schema.is_empty())
-                {
-                    schema.merge_source_schema(source.source.id(), &source_schema);
-                } else {
-                    schema.record_source_without_schema(source.source.id());
-                }
-            }
-        }
-        for (id, _) in self.list_components("source").await? {
-            if !records
-                .iter()
-                .any(|record| record.value.instance().id() == id)
+        for id in &sources {
+            if let Some(source_schema) = self
+                .source_schema_at(&publication, id)
+                .await?
+                .filter(|schema| !schema.is_empty())
             {
-                schema.record_source_without_schema(&id);
+                schema.merge_source_schema(id, &source_schema);
+            } else {
+                schema.record_source_without_schema(id);
             }
         }
         for query in self.query_configurations().await? {
@@ -2027,6 +2024,9 @@ impl Runtime {
                 labels.relation_labels.iter().map(String::as_str),
                 &query.id,
             );
+        }
+        for id in sources {
+            self.ensure_source_schema_current(&publication, id)?;
         }
         Ok(schema)
     }

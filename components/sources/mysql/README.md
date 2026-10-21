@@ -138,6 +138,38 @@ visibility or exactly-once delivery.
 
 ## Native ComputationGraph source
 
+The independently hosted native SDK library is
+[`drasi-computation-source-mysql`](../../computation-plugins/sources/mysql/README.md).
+It shares the directly owned protocol, decoder, snapshot and replay engine in
+`drasi-mysql-common` with the Rust interface below. Both static and separately
+built dynamic libraries run in the caller's ComputationGraph; they do not wrap
+the legacy source in another runtime.
+
+The independent library has distinct untracked, single-owner transaction,
+shared-transaction and shared-row factories. Shared rows support actual memory
+query owners as well as persistent owners, with a separate row cursor carrying
+the physical transaction, row offset/count and allocation counter. Their
+minimum and duplicate filtering use physical coverage, not the largest or
+smallest allocation counter. A partial row resumes at its transaction start;
+the last row covers the completed boundary. Row streaming can deliver logged
+MyISAM changes at `ROLLBACK`; coordinated snapshots and whole-transaction modes
+remain InnoDB-only. These additions do not reinterpret legacy tokens or the
+existing native transaction handover.
+
+The independent library also offers `drasi.mysql/positional-changes` and
+`drasi.mysql/shared-positional-changes` for MySQL 5.7/limited-metadata streams.
+They explicitly project `@N` fields and require positional keys, preserve native
+partial-row and persistent consumer recovery, and fence mismatched historical
+catalog hints before admitting rows. They do not fabricate FULL metadata,
+coordinated bootstrap state or a server commit clock. See the native guide for
+the matching-schema history requirement and the separate binding namespace.
+
+The existing Rust factory identity and transaction-recovery contract below
+remain unchanged. Direct Rust callers can opt into ordinary tracked rows with
+`native::MySqlSource::shared_rows` and query-scoped
+`native::MySqlSnapshot::for_row_consumer`, using the same actual
+`ConsumerProgressSet` and explicit `persistent` requirement.
+
 `native::MySqlSource` and `native::MySqlSourceFactory` are separate from
 `MySqlReplicationSource`. They own their TCP/TLS connections directly; they do
 not create `mysql_async` connections, pools or detached driver cleanup tasks.
@@ -167,9 +199,10 @@ Neither retention mode changes MySQL retention settings or purges files. Strict 
 checks both the seconds setting and the older `expire_logs_days` setting; where
 available, `binlog_expire_logs_auto_purge=OFF` also disables automatic expiry.
 Operators must keep expiry disabled for `until_processed` while replay is needed.
-Replay requires transaction output and either a fixed initial file/position or the
-explicit coordinated snapshot mode below; `start: end` is only for non-replay
-operation. A fixed initial position must be a real transaction boundary.
+Transaction replay requires transaction output and either a fixed initial
+file/position or the explicit coordinated snapshot mode below; shared-row
+factories use their own actual row progress contract. `start: end` is only for
+non-replay operation. A fixed initial position must be a real transaction boundary.
 Resume binds to the server UUID, database, selected column definitions,
 source/stream and consumer scope (the producer's graph scope in shared mode).
 It rereads and verifies the last committed
@@ -179,9 +212,12 @@ files**, even though the checkpoint transaction itself is already processed.
 The declared survival scope is Drasi process restart, not arbitrary upstream
 data loss or storage power failure.
 
-Native requirements are MySQL 8.0.20 or newer (not MariaDB), InnoDB tables,
-`ROW` binlogs, `FULL` row images and metadata, `CRC32` checksums, explicit table
-selection, full-column non-null primary keys, and UTF-8/ASCII/binary columns.
+The FULL-metadata native paths require MySQL 8.0.20 or newer (not MariaDB),
+`ROW` binlogs, `FULL` row images and metadata, `CRC32` checksums,
+non-null deterministic graph key values, and UTF-8/ASCII/binary columns.
+Snapshots and transaction output require InnoDB; ordinary row streaming also
+supports MyISAM and MEMORY. This InnoDB restriction applies to coordinated
+snapshots, not the separate native standalone scan.
 Use a distinct nonzero replication `server_id` for each active source. In
 addition to replication permissions, the user needs selected-table/catalog read
 access. Native row IDs use the shared typed `mysql:v1:` format, including binary
@@ -190,6 +226,23 @@ not interchangeable with legacy bootstrap IDs.
 Binary and BIT values preserve their bytes as integer lists; other values retain
 the shared MySQL formatting. Unsupported selected column types are rejected
 during startup, not deferred until the first changed row.
+
+An empty native `tables` list selects the current database catalog. Only
+untracked ordinary-row mode discovers new tables during live replication;
+tracked and whole-transaction modes reject changes to database-wide selection.
+`table_keys: [{table, key_columns}]` overrides the physical primary key; an
+otherwise keyless table can use its `id` column. Nullable declarations are
+accepted, but an actual null graph key is an error. Explicit key overrides add
+their own binding material without changing existing default binding bytes.
+Untracked starts also support `{mode: start}` and `{mode: gtid, set: "..."}`.
+GTID selection does not make file-bound checkpoints or partial-row cursors
+portable across failover.
+
+Native source schema inspection returns the worker's captured database catalog,
+including validated live table additions, without taking the pending stream's
+mutable lock. Construction performs no database I/O, stop clears the catalog,
+and retired readers are fenced. This is separate from factory configuration
+schema inspection.
 
 TLS is directly owned too. `require_verify_full` verifies the trusted CA and
 hostname; `require_verify_ca` verifies the CA only. `require` and `if_available`
@@ -207,8 +260,8 @@ their original causes. There is no silent reconnect/reset-to-end fallback.
 paired constructors accept either a local progress owner or that reader.
 Local readers preserve actual-owner checks. External readers provide reads only,
 not local ownership proof; pairing requires the same reader handle. Fast mode
-does not construct a reader or subscription. This prepares the Rust boundary,
-not the plugin protocol.
+does not construct a reader or subscription. The independent SDK factories use
+the host-validated read-only capabilities over the native boundary.
 
 ### Shared consumer recovery
 
@@ -271,8 +324,10 @@ server-ID-zero binlog requests, like
 They do not reuse the live source's nonzero replication ID or disconnect another
 snapshot. All connections remain explicitly owned and closed.
 
-**Still incomplete:** native plugin ABI and Server registration. Starting an
-unpaired source does not initialize existing rows. DDL affecting the selected database,
+The independent native libraries and canonical Server resource recipes use the
+factory identities linked above; the existing Rust factory remains available.
+Starting an unpaired source does not initialize existing rows. Destructive or
+shape-changing DDL affecting selected data,
 statement-based changes, XA, compressed/tagged transactions, partial JSON updates,
 spatial/vector columns and opaque binary JSON extensions in live events are not
 supported and fail explicitly. Initial JSON uses MySQL's textual representation;
@@ -281,9 +336,12 @@ that does not add support for opaque binary JSON replay.
 ### Opt-in coordinated initial loading
 
 `native::MySqlSnapshot` is a separate native bootstrap provider, not a change to
-the legacy MySQL bootstrapper. It requires a persistent atomic query, transaction
-output, one of the replay policies above, and explicit permission to use
+the legacy MySQL bootstrapper. The transaction-coordinated constructors require
+a persistent atomic query, transaction output, one of the replay policies above,
+and explicit permission to use
 `FLUSH TABLES WITH READ LOCK`. Ordinary streaming never acquires this lock.
+The separate row-consumer constructor and native shared-row bootstrap factory
+also support ordinary memory queries without fabricated persistence.
 
 Given a native configuration, query and its actual progress resource:
 

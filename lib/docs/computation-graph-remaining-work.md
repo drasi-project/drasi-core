@@ -2,13 +2,14 @@
 
 <a id="cw-06"></a>
 
-## 1. Make starting and stopping dependable (CW-06)
+## 1. Finish startup and shutdown deadlines (CW-06)
 
 **Priority:** High. **Effort:** Large.
 
-**Work:** Set separate time limits for startup steps, individual components and
-resources, and the whole shutdown. A timeout must report what remains unfinished
-and who still owns it, without abandoning work or pretending cleanup succeeded.
+**Work:** Complete separate time limits for startup steps, individual components
+and resources, and the whole shutdown across the remaining providers. A timeout
+must identify unfinished work and its actual owner without abandoning accepted
+operations, revoking readers needed for drain, or pretending cleanup succeeded.
 
 **Finish when:** Slow or failing components cannot cause an unexplained indefinite
 wait, and cleanup can be safely retried after a timeout or cancellation.
@@ -27,15 +28,21 @@ conversion and protocol logic:
 | Area | Remaining work |
 |---|---|
 | Kafka and Kubernetes | Native sources and initial-data providers, independently packaged and exercised against real services. |
-| SQL Server | Native source, initial-data provider and stored-procedure output. |
-| MySQL | Independently packaged source and initial-data providers, remaining required modes, and stored-procedure output. |
-| SQLite | Independently packaged live source and coordinated initial loading, usable in a complete Server deployment. |
-| Database discovery | Expose available tables, fields and types through the native source and Server interfaces. |
+| SQL Server | Close capture-table permission, large sink-batch and orphan-marker gaps; qualify bounded CDC paging, streamed snapshots, credentials, replay, procedure effects and cleanup against real SQL Server. |
+| Database discovery | Populate and qualify the remaining family catalogs through the existing native schema reader and Server APIs; factory configuration schemas are not source data schemas. |
 | Network recovery | Resolve required snapshot/progress replacement and destination-completion gaps that the current HTTP/gRPC/SSE contracts do not cover. |
 | Application components | Move remaining old-interface test and example consumers to the native components. |
 
-**Finish when:** Each selected connection works through the new interfaces with
-equivalent functional and failure coverage, including real libraries and services.
+SQL Server's real-database qualification is **deferred by the user** until a
+usable test environment is available. Keep the family explicitly incomplete;
+compilation, unit tests and authored database scenarios do not close that gate.
+
+**Finish when:** Every required source, bootstrapper and reaction/sink exists,
+and a capability-by-capability comparison finds no omitted working legacy
+functionality. Qualify real services, static and freshly built dynamic libraries,
+both Tokio runtimes, and actual Server consumers, including failure, cancellation,
+restart and cleanup. Skipped cases and matching test counts are not proof.
+SQLite has no legacy reaction to port; this work adds no public DrasiLib SQL API.
 
 <a id="cw-45"></a>
 
@@ -94,10 +101,34 @@ and interrupted delivery. Record the actual Server and plugin versions used.
 end-to-end results, including failure and restart, rather than only matching
 intermediate captures.
 
+<a id="cw-13"></a>
+
+## 7. Reject unsupported path bounds and verify query matching (CW-13)
+
+**Priority:** High for the confirmed path-bound gap; conditional on reproduction
+for the historical reports. **Effort:** Medium to large.
+
+**Work:** Stop accepting variable-length relationship bounds and planning them
+as a single edge. Honor the supported bounds through planning and incremental
+execution, or reject unsupported forms explicitly. Separately reproduce
+optional-match filters, outer-variable references, list membership and
+relationship-end reports, including changes and removals.
+
+**Finish when:** An accepted query never silently ignores its hop bounds, and
+each remaining report has a tested fix or evidence that it does not reproduce.
+
+**Reports:** [#795](https://github.com/drasi-project/drasi-core/issues/795),
+[#796](https://github.com/drasi-project/drasi-core/issues/796),
+[#797](https://github.com/drasi-project/drasi-core/issues/797),
+[#798](https://github.com/drasi-project/drasi-core/issues/798),
+[#807](https://github.com/drasi-project/drasi-core/issues/807),
+[#808](https://github.com/drasi-project/drasi-core/issues/808),
+[#812](https://github.com/drasi-project/drasi-core/issues/812).
+
 <a id="cw-43"></a>
 <a id="cw-43-optional-native-query-plugin"></a>
 
-## 7. Finish loadable query support and application definitions (CW-43)
+## 8. Finish loadable query support and application definitions (CW-43)
 
 **Priority:** High for the selected query-component work. **Effort:** Large.
 
@@ -113,7 +144,7 @@ transactions, restart and cleanup behavior.
 
 <a id="cw-47"></a>
 
-## 8. Finish required examples and normal builds (CW-47)
+## 9. Finish required examples and normal builds (CW-47)
 
 **Priority:** High for required examples. **Effort:** Large overall.
 
@@ -127,7 +158,7 @@ Server with clear setup, shutdown and recovery behavior.
 
 <a id="cw-18"></a>
 
-## 9. Keep saved data and retries unambiguous (CW-18)
+## 10. Keep saved data and retries unambiguous (CW-18)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -141,7 +172,7 @@ incompatible records are rejected without silently resetting valid state.
 
 <a id="cw-19"></a>
 
-## 10. Reject excessively deep data safely (CW-19)
+## 11. Reject excessively deep data safely (CW-19)
 
 **Priority:** High where input could terminate the process. **Effort:** Large.
 
@@ -154,7 +185,7 @@ exhausting the call stack or terminating the process.
 
 <a id="cw-20"></a>
 
-## 11. Verify interrupted reset across storage providers (CW-20)
+## 12. Verify interrupted reset across storage providers (CW-20)
 
 **Priority:** High. **Effort:** Large, mainly failure testing.
 
@@ -166,7 +197,7 @@ recovery restores correct rows, progress and output identity.
 
 <a id="cw-22"></a>
 
-## 12. Make errors explain what happened and what to do (CW-22)
+## 13. Make errors explain what happened and what to do (CW-22)
 
 **Priority:** High. **Effort:** Large.
 
@@ -179,7 +210,7 @@ without guessing from a generic error or mistaking rejection for successful work
 
 <a id="cw-23"></a>
 
-## 13. Make live status and log updates reliable (CW-23)
+## 14. Make live status and log updates reliable (CW-23)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -192,7 +223,7 @@ told to refresh, and old readers cannot report a replacement as their old compon
 
 <a id="cw-10"></a>
 
-## 14. Finish public status and result consistency checks (CW-10)
+## 15. Finish public status and result consistency checks (CW-10)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -205,7 +236,7 @@ state and results through replacement, restart and failure.
 
 <a id="cw-03"></a>
 
-## 15. Check remaining extension failure boundaries (CW-03)
+## 16. Check remaining extension failure boundaries (CW-03)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -218,7 +249,7 @@ reuse of damaged objects and allow unrelated healthy work to continue.
 
 <a id="cw-05"></a>
 
-## 16. Extend safe-stop coverage to remaining shared resources (CW-05)
+## 17. Extend safe-stop coverage to remaining shared resources (CW-05)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -231,7 +262,7 @@ cleanup or interrupts an unreported shared owner.
 
 <a id="cw-07"></a>
 
-## 17. Verify overlapping application changes (CW-07)
+## 18. Verify overlapping application changes (CW-07)
 
 **Priority:** High. **Effort:** Large, mainly testing.
 
@@ -244,7 +275,7 @@ and the reported result accurately distinguishes applied changes from failures.
 
 <a id="cw-08"></a>
 
-## 18. Complete cleanup checks across native providers (CW-08)
+## 19. Complete cleanup checks across native providers (CW-08)
 
 **Priority:** High. **Effort:** Large, mainly testing.
 
@@ -257,7 +288,7 @@ reports unfinished ownership truthfully, including after repeated cleanup attemp
 
 <a id="cw-17"></a>
 
-## 19. Make components stop their own background work (CW-17)
+## 20. Make components stop their own background work (CW-17)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -270,7 +301,7 @@ that can affect a replacement or keep its resources unavailable.
 
 <a id="cw-39"></a>
 
-## 20. Test the remaining combinations of failures (CW-39)
+## 21. Test the remaining combinations of failures (CW-39)
 
 **Priority:** High. **Effort:** Large.
 
@@ -284,7 +315,7 @@ effects and cleanup outcomes rather than an inference from single-failure tests.
 
 <a id="cw-41"></a>
 
-## 21. Complete checks using real plugin libraries (CW-41)
+## 22. Complete checks using real plugin libraries (CW-41)
 
 **Priority:** High. **Effort:** Large.
 
@@ -296,9 +327,13 @@ kept loaded for the process lifetime.
 **Finish when:** The selected libraries reject invalid calls and release instance
 resources without letting old callbacks act on replacements.
 
+Include fixture disposal in the evidence: normal, repeated and failed-start
+runs must remove only their owned containers and volumes. An environment failure
+or a skipped database case is not a successful plugin run.
+
 <a id="cw-40"></a>
 
-## 22. Measure larger and longer-running applications (CW-40)
+## 23. Measure larger and longer-running applications (CW-40)
 
 **Priority:** High for release claims. **Effort:** Large.
 
@@ -311,7 +346,7 @@ exact result checks and explicit operating limits.
 
 <a id="cw-31"></a>
 
-## 23. Avoid rebuilding unchanged information for status updates (CW-31)
+## 24. Avoid rebuilding unchanged information for status updates (CW-31)
 
 **Priority:** High for the agreed scaling requirement. **Effort:** Large.
 
@@ -325,7 +360,7 @@ while current-state reads, notifications and required history remain consistent.
 
 <a id="cw-33"></a>
 
-## 24. Reclaim bookkeeping left by removed components (CW-33)
+## 25. Reclaim bookkeeping left by removed components (CW-33)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -338,7 +373,7 @@ unnecessary entries indefinitely, and delayed old requests cannot affect new one
 
 <a id="cw-29"></a>
 
-## 25. Finish memory limits for saved queues and results (CW-29)
+## 26. Finish memory limits for saved queues and results (CW-29)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -351,7 +386,7 @@ and restart without accepting work that cannot be retained safely.
 
 <a id="cw-28"></a>
 
-## 26. Reduce unnecessary disk work and growth (CW-28)
+## 27. Reduce unnecessary disk work and growth (CW-28)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -364,7 +399,7 @@ without changing results, recovery or independent query retention choices.
 
 <a id="cw-32"></a>
 
-## 27. Remove measured repetition from data processing (CW-32)
+## 28. Remove measured repetition from data processing (CW-32)
 
 **Priority:** Medium. **Effort:** Medium.
 
@@ -377,20 +412,24 @@ replay and failure behavior remain unchanged.
 
 <a id="cw-37"></a>
 
-## 28. Make asynchronous tests reliable (CW-37)
+## 29. Make asynchronous tests reliable (CW-37)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
 **Work:** Replace timing guesses with actual completion signals where tests
 depend on them. Isolate shared test state and reproduce the Trading
-`dialogAccessibility.test.tsx` failure under parallel execution.
+`dialogAccessibility.test.tsx` failure under parallel execution. Reconcile
+`duplicate_ports_and_empty_graph_are_rejected` and
+`whole_topology_preflight_rejects_invalid_structure_before_any_side_effects`
+with supported empty/deferred graph construction, preserving their checks for
+genuinely invalid topology rather than excluding them from a claimed full-suite pass.
 
 **Finish when:** Selected tests reliably prove the intended behavior under load
 and on both supported runtime styles, without weakened assertions or inflated timeouts.
 
 <a id="cw-61"></a>
 
-## 29. Restore useful compiler and code-check warnings (CW-61)
+## 30. Restore useful compiler and code-check warnings (CW-61)
 
 **Priority:** Medium. **Effort:** Medium overall; small packages can be done separately.
 
@@ -403,7 +442,7 @@ enabled across supported configurations.
 
 <a id="cw-63"></a>
 
-## 30. Remove the remaining old plugin support (CW-63)
+## 31. Remove the remaining old plugin support (CW-63)
 
 **Priority:** Medium. **Effort:** Medium to large. **Depends on:** Required consumer moves in CW-44/45.
 
@@ -417,7 +456,7 @@ retired code.
 
 <a id="cw-34"></a>
 
-## 31. Simplify the remaining management code (CW-34)
+## 32. Simplify the remaining management code (CW-34)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -430,7 +469,7 @@ graph, with unchanged processing, cancellation, recovery and cleanup behavior.
 
 <a id="cw-24"></a>
 
-## 32. Let applications control logging and monitoring (CW-24)
+## 33. Let applications control logging and monitoring (CW-24)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -444,7 +483,7 @@ Drasi replacing their logging setup or disabling existing logs.
 
 <a id="cw-25"></a>
 
-## 33. Follow a request through processing and delivery (CW-25)
+## 34. Follow a request through processing and delivery (CW-25)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -457,7 +496,7 @@ with meaningful timing and no invented duration across a restart.
 
 <a id="cw-26"></a>
 
-## 34. Make measurements consistent across components (CW-26)
+## 35. Make measurements consistent across components (CW-26)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -470,7 +509,7 @@ boundaries across normal work, retries, batching and failure.
 
 <a id="cw-27"></a>
 
-## 35. Export monitoring data without blocking useful work (CW-27)
+## 36. Export monitoring data without blocking useful work (CW-27)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -483,7 +522,7 @@ processing, and export/flush/shutdown have explicit ownership.
 
 <a id="cw-12"></a>
 
-## 36. Investigate reported errors in grouped results (CW-12)
+## 37. Investigate reported errors in grouped results (CW-12)
 
 **Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
@@ -498,27 +537,6 @@ result and recovery checks.
 [#498](https://github.com/drasi-project/drasi-core/issues/498),
 [#806](https://github.com/drasi-project/drasi-core/issues/806),
 [#411](https://github.com/drasi-project/drasi-core/issues/411).
-
-<a id="cw-13"></a>
-
-## 37. Investigate reported query-matching errors (CW-13)
-
-**Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
-
-**Work:** Reproduce optional-match filters, outer-variable references, list
-membership and relationship-end errors. Verify exact results when candidates
-and relationships change or disappear.
-
-**Finish when:** Each report has a current reproduction and fix, or evidence that
-the reported problem is not present.
-
-**Reports:** [#795](https://github.com/drasi-project/drasi-core/issues/795),
-[#796](https://github.com/drasi-project/drasi-core/issues/796),
-[#797](https://github.com/drasi-project/drasi-core/issues/797),
-[#798](https://github.com/drasi-project/drasi-core/issues/798),
-[#807](https://github.com/drasi-project/drasi-core/issues/807),
-[#808](https://github.com/drasi-project/drasi-core/issues/808),
-[#812](https://github.com/drasi-project/drasi-core/issues/812).
 
 <a id="cw-21"></a>
 

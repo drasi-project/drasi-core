@@ -16,6 +16,7 @@ use futures::FutureExt;
 use std::{
     collections::BTreeMap,
     ops::{Deref, DerefMut},
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
@@ -25,7 +26,7 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use super::v1::{
     ComponentBatch, ComputationGraph, DeploymentReport, DesiredMutation, GraphControl, GraphError,
-    GraphRevision, GraphSelection, GraphState, ObservedGraph, OperationSummary, RejectedResources,
+    GraphRevision, GraphRun, GraphSelection, GraphState, ObservedGraph, OperationSummary, RejectedResources,
     ResourceHandle, ResourceId, ResourceOwnership, StartReport, TopologyBindings,
 };
 use crate::error::{DrasiError, Result};
@@ -239,6 +240,49 @@ struct Entry {
     disposed: AtomicBool,
 }
 
+fn driver_result(result: std::result::Result<(), GraphError>) -> anyhow::Result<()> {
+    match result {
+        Ok(()) | Err(GraphError::Cancelled) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn finish_driver(
+    control: &GraphControl,
+    mut run: Pin<&mut GraphRun<'_>>,
+) -> anyhow::Result<()> {
+    let mut failures = Vec::new();
+    if control.observed().deployment.is_some() {
+        // The existing driver owns and polls this drain even if a shutdown
+        // waiter disappears. Keep real input owners live until producers stop.
+        let stop = control.stop_components(
+            control.desired_snapshot().revision,
+            GraphSelection::All,
+        );
+        tokio::pin!(stop);
+        let report = tokio::select! {
+            result = &mut stop => result,
+            result = &mut run => return driver_result(result),
+        };
+        match report {
+            Ok(report) if report.summary == OperationSummary::Completed => {}
+            Ok(report) => failures.push(super::v1::LifecycleReportError::Stop(report).into()),
+            Err(error) => failures.push(error.into()),
+        }
+    }
+    // Deployment may still own an unfinished constructor. Preserve the
+    // cancellation path and await all cleanup rather than waiting for readiness.
+    control.cancel();
+    if let Err(error) = driver_result(run.await) {
+        failures.push(error);
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::error::OperationFailures::new("computation shutdown failed", failures).into())
+    }
+}
+
 impl Entry {
     fn new(mut graph: ComputationGraph, instance: &str) -> Arc<Self> {
         let id = graph.snapshot().id.to_string();
@@ -275,17 +319,12 @@ impl Entry {
                     .map_err(|_| anyhow::anyhow!("driver control already published"))?;
                 publication.state.send_replace(DriverState::Running);
                 tokio::pin!(run);
-                let result = tokio::select! {
+                tokio::select! {
                     biased;
                     _ = async { let _ = cancellation.wait_for(|cancelled| *cancelled).await; } => {
-                        control.cancel();
-                        run.await
+                        finish_driver(&control, run.as_mut()).await
                     }
-                    result = &mut run => result,
-                };
-                match result {
-                    Ok(()) | Err(GraphError::Cancelled) => Ok::<_, anyhow::Error>(()),
-                    Err(error) => Err(error.into()),
+                    result = &mut run => driver_result(result),
                 }
             }).catch_unwind().await.unwrap_or_else(|payload| {
                 Err(GraphError::Driver {
@@ -327,9 +366,6 @@ impl Entry {
 
     fn request_shutdown(&self) {
         self.cancel.send_replace(true);
-        if let Some(control) = self.control.get() {
-            control.cancel();
-        }
     }
 
     async fn shutdown(&self, pending: &[Arc<PendingComponents>]) -> Result<()> {
