@@ -19,6 +19,21 @@ permissions:
   contents: read
 
 jobs:
+  sdk-release-boundary:
+    name: SDK package compatibility boundary
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Check compatibility line and release closure
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 .github/scripts/check-sdk-release.test.py
+          python3 .github/scripts/check-sdk-release.py --base "$BASE_SHA"
+
   ffi-test:
     name: FFI Tests (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -80,6 +95,8 @@ jobs:
           cargo build --lib -p drasi-reaction-snapshot-test
           cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
           cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+          cargo build --lib -p drasi-source-kubernetes --features drasi-source-kubernetes/dynamic-plugin
+          cargo build --lib -p drasi-bootstrap-kubernetes --features drasi-bootstrap-kubernetes/dynamic-plugin
 
       - name: Copy plugins to test directory
         shell: bash
@@ -122,3 +139,10 @@ jobs:
         env:
           RUST_BACKTRACE: full
         run: cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1 --nocapture
+
+      - name: Check Kubernetes crypto initialization across cdylibs
+        shell: bash
+        run: |
+          cargo test -p drasi-kubernetes-common --test client_crypto_provider
+          cargo test -p drasi-host-sdk --test kubernetes_crypto_provider_test -- --ignored
+          cargo test -p drasi-host-sdk --features registry --lib registry::resolver::tests
