@@ -357,7 +357,7 @@ mod tests {
         let host = HostVersionInfo {
             sdk_version: "0.12.0".into(),
             core_version: "0.5.10".into(),
-            lib_version: "0.9.3".into(),
+            lib_version: "0.9.4".into(),
             target_triple: "aarch64-apple-darwin".into(),
         };
         let resolver = PluginResolver::new(&client, &host);

@@ -134,8 +134,8 @@ def resolved_dependency(name, value, workspace):
     return value.get("package", name), value.get("version")
 
 
-def release_closure(manifests, workspace, packages):
-    affected = SDK_PACKAGES | {n for n, p in packages.items() if p["dynamic"]}
+def release_closure(manifests, workspace, packages, seeds=SDK_PACKAGES):
+    affected = set(seeds) | {n for n, p in packages.items() if p["dynamic"]}
     while True:
         dependents = {
             name for name, package in packages.items()
@@ -164,7 +164,14 @@ def check(base, output=None, check_unused=False):
         if packages[name]["version"] != sdk:
             errors.append(f"{name} must use the same package version as drasi-plugin-sdk ({sdk})")
 
-    affected = release_closure(old_manifests, old_workspace, old) if changed_line else set()
+    changed = {
+        name for name in old
+        if name in packages and old[name]["version"] != packages[name]["version"]
+    }
+    affected = (
+        release_closure(old_manifests, old_workspace, old, changed | SDK_PACKAGES)
+        if changed_line else set()
+    )
     for name in sorted(affected):
         if name not in packages or packages[name]["version"] == old[name]["version"]:
             errors.append(f"{name} needs a new release version for SDK {sdk}")

@@ -67,6 +67,21 @@ class ReleaseClosureTests(unittest.TestCase):
             ("drasi-plugin-sdk", "0.12.0"),
         )
 
+    def test_additional_required_library_release_expands_closure(self):
+        packages = {
+            name: {"manifest": name, "dynamic": False, "publish": True}
+            for name in ("drasi-lib", "state-store", "wrapper")
+        }
+        manifests = {
+            "drasi-lib": {},
+            "state-store": {"dependencies": {"drasi-lib": "0.9.3"}},
+            "wrapper": {"dependencies": {"state-store": "0.2.8"}},
+        }
+        self.assertEqual(
+            release_check.release_closure(manifests, {}, packages, {"drasi-lib"}),
+            {"drasi-lib", "state-store", "wrapper"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

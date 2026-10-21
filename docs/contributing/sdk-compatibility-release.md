@@ -3,7 +3,11 @@
 The SDK package line and the FFI ABI are different contracts. SDK, host SDK, and
 FFI primitives **0.12.0** use FFI ABI **0.14.0**. This release does not change that
 ABI. It separates rebuilt plugins from the 0.11.x package line, which previously
-contained incompatible ABIs. Core **0.5.10** and lib **0.9.3** remain unchanged.
+contained incompatible ABIs. Core **0.5.10** remains unchanged; lib moves from
+**0.9.3 to 0.9.4** because the rebuilt sources require
+`SourceBase::abort_and_join_task`, which is absent from the published 0.9.3
+archive. Its dependent application source, state store, and WAL also receive
+new patch releases.
 
 Until [#989](https://github.com/drasi-project/drasi-core/issues/989) introduces
 explicit registry ABI metadata, every ABI major/minor change must also change
@@ -45,8 +49,8 @@ GHCR repository's tags, including pagination and all platform suffixes. It fails
 closed on inaccessible repositories. Availability is a point-in-time result,
 not a reservation: rerun immediately before approving publication.
 
-The initial 0.12.0 candidate contains **72 changed packages**, **60 dynamic
-plugins**, and **66 crates.io-eligible changed packages**. The map records
+The corrected 0.12.0 candidate contains **76 changed packages**, **60 dynamic
+plugins**, and **70 crates.io-eligible changed packages**. The map records
 per-package old/new versions and eligibility. Unchanged packages retain their
 existing registry checksums and source commit identities; do not label their
 archives with this release's source commit.
@@ -61,9 +65,9 @@ archives with this release's source commit.
    Its old 0.11.4 SDK candidate must not be published. Recheck the final map if
    other pending changes require additional dependency releases.
 3. With explicit release approval, publish crates in dependency order:
-   FFI primitives before plugin SDK before host SDK/plugins; Kubernetes common
+   Lib 0.9.4 and FFI primitives before plugin SDK before host SDK/plugins; Kubernetes common
    before its source/bootstrap; plugins before their dependent wrappers.
-   Unchanged core/lib and other dependencies already exist on crates.io.
+   Unchanged core and other dependencies already exist on crates.io.
 4. The normal `release-plz.yml` release job invokes `publish-plugins.yml` only
    after successful crate publication. That workflow builds all discovered
    plugins, publishes platform-suffixed versions, signs with cosign, and verifies
@@ -79,6 +83,13 @@ Main currently ignores Cargo.lock. The lock/candidate ownership change belongs
 to #987. Local verification generates a workspace lock without committing a
 competing dependency refresh. Final production builds must use the approved
 locked candidate, not an independently resolved dependency graph.
+
+Workspace-only builds do not prove this release graph: unchanged local sources
+can differ from their published archives. Use Cargo's multi-package packaging
+and extracted, normalized candidate sources, with only changed packages
+overridden locally and all unchanged dependencies resolved from the registry.
+The lib 0.9.4 requirement above was found by this distinction. Keep publication
+gated on that hybrid graph and the approved full packaging/release rehearsal.
 
 ## Exclusions and target limits
 

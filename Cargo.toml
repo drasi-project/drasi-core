@@ -157,7 +157,7 @@ drasi-functions-gql = { version = "0.5.10", path = "functions-gql" }
 drasi-middleware = { version = "0.5.11", path = "middleware" }
 drasi-identity-azure = { version = "0.2.16", path = "components/identity/azure" }
 drasi-identity-aws = { version = "0.2.9", path = "components/identity/aws" }
-drasi-lib = { version = "0.9.3", path = "lib" }
+drasi-lib = { version = "0.9.4", path = "lib" }
 drasi-ffi-primitives = { version = "0.12.0", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.12.0", path = "components/plugin-sdk" }
 drasi-host-sdk = { version = "0.12.0", path = "components/host-sdk" }
@@ -169,8 +169,8 @@ roaring = ">=0.11.2, <0.11.4"
 utoipa = { version = "4", features = ["chrono"] }
 drasi-index-rocksdb = { version = "0.6.5", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.3.8", path = "components/indexes/garnet" }
-drasi-state-store-redb = { version = "0.2.8", path = "components/state_stores/redb" }
-drasi-wal-redb = { version = "0.2.10", path = "components/wals/redb" }
+drasi-state-store-redb = { version = "0.2.9", path = "components/state_stores/redb" }
+drasi-wal-redb = { version = "0.2.11", path = "components/wals/redb" }
 
 # Component plugins
 drasi-source-mssql = { version = "0.2.13", path = "components/sources/mssql" }
@@ -181,7 +181,7 @@ drasi-bootstrap-cloudflare-radar = { version = "0.1.11", path = "components/boot
 drasi-reaction-application = { version = "0.3.14", path = "components/reactions/application" }
 drasi-source-postgres = { version = "0.2.13", path = "components/sources/postgres" }
 drasi-source-here-traffic = { version = "0.1.1", path = "components/sources/here-traffic" }
-drasi-source-application = { version = "0.2.11", path = "components/sources/application" }
+drasi-source-application = { version = "0.2.12", path = "components/sources/application" }
 drasi-source-hyperliquid = { version = "0.1.12", path = "components/sources/hyperliquid" }
 drasi-source-cloudflare-radar = { version = "0.1.11", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.16", path = "components/bootstrappers/application" }
