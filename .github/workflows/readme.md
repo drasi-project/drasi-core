@@ -200,6 +200,15 @@ rather than duplicating it between callers.
 | Plugins and catalog | Shared eight-target publisher, native/glibc checks, signing, verification, and public visibility checks | Same implementation and required checks, but plugins, catalog, and signatures use the isolated nightly namespace and unique run/attempt plugin tags |
 | Completion | Successful crate publication gates plugins; required plugin/catalog failures fail the workflow | Packaging and all publication/visibility checks gate the complete-inventory handoff; downstream runtime E2E remains separate |
 
+Both callers also use `xtask`'s binary-backed ABI metadata checks. The SDK
+package annotation (`io.drasi.plugin.sdk-version`) and FFI ABI annotation
+(`io.drasi.plugin.abi-version`) remain distinct. Build metadata obtains the ABI
+from each binary's embedded marker, which also backs its exported FFI metadata.
+Publication rejects missing markers or disagreement with the JSON metadata
+before upload, including dry runs and cross-compiled targets. The same ABI is
+included in the OCI annotation and publication report. These shared producer
+checks do not replace released-host/runtime compatibility checks.
+
 For each changed release step, either rehearse it through the same implementation
 or document why it is production-only and how it is validated separately. Do not
 weaken nightly signing, visibility, locked-build, or complete-inventory checks to

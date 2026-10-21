@@ -80,6 +80,7 @@ struct PluginArtifactMetadata {
     plugin_type: String,
     version: String,
     sdk_version: String,
+    abi_version: String,
     core_version: String,
     lib_version: String,
     target_triple: String,
@@ -546,6 +547,27 @@ fn has_rustls_crypto_provider_marker(plugin: &Path) -> std::io::Result<bool> {
         .any(|window| window == drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER))
 }
 
+fn plugin_binary_abi_version(binary: &[u8]) -> Result<&str, String> {
+    let version = drasi_ffi_primitives::read_plugin_abi_version(binary).map_err(str::to_string)?;
+    semver::Version::parse(version)
+        .map_err(|error| format!("invalid plugin FFI ABI version {version:?}: {error}"))?;
+    Ok(version)
+}
+
+fn validate_plugin_artifact(
+    metadata: &PluginArtifactMetadata,
+    binary: &[u8],
+) -> Result<(), String> {
+    let binary_abi = plugin_binary_abi_version(binary)?;
+    if metadata.abi_version != binary_abi {
+        return Err(format!(
+            "FFI ABI metadata disagrees with binary: metadata={}, binary={binary_abi}",
+            metadata.abi_version
+        ));
+    }
+    Ok(())
+}
+
 fn plugin_build_command(options: PluginBuildOptions<'_>) -> Command {
     let mut cmd = Command::new(options.build_tool);
     cmd.current_dir(options.workspace_root);
@@ -695,6 +717,7 @@ fn build_plugins(args: &[String]) {
     let lib_ext = plugin_lib_ext(target.as_deref());
     let mut missing_binaries = Vec::new();
     let mut plugins_without_rustls_provider = Vec::new();
+    let mut plugins_with_invalid_metadata = Vec::new();
 
     for info in &result.plugins {
         let name = &info.package.name;
@@ -732,7 +755,20 @@ fn build_plugins(args: &[String]) {
                 src.display()
             );
             missing_binaries.push(name.clone());
+            continue;
         }
+
+        let abi_version = match fs::read(&dst)
+            .map_err(|error| error.to_string())
+            .and_then(|binary| plugin_binary_abi_version(&binary).map(str::to_string))
+        {
+            Ok(version) => version,
+            Err(error) => {
+                eprintln!("ERROR: cannot read FFI ABI from {lib_name}: {error}");
+                plugins_with_invalid_metadata.push(name.clone());
+                continue;
+            }
+        };
 
         // Generate metadata.json alongside the plugin binary
         let metadata = PluginArtifactMetadata {
@@ -741,6 +777,7 @@ fn build_plugins(args: &[String]) {
             plugin_type: info.plugin_type.clone(),
             version: info.package.version.clone(),
             sdk_version: result.sdk_version.clone(),
+            abi_version,
             core_version: result.core_version.clone(),
             lib_version: result.lib_version.clone(),
             target_triple: target_triple.clone(),
@@ -750,14 +787,18 @@ fn build_plugins(args: &[String]) {
         let metadata_path = plugins_dir.join(format!("{lib_name}.metadata.json"));
         let metadata_json =
             serde_json::to_string_pretty(&metadata).expect("failed to serialize metadata");
-        fs::write(&metadata_path, metadata_json).unwrap_or_else(|e| {
-            eprintln!("Failed to write metadata for {name}: {e}");
-        });
+        if let Err(error) = fs::write(&metadata_path, metadata_json) {
+            eprintln!("Failed to write metadata for {name}: {error}");
+            plugins_with_invalid_metadata.push(name.clone());
+        }
 
         clean_build_artifacts(&build_dir, &lib_name);
     }
 
-    if !missing_binaries.is_empty() || !plugins_without_rustls_provider.is_empty() {
+    if !missing_binaries.is_empty()
+        || !plugins_without_rustls_provider.is_empty()
+        || !plugins_with_invalid_metadata.is_empty()
+    {
         if !missing_binaries.is_empty() {
             eprintln!(
                 "\n=== {} of {} plugin binaries missing after build ===",
@@ -776,6 +817,15 @@ fn build_plugins(args: &[String]) {
         }
         for name in &plugins_without_rustls_provider {
             eprintln!("  - {name}");
+        }
+        if !plugins_with_invalid_metadata.is_empty() {
+            eprintln!(
+                "\n=== {} plugin binaries have invalid ABI metadata ===",
+                plugins_with_invalid_metadata.len()
+            );
+            for name in &plugins_with_invalid_metadata {
+                eprintln!("  - {name}");
+            }
         }
         eprintln!("\nContents of build directory ({}):", build_dir.display());
         match fs::read_dir(&build_dir) {
@@ -843,7 +893,6 @@ const DEFAULT_REGISTRY: &str = "ghcr.io/drasi-project";
 struct PublishablePlugin {
     metadata: PluginArtifactMetadata,
     binary_path: PathBuf,
-    metadata_path: PathBuf,
 }
 
 fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
@@ -909,10 +958,17 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 std::process::exit(1);
             }
 
+            let validation = fs::read(&binary_path)
+                .map_err(|error| error.to_string())
+                .and_then(|binary| validate_plugin_artifact(&metadata, &binary));
+            if let Err(error) = validation {
+                eprintln!("Invalid plugin artifact {}: {error}", binary_path.display());
+                std::process::exit(1);
+            }
+
             plugins.push(PublishablePlugin {
                 metadata,
                 binary_path,
-                metadata_path: path,
             });
         }
     }
@@ -1122,6 +1178,7 @@ where
                         "kind": plugin.metadata.kind,
                         "target": plugin.metadata.target_triple,
                         "sdk_version": plugin.metadata.sdk_version,
+                        "abi_version": plugin.metadata.abi_version,
                         "core_version": plugin.metadata.core_version,
                         "lib_version": plugin.metadata.lib_version,
                         "reference": reference,
@@ -1539,9 +1596,10 @@ async fn publish_single_plugin(
     let reference: oci_client::Reference = reference_str.parse()?;
 
     let binary_data = fs::read(&plugin.binary_path)?;
+    validate_plugin_artifact(&plugin.metadata, &binary_data)?;
     let binary_size = binary_data.len();
 
-    let metadata_json = fs::read(&plugin.metadata_path)?;
+    let metadata_json = serde_json::to_vec_pretty(&plugin.metadata)?;
 
     let binary_layer = ImageLayer::new(
         bytes::Bytes::from(binary_data),
@@ -1563,42 +1621,11 @@ async fn publish_single_plugin(
         None,
     );
 
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        "org.opencontainers.image.title".to_string(),
-        plugin.metadata.name.clone(),
+    let manifest = oci_client::manifest::OciImageManifest::build(
+        &layers,
+        &config,
+        Some(plugin_annotations(&plugin.metadata)),
     );
-    annotations.insert(
-        "org.opencontainers.image.version".to_string(),
-        plugin.metadata.version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.kind".to_string(),
-        plugin.metadata.kind.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.type".to_string(),
-        plugin.metadata.plugin_type.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.sdk-version".to_string(),
-        plugin.metadata.sdk_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.core-version".to_string(),
-        plugin.metadata.core_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.lib-version".to_string(),
-        plugin.metadata.lib_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.target-triple".to_string(),
-        plugin.metadata.target_triple.clone(),
-    );
-
-    let manifest =
-        oci_client::manifest::OciImageManifest::build(&layers, &config, Some(annotations));
 
     let response = client
         .push(&reference, &layers, config, auth, Some(manifest))
@@ -1611,6 +1638,23 @@ async fn publish_single_plugin(
     );
 
     Ok(response.manifest_url)
+}
+
+fn plugin_annotations(metadata: &PluginArtifactMetadata) -> BTreeMap<String, String> {
+    [
+        ("org.opencontainers.image.title", &metadata.name),
+        ("org.opencontainers.image.version", &metadata.version),
+        ("io.drasi.plugin.kind", &metadata.kind),
+        ("io.drasi.plugin.type", &metadata.plugin_type),
+        ("io.drasi.plugin.sdk-version", &metadata.sdk_version),
+        ("io.drasi.plugin.abi-version", &metadata.abi_version),
+        ("io.drasi.plugin.core-version", &metadata.core_version),
+        ("io.drasi.plugin.lib-version", &metadata.lib_version),
+        ("io.drasi.plugin.target-triple", &metadata.target_triple),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.clone()))
+    .collect()
 }
 
 /// Publish a zero-byte directory entry to the plugin directory package.
@@ -1778,6 +1822,132 @@ mod tests {
             kind: kind.map(str::to_string),
             path: Some(PathBuf::from(name)),
         }
+    }
+
+    fn artifact_metadata() -> PluginArtifactMetadata {
+        PluginArtifactMetadata {
+            name: "drasi-source-mock".to_string(),
+            kind: "mock".to_string(),
+            plugin_type: "source".to_string(),
+            version: "0.1.0".to_string(),
+            sdk_version: "0.11.3".to_string(),
+            abi_version: "0.14.0".to_string(),
+            core_version: "0.5.10".to_string(),
+            lib_version: "0.9.3".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            description: None,
+            license: None,
+        }
+    }
+
+    #[test]
+    fn publication_preserves_sdk_package_annotation_and_adds_distinct_abi() {
+        let metadata = artifact_metadata();
+        let annotations = plugin_annotations(&metadata);
+        assert_eq!(annotations["io.drasi.plugin.sdk-version"], "0.11.3");
+        assert_eq!(annotations["io.drasi.plugin.abi-version"], "0.14.0");
+        assert_eq!(annotations["io.drasi.plugin.core-version"], "0.5.10");
+        assert_eq!(annotations["io.drasi.plugin.lib-version"], "0.9.3");
+        let json = serde_json::to_value(&metadata).expect("artifact metadata JSON");
+        assert_eq!(json["sdk_version"], "0.11.3");
+        assert_eq!(json["abi_version"], "0.14.0");
+    }
+
+    #[test]
+    fn publication_requires_exact_agreement_between_metadata_and_binary_abi() {
+        let mut metadata = artifact_metadata();
+        let binary = b"binary\0drasi-plugin-ffi-abi=0.14.0\0";
+        validate_plugin_artifact(&metadata, binary).expect("matching ABI");
+        for abi in ["0.13.0", "0.14.1", "invalid", ""] {
+            metadata.abi_version = abi.to_string();
+            let error =
+                validate_plugin_artifact(&metadata, binary).expect_err("incorrect metadata");
+            assert!(error.contains("disagrees with binary"), "{error}");
+        }
+        assert!(validate_plugin_artifact(&metadata, b"legacy binary").is_err());
+        assert!(plugin_binary_abi_version(b"drasi-plugin-ffi-abi=invalid\0").is_err());
+    }
+
+    #[test]
+    fn legacy_publication_metadata_must_not_infer_abi_from_package_version() {
+        let mut json = serde_json::to_value(artifact_metadata()).expect("artifact JSON");
+        json.as_object_mut()
+            .expect("metadata object")
+            .remove("abi_version");
+        let error = serde_json::from_value::<PluginArtifactMetadata>(json)
+            .err()
+            .expect("missing ABI metadata");
+        assert!(error.to_string().contains("abi_version"), "{error}");
+    }
+
+    #[test]
+    fn dry_run_publication_rejects_invalid_artifacts_before_upload() {
+        for scenario in [
+            "valid",
+            "legacy",
+            "mismatch",
+            "patch-mismatch",
+            "missing-marker",
+            "invalid-version",
+        ] {
+            let dir = test_temp_dir(scenario);
+            let mut metadata = artifact_metadata();
+            let binary: &[u8] = match scenario {
+                "missing-marker" => b"legacy binary",
+                "invalid-version" => {
+                    metadata.abi_version = "invalid".to_string();
+                    b"binary\0drasi-plugin-ffi-abi=invalid\0"
+                }
+                _ => b"binary\0drasi-plugin-ffi-abi=0.14.0\0",
+            };
+            if scenario == "mismatch" {
+                metadata.abi_version = "0.13.0".to_string();
+            } else if scenario == "patch-mismatch" {
+                metadata.abi_version = "0.14.1".to_string();
+            }
+            let mut json = serde_json::to_value(&metadata).expect("metadata JSON");
+            if scenario == "legacy" {
+                json.as_object_mut()
+                    .expect("metadata object")
+                    .remove("abi_version");
+            }
+            fs::write(
+                dir.join("libdrasi_source_mock.metadata.json"),
+                serde_json::to_vec(&json).expect("metadata bytes"),
+            )
+            .expect("write metadata");
+            fs::write(dir.join("libdrasi_source_mock.dylib"), binary)
+                .expect("write binary fixture");
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "tests::artifact_preflight_probe",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("ABI_PREFLIGHT_PLUGINS_DIR", &dir)
+                .output()
+                .expect("run publication preflight");
+            fs::remove_dir_all(&dir).expect("remove artifact fixtures");
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(scenario != "valid")),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture invoked by dry_run_publication_rejects_invalid_artifacts_before_upload"]
+    fn artifact_preflight_probe() {
+        let plugins_dir = std::env::var("ABI_PREFLIGHT_PLUGINS_DIR").expect("fixture directory");
+        publish_plugins(&[
+            "--plugins-dir".to_string(),
+            plugins_dir,
+            "--dry-run".to_string(),
+            "--sign".to_string(),
+        ]);
     }
 
     struct EnvGuard {
@@ -2482,6 +2652,7 @@ exit 2
                     plugin_type: (*ptype).into(),
                     version: "1.0.0".into(),
                     sdk_version: "1.0.0".into(),
+                    abi_version: "0.14.0".into(),
                     core_version: "1.0.0".into(),
                     lib_version: "1.0.0".into(),
                     target_triple: "target".into(),
@@ -2489,7 +2660,6 @@ exit 2
                     license: None,
                 },
                 binary_path: PathBuf::new(),
-                metadata_path: PathBuf::new(),
             })
             .collect();
         let publications: Vec<_> = plugins
