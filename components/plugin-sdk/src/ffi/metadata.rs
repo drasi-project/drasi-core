@@ -25,9 +25,6 @@ use super::types::FfiStr;
 /// envelope structs and the wire format of serialized payloads, not the package
 /// release. **Bump the minor (pre-1.0) on any `#[repr(C)]` layout change or
 /// payload wire-format change.**
-/// Until #989 introduces explicit OCI ABI metadata, also move the SDK package
-/// major/minor line on ABI major/minor changes and rebuild/reversion all plugins.
-/// Package 0.12.x uses ABI 0.14.x; these numbers are not interchangeable.
 ///
 /// History:
 /// - `0.10.0`: source change / bootstrap events now cross the boundary as
@@ -68,7 +65,7 @@ pub const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP");
 /// The host checks these fields before calling `drasi_plugin_init()`.
 #[repr(C)]
 pub struct PluginMetadata {
-    /// FFI ABI contract version, not the drasi-plugin-sdk package version.
+    /// Version of the drasi-plugin-sdk crate (FFI envelope types).
     pub sdk_version: FfiStr,
     /// Version of drasi-core (opaque pointer types: SourceChange, Element, etc.).
     pub core_version: FfiStr,

@@ -6,7 +6,6 @@ All Drasi plugins (sources, bootstrappers, reactions, indexes, identity, secret 
 - Crate names must follow drasi-{source|reaction|bootstrap|identity|secret-store}-<kind> and declare a `dynamic-plugin` feature with crate-type ["lib","cdylib"] - xtask silently skips nonconforming crates when building and publishing plugins; verify with `cargo run -p xtask -- list-plugins`
 - `export_plugin!` must stay gated behind the `dynamic-plugin` feature (prevents duplicate FFI symbols in static builds)
 - Bump `FFI_SDK_VERSION` (plugin-sdk/src/ffi/metadata.rs) on ANY `#[repr(C)]` layout or wire-format change, including changes made in ffi-primitives or host-sdk
-- Until #989 adds explicit registry ABI metadata, an ABI major/minor change must also move the SDK package major/minor compatibility line and rebuild/reversion every dynamic plugin; run `.github/scripts/check-sdk-release.py --base <base-sha>` (Python 3.11+)
 - Event payloads cross the FFI boundary only as serialized MessagePack - never as repr(Rust) pointers
 - ffi-primitives must stay dependency-free (std only)
 - Indexes, state stores, and WALs are NOT dynamic plugins - they link statically (wiring rules: see lib/AGENTS.md)
