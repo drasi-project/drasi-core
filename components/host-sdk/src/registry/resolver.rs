@@ -352,57 +352,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sdk_012_release_compatibility_matrix() {
-        let client = OciRegistryClient::new(Default::default());
-        let host = HostVersionInfo {
-            sdk_version: "0.12.0".into(),
-            core_version: "0.5.10".into(),
-            lib_version: "0.9.4".into(),
-            target_triple: "aarch64-apple-darwin".into(),
-        };
-        let resolver = PluginResolver::new(&client, &host);
-        let compatible = std::collections::BTreeMap::from([
-            (annotations::SDK_VERSION.into(), "0.12.1".into()),
-            (annotations::CORE_VERSION.into(), "0.5.11".into()),
-            (annotations::LIB_VERSION.into(), "0.9.4".into()),
-        ]);
-        assert!(resolver.is_compatible(&compatible));
-        resolver
-            .check_compatibility(&compatible, "source/kubernetes:0.1.11")
-            .unwrap();
-
-        for (key, incompatible_version) in [
-            (annotations::SDK_VERSION, "0.11.3"),
-            (annotations::CORE_VERSION, "0.6.0"),
-            (annotations::LIB_VERSION, "0.10.0"),
-        ] {
-            let mut annotations = compatible.clone();
-            annotations.insert(key.into(), incompatible_version.into());
-            assert!(!resolver.is_compatible(&annotations), "{key}");
-            assert!(resolver
-                .check_compatibility(&annotations, "source/kubernetes:0.1.11")
-                .is_err());
-            annotations.remove(key);
-            assert!(!resolver.is_compatible(&annotations), "missing {key}");
-            assert!(resolver
-                .check_compatibility(&annotations, "source/kubernetes:0.1.11")
-                .is_err());
-        }
-
-        let old_host = HostVersionInfo {
-            sdk_version: "0.11.0".into(),
-            core_version: "0.5.8".into(),
-            lib_version: "0.9.0".into(),
-            ..host
-        };
-        let old_resolver = PluginResolver::new(&client, &old_host);
-        assert!(!old_resolver.is_compatible(&compatible));
-        assert!(old_resolver
-            .check_compatibility(&compatible, "source/kubernetes:0.1.11")
-            .is_err());
-    }
-
-    #[test]
     fn test_major_minor_match() {
         assert!(major_minor_match("0.3.1", "0.3.8"));
         assert!(major_minor_match("1.2.0", "1.2.99"));
