@@ -401,6 +401,14 @@ impl Runtime {
             if let Some(catalog) = catalog {
                 builder = builder.with_catalog(catalog);
             }
+            #[cfg(feature = "test-support")]
+            if let Some(control) = self
+                .test_controls
+                .get()
+                .and_then(|controls| controls.get(&config.id))
+            {
+                builder = builder.with_test_control(control.clone());
+            }
             for source in &config.sources {
                 let host =
                     match self.source_host(&source.source_id).await {

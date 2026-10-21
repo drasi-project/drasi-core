@@ -2021,14 +2021,9 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
             .start_components(GraphRevision(1), GraphSelection::All)
             .await?;
         assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !admission.is_active()? {
-                tokio::task::yield_now().await;
-            }
-            Ok::<_, anyhow::Error>(())
-        })
-        .await
-        .unwrap_or_else(|_| panic!("admission inactive: {:?}", control.observed()))?;
+        tokio::time::timeout(Duration::from_secs(1), admission.wait_active())
+            .await
+            .unwrap_or_else(|_| panic!("admission inactive: {:?}", control.observed()))?;
         assert!(control
             .set_subscriptions(vec![(
                 ComponentId::try_new("source")?,
@@ -2101,9 +2096,7 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
         control
             .start_components(GraphRevision(1), selection)
             .await?;
-        while !admission.is_active()? {
-            tokio::task::yield_now().await;
-        }
+        admission.wait_active().await?;
         assert_eq!(
             graph_admit(&admission, &session, 3, &event(3)?)
                 .await?
@@ -2549,6 +2542,13 @@ async fn graph_admission_rejects_a_foreign_construction_scope_before_activation(
     );
     assert!(matches!(result, Err(GraphError::Cancelled)));
     assert!(!admission.is_active()?);
+    let error = admission
+        .wait_active()
+        .await
+        .expect_err("scope activation failed");
+    assert!(
+        matches!(error, PipeError::Backend(ref cause) if cause.downcast_ref::<GraphError>().is_some())
+    );
     assert_eq!(channel.progress().await?.accepted, 0);
     graph.shutdown().await?;
     channel.shutdown().await?;

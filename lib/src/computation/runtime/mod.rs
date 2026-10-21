@@ -64,8 +64,17 @@ pub(crate) async fn build(
     reactions: Vec<ReactionRegistration>,
     bootstraps: Vec<BootstrapRegistration>,
     wal: Option<Arc<dyn crate::wal::WalProvider>>,
+    #[cfg(feature = "test-support")] test_controls: BTreeMap<
+        String,
+        crate::test_support::QueryTestControl,
+    >,
 ) -> crate::Result<DrasiLib> {
     let mut core = DrasiLib::new_with_wal(config.clone(), wal);
+    #[cfg(feature = "test-support")]
+    core.computation_runtime
+        .test_controls
+        .set(test_controls)
+        .map_err(|_| crate::DrasiError::invalid_state("test controls already configured"))?;
     let setup = async {
         let mut recipes = BTreeMap::new();
         for (source, kind, properties) in bootstraps {
@@ -304,6 +313,8 @@ fn index_resource_id(name: &str) -> GraphResult<ResourceId> {
 }
 
 pub(crate) struct Runtime {
+    #[cfg(feature = "test-support")]
+    test_controls: OnceLock<BTreeMap<String, crate::test_support::QueryTestControl>>,
     config: Arc<RuntimeConfig>,
     services: LegacyPluginServices,
     middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
@@ -338,6 +349,8 @@ impl Runtime {
         };
         let factory = Arc::new(RuntimeFactory::new(services.clone()));
         Arc::new(Self {
+            #[cfg(feature = "test-support")]
+            test_controls: OnceLock::new(),
             config,
             services,
             middleware,

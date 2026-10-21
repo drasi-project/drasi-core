@@ -196,6 +196,8 @@ pub struct ComputationPipelineBuilder {
     queries: Vec<QueryConfig>,
     reactions: Vec<(Arc<ReactionPluginHost>, bool)>,
     overrides: BTreeMap<String, (Arc<dyn ComputationIndexProvider>, QueryPublicationMode)>,
+    #[cfg(feature = "test-support")]
+    test_control: Option<crate::test_support::QueryTestControl>,
 }
 
 fn encoded(value: &str) -> String {
@@ -240,7 +242,17 @@ impl ComputationPipelineBuilder {
             queries: Vec::new(),
             reactions: Vec::new(),
             overrides: BTreeMap::new(),
+            #[cfg(feature = "test-support")]
+            test_control: None,
         })
+    }
+    #[cfg(feature = "test-support")]
+    pub(crate) fn with_test_control(
+        mut self,
+        control: crate::test_support::QueryTestControl,
+    ) -> Self {
+        self.test_control = Some(control);
+        self
     }
     pub fn catalog(&self) -> QueryResultsCatalog {
         self.catalog.clone()
@@ -572,7 +584,10 @@ impl ComputationPipelineBuilder {
             let input_queue = RankedInputQueue::new(input_capacity)
                 .map_err(|error| invalid(error.to_string()))?;
             let scheduling_id = resource("query-scheduling", &config.id)?;
-            let scheduling = Arc::new(QuerySchedulingResource::default());
+            let scheduling = QuerySchedulingResource::default();
+            #[cfg(feature = "test-support")]
+            let scheduling = scheduling.with_test_control(self.test_control.clone());
+            let scheduling = Arc::new(scheduling);
             builder = builder
                 .declare_resource(ResourceSpecification {
                     id: input_queue_id.clone(),

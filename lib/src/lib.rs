@@ -112,6 +112,9 @@ pub mod component_graph;
 /// Fluent builders for DrasiLib and components
 pub mod builder;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 /// Runtime context types for plugin service injection
 pub mod context;
 

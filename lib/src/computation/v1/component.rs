@@ -62,6 +62,15 @@ pub trait ComputationComponent: Send + Sync {
     /// Supplies a generation-bound sender. This is optional for components that
     /// do not originate control notifications.
     fn bind_control(&mut self, _control: super::ComponentControl) {}
+    /// Bind generation-scoped observation for opt-in query test controls.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    fn bind_query_test_support(
+        &mut self,
+        _inspector: &super::ComputationInspector,
+        _generation: super::ComponentGeneration,
+    ) {
+    }
     /// The shared handler is polled independently of mutable data operations.
     fn control_handler(&self) -> Option<std::sync::Arc<dyn super::ControlHandler>> {
         None

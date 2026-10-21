@@ -975,6 +975,9 @@ Source admission records a client session, consecutive client sequence and
 content with the journal append. A retry returns the same bounded receipt
 instead of appending again. `SourceAdmission` delegates through the graph's
 mailbox to the actual outgoing channel, not a source-private worker or queue.
+Call `wait_active` after startup to fence actual mailbox binding; lifecycle
+`Running` is not that fence. Activation waits are event-driven, cancellation-safe
+and cannot succeed on a superseding processing generation.
 
 Output replay tracking instead recognizes an existing persistent producer's
 logical output. It must not assign a fresh source identity to a replayed query

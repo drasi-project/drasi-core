@@ -30,6 +30,7 @@ mod shared;
 pub use admission::{
     AdmissionOptions, AdmissionReceipt, AdmissionRejection, ProducerSession, ProducerStatus,
 };
+pub(crate) use ingress::AdmissionActivation;
 pub use ingress::SourceAdmission;
 pub use recovery::QosRecoveryOptions;
 pub use replay::{ReplayOptions, ReplayRejection};

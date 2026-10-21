@@ -3,6 +3,36 @@
 
 use super::*;
 
+#[cfg(feature = "test-support")]
+pub(super) struct QueryTestWakeup {
+    pub(super) control: crate::test_support::QueryTestControl,
+    pub(super) pending: Arc<AtomicBool>,
+    pub(super) changed: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl WakeupSource for QueryTestWakeup {
+    async fn wait(&self) -> anyhow::Result<()> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.pending.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = self.control.notified() => return Ok(()),
+                _ = changed => {},
+            }
+        }
+    }
+
+    async fn has_pending(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
 pub(super) const DELIVERED: &str = "\0computation:query-delivered:v1";
 pub(super) const DELIVERY_SEQUENCE: &str = "\0computation:query-delivery-sequence:v1";
 
