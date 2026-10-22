@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::evaluation::variable_value::integer::Integer;
+use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display};
 use core::hash::{Hash, Hasher};
 use serde::de::{self, Deserialize, Deserializer, Visitor};
@@ -40,6 +41,37 @@ impl PartialEq<f64> for Float {
 impl PartialEq<Integer> for Float {
     fn eq(&self, other: &Integer) -> bool {
         self.as_integer_exact().as_ref() == Some(other)
+    }
+}
+
+impl PartialOrd for Float {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.value.partial_cmp(&other.value)
+    }
+}
+
+impl PartialOrd<Integer> for Float {
+    fn partial_cmp(&self, other: &Integer) -> Option<Ordering> {
+        let value = self.value;
+        if value.is_nan() {
+            return None;
+        }
+        if value < i64::MIN as f64 {
+            return Some(Ordering::Less);
+        }
+        if value >= u64::MAX as f64 {
+            return Some(Ordering::Greater);
+        }
+        // Compare the integer part without rounding the other operand to f64.
+        let integral = if value < 0.0 {
+            Integer::from(value as i64)
+        } else {
+            Integer::from(value as u64)
+        };
+        match integral.cmp(other) {
+            Ordering::Equal => value.partial_cmp(&value.trunc()),
+            ordering => Some(ordering),
+        }
     }
 }
 

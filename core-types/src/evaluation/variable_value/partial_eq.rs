@@ -15,12 +15,13 @@
 use super::VariableValue;
 use crate::evaluation::variable_value::duration::Duration;
 use crate::evaluation::variable_value::float::Float;
+use crate::evaluation::variable_value::integer::Integer;
 use chrono::{NaiveDate, NaiveTime};
 
 fn eq_i64(value: &VariableValue, other: i64) -> bool {
     match value {
         VariableValue::Integer(n) => n.as_i64() == Some(other),
-        VariableValue::Float(n) => n.as_f64() == Some(other as f64),
+        VariableValue::Float(n) => n == &Integer::from(other),
         _ => false,
     }
 }
@@ -28,23 +29,19 @@ fn eq_i64(value: &VariableValue, other: i64) -> bool {
 fn eq_u64(value: &VariableValue, other: u64) -> bool {
     match value {
         VariableValue::Integer(n) => n.as_u64() == Some(other),
-        VariableValue::Float(n) => n.as_f64() == Some(other as f64),
+        VariableValue::Float(n) => n == &Integer::from(other),
         _ => false,
     }
 }
 
 fn eq_f32(value: &VariableValue, other: f32) -> bool {
-    match value {
-        VariableValue::Float(n) => n.as_f32() == Some(other),
-        VariableValue::Integer(n) => n.as_i64().is_some_and(|n| n as f64 == other as f64),
-        _ => false,
-    }
+    eq_f64(value, f64::from(other))
 }
 
 fn eq_f64(value: &VariableValue, other: f64) -> bool {
     match value {
-        VariableValue::Float(n) => n.as_f64() == Some(other),
-        VariableValue::Integer(n) => n.as_i64().is_some_and(|n| n as f64 == other),
+        VariableValue::Float(n) => n == &other,
+        VariableValue::Integer(n) => n == &Float::from(other),
         _ => false,
     }
 }
@@ -95,13 +92,11 @@ impl PartialEq<VariableValue> for String {
 
 impl PartialEq<Float> for VariableValue {
     fn eq(&self, other: &Float) -> bool {
-        eq_f64(
-            self,
-            match other.as_f64() {
-                Some(n) => n,
-                None => unreachable!(),
-            },
-        )
+        match self {
+            VariableValue::Float(value) => value == other,
+            VariableValue::Integer(value) => value == other,
+            _ => false,
+        }
     }
 }
 
@@ -217,19 +212,10 @@ use std::cmp::Ordering;
 impl PartialOrd for VariableValue {
     fn partial_cmp(&self, other: &VariableValue) -> Option<Ordering> {
         match (self, other) {
-            (VariableValue::Integer(lhs), VariableValue::Integer(rhs)) => {
-                lhs.as_i64().partial_cmp(&rhs.as_i64())
-            }
-            (VariableValue::Float(lhs), VariableValue::Float(rhs)) => {
-                lhs.as_f64().partial_cmp(&rhs.as_f64())
-            }
-            (VariableValue::Integer(lhs), VariableValue::Float(rhs)) => lhs
-                .as_i64()
-                .map(|lhs| lhs as f64)
-                .partial_cmp(&rhs.as_f64()),
-            (VariableValue::Float(lhs), VariableValue::Integer(rhs)) => lhs
-                .as_f64()
-                .partial_cmp(&rhs.as_i64().map(|rhs| rhs as f64)),
+            (VariableValue::Integer(lhs), VariableValue::Integer(rhs)) => lhs.partial_cmp(rhs),
+            (VariableValue::Float(lhs), VariableValue::Float(rhs)) => lhs.partial_cmp(rhs),
+            (VariableValue::Integer(lhs), VariableValue::Float(rhs)) => lhs.partial_cmp(rhs),
+            (VariableValue::Float(lhs), VariableValue::Integer(rhs)) => lhs.partial_cmp(rhs),
             (
                 VariableValue::Integer(_),
                 VariableValue::String(_)
@@ -363,8 +349,96 @@ impl PartialOrd for VariableValue {
     }
 }
 
-// impl Ord for VariableValue {
-//     fn cmp(&self, other: &Self) -> Ordering {
-//         Ordering::Equal
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_ordering_matches_exact_equality() {
+        let signed = |value: i64| VariableValue::Integer(value.into());
+        let unsigned = |value: u64| VariableValue::Integer(value.into());
+        let float = |value: f64| VariableValue::Float(value.into());
+        let groups = [
+            vec![float(f64::NEG_INFINITY)],
+            vec![float(-f64::MAX)],
+            vec![float(f64::from_bits((i64::MIN as f64).to_bits() + 1))],
+            vec![signed(i64::MIN), float(i64::MIN as f64)],
+            vec![signed(i64::MIN + 1)],
+            vec![signed(-9_007_199_254_740_993)],
+            vec![
+                signed(-9_007_199_254_740_992),
+                float(-9_007_199_254_740_992.0),
+            ],
+            vec![signed(-1), float(-1.0)],
+            vec![float(-0.5)],
+            vec![float(-f64::from_bits(1))],
+            vec![signed(0), unsigned(0), float(-0.0), float(0.0)],
+            vec![float(f64::from_bits(1))],
+            vec![float(0.5)],
+            vec![signed(1), unsigned(1), float(1.0)],
+            vec![
+                unsigned(9_007_199_254_740_992),
+                float(9_007_199_254_740_992.0),
+            ],
+            vec![unsigned(9_007_199_254_740_993)],
+            vec![signed(i64::MAX)],
+            vec![unsigned(1u64 << 63), float((1u64 << 63) as f64)],
+            vec![unsigned(u64::MAX - 1)],
+            vec![unsigned(u64::MAX)],
+            vec![float(u64::MAX as f64)],
+            vec![float(f64::MAX)],
+            vec![float(f64::INFINITY)],
+        ];
+        for (left_group, left_values) in groups.iter().enumerate() {
+            for (right_group, right_values) in groups.iter().enumerate() {
+                let expected = left_group.cmp(&right_group);
+                for left in left_values {
+                    for right in right_values {
+                        assert_eq!(
+                            left.partial_cmp(right),
+                            Some(expected),
+                            "{left:?} compared with {right:?}"
+                        );
+                        assert_eq!(
+                            left == right,
+                            expected == Ordering::Equal,
+                            "{left:?} compared with {right:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let nan = float(f64::NAN);
+        for value in groups.iter().flatten().chain(std::iter::once(&nan)) {
+            assert_eq!(nan.partial_cmp(value), None);
+            assert_eq!(value.partial_cmp(&nan), None);
+            assert_ne!(nan, *value);
+        }
+    }
+
+    #[test]
+    fn primitive_numeric_equality_is_exact() {
+        let rounded = VariableValue::Float(9_007_199_254_740_992.0.into());
+        assert_ne!(rounded, 9_007_199_254_740_993i64);
+        assert_ne!(9_007_199_254_740_993u64, rounded);
+        let integer = VariableValue::Integer(9_007_199_254_740_993u64.into());
+        assert_ne!(integer, 9_007_199_254_740_992.0f64);
+        assert_ne!(9_007_199_254_740_992.0f64, integer);
+        let unsigned = VariableValue::Integer((1u64 << 63).into());
+        assert_eq!(unsigned, (1u64 << 63) as f64);
+        assert_eq!((1u64 << 63) as f64, unsigned);
+        assert_ne!(VariableValue::Integer(u64::MAX.into()), u64::MAX as f64);
+        assert_ne!(VariableValue::Float(1.000_000_000_1.into()), 1.0f32);
+        assert_ne!(
+            VariableValue::Integer(16_777_217u64.into()),
+            16_777_216.0f32
+        );
+        assert_eq!(VariableValue::Float((-0.0).into()), 0i64);
+        assert_eq!(VariableValue::Float((-0.0).into()), 0u64);
+        assert_eq!(
+            VariableValue::Float(f64::INFINITY.into()),
+            Float::from(f64::INFINITY)
+        );
+        assert_ne!(VariableValue::Integer(0.into()), Float::from(f64::NAN));
+    }
+}

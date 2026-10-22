@@ -641,18 +641,10 @@ impl ExpressionEvaluator {
                 self.evaluate_expression(context, e1).await?,
                 self.evaluate_expression(context, e2).await?,
             ) {
-                (VariableValue::Integer(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_i64().unwrap_or_default() < n2.as_i64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() < n2.as_f64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() < n2.as_i64().unwrap_or_default() as f64,
-                ),
-                (VariableValue::Integer(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    (n1.as_i64().unwrap_or_default() as f64) < n2.as_f64().unwrap_or_default(),
-                ),
+                (
+                    left @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                    right @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                ) => VariableValue::Bool(left < right),
                 (VariableValue::Date(date1), VariableValue::Date(date2)) => {
                     VariableValue::Bool(date1 < date2)
                 }
@@ -781,18 +773,10 @@ impl ExpressionEvaluator {
                 self.evaluate_expression(context, e1).await?,
                 self.evaluate_expression(context, e2).await?,
             ) {
-                (VariableValue::Integer(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_i64().unwrap_or_default() <= n2.as_i64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() <= n2.as_f64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() <= n2.as_i64().unwrap_or_default() as f64,
-                ),
-                (VariableValue::Integer(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n1.as_i64().unwrap_or_default() as f64 <= n2.as_f64().unwrap_or_default(),
-                ),
+                (
+                    left @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                    right @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                ) => VariableValue::Bool(left <= right),
                 (VariableValue::ZonedDateTime(zdt1), VariableValue::ZonedDateTime(zdt2)) => {
                     VariableValue::Bool(zdt1.datetime() <= zdt2.datetime())
                 }
@@ -921,18 +905,10 @@ impl ExpressionEvaluator {
                 self.evaluate_expression(context, e1).await?,
                 self.evaluate_expression(context, e2).await?,
             ) {
-                (VariableValue::Integer(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_i64().unwrap_or_default() > n2.as_i64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() > n2.as_f64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() > n2.as_i64().unwrap_or_default() as f64,
-                ),
-                (VariableValue::Integer(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n1.as_i64().unwrap_or_default() as f64 > n2.as_f64().unwrap_or_default(),
-                ),
+                (
+                    left @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                    right @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                ) => VariableValue::Bool(left > right),
                 (VariableValue::Date(date1), VariableValue::Date(date2)) => {
                     VariableValue::Bool(date1 > date2)
                 }
@@ -1085,18 +1061,10 @@ impl ExpressionEvaluator {
                 self.evaluate_expression(context, e1).await?,
                 self.evaluate_expression(context, e2).await?,
             ) {
-                (VariableValue::Integer(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_i64().unwrap_or_default() >= n2.as_i64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() >= n2.as_f64().unwrap_or_default(),
-                ),
-                (VariableValue::Float(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1.as_f64().unwrap_or_default() >= n2.as_i64().unwrap_or_default() as f64,
-                ),
-                (VariableValue::Integer(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n1.as_i64().unwrap_or_default() as f64 >= n2.as_f64().unwrap_or_default(),
-                ),
+                (
+                    left @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                    right @ (VariableValue::Integer(_) | VariableValue::Float(_)),
+                ) => VariableValue::Bool(left >= right),
                 (VariableValue::Date(date1), VariableValue::Date(date2)) => {
                     VariableValue::Bool(date1 >= date2)
                 }
