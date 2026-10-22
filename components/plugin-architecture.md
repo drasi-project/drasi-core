@@ -29,6 +29,27 @@ applications may register statically linked implementations explicitly.
 The singular `dynamic-plugin` feature belongs to each plugin crate and enables
 its export entry points. It does not switch the graph runtime.
 
+### Coexistence and migration decision
+
+Making ComputationGraph the runtime does not require converting every plugin.
+Required ordinary plugins remain supported through graph-owned adapters until
+their callers move. Native libraries are selected explicitly, not substituted
+automatically for an ordinary plugin with a similar name.
+
+The dependency rule is directional: native libraries cannot depend on the
+ordinary SDK or query runtime. An ordinary Rust compatibility entry point may
+delegate to a native implementation instead of copying it; that does not give
+the native library a dependency on the old host. Protocol, mapping and SQL logic
+shared by both families belongs in the relevant `*-common` crate.
+
+Convert remaining families in separately qualified changes, then remove an
+ordinary entry point only after its required callers and behavior are covered.
+The already removed application-bootstrap descriptor is an explicit breaking
+change, documented in its [migration note](bootstrappers/application/README.md#breaking-change-from-descriptor-based-bootstrap).
+Package versions follow workspace release tooling; native ABI metadata and
+configuration versions are independently checked and are not inferred from
+the package version.
+
 **Queries remain built in.** Ordinary and explicitly assembled native queries
 use `ContinuousQueryTransformer` and the existing query engine in the main
 graph. There is no extra query host/private graph. Independently loaded Query

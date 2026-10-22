@@ -23,6 +23,14 @@ the separate session/sequence protocol. See
 [durable admission](../../NETWORK.md#optional-durable-admission) for wire shapes,
 limits and acknowledgement semantics. No gRPC component is loaded.
 
+**Network exposure:** standard event and durable admission routes currently
+have no built-in authentication or per-client rate limit. Do not expose them
+directly to an untrusted network. Bind `host` explicitly to `127.0.0.1` or place
+the listener behind an authenticated, rate-limited proxy on a trusted network.
+The default `0.0.0.0` listens on every interface. Webhook authentication below
+protects configured webhook routes; it does not authenticate the standard
+event or producer-session routes.
+
 ## Webhooks
 
 `webhooks` selects the published HTTP webhook contract instead of the standard

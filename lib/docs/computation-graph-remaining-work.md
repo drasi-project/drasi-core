@@ -31,7 +31,16 @@ conversion and protocol logic:
 | SQL Server | Close capture-table permission, large sink-batch and orphan-marker gaps; qualify bounded CDC paging, streamed snapshots, credentials, replay, procedure effects and cleanup against real SQL Server. |
 | Database discovery | Populate and qualify the remaining family catalogs through the existing native schema reader and Server APIs; factory configuration schemas are not source data schemas. |
 | Network recovery | Resolve required snapshot/progress replacement and destination-completion gaps that the current HTTP/gRPC/SSE contracts do not cover. |
+| HTTP ingress authentication | Protect standard single-event, batch and producer-session routes with explicit authentication and per-client request limits. Define non-loopback exposure rules and test that rejected requests produce no graph changes. Webhook authentication alone does not protect these routes. |
 | Application components | Move remaining old-interface test and example consumers to the native components. |
+
+The HTTP access-control work is deferred from
+[PR #988's ingress review](https://github.com/drasi-project/drasi-core/pull/988#discussion_r4330093015).
+Until it is implemented, standard ingress must be isolated or protected by an
+authenticated, rate-limited proxy. Documenting that restriction is not a fix.
+Future family conversions should be separate, reviewable changes; retaining
+required ordinary plugins through graph-owned adapters does not block runtime
+qualification or require immediate old-stack deletion.
 
 SQL Server's real-database qualification is **deferred by the user** until a
 usable test environment is available. Keep the family explicitly incomplete;
@@ -183,9 +192,30 @@ release of deeply nested values after an error or cancellation.
 **Finish when:** Supported malformed-input cases fail with an error rather than
 exhausting the call stack or terminating the process.
 
+<a id="cw-66"></a>
+
+## 12. Fix the reported dependency security advisories (CW-66)
+
+**Priority:** High. **Effort:** Large across the affected dependency families.
+
+**Work:** Resolve the RustSec findings recorded during
+[PR #988's dependency review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780).
+The current workspace lock reports 23 advisory entries affecting `azure_core`
+0.21, `quick-xml` 0.31/0.37, `quinn-proto` 0.11.17, `rustls` 0.21/0.23.44,
+`rustls-webpki` 0.101/0.103.15, the 1.0.9 WebPKI root packages, and `rsa` 0.9.10.
+Trace each production use, upgrade to patched versions where available, and
+carry the changes into the relevant manifests and tracked consumer lockfiles.
+The legacy TLS/XML/Azure upgrades and the unpatched RSA advisory need explicit
+compatibility or exposure decisions, not blanket advisory suppression.
+
+**Finish when:** Repeatable scans of the supported dependency graphs contain no
+unreviewed applicable advisories, with explicit mitigations for any unpatched
+case. Real TLS/authentication and affected connector tests pass. Do not change
+the allocator ban or add license/advisory exceptions merely to make a check green.
+
 <a id="cw-20"></a>
 
-## 12. Verify interrupted reset across storage providers (CW-20)
+## 13. Verify interrupted reset across storage providers (CW-20)
 
 **Priority:** High. **Effort:** Large, mainly failure testing.
 
@@ -197,7 +227,7 @@ recovery restores correct rows, progress and output identity.
 
 <a id="cw-22"></a>
 
-## 13. Make errors explain what happened and what to do (CW-22)
+## 14. Make errors explain what happened and what to do (CW-22)
 
 **Priority:** High. **Effort:** Large.
 
@@ -210,7 +240,7 @@ without guessing from a generic error or mistaking rejection for successful work
 
 <a id="cw-23"></a>
 
-## 14. Make live status and log updates reliable (CW-23)
+## 15. Make live status and log updates reliable (CW-23)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -223,7 +253,7 @@ told to refresh, and old readers cannot report a replacement as their old compon
 
 <a id="cw-10"></a>
 
-## 15. Finish public status and result consistency checks (CW-10)
+## 16. Finish public status and result consistency checks (CW-10)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -236,7 +266,7 @@ state and results through replacement, restart and failure.
 
 <a id="cw-03"></a>
 
-## 16. Check remaining extension failure boundaries (CW-03)
+## 17. Check remaining extension failure boundaries (CW-03)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -249,7 +279,7 @@ reuse of damaged objects and allow unrelated healthy work to continue.
 
 <a id="cw-05"></a>
 
-## 17. Extend safe-stop coverage to remaining shared resources (CW-05)
+## 18. Extend safe-stop coverage to remaining shared resources (CW-05)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -262,7 +292,7 @@ cleanup or interrupts an unreported shared owner.
 
 <a id="cw-07"></a>
 
-## 18. Verify overlapping application changes (CW-07)
+## 19. Verify overlapping application changes (CW-07)
 
 **Priority:** High. **Effort:** Large, mainly testing.
 
@@ -275,7 +305,7 @@ and the reported result accurately distinguishes applied changes from failures.
 
 <a id="cw-08"></a>
 
-## 19. Complete cleanup checks across native providers (CW-08)
+## 20. Complete cleanup checks across native providers (CW-08)
 
 **Priority:** High. **Effort:** Large, mainly testing.
 
@@ -288,7 +318,7 @@ reports unfinished ownership truthfully, including after repeated cleanup attemp
 
 <a id="cw-17"></a>
 
-## 20. Make components stop their own background work (CW-17)
+## 21. Make components stop their own background work (CW-17)
 
 **Priority:** High. **Effort:** Medium to large.
 
@@ -301,7 +331,7 @@ that can affect a replacement or keep its resources unavailable.
 
 <a id="cw-39"></a>
 
-## 21. Test the remaining combinations of failures (CW-39)
+## 22. Test the remaining combinations of failures (CW-39)
 
 **Priority:** High. **Effort:** Large.
 
@@ -315,7 +345,7 @@ effects and cleanup outcomes rather than an inference from single-failure tests.
 
 <a id="cw-41"></a>
 
-## 22. Complete checks using real plugin libraries (CW-41)
+## 23. Complete checks using real plugin libraries (CW-41)
 
 **Priority:** High. **Effort:** Large.
 
@@ -323,6 +353,14 @@ effects and cleanup outcomes rather than an inference from single-failure tests.
 and replacement tests using independently built libraries. Measure per-instance
 resource release through repeated use; distinguish it from libraries intentionally
 kept loaded for the process lifetime.
+
+Complete the separately requested
+[PR #988 native FFI safety review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780):
+inventory unsafe operations in the ABI, SDK, Host and instance-host paths;
+check each pointer's lifetime, callback/release order and cross-thread use;
+and add failing cases for any uncovered contract. A `SAFETY` comment or a
+validated function-pointer assertion is not itself proof that the complete
+boundary was reviewed. The broader audit is deferred, not reported as passed.
 
 **Finish when:** The selected libraries reject invalid calls and release instance
 resources without letting old callbacks act on replacements.
@@ -333,7 +371,7 @@ or a skipped database case is not a successful plugin run.
 
 <a id="cw-40"></a>
 
-## 23. Measure larger and longer-running applications (CW-40)
+## 24. Measure larger and longer-running applications (CW-40)
 
 **Priority:** High for release claims. **Effort:** Large.
 
@@ -346,7 +384,7 @@ exact result checks and explicit operating limits.
 
 <a id="cw-31"></a>
 
-## 24. Avoid rebuilding unchanged information for status updates (CW-31)
+## 25. Avoid rebuilding unchanged information for status updates (CW-31)
 
 **Priority:** High for the agreed scaling requirement. **Effort:** Large.
 
@@ -360,7 +398,7 @@ while current-state reads, notifications and required history remain consistent.
 
 <a id="cw-33"></a>
 
-## 25. Reclaim bookkeeping left by removed components (CW-33)
+## 26. Reclaim bookkeeping left by removed components (CW-33)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -373,7 +411,7 @@ unnecessary entries indefinitely, and delayed old requests cannot affect new one
 
 <a id="cw-29"></a>
 
-## 26. Finish memory limits for saved queues and results (CW-29)
+## 27. Finish memory limits for saved queues and results (CW-29)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -386,7 +424,7 @@ and restart without accepting work that cannot be retained safely.
 
 <a id="cw-28"></a>
 
-## 27. Reduce unnecessary disk work and growth (CW-28)
+## 28. Reduce unnecessary disk work and growth (CW-28)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -399,7 +437,7 @@ without changing results, recovery or independent query retention choices.
 
 <a id="cw-32"></a>
 
-## 28. Remove measured repetition from data processing (CW-32)
+## 29. Remove measured repetition from data processing (CW-32)
 
 **Priority:** Medium. **Effort:** Medium.
 
@@ -412,7 +450,7 @@ replay and failure behavior remain unchanged.
 
 <a id="cw-37"></a>
 
-## 29. Make asynchronous tests reliable (CW-37)
+## 30. Make asynchronous tests reliable (CW-37)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -424,12 +462,18 @@ depend on them. Isolate shared test state and reproduce the Trading
 with supported empty/deferred graph construction, preserving their checks for
 genuinely invalid topology rather than excluding them from a claimed full-suite pass.
 
+Replace the workspace-wide `--test-threads=1` workaround only after identifying
+and isolating the tests that actually share ports, files or global state. Add a
+normal parallel CI run without dropping serialized coverage where it is still
+needed. This is the deferred
+[PR #988 parallel-testing follow-up](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591575864).
+
 **Finish when:** Selected tests reliably prove the intended behavior under load
 and on both supported runtime styles, without weakened assertions or inflated timeouts.
 
 <a id="cw-61"></a>
 
-## 30. Restore useful compiler and code-check warnings (CW-61)
+## 31. Restore useful compiler and code-check warnings (CW-61)
 
 **Priority:** Medium. **Effort:** Medium overall; small packages can be done separately.
 
@@ -440,9 +484,26 @@ recorded test-infra code-check failures rather than hiding them with broad suppr
 **Finish when:** Selected packages pass their normal checks with useful warnings
 enabled across supported configurations.
 
+<a id="cw-67"></a>
+
+## 32. Pin and verify the CI Protocol Buffers compiler (CW-67)
+
+**Priority:** Medium. **Effort:** Small to medium.
+
+**Work:** Replace unversioned Protocol Buffers compiler installation in native
+FFI and coverage jobs with a reviewed version and verified download or package
+identity on Linux, macOS and Windows. Check the actual installed version and
+rebuild the HTTP/gRPC libraries and wire tests on each supported runner.
+This provisioning change is deferred from
+[PR #988's CI supply-chain review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780);
+an arbitrary version pin that is unavailable on a runner is not a fix.
+
+**Finish when:** CI records the expected compiler version, rejects an unexpected
+artifact, and the existing cross-platform native build/wire checks pass.
+
 <a id="cw-63"></a>
 
-## 31. Remove the remaining old plugin support (CW-63)
+## 33. Remove the remaining old plugin support (CW-63)
 
 **Priority:** Medium. **Effort:** Medium to large. **Depends on:** Required consumer moves in CW-44/45.
 
@@ -456,7 +517,7 @@ retired code.
 
 <a id="cw-34"></a>
 
-## 32. Simplify the remaining management code (CW-34)
+## 34. Simplify the remaining management code (CW-34)
 
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -469,7 +530,7 @@ graph, with unchanged processing, cancellation, recovery and cleanup behavior.
 
 <a id="cw-24"></a>
 
-## 33. Let applications control logging and monitoring (CW-24)
+## 35. Let applications control logging and monitoring (CW-24)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -483,7 +544,7 @@ Drasi replacing their logging setup or disabling existing logs.
 
 <a id="cw-25"></a>
 
-## 34. Follow a request through processing and delivery (CW-25)
+## 36. Follow a request through processing and delivery (CW-25)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -496,7 +557,7 @@ with meaningful timing and no invented duration across a restart.
 
 <a id="cw-26"></a>
 
-## 35. Make measurements consistent across components (CW-26)
+## 37. Make measurements consistent across components (CW-26)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -509,7 +570,7 @@ boundaries across normal work, retries, batching and failure.
 
 <a id="cw-27"></a>
 
-## 36. Export monitoring data without blocking useful work (CW-27)
+## 38. Export monitoring data without blocking useful work (CW-27)
 
 **Priority:** Medium. **Effort:** Large.
 
@@ -522,7 +583,7 @@ processing, and export/flush/shutdown have explicit ownership.
 
 <a id="cw-12"></a>
 
-## 37. Investigate reported errors in grouped results (CW-12)
+## 39. Investigate reported errors in grouped results (CW-12)
 
 **Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
@@ -540,7 +601,7 @@ result and recovery checks.
 
 <a id="cw-21"></a>
 
-## 38. Investigate remaining retry and completion questions (CW-21)
+## 40. Investigate remaining retry and completion questions (CW-21)
 
 **Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
@@ -553,7 +614,7 @@ and genuinely uncertain work, with a fix where a failure is reproduced.
 
 <a id="cw-35"></a>
 
-## 39. Resolve the remaining ownership and limit findings (CW-35)
+## 41. Resolve the remaining ownership and limit findings (CW-35)
 
 **Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 

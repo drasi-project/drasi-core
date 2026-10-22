@@ -18,4 +18,4 @@ The continuous query engine: evaluates parsed Cypher/GQL ASTs against a labeled 
 
 ## Testing
 - The behavioral suite lives in shared-tests, not here - `cargo test -p drasi-core` alone skips it; run `cargo test -p shared-tests` after engine changes (CI runs it via `--workspace`)
-- The `parallel_solver` feature is excluded from CI clippy and tests - build and test with `--features parallel_solver` when touching path_solver, because CI will not catch breakage
+- CI explicitly tests `parallel_solver` with `cargo test -p drasi-core --features parallel_solver`; run that command when touching path_solver. The standard Clippy feature selection does not enable it.

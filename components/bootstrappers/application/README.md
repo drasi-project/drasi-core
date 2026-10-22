@@ -8,6 +8,19 @@ This is a host-linked Rust provider, not a dynamically loaded plugin or a
 Server configuration factory. The old count-only `BootstrapProvider` callback
 and empty configuration descriptor have been removed.
 
+## Breaking change from descriptor-based bootstrap
+
+The removed descriptor cannot be registered with the ordinary plugin registry
+or selected through an old Server bootstrap configuration. Rebuild Rust callers
+against the current provider and attach it to the query as shown below. Server
+applications must select a separately supported bootstrap factory; this package
+does not supply a replacement dynamic or configuration-driven factory.
+
+The old count-only callback did not supply the graph records needed for native
+query initialization. The replacement supplies those records directly, but
+does not add persistent storage or automatically connect application live input
+to snapshot data.
+
 ## Create and attach a provider
 
 ```rust,ignore
