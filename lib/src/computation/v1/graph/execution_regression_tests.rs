@@ -202,7 +202,10 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
             entered.notified().await;
             for owner in &owners {
                 assert!(owner.snapshot().ready && owner.snapshot().admitting);
-                assert!(matches!(report.components[owner.component_id()], StopOutcome::StopFailed(_)));
+                assert!(matches!(
+                    report.components[owner.component_id()],
+                    StopOutcome::StopFailed(_)
+                ));
             }
             let retry = control.stop_components(GraphRevision(1), GraphSelection::All);
             tokio::pin!(retry);
@@ -211,7 +214,9 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
                 result = &mut retry => anyhow::bail!("stop retry completed before drain: {result:?}"),
                 result = tokio::time::timeout(Duration::from_secs(1), entered.notified()) => result?,
             }
-            for owner in &owners { assert!(owner.snapshot().ready && owner.snapshot().admitting); }
+            for owner in &owners {
+                assert!(owner.snapshot().ready && owner.snapshot().admitting);
+            }
             release.add_permits(1);
             let mut completed_run = false;
             let report = tokio::select! {
@@ -224,7 +229,9 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
             };
             assert_eq!(report.summary, OperationSummary::Completed);
             assert_eq!(stops.load(Ordering::SeqCst), 2);
-            for owner in &owners { assert!(!owner.snapshot().ready && !owner.snapshot().admitting); }
+            for owner in &owners {
+                assert!(!owner.snapshot().ready && !owner.snapshot().admitting);
+            }
             if !completed_run {
                 control.cancel();
                 let stopped = tokio::time::timeout(Duration::from_secs(2), &mut run).await?;
@@ -269,7 +276,8 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
         }
         release.add_permits(1);
         tokio::time::timeout(Duration::from_secs(2), retry)
-            .await.context("producer cleanup completed")??;
+            .await
+            .context("producer cleanup completed")??;
         assert_eq!(
             stops.load(Ordering::SeqCst),
             if mode == "cancelled" { 1 } else { 2 }

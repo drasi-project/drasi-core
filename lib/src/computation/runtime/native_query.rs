@@ -1263,14 +1263,61 @@ impl Query for NativeQuery {
         self
     }
     async fn subscription_count(&self) -> usize {
-        if matches!(
-            self.status_now(),
-            ComponentStatus::Running | ComponentStatus::Starting
-        ) {
-            self.config.sources.len()
-        } else {
-            0
+        let publication = self.control.registry_snapshot();
+        if !publication
+            .observed
+            .components
+            .get(self.handle.id())
+            .is_some_and(|state| state.generation == self.handle.generation())
+        {
+            return 0;
         }
+        let reader = SourcePluginAdapterFactory::default()
+            .descriptor()
+            .implementation
+            .clone();
+        let mut resources = BTreeSet::new();
+        for member in query_members(&publication, self.handle.id()).keys() {
+            let Some(specification) = publication.desired.specifications.get(member) else {
+                continue;
+            };
+            if specification.implementation == reader {
+                resources.extend(
+                    specification
+                        .dependencies
+                        .get("subscription")
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+            }
+        }
+        resources
+            .iter()
+            .filter(|resource| {
+                publication
+                    .observed
+                    .resources
+                    .get(*resource)
+                    .is_some_and(|state| state.realization == ResourceRealization::Created)
+            })
+            .filter(|resource| {
+                match publication
+                    .resource(resource)
+                    .and_then(|handle| handle.get::<LegacySourceSubscription>())
+                {
+                    Ok(subscription) => subscription.is_subscribed(),
+                    Err(error) => {
+                        log::warn!(
+                            "Could not inspect query '{}' subscription '{}': {error:#}",
+                            self.handle.id(),
+                            resource
+                        );
+                        false
+                    }
+                }
+            })
+            .count()
     }
     async fn subscribe(&self, _: String) -> anyhow::Result<QuerySubscriptionResponse> {
         let receiver = self.subscribe_native().await?;

@@ -1036,6 +1036,11 @@ impl ComputationGraphBuilder {
                 return Err(topology("duplicate edge"));
             }
             let (from, output) = resolve(&ids, &nodes, &edge.from)?;
+            if !nodes[from].output_streams.contains_key(&edge.from.port) {
+                return Err(topology(
+                    "connect an output only after binding its producer stream",
+                ));
+            }
             if let Some(DesiredPipe::Qos(config)) = provider.specification() {
                 if nodes[from].output_streams.get(&edge.from.port)
                     != Some(&config.definition.stream)

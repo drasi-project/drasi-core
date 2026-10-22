@@ -192,6 +192,9 @@ struct SourceControl {
     stops: AtomicUsize,
     deprovisions: AtomicUsize,
     subscriptions: AtomicUsize,
+    pending_subscription: AtomicBool,
+    subscription_entered: Notify,
+    subscription_release: Notify,
     fail_starts: AtomicUsize,
     fail_stop: AtomicBool,
     noop_stop: AtomicBool,
@@ -903,6 +906,10 @@ impl Source for ControlledSource {
         settings: SourceSubscriptionSettings,
     ) -> anyhow::Result<SubscriptionResponse> {
         self.control.subscriptions.fetch_add(1, Ordering::AcqRel);
+        if self.control.pending_subscription.load(Ordering::Acquire) {
+            self.control.subscription_entered.notify_one();
+            self.control.subscription_release.notified().await;
+        }
         self.inner
             .subscribe_with_bootstrap(&settings, "Controlled")
             .await
@@ -2588,6 +2595,68 @@ async fn a_plugin_failure_before_running_fails_the_start_wait_not_the_addition()
     assert!(!handle.observed().unwrap().started);
     core.remove_source("source", true).await.unwrap();
     core.shutdown().await.unwrap();
+}
+
+async fn verify_query_subscription_count_tracks_running_helpers() {
+    let (source, source_control) = ControlledSource::new("source");
+    source_control.auto_start.store(true, Ordering::Release);
+    source_control
+        .pending_subscription
+        .store(true, Ordering::Release);
+    let core = builder()
+        .with_source(source)
+        .with_query(config("query", Some("source")))
+        .build()
+        .await
+        .unwrap();
+    core.start().await.unwrap();
+    let query = core
+        .query_manager()
+        .get_query_instance("query")
+        .await
+        .unwrap();
+    let handle = component_handle(&core, "query", "query").await;
+    let mut start = Box::pin(query.start());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            result = &mut start => panic!("start finished before source subscription: {result:?}"),
+            _ = source_control.subscription_entered.notified() => {},
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        query.status().await,
+        ComponentStatus::Starting | ComponentStatus::Running
+    ));
+    assert_eq!(
+        query.subscription_count().await,
+        0,
+        "a configured source is not an active subscription"
+    );
+    source_control.subscription_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), &mut start)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), handle.wait_started())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(query.subscription_count().await, 1);
+    query.stop().await.unwrap();
+    assert_eq!(query.subscription_count().await, 0);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_subscription_count_uses_actual_helpers_current_thread() {
+    verify_query_subscription_count_tracks_running_helpers().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_subscription_count_uses_actual_helpers_multi_thread() {
+    verify_query_subscription_count_tracks_running_helpers().await;
 }
 
 #[tokio::test]

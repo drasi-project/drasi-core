@@ -456,11 +456,9 @@ replay and failure behavior remain unchanged.
 
 **Work:** Replace timing guesses with actual completion signals where tests
 depend on them. Isolate shared test state and reproduce the Trading
-`dialogAccessibility.test.tsx` failure under parallel execution. Reconcile
-`duplicate_ports_and_empty_graph_are_rejected` and
-`whole_topology_preflight_rejects_invalid_structure_before_any_side_effects`
-with supported empty/deferred graph construction, preserving their checks for
-genuinely invalid topology rather than excluding them from a claimed full-suite pass.
+`dialogAccessibility.test.tsx` failure under parallel execution. Preserve
+separate checks for valid deferred construction and genuinely invalid topology;
+do not exclude failing cases from a claimed full-suite pass.
 
 Replace the workspace-wide `--test-threads=1` workaround only after identifying
 and isolating the tests that actually share ports, files or global state. Add a

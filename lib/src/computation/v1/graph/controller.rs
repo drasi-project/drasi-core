@@ -4313,10 +4313,9 @@ impl Operations {
             for (&index, &producer) in &blocked {
                 if group.pending.remove(&index) {
                     let id = graph.nodes[index].descriptor.id().clone();
-                    group.outcomes.insert(
-                        id,
-                        StopOutcome::StopFailed(failed[&producer].clone()),
-                    );
+                    group
+                        .outcomes
+                        .insert(id, StopOutcome::StopFailed(failed[&producer].clone()));
                 }
             }
         }
@@ -5910,14 +5909,21 @@ fn cleanup_blockers(
             continue;
         }
         let slot = &graph.components[index];
-        if !slot.uses_consumer_progress.load(std::sync::atomic::Ordering::Acquire)
-            && !slot.uses_replay_progress.load(std::sync::atomic::Ordering::Acquire)
+        if !slot
+            .uses_consumer_progress
+            .load(std::sync::atomic::Ordering::Acquire)
+            && !slot
+                .uses_replay_progress
+                .load(std::sync::atomic::Ordering::Acquire)
         {
             continue;
         }
         let contract = slot.recovery_contract()?;
         let owners = contract.replay_progress.iter().chain(
-            contract.consumer_progress.iter().flat_map(|group| group.owners().values()),
+            contract
+                .consumer_progress
+                .iter()
+                .flat_map(|group| group.owners().values()),
         );
         for owner in owners {
             if owner.graph_id() != graph.snapshot.id.as_ref() {

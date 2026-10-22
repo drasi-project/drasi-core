@@ -526,7 +526,7 @@ impl EnvelopeSink for Consumer {
     }
 }
 
-async fn verify_late_connection() {
+async fn verify_late_connection(late_stream: bool) {
     use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
     let output = PortId::try_new("out").expect("port");
     let input = PortId::try_new("in").expect("port");
@@ -538,25 +538,46 @@ async fn verify_late_connection() {
             effective_from: 17,
         },
     };
-    let mut graph = ComputationGraph::builder("late-connection")
-        .source(Box::new(Producer {
-            descriptor: ComponentDescriptor::try_new(
-                component("producer"),
-                vec![PortDescriptor::new(
-                    output.clone(),
-                    PortDirection::Output,
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )
-            .expect("source descriptor"),
-            output: Some(OutputEnvelope {
-                port: output.clone(),
-                envelope: GraphChangeCodec::encode_change(change.clone(), stream.clone(), 1, None)
-                    .expect("change"),
-            }),
-        }))
-        .bind_stream(Endpoint::new(component("producer"), output.clone()), stream)
+    let (send, mut receive) = tokio::sync::mpsc::channel(1);
+    let consumer = || Consumer {
+        descriptor: ComponentDescriptor::try_new(
+            component("consumer"),
+            vec![PortDescriptor::new(
+                input.clone(),
+                PortDirection::Input,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )
+        .expect("sink descriptor"),
+        output: send.clone(),
+    };
+    let builder = ComputationGraph::builder("late-connection").source(Box::new(Producer {
+        descriptor: ComponentDescriptor::try_new(
+            component("producer"),
+            vec![PortDescriptor::new(
+                output.clone(),
+                PortDirection::Output,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )
+        .expect("source descriptor"),
+        output: Some(OutputEnvelope {
+            port: output.clone(),
+            envelope: GraphChangeCodec::encode_change(change.clone(), stream.clone(), 1, None)
+                .expect("change"),
+        }),
+    }));
+    let builder = if late_stream {
+        builder
+    } else {
+        builder.bind_stream(
+            Endpoint::new(component("producer"), output.clone()),
+            stream.clone(),
+        )
+    };
+    let mut graph = builder
         .build()
         .expect("an unconnected component is a valid declaration");
     let definition = graph
@@ -585,31 +606,57 @@ async fn verify_late_connection() {
                 endpoint: Endpoint::new(component("producer"), output.clone()),
             }
         ));
-        let (send, mut receive) = tokio::sync::mpsc::channel(1);
         control
             .add_component(ComponentAddition::new(ConstructedComponent::sink(
-                Box::new(Consumer {
-                    descriptor: ComponentDescriptor::try_new(
-                        component("consumer"),
-                        vec![PortDescriptor::new(
-                            input.clone(),
-                            PortDirection::Input,
-                            GraphChangeCodec::schema().descriptor().clone(),
-                            PipeRequirements::default(),
-                        )],
-                    )
-                    .expect("sink descriptor"),
-                    output: send,
-                }),
+                Box::new(consumer()),
             )))
             .await
             .expect("sink declaration");
+        let edge = EdgeDefinition::new(
+            Endpoint::new(component("producer"), output.clone()),
+            Endpoint::new(component("consumer"), input.clone()),
+        );
+        if late_stream {
+            let waiting = DependencyWait::Stream {
+                endpoint: Endpoint::new(component("producer"), output.clone()),
+            };
+            assert!(producer
+                .observed()
+                .expect("state")
+                .waiting_for
+                .contains(&waiting));
+            assert!(matches!(
+                receive.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            let revision = control.desired_snapshot().revision;
+            assert!(control
+                .connect(
+                    edge.clone(),
+                    Box::new(BoundedPipeConfig { capacity: 2 }),
+                    RelationshipPolicy::default(),
+                )
+                .await
+                .is_err());
+            assert_eq!(control.desired_snapshot().revision, revision);
+            assert!(control.desired_snapshot().edges.is_empty());
+            assert!(producer
+                .bind_stream(PortId::try_new("missing").expect("port"), stream.clone())
+                .await
+                .is_err());
+            assert!(producer
+                .observed()
+                .expect("state")
+                .waiting_for
+                .contains(&waiting));
+            producer
+                .bind_stream(output.clone(), stream.clone())
+                .await
+                .expect("bind the actual output stream");
+        }
         control
             .connect(
-                EdgeDefinition::new(
-                    Endpoint::new(component("producer"), output),
-                    Endpoint::new(component("consumer"), input),
-                ),
+                edge,
                 Box::new(BoundedPipeConfig { capacity: 2 }),
                 RelationshipPolicy::default(),
             )
@@ -632,12 +679,22 @@ async fn verify_late_connection() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn unconnected_nodes_wait_and_start_when_connected_current_thread() {
-    verify_late_connection().await;
+    verify_late_connection(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unconnected_nodes_wait_and_start_when_connected_multi_thread() {
-    verify_late_connection().await;
+    verify_late_connection(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unbound_stream_waits_and_rejects_early_connection_current_thread() {
+    verify_late_connection(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unbound_stream_waits_and_rejects_early_connection_multi_thread() {
+    verify_late_connection(true).await;
 }
 
 async fn verify_declared_connection_before_producer() {

@@ -1017,13 +1017,27 @@ async fn explicit_creation_dependency_blocks_when_its_required_instance_is_unrea
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         let deployment = control.deployment_report().await.expect("deployment");
-        assert!(matches!(
-            deployment.components[&component("dependent")],
-            CreationOutcome::Blocked { .. }
-        ));
+        let CreationOutcome::Blocked {
+            dependencies,
+            resources,
+        } = &deployment.components[&component("dependent")]
+        else {
+            panic!("dependent was constructed without its required source");
+        };
+        assert!(dependencies.contains(&component("source")));
+        assert!(resources.is_empty());
+        let observed = control.observed();
         assert_eq!(
-            control.observed().relationships[&edge("source", "dependent")].binding,
-            BindingState::Bound
+            observed.relationships[&edge("source", "failed-binding")].binding,
+            BindingState::Failed
+        );
+        assert_eq!(
+            observed.relationships[&edge("source", "dependent")].binding,
+            BindingState::Declared
+        );
+        assert_eq!(
+            observed.relationships[&edge("source", "dependent")].availability,
+            DataAvailability::Unavailable
         );
         control.cancel();
     });

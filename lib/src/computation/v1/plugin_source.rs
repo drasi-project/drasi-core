@@ -457,6 +457,9 @@ impl LegacySourceSubscription {
     pub(crate) fn prepare_start(&self) {
         self.phase.send_replace(SubscriptionPhase::Waiting);
     }
+    pub(crate) fn is_subscribed(&self) -> bool {
+        matches!(*self.phase.borrow(), SubscriptionPhase::Ready)
+    }
     pub(crate) async fn wait_subscribed(&self) -> anyhow::Result<()> {
         let mut phase = self.phase.subscribe();
         loop {
@@ -819,6 +822,9 @@ impl EnvelopeSource for SourcePluginAdapter {
                     != view.reset_generation
                 {
                     self.live = None;
+                    self.subscription
+                        .phase
+                        .send_replace(SubscriptionPhase::Waiting);
                     self.subscription.clear_subscription().await?;
                     continue;
                 }

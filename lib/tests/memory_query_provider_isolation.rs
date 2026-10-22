@@ -189,7 +189,32 @@ async fn default_pipeline_memory_provider_processes_the_same_context_updates() -
         indexes.cleanup().is_none(),
         "default native memory indexes must not spawn plugin I/O tasks"
     );
-    assert!(indexes.checkpoint_store().is_none());
+    assert_eq!(
+        indexes.durability(),
+        drasi_core::interface::StorageDurability::VOLATILE
+    );
+    let checkpoints = indexes
+        .checkpoint_store()
+        .expect("ordinary memory queries expose actual volatile input progress");
+    assert!(!checkpoints.is_persistent());
+    checkpoints.stage_checkpoint("source", 7, None).await?;
+    assert_eq!(
+        checkpoints
+            .read_checkpoint("source")
+            .await?
+            .expect("stored volatile checkpoint")
+            .sequence,
+        7
+    );
+    let fresh = provider
+        .create_indexes("memory-provider-isolation", "capabilities")
+        .await?;
+    assert!(fresh
+        .checkpoint_store()
+        .expect("fresh volatile checkpoint store")
+        .read_checkpoint("source")
+        .await?
+        .is_none());
     assert!(indexes.outbox_writer().is_none());
     drop(indexes);
     write_report(&measure("pipeline-memory", provider).await?)?;

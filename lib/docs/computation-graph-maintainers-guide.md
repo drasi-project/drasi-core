@@ -1682,12 +1682,10 @@ cargo test --locked -p drasi-lib --no-default-features \
 ```
 
 These commands are examples of targeted selection, not the complete CI gate.
-The two unchanged assertions
-`duplicate_ports_and_empty_graph_are_rejected` and
-`whole_topology_preflight_rejects_invalid_structure_before_any_side_effects`
-still conflict with supported empty/deferred construction and remain tracked
-under [CW-37](computation-graph-remaining-work.md#cw-37). Excluding them is not a
-passing full-workspace lifecycle run.
+Empty graphs and valid declarations waiting for connections are supported.
+Keep their positive construction checks separate from invalid-topology
+preflight checks. Duplicate ports, incompatible connections, cycles and invalid
+cleanup limits must still reject before creating pipes or starting components.
 Tests involving source/reaction crates that depend on drasi-lib belong in
 [`lib-integration-tests`](../../lib-integration-tests), avoiding dependency
 cycles. Backend injection can be tested from `lib` with its existing backend

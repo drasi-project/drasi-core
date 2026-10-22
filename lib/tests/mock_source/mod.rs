@@ -17,7 +17,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{
-    ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    ChangeReceiver, ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper,
+    SubscriptionResponse,
 };
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
@@ -26,21 +27,64 @@ use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use ordered_float::OrderedFloat;
 
+#[derive(Clone, Copy, Default)]
+struct SubscriptionCounts {
+    created: usize,
+    active: usize,
+}
+
+struct TrackedReceiver {
+    inner: Box<dyn ChangeReceiver<SourceEventWrapper>>,
+    counts: watch::Sender<SubscriptionCounts>,
+}
+
+#[async_trait]
+impl ChangeReceiver<SourceEventWrapper> for TrackedReceiver {
+    async fn recv(&mut self) -> Result<Arc<SourceEventWrapper>> {
+        self.inner.recv().await
+    }
+}
+
+impl Drop for TrackedReceiver {
+    fn drop(&mut self) {
+        self.counts.send_modify(|counts| {
+            counts.active = counts.active.checked_sub(1).expect("owned subscription");
+        });
+    }
+}
+
 /// A handle for sending events to the mock source
 #[derive(Clone)]
 pub struct MockSourceHandle {
     tx: mpsc::Sender<SourceChange>,
     source_id: String,
+    subscriptions: watch::Sender<SubscriptionCounts>,
 }
 
 impl MockSourceHandle {
+    pub async fn wait_for_subscription_counts(
+        &self,
+        created: usize,
+        active: Option<usize>,
+    ) -> Result<()> {
+        let mut counts = self.subscriptions.subscribe();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            counts.wait_for(|counts| {
+                counts.created == created && active.map_or(true, |active| counts.active == active)
+            }),
+        )
+        .await??;
+        Ok(())
+    }
+
     /// Send a raw source change event
     pub async fn send(&self, change: SourceChange) -> Result<()> {
         self.tx
@@ -85,6 +129,7 @@ impl MockSourceHandle {
 pub struct MockSource {
     base: SourceBase,
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
+    subscriptions: watch::Sender<SubscriptionCounts>,
     #[allow(dead_code)]
     app_tx: mpsc::Sender<SourceChange>,
 }
@@ -95,15 +140,18 @@ impl MockSource {
         let id = id.into();
         let params = SourceBaseParams::new(id.clone());
         let (app_tx, app_rx) = mpsc::channel(1000);
+        let subscriptions = watch::channel(SubscriptionCounts::default()).0;
 
         let handle = MockSourceHandle {
             tx: app_tx.clone(),
             source_id: id.clone(),
+            subscriptions: subscriptions.clone(),
         };
 
         let source = Self {
             base: SourceBase::new(params)?,
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
+            subscriptions,
             app_tx,
         };
 
@@ -207,7 +255,19 @@ impl Source for MockSource {
         &self,
         settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base.subscribe_with_bootstrap(&settings, "Mock").await
+        let mut response = self
+            .base
+            .subscribe_with_bootstrap(&settings, "Mock")
+            .await?;
+        self.subscriptions.send_modify(|counts| {
+            counts.created += 1;
+            counts.active += 1;
+        });
+        response.receiver = Box::new(TrackedReceiver {
+            inner: response.receiver,
+            counts: self.subscriptions.clone(),
+        });
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

@@ -957,7 +957,6 @@ fn whole_topology_preflight_rejects_invalid_structure_before_any_side_effects() 
         "wrong-direction",
         "wrong-schema",
         "role",
-        "unconnected",
         "duplicate-edge",
         "missing-stream",
         "duplicate-stream",
@@ -1064,24 +1063,22 @@ fn whole_topology_preflight_rejects_invalid_structure_before_any_side_effects() 
             .unwrap(),
             _ => BoundedPipeConfig { capacity: 1 }.capabilities().unwrap(),
         };
-        if case != "unconnected" {
-            let provider: Box<dyn PipeProvider> =
-                if matches!(case, "zero-capacity" | "oversized-capacity") {
-                    Box::new(BoundedPipeConfig {
-                        capacity: if case == "zero-capacity" {
-                            0
-                        } else {
-                            usize::MAX
-                        },
-                    })
-                } else {
-                    Box::new(FailingProvider {
-                        creates: creates.clone(),
-                        capabilities,
-                    })
-                };
-            builder = builder.connect(definition.clone(), provider);
-        }
+        let provider: Box<dyn PipeProvider> =
+            if matches!(case, "zero-capacity" | "oversized-capacity") {
+                Box::new(BoundedPipeConfig {
+                    capacity: if case == "zero-capacity" {
+                        0
+                    } else {
+                        usize::MAX
+                    },
+                })
+            } else {
+                Box::new(FailingProvider {
+                    creates: creates.clone(),
+                    capabilities,
+                })
+            };
+        builder = builder.connect(definition.clone(), provider);
         if case == "duplicate-edge" {
             builder = builder.connect(definition, Box::new(BoundedPipeConfig { capacity: 1 }));
         }
@@ -1124,7 +1121,31 @@ fn whole_topology_preflight_rejects_invalid_structure_before_any_side_effects() 
 }
 
 #[test]
-fn duplicate_ports_and_empty_graph_are_rejected() {
+fn empty_and_deferred_graphs_build_without_startup_side_effects() {
+    let empty = ComputationGraph::builder("empty").build().unwrap();
+    assert!(empty.snapshot().nodes.is_empty());
+    assert!(empty.snapshot().edges.is_empty());
+
+    let signals = Signals::default();
+    let unconnected = ComputationGraph::builder("unconnected")
+        .source(Box::new(Fixture::source(&signals)))
+        .sink(Box::new(Fixture::sink(&signals)))
+        .bind_stream(
+            endpoint("source", "out"),
+            StreamId::try_new("source/out").unwrap(),
+        )
+        .build()
+        .unwrap();
+    assert_eq!(unconnected.snapshot().nodes.len(), 2);
+    assert!(unconnected.snapshot().edges.is_empty());
+    assert!(signals.starts.lock().unwrap().is_empty());
+    assert!(signals.stops.lock().unwrap().is_empty());
+    assert_eq!(signals.produced.load(Ordering::SeqCst), 0);
+    assert_eq!(signals.handled.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn duplicate_ports_and_invalid_cleanup_timeouts_are_rejected() {
     assert!(matches!(
         ComponentDescriptor::try_new(
             component("duplicate"),
@@ -1145,7 +1166,6 @@ fn duplicate_ports_and_empty_graph_are_rejected() {
         ),
         Err(ContractError::DuplicatePort { .. })
     ));
-    assert!(ComputationGraph::builder("empty").build().is_err());
     let signals = Signals::default();
     for timeout in [std::time::Duration::ZERO, std::time::Duration::MAX] {
         assert!(direct(
