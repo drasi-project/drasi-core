@@ -785,27 +785,9 @@ async fn initialize(shared: &Arc<Shared>) -> Result<()> {
     }
     core.reconcile_desired_state().await?;
     shared.phase(HostPhase::Starting, None);
-    let mut observed = core.computation_control()?.subscribe_observed();
     core.start().await?;
     shared.phase(HostPhase::Running, None);
-    loop {
-        let status = shared.status();
-        if status.ready {
-            return Ok(());
-        }
-        ensure!(
-            status.phase != HostPhase::Failed,
-            "DrasiLib did not reach healthy native readiness: {}",
-            status
-                .error
-                .as_deref()
-                .unwrap_or("component readiness failed")
-        );
-        observed
-            .changed()
-            .await
-            .context("DrasiLib readiness observer closed")?;
-    }
+    Ok(())
 }
 
 async fn execute(shared: &Arc<Shared>, command: ControlCommand) -> Result<serde_json::Value> {

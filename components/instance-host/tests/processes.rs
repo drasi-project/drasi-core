@@ -552,63 +552,118 @@ fn plugin_allowlist_failure_remains_an_observable_host_not_a_ready_listening_soc
 }
 
 #[test]
-fn persisted_normal_management_keeps_failed_desired_state_and_excludes_duplicate_owner(
+fn persisted_normal_management_keeps_waiting_and_failed_state_and_excludes_duplicate_owner(
 ) -> Result<()> {
-    let directory = Directory::new()?;
-    let key_path = directory.join("key");
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&key_path)?
-        .write_all(&[73; 32])?;
-    let mut config = HostConfig::empty("persistent", directory.join("a"));
-    config.configuration_store = Some(ConfigurationStorage { key_file: key_path });
-    let mut host = HostProcess::spawn(&config, &directory)?;
-    let ready = host.wait(|status| status.ready)?;
-    assert!(ready.configuration_persistent);
-    let mut duplicate = HostProcess::spawn(&config, &directory)?;
-    assert!(!duplicate.wait_exit()?.success());
-    assert_eq!(host.status()?.generation, ready.generation);
-    let mut changed = config.clone();
-    add(
-        &mut changed,
-        ComponentSpecification {
-            descriptor: ComponentDescriptor::try_new(id("unavailable"), Vec::new())?,
-            role: ComponentRole::Service,
-            completion: None,
-            implementation: ImplementationIdentity::try_new("not-installed/service", "1")?,
-            configuration_version: 1,
-            configuration: BTreeMap::new(),
-            dependencies: BTreeMap::new(),
-        },
-    );
-    let apply = host.operation(ControlCommand::Apply {
-        expected_revision: ready.configuration_revision.unwrap(),
-        management_request_id: "persist-failed-definition".into(),
-        desired: Box::new(changed.desired),
-    })?;
-    let applied = host.wait_operation(apply)?;
-    assert_eq!(applied.phase, OperationPhase::Completed, "{applied:?}");
-    assert_eq!(applied.result.as_ref().unwrap()["durable"], true);
-    let revision = applied.result.as_ref().unwrap()["revision"]
-        .as_u64()
-        .unwrap();
-    host.stop()?;
-    let mut restored = HostProcess::spawn(&config, &directory)?;
-    let observed = restored.wait(|status| status.phase == HostPhase::Failed)?;
-    assert_eq!(observed.configuration_revision, Some(revision));
-    let ControlReply::Configuration { configuration } = restored
-        .client()?
-        .request(Uuid::new_v4(), ControlCommand::Configuration)?
-    else {
-        panic!("configuration response")
-    };
-    assert_eq!(
-        configuration.desired.topology.components[0].descriptor.id(),
-        &id("unavailable")
-    );
-    restored.stop()
+    for mode in ["missing-factory", "unknown-mode", "start-error"] {
+        let directory = Directory::new()?;
+        let key_path = directory.join("key");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_path)?
+            .write_all(&[73; 32])?;
+        let mut config = HostConfig::empty("persistent", directory.join("a"));
+        config.configuration_store = Some(ConfigurationStorage { key_file: key_path });
+        let mut changed = config.clone();
+        let component = if mode == "missing-factory" {
+            add(
+                &mut changed,
+                ComponentSpecification {
+                    descriptor: ComponentDescriptor::try_new(id("unavailable"), Vec::new())?,
+                    role: ComponentRole::Service,
+                    completion: None,
+                    implementation: ImplementationIdentity::try_new("not-installed/service", "1")?,
+                    configuration_version: 1,
+                    configuration: BTreeMap::new(),
+                    dependencies: BTreeMap::new(),
+                },
+            );
+            "unavailable"
+        } else {
+            native(&mut changed, mode, &directory.join("native"), 0, 0)?;
+            config.plugins = changed.plugins.clone();
+            "native"
+        };
+        let expected = changed.desired.clone();
+        let mut host = HostProcess::spawn(&config, &directory)?;
+        let ready = host.wait(|status| status.ready)?;
+        assert!(ready.configuration_persistent);
+        let mut duplicate = HostProcess::spawn(&config, &directory)?;
+        assert!(!duplicate
+            .wait_exit()
+            .with_context(|| format!("{mode}: duplicate host must be rejected"))?
+            .success());
+        assert_eq!(host.status()?.generation, ready.generation);
+        let apply = host.operation(ControlCommand::Apply {
+            expected_revision: ready.configuration_revision.unwrap(),
+            management_request_id: format!("persist-{mode}"),
+            desired: Box::new(changed.desired),
+        })?;
+        let applied = host.wait_operation(apply)?;
+        assert_eq!(
+            applied.phase,
+            OperationPhase::Completed,
+            "{mode}: {applied:?}"
+        );
+        assert_eq!(applied.result.as_ref().unwrap()["durable"], true);
+        let revision = applied.result.as_ref().unwrap()["revision"]
+            .as_u64()
+            .unwrap();
+        host.stop()
+            .with_context(|| format!("{mode}: stop after apply; status={:?}", host.status()))?;
+        let mut restored = HostProcess::spawn(&config, &directory)?;
+        let observed = restored.wait(|status| {
+            status.configuration_revision == Some(revision)
+                && if mode == "missing-factory" {
+                    status.phase == HostPhase::Running
+                        && status
+                            .components
+                            .iter()
+                            .any(|node| node.id == component && node.realization == "Blocked")
+                } else {
+                    status.phase == HostPhase::Failed
+                }
+        })?;
+        assert!(!observed.ready, "{mode}");
+        let state = observed
+            .components
+            .iter()
+            .find(|node| node.id == component)
+            .context("persisted component observation")?;
+        if mode == "missing-factory" {
+            assert!(observed.healthy);
+            assert!(state.failure.is_none());
+            assert_eq!(state.lifecycle, "Stopped");
+        } else {
+            assert!(!observed.healthy);
+            assert!(state.failure.is_some(), "{mode}: {state:?}");
+        }
+        let ControlReply::Configuration { configuration } = restored
+            .client()?
+            .request(Uuid::new_v4(), ControlCommand::Configuration)?
+        else {
+            panic!("configuration response")
+        };
+        assert_eq!(configuration.desired, expected, "{mode}");
+        if mode == "missing-factory" {
+            let reconcile = restored.operation(ControlCommand::Reconcile)?;
+            let reconciled = restored.wait_operation(reconcile)?;
+            assert_eq!(
+                reconciled.phase,
+                OperationPhase::Completed,
+                "{mode}: {reconciled:?}"
+            );
+            assert!(!restored.status()?.ready);
+        }
+        restored.stop().with_context(|| {
+            format!(
+                "{mode}: stop after reconstruction; status={:?}",
+                restored.status()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

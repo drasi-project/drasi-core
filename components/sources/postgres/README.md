@@ -180,6 +180,9 @@ streaming, coordinated initial loading and persistent restart. Tests inspect
 server-side encryption and session retirement, and reject unknown CAs, wrong
 hostnames, expired certificates and invalid certificate settings without advancing
 query progress. The existing TLS-refusal case also remains required.
+On Unix, fixture checks also use the `openssl` command-line tool to verify the
+generated certificate chain and reject an unrelated CA, independently of the
+platform TLS backend.
 
 ## Architecture
 

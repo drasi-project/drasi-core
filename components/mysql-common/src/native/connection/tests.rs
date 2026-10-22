@@ -454,8 +454,8 @@ fn greeting_rejects_every_invalid_raw_nonce_length_before_dependency_parsing() -
 async fn owned_mysql_connections_authenticate_query_and_close_without_driver_tasks() -> Result<()> {
     use chrono::Datelike;
     use rcgen::{
-        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-        KeyUsagePurpose,
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+        IsCa, KeyPair, KeyUsagePurpose,
     };
     let today = chrono::Utc::now().date_naive();
     let expires = today + chrono::Duration::days(7);
@@ -463,6 +463,9 @@ async fn owned_mysql_connections_authenticate_query_and_close_without_driver_tas
     let after = rcgen::date_time_ymd(expires.year(), expires.month() as u8, expires.day() as u8);
     let ca_key = KeyPair::generate()?;
     let mut ca = CertificateParams::new(Vec::new())?;
+    ca.distinguished_name = DistinguishedName::new();
+    ca.distinguished_name
+        .push(DnType::CommonName, "Drasi MySQL fixture CA");
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     ca.not_before = before;
@@ -470,6 +473,10 @@ async fn owned_mysql_connections_authenticate_query_and_close_without_driver_tas
     let ca = ca.self_signed(&ca_key)?;
     let key = KeyPair::generate()?;
     let mut server = CertificateParams::new(vec!["localhost".into()])?;
+    server.distinguished_name = DistinguishedName::new();
+    server
+        .distinguished_name
+        .push(DnType::CommonName, "localhost");
     server.not_before = before;
     server.not_after = after;
     server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
