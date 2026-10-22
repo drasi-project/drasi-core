@@ -58,6 +58,12 @@ resolver reference.
 | `command_timeout_ms` | Positive, default 30,000; also sets PostgreSQL `statement_timeout`. |
 | `connect_timeout_ms`, `shutdown_timeout_ms` | Positive, default 30,000 each. |
 
+Use `ssl=true` outside a trusted local deployment. With `ssl=false`, query data
+and authentication traffic are not encrypted; the sink logs a warning for a
+non-loopback hostname. TLS verifies the server hostname and uses the system
+trust store, plus `tls_ca_pem` when supplied. The selected trust source is logged
+at debug level without logging certificate contents or credentials.
+
 Routing is full query ID, last dotted segment, then default, resolved separately
 for ADD/UPDATE/DELETE. Aggregations use the UPDATE template as in the legacy
 reaction. Context keys are `query_id`, `query_name`, `operation`, RFC3339

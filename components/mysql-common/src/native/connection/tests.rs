@@ -558,6 +558,34 @@ async fn owned_mysql_connections_authenticate_query_and_close_without_driver_tas
     let connection = Connection::connect(&verified, 1024 * 1024, Duration::from_secs(5)).await?;
     assert!(connection.encrypted);
     connection.close().await?;
+    let wrong_ca_key = KeyPair::generate()?;
+    let mut wrong_ca = CertificateParams::new(Vec::new())?;
+    wrong_ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    wrong_ca.not_before = before;
+    wrong_ca.not_after = after;
+    let wrong_ca = wrong_ca.self_signed(&wrong_ca_key)?;
+    for mode in [MySqlTlsMode::IfAvailable, MySqlTlsMode::Require] {
+        let mut configured = verified.clone();
+        configured.ssl_mode = mode;
+        configured.tls_ca_pem = Some(wrong_ca.pem());
+        let error =
+            match Connection::connect(&configured, 1024 * 1024, Duration::from_secs(5)).await {
+                Ok(connection) => {
+                    connection.close().await?;
+                    anyhow::bail!("{mode:?} ignored the configured CA");
+                }
+                Err(error) => error,
+            };
+        assert!(
+            error.downcast_ref::<native_tls::Error>().is_some(),
+            "wrong CA must fail TLS verification, not authentication: {error:#}"
+        );
+        configured.tls_ca_pem = verified.tls_ca_pem.clone();
+        let connection =
+            Connection::connect(&configured, 1024 * 1024, Duration::from_secs(5)).await?;
+        assert!(connection.encrypted);
+        connection.close().await?;
+    }
     verified.ssl_mode = MySqlTlsMode::RequireVerifyFull;
     assert!(
         Connection::connect(&verified, 1024 * 1024, Duration::from_secs(5))

@@ -22,6 +22,13 @@ use tokio_postgres::{Client, NoTls, Transaction};
 type DriverResult = std::result::Result<(), tokio_postgres::Error>;
 type Driver = Pin<Box<dyn Future<Output = DriverResult> + Send>>;
 
+fn is_loopback_hostname(hostname: &str) -> bool {
+    hostname.eq_ignore_ascii_case("localhost")
+        || hostname
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 struct ProcedureEffect {
     config: Arc<PostgresStoredProcConfig>,
     templates: Arc<HashMap<String, CompiledTemplate>>,
@@ -120,6 +127,14 @@ impl PostgresStoredProcSink {
             ));
         if self.config.ssl {
             config.ssl_mode(tokio_postgres::config::SslMode::Require);
+            log::debug!(
+                "Native PostgreSQL sink verifies TLS using system trust{}",
+                if self.config.tls_ca_pem.is_some() {
+                    " and the configured additional CA"
+                } else {
+                    ""
+                }
+            );
             let mut tls = native_tls::TlsConnector::builder();
             if let Some(pem) = &self.config.tls_ca_pem {
                 tls.add_root_certificate(
@@ -141,6 +156,12 @@ impl PostgresStoredProcSink {
                 .await?;
             Ok((client, Box::pin(connection)))
         } else {
+            if !is_loopback_hostname(&self.config.hostname) {
+                log::warn!(
+                    "Native PostgreSQL sink connects to a non-loopback host without TLS; \
+                     query data and authentication traffic are not encrypted. Set ssl=true."
+                );
+            }
             config.ssl_mode(tokio_postgres::config::SslMode::Disable);
             let (client, connection) = config.connect(NoTls).await?;
             Ok((client, Box::pin(connection)))
@@ -255,6 +276,21 @@ impl Drop for PostgresStoredProcSink {
         if let Some(driver) = self.driver.get_mut() {
             driver.abort();
             log::warn!("Native PostgreSQL sink dropped without awaited connection cleanup");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_hostname;
+
+    #[test]
+    fn plaintext_warning_only_exempts_explicit_loopback_hosts() {
+        for hostname in ["localhost", "LOCALHOST", "127.0.0.1", "127.0.0.2", "::1"] {
+            assert!(is_loopback_hostname(hostname), "{hostname}");
+        }
+        for hostname in ["0.0.0.0", "::", "database.example", "localhost.example"] {
+            assert!(!is_loopback_hostname(hostname), "{hostname}");
         }
     }
 }

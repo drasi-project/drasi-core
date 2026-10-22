@@ -68,6 +68,16 @@ to each query's matching bootstrap provider. For transaction factories select
 `output: transactions` and a query backend that actually supports complete
 atomic output; ordinary in-memory indexes do not provide that capability.
 
+**Transport security:** explicitly select `require_verify_full` for remote
+connections. It checks the certificate chain and hostname using system trust
+plus `tls_ca_pem`, when provided. `require_verify_ca` checks the chain but not
+the hostname. `require` and `if_available` verify the certificate chain when
+`tls_ca_pem` is supplied, but otherwise accept unverified certificates; neither
+checks hostnames. `if_available` can fall back to plaintext, even with a CA
+configured, and `disabled` always uses plaintext. Unverified or unencrypted
+connections log a warning. These weaker modes are explicit compatibility
+choices, not substitutes for verified TLS.
+
 Tracked rows use `output: changes` and explicit `replay: server` or
 `replay: until_processed`. Tracked transaction factories require transaction
 output. The latter retention policy verifies that automatic binlog expiry is

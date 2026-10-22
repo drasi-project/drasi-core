@@ -455,8 +455,18 @@ impl Connection {
             if matches!(
                 config.ssl_mode,
                 MySqlTlsMode::IfAvailable | MySqlTlsMode::Require
-            ) {
+            ) && config.tls_ca_pem.is_none()
+            {
+                log::warn!(
+                    "Native MySQL TLS does not verify the server certificate or hostname; \
+                     configure require_verify_full and a trusted CA for remote connections"
+                );
                 connector.danger_accept_invalid_certs(true);
+            } else if config.ssl_mode != MySqlTlsMode::RequireVerifyFull {
+                log::warn!(
+                    "Native MySQL TLS verifies the certificate chain but not the hostname; \
+                     configure require_verify_full to verify the server identity"
+                );
             }
             if config.ssl_mode != MySqlTlsMode::RequireVerifyFull {
                 connector.danger_accept_invalid_hostnames(true);
@@ -477,6 +487,11 @@ impl Connection {
             }
             let connector = tokio_native_tls::TlsConnector::from(connector.build()?);
             packets.stream = Box::new(connector.connect(&config.host, packets.stream).await?);
+        } else {
+            log::warn!(
+                "Native MySQL connection is not encrypted; disabled and if_available modes \
+                 can send database traffic without TLS. Use require_verify_full for remote connections"
+            );
         }
         let scramble = plugin.gen_data(Some(&config.password), &nonce);
         let mut response = Vec::new();
