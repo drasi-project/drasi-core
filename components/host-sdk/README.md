@@ -7,7 +7,7 @@ The Drasi Host SDK provides the host-side counterpart to the [Drasi Plugin SDK](
 When the Drasi Server is built with the `dynamic-plugins` feature, it uses this crate to:
 
 1. **Discover** plugin shared libraries (`.so`/`.dylib`/`.dll`) in a directory
-2. **Validate** plugin metadata (SDK version, target triple) before initialization
+2. **Validate** plugin metadata (FFI ABI version, target triple) before initialization
 3. **Initialize** plugins by calling their `drasi_plugin_init()` entry point
 4. **Wire callbacks** for log routing and lifecycle event capture
 5. **Wrap FFI vtables** in proxy types that implement standard DrasiLib traits (`Source`, `Reaction`, `BootstrapProvider`, `SourcePluginDescriptor`, etc.)
@@ -149,12 +149,99 @@ The `OciRegistryClient` supports downloading plugins from OCI registries and opt
 - `download_plugin()` returns `DownloadResult` containing the plugin path and an optional `VerificationResult`
 - `PluginMetadata` now includes `git_commit` and `build_timestamp` fields for build provenance
 
+## Registry Compatibility and Host Migration
+
+The registry resolver checks SDK, core, and library **Cargo package versions**
+and a separate **FFI ABI version**. All four must match the host on major/minor;
+compatible patch differences are allowed. Platform-tag selection and its
+existing suffix fallbacks are unchanged.
+
+The existing `io.drasi.plugin.sdk-version` annotation still means the SDK Cargo
+package version. The new `io.drasi.plugin.abi-version` annotation means the
+binary's FFI ABI. For example, SDK packages `0.11.0` and `0.11.3` pass the package
+check, but plugin ABI `0.14.0` cannot be used by a host with ABI `0.13.0`.
+The resolver and binary loader share the same ABI compatibility predicate.
+
+### Updating a host
+
+Replace `HostVersionInfo` struct literals with its constructor:
+
+```rust
+use drasi_host_sdk::registry::HostVersionInfo;
+
+let host = HostVersionInfo::new(
+    sdk_package_version,
+    core_package_version,
+    lib_package_version,
+    target_triple,
+);
+```
+
+The constructor obtains the actual ABI from the SDK linked into the loader.
+Callers cannot supply a package version in its place. `host.abi_version()`
+exposes that value for diagnostics.
+
+`ResolvedPlugin.abi_version` records the checked ABI separately from
+`sdk_version`. Hosts constructing `LockedPlugin` entries should persist it as
+`abi_version: Some(resolved.abi_version.clone())`. The optional lockfile field
+preserves readability of old lockfiles; `None` is unknown, not compatible.
+Hosts must re-resolve entries with unknown compatibility and revalidate cached
+entries against the current host before reuse. The SDK does not own the server's
+installation/cache policy.
+
+Resolution now returns the digest from the very manifest whose annotations were
+checked, avoiding a second mutable-tag lookup. Downloads require ABI metadata
+that agrees exactly with the embedded binary marker, and check the binary ABI
+against the loader before writing the plugin into its destination directory.
+The loader still independently rejects incompatible binaries before initialization.
+Signature verification behavior is unchanged.
+
+### Legacy artifacts and already released hosts
+
+The corrected resolver **skips unannotated legacy artifacts for floating
+references** and **rejects explicit unannotated pins**. It never infers an ABI
+from a package version. If no fully compatible annotated artifact exists,
+resolution fails with package and ABI diagnostics instead of installing a
+plugin that will fail the loader's ABI check.
+
+Roll out both a host using this SDK and rebuilt, versioned plugins carrying
+validated ABI metadata. Adding an annotation alone does not update an old
+server's resolver. This change does not rewrite stable tags, delete installed
+plugins, or make incompatible ABIs interoperable.
+
+Server `0.2.2` and `0.2.3` use SDK package `0.11.0` / ABI `0.13.0`; Server
+`0.2.4` uses SDK package `0.11.3` / ABI `0.14.0`. Server `0.2.4` avoids the
+particular ABI mismatch in [#989](https://github.com/drasi-project/drasi-core/issues/989),
+but still requires a future SDK/host upgrade to gain the corrected resolver.
+Unchanged older hosts must use known-compatible pins, not floating references.
+
+The [downstream reproduction](https://github.com/drasi-project/learning-drasi-server/issues/29)
+documents this complete temporary set for Server `0.2.2`, tested there on macOS
+arm64 and Linux arm64 with a **fresh, isolated plugin directory**:
+
+```yaml
+plugins:
+  - ref: source/postgres:0.2.10
+  - ref: bootstrap/postgres:0.2.13
+  - ref: source/kubernetes:0.1.6
+  - ref: bootstrap/kubernetes:0.1.6
+  - ref: source/otel:0.1.0
+  - ref: reaction/dashboard:0.1.5
+  - ref: reaction/log:0.2.7
+```
+
+That historical workaround is not a compatibility promise for other hosts or
+platforms, and was not re-executed as part of the SDK unit tests. Changing pins
+in an existing cache can encounter the separate
+[cache replacement bug](https://github.com/drasi-project/learning-drasi-server/issues/30).
+Do not bypass signature verification.
+
 ## Plugin Load Sequence
 
 1. **Discovery** — scans the plugin directory for files matching configured glob patterns (the `DEFAULT_PLUGIN_FILE_PATTERNS` — `libdrasi_*` / `drasi_*` — match every plugin type), groups them by base name (stripping all known extensions: `.dylib`, `.so`, `.dll`, `.rlib`, `.rmeta`, `.d`)
 2. **Extension filtering** — for each plugin group, selects only cdylib files (`.dylib`, `.so`, `.dll`). Non-cdylib Cargo artifacts (`.rlib`, `.d`, `.rmeta`) are silently ignored. If multiple cdylib extensions exist for the same plugin, an error is logged and the plugin is skipped (ambiguous)
 3. **Library open** — `libloading::Library::new(path)` loads the `.so`/`.dylib`/`.dll`
-4. **Metadata validation** — resolves `drasi_plugin_metadata()` symbol, checks SDK version (major.minor match) and target triple
+4. **Metadata validation** — resolves `drasi_plugin_metadata()` symbol, checks the FFI ABI version (valid semver with a major.minor match) and target triple
 5. **Initialization** — calls `drasi_plugin_init()` which returns an `FfiPluginRegistration` containing vtable arrays and callback setters
 6. **Callback wiring** — calls `set_log_callback` and `set_lifecycle_callback` with host context pointers
 7. **Proxy extraction** — wraps each `SourcePluginVtable`, `ReactionPluginVtable`, and `BootstrapPluginVtable` in their corresponding proxy types
@@ -182,7 +269,8 @@ cargo test -p drasi-host-sdk --test integration_test
 
 The tests cover:
 - Plugin discovery and loading
-- Metadata validation (SDK version, target triple)
+- Metadata validation (FFI ABI version, target triple), including binary-marker/export agreement
+- Registry compatibility regressions for package checks, missing annotations, ABI mismatches, floating selection, and explicit pins
 - Source/Reaction/Bootstrap factory invocation
 - Trait method dispatch through FFI (start, stop, status, subscribe, etc.)
 - Log and lifecycle callback routing

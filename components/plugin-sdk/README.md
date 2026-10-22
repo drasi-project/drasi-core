@@ -200,7 +200,18 @@ cp target/release/libdrasi_source_my_plugin.so /path/to/server/plugins/
 
 #### Plugin metadata provenance
 
-`PluginMetadata` includes `git_commit` (from `GIT_COMMIT` env or `git rev-parse HEAD`) and `build_timestamp` (from `BUILD_TIMESTAMP` env or compile time) for build provenance tracking.
+`PluginMetadata` includes `git_commit` and `build_timestamp` for build provenance
+tracking. Prepared release/nightly builds set `DRASI_BUILD_GIT_SHA` to the full
+40-character commit recorded in the candidate manifest. The SDK validates and
+embeds that value verbatim, without consulting a parent tooling checkout or
+requiring `.git` inside a build container. Changing or removing the variable
+invalidates Cargo's cached SDK build metadata.
+
+Without this override, release builds (or builds with `DRASI_EMBED_GIT_SHA` set)
+use `git rev-parse --short HEAD`; unavailable Git metadata produces a warning
+and `unknown`. Ordinary debug builds use the stable `dev` placeholder.
+The build timestamp is the current UTC time for release builds or when
+`DRASI_EMBED_BUILD_TIMESTAMP` is set, and `dev-build` otherwise.
 
 #### Plugin signing
 
@@ -211,7 +222,10 @@ When publishing plugins with `cargo xtask publish-plugins --sign`, each plugin i
 Both the plugin and the server **must** be compiled with:
 
 - The **same Rust toolchain version** — the Rust ABI is not stable across compiler versions.
-- The **same `drasi-plugin-sdk` version** — the server compares `SDK_VERSION` at load time and rejects mismatches.
+- Matching **FFI ABI major/minor versions** — the loader compares
+  `ffi::metadata::FFI_SDK_VERSION`, independently of the SDK Cargo package
+  version. ABI patch differences are allowed. Any FFI layout or payload
+  wire-format change requires an ABI version bump.
 - The **same target triple** — validated via `PluginMetadata::target_triple`.
 - The **default System allocator** — neither the plugin nor the server may install a
   custom `#[global_allocator]` (`jemalloc`, `mimalloc`, `tcmalloc`, `snmalloc`, etc.).
@@ -226,8 +240,41 @@ Both the plugin and the server **must** be compiled with:
 
 The server performs a two-phase load:
 
-1. **Metadata validation** — calls `drasi_plugin_metadata()` to check SDK version, build hash, and target triple.
+1. **Metadata validation** — calls `drasi_plugin_metadata()` to check the FFI ABI version and target triple.
 2. **Initialization** — calls `drasi_plugin_init()` only if metadata validation passes.
+
+#### Registry compatibility metadata
+
+Package versions and the FFI ABI serve different purposes and must not be
+substituted for each other:
+
+| OCI annotation | Meaning |
+|---|---|
+| `io.drasi.plugin.sdk-version` | SDK Cargo package version |
+| `io.drasi.plugin.core-version` | Core Cargo package version |
+| `io.drasi.plugin.lib-version` | Library Cargo package version |
+| `io.drasi.plugin.abi-version` | FFI ABI from `FFI_SDK_VERSION` |
+
+Registry resolution requires matching major/minor versions for all four fields,
+in addition to the existing platform-tag selection. Missing required annotations
+are rejected, including on explicitly pinned references. Patch differences remain
+allowed, but matching package versions alone never establish ABI compatibility.
+
+`export_plugin!` embeds a NUL-terminated ABI marker in every binary. The
+`PluginMetadata.sdk_version` FFI field points into that same marker, so it reports
+the ABI, **not** the Cargo SDK package version. This preserves the existing FFI
+layout and does not itself change the ABI. `xtask build-plugins` reads the marker
+from each built binary to generate `abi_version` in its metadata JSON.
+`xtask publish-plugins` verifies exact agreement between that JSON and the binary
+before any upload, including dry runs and cross-compiled targets. Publication
+uses the same validated ABI in the OCI annotation and result report.
+
+Artifacts predating the marker/annotation are not accepted by the corrected
+registry resolver. Rebuild and publish versioned artifacts using this contract;
+do not guess the ABI from the package version, silently relabel old artifacts,
+or disable signature verification. See the
+[host migration guidance](../host-sdk/README.md#registry-compatibility-and-host-migration)
+for rollout and already released servers.
 
 ## FFI Architecture
 

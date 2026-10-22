@@ -98,7 +98,7 @@ Provide initial data snapshots to populate queries when sources are connected.
 3. For each plugin file:
    a. dlopen() the shared library
    b. Resolve drasi_plugin_metadata() → PluginMetadata
-   c. Validate SDK version (major.minor must match host)
+   c. Validate FFI ABI version (major.minor must match host)
    d. Validate target triple (must match host)
    e. Resolve drasi_plugin_init() → FfiPluginRegistration
    f. Call init → plugin initializes its tokio runtime, installs FfiLogger
@@ -130,9 +130,22 @@ pub extern "C" fn drasi_plugin_init() -> *mut FfiPluginRegistration
 
 | Field | Check | Severity | Rationale |
 |-------|-------|----------|-----------|
-| `sdk_version` | Major.minor match | **REJECT** | `#[repr(C)]` layout changes are breaking |
+| `sdk_version` (FFI ABI, not Cargo package version) | Valid semver, major.minor match | **REJECT** | `#[repr(C)]` layout and payload changes are breaking |
 | `target_triple` | Exact match | **REJECT** | Cannot load x86_64 `.so` on aarch64 |
 | `plugin_version` | Log only | **INFO** | Plugin's own version — no compatibility constraint |
+
+Registry selection additionally checks SDK, core, and library Cargo package
+major/minor versions. OCI `io.drasi.plugin.sdk-version` remains the SDK package
+version; `io.drasi.plugin.abi-version` records the separate FFI ABI. The resolver
+and loader share the ABI rule. Missing ABI annotations are rejected rather than
+inferred from package versions, including for explicit pins.
+
+`export_plugin!` stores the ABI in a binary-inspectable marker and points the
+existing metadata ABI field into that same storage. Shared build/publication
+tooling validates it without loading the binary, including cross-compiled
+targets, before publishing the JSON metadata and OCI annotations. No FFI layout
+change is needed. See the
+[host rollout and legacy policy](host-sdk/README.md#registry-compatibility-and-host-migration).
 
 ## FFI Boundary Design
 

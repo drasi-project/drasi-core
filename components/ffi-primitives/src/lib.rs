@@ -45,3 +45,64 @@ pub use types::*;
 /// provider. `xtask build-plugins` checks for this exact NUL-terminated value
 /// in each staged cdylib before publication.
 pub const RUSTLS_RING_PROVIDER_MARKER: [u8; 27] = *b"drasi-rustls-provider=ring\0";
+
+/// Prefix of the NUL-terminated ABI version embedded by `export_plugin!`.
+///
+/// This lets build and publication tools inspect cross-compiled binaries without
+/// loading them or calling their initialization code.
+pub const PLUGIN_ABI_VERSION_MARKER_PREFIX: &[u8] = b"drasi-plugin-ffi-abi=";
+
+/// Read the unique embedded ABI version from a plugin binary.
+pub fn read_plugin_abi_version(binary: &[u8]) -> Result<&str, &'static str> {
+    let mut version = None;
+    for (offset, window) in binary
+        .windows(PLUGIN_ABI_VERSION_MARKER_PREFIX.len())
+        .enumerate()
+    {
+        if window != PLUGIN_ABI_VERSION_MARKER_PREFIX {
+            continue;
+        }
+        if version.is_some() {
+            return Err("multiple plugin FFI ABI version markers");
+        }
+        let value = &binary[offset + PLUGIN_ABI_VERSION_MARKER_PREFIX.len()..];
+        let end = value
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or("unterminated plugin FFI ABI version marker")?;
+        let value = std::str::from_utf8(&value[..end])
+            .map_err(|_| "plugin FFI ABI version is not UTF-8")?;
+        if value.is_empty() {
+            return Err("empty plugin FFI ABI version marker");
+        }
+        version = Some(value);
+    }
+    version.ok_or("missing plugin FFI ABI version marker")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_abi_version_from_binary_bytes() {
+        assert_eq!(
+            read_plugin_abi_version(b"\x7fELF\0drasi-plugin-ffi-abi=0.14.0\0suffix"),
+            Ok("0.14.0")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_malformed_and_ambiguous_markers() {
+        for binary in [
+            b"legacy binary".as_slice(),
+            b"drasi-plugin-ffi-abi=0.14.0",
+            b"drasi-plugin-ffi-abi=\0",
+            b"drasi-plugin-ffi-abi=\xff\0",
+            b"drasi-plugin-ffi-abi=0.13.0\0drasi-plugin-ffi-abi=0.14.0\0",
+            b"drasi-plugin-ffi-abi=0.14.0\0drasi-plugin-ffi-abi=0.14.0\0",
+        ] {
+            assert!(read_plugin_abi_version(binary).is_err(), "{binary:?}");
+        }
+    }
+}

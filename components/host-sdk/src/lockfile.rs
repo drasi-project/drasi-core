@@ -46,8 +46,11 @@ pub struct LockedPlugin {
     pub version: String,
     /// Content digest (sha256:...).
     pub digest: String,
-    /// SDK version of the plugin.
+    /// SDK Cargo package version of the plugin.
     pub sdk_version: String,
+    /// FFI ABI version. An absent legacy value is not proof of compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_version: Option<String>,
     /// Core version of the plugin.
     pub core_version: String,
     /// Lib version of the plugin.
@@ -253,6 +256,7 @@ mod tests {
             version: "0.1.8".to_string(),
             digest: "sha256:abc123".to_string(),
             sdk_version: "0.3.1".to_string(),
+            abi_version: Some("0.14.0".to_string()),
             core_version: "0.3.3".to_string(),
             lib_version: "0.3.8".to_string(),
             platform: "linux/amd64".to_string(),
@@ -276,6 +280,7 @@ mod tests {
                 version: "0.1.7".to_string(),
                 digest: "sha256:def456".to_string(),
                 sdk_version: "0.3.1".to_string(),
+                abi_version: Some("0.14.0".to_string()),
                 core_version: "0.3.3".to_string(),
                 lib_version: "0.3.8".to_string(),
                 platform: "linux/amd64".to_string(),
@@ -299,6 +304,29 @@ mod tests {
     fn test_lockfile_missing_returns_none() {
         let dir = TempDir::new().unwrap();
         assert!(PluginLockfile::read(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_lockfile_does_not_infer_abi_from_sdk_package_version() {
+        let dir = TempDir::new().expect("temporary plugin directory");
+        let mut lockfile = PluginLockfile::new();
+        let mut entry = sample_entry();
+        entry.abi_version = None;
+        lockfile.insert("source/postgres".to_string(), entry);
+        lockfile.write(dir.path()).expect("legacy lockfile");
+        let content =
+            std::fs::read_to_string(dir.path().join("plugins.lock")).expect("lockfile contents");
+        assert!(!content.contains("abi_version"));
+        let loaded = PluginLockfile::read(dir.path())
+            .expect("read legacy lockfile")
+            .expect("existing lockfile");
+        assert_eq!(
+            loaded
+                .get("source/postgres")
+                .expect("locked plugin")
+                .abi_version,
+            None
+        );
     }
 
     #[test]
@@ -334,6 +362,7 @@ mod tests {
                 version: "0.1.8".to_string(),
                 digest: String::new(),
                 sdk_version: "0.3.1".to_string(),
+                abi_version: None,
                 core_version: "0.3.3".to_string(),
                 lib_version: "0.3.8".to_string(),
                 platform: "x86_64-unknown-linux-gnu".to_string(),

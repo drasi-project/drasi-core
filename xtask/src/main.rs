@@ -80,6 +80,7 @@ struct PluginArtifactMetadata {
     plugin_type: String,
     version: String,
     sdk_version: String,
+    abi_version: String,
     core_version: String,
     lib_version: String,
     target_triple: String,
@@ -144,8 +145,18 @@ fn extract_os(triple: &str) -> &str {
 }
 
 fn load_cargo_metadata(no_deps: bool) -> CargoMetadata {
+    if !std::env::current_dir()
+        .expect("current directory")
+        .ancestors()
+        .any(|directory| directory.join("Cargo.lock").is_file())
+    {
+        eprintln!(
+            "Missing required Cargo.lock; restore the committed release dependency baseline."
+        );
+        std::process::exit(1);
+    }
     let mut command = Command::new("cargo");
-    command.args(["metadata", "--format-version", "1"]);
+    command.args(["metadata", "--locked", "--format-version", "1"]);
     if no_deps {
         command.arg("--no-deps");
     }
@@ -422,6 +433,9 @@ fn main() {
             eprintln!("  --arch-suffix <SUFFIX> Append architecture suffix to tag (e.g., linux-amd64 → 0.1.8-linux-amd64)");
             eprintln!("  --dry-run             Show what would be published without pushing");
             eprintln!("  --sign                Sign each published artifact with cosign (requires cosign in PATH)");
+            eprintln!(
+                "  --report <PATH>       Write publication outcomes and immutable OCI references"
+            );
             std::process::exit(1);
         }
     }
@@ -533,10 +547,32 @@ fn has_rustls_crypto_provider_marker(plugin: &Path) -> std::io::Result<bool> {
         .any(|window| window == drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER))
 }
 
+fn plugin_binary_abi_version(binary: &[u8]) -> Result<&str, String> {
+    let version = drasi_ffi_primitives::read_plugin_abi_version(binary).map_err(str::to_string)?;
+    semver::Version::parse(version)
+        .map_err(|error| format!("invalid plugin FFI ABI version {version:?}: {error}"))?;
+    Ok(version)
+}
+
+fn validate_plugin_artifact(
+    metadata: &PluginArtifactMetadata,
+    binary: &[u8],
+) -> Result<(), String> {
+    let binary_abi = plugin_binary_abi_version(binary)?;
+    if metadata.abi_version != binary_abi {
+        return Err(format!(
+            "FFI ABI metadata disagrees with binary: metadata={}, binary={binary_abi}",
+            metadata.abi_version
+        ));
+    }
+    Ok(())
+}
+
 fn plugin_build_command(options: PluginBuildOptions<'_>) -> Command {
     let mut cmd = Command::new(options.build_tool);
     cmd.current_dir(options.workspace_root);
     cmd.arg("build");
+    cmd.arg("--locked");
     cmd.arg("--lib");
     for plugin in options.plugins {
         cmd.args(["-p", plugin]);
@@ -681,6 +717,7 @@ fn build_plugins(args: &[String]) {
     let lib_ext = plugin_lib_ext(target.as_deref());
     let mut missing_binaries = Vec::new();
     let mut plugins_without_rustls_provider = Vec::new();
+    let mut plugins_with_invalid_metadata = Vec::new();
 
     for info in &result.plugins {
         let name = &info.package.name;
@@ -718,7 +755,20 @@ fn build_plugins(args: &[String]) {
                 src.display()
             );
             missing_binaries.push(name.clone());
+            continue;
         }
+
+        let abi_version = match fs::read(&dst)
+            .map_err(|error| error.to_string())
+            .and_then(|binary| plugin_binary_abi_version(&binary).map(str::to_string))
+        {
+            Ok(version) => version,
+            Err(error) => {
+                eprintln!("ERROR: cannot read FFI ABI from {lib_name}: {error}");
+                plugins_with_invalid_metadata.push(name.clone());
+                continue;
+            }
+        };
 
         // Generate metadata.json alongside the plugin binary
         let metadata = PluginArtifactMetadata {
@@ -727,6 +777,7 @@ fn build_plugins(args: &[String]) {
             plugin_type: info.plugin_type.clone(),
             version: info.package.version.clone(),
             sdk_version: result.sdk_version.clone(),
+            abi_version,
             core_version: result.core_version.clone(),
             lib_version: result.lib_version.clone(),
             target_triple: target_triple.clone(),
@@ -736,14 +787,18 @@ fn build_plugins(args: &[String]) {
         let metadata_path = plugins_dir.join(format!("{lib_name}.metadata.json"));
         let metadata_json =
             serde_json::to_string_pretty(&metadata).expect("failed to serialize metadata");
-        fs::write(&metadata_path, metadata_json).unwrap_or_else(|e| {
-            eprintln!("Failed to write metadata for {name}: {e}");
-        });
+        if let Err(error) = fs::write(&metadata_path, metadata_json) {
+            eprintln!("Failed to write metadata for {name}: {error}");
+            plugins_with_invalid_metadata.push(name.clone());
+        }
 
         clean_build_artifacts(&build_dir, &lib_name);
     }
 
-    if !missing_binaries.is_empty() || !plugins_without_rustls_provider.is_empty() {
+    if !missing_binaries.is_empty()
+        || !plugins_without_rustls_provider.is_empty()
+        || !plugins_with_invalid_metadata.is_empty()
+    {
         if !missing_binaries.is_empty() {
             eprintln!(
                 "\n=== {} of {} plugin binaries missing after build ===",
@@ -762,6 +817,15 @@ fn build_plugins(args: &[String]) {
         }
         for name in &plugins_without_rustls_provider {
             eprintln!("  - {name}");
+        }
+        if !plugins_with_invalid_metadata.is_empty() {
+            eprintln!(
+                "\n=== {} plugin binaries have invalid ABI metadata ===",
+                plugins_with_invalid_metadata.len()
+            );
+            for name in &plugins_with_invalid_metadata {
+                eprintln!("  - {name}");
+            }
         }
         eprintln!("\nContents of build directory ({}):", build_dir.display());
         match fs::read_dir(&build_dir) {
@@ -829,7 +893,6 @@ const DEFAULT_REGISTRY: &str = "ghcr.io/drasi-project";
 struct PublishablePlugin {
     metadata: PluginArtifactMetadata,
     binary_path: PathBuf,
-    metadata_path: PathBuf,
 }
 
 fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
@@ -843,11 +906,15 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 plugins_dir.display(),
                 e
             );
-            return plugins;
+            std::process::exit(1);
         }
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            eprintln!("Cannot enumerate plugin artifacts: {error}");
+            std::process::exit(1);
+        });
         let path = entry.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
 
@@ -856,7 +923,7 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("Failed to read {}: {}", path.display(), e);
-                    continue;
+                    std::process::exit(1);
                 }
             };
 
@@ -864,7 +931,7 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("Failed to parse {}: {}", path.display(), e);
-                    continue;
+                    std::process::exit(1);
                 }
             };
 
@@ -884,17 +951,24 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
 
             if !binary_path.exists() {
                 eprintln!(
-                    "Warning: binary not found for {}: expected {}",
+                    "Error: binary not found for {}: expected {}",
                     name,
                     binary_path.display()
                 );
-                continue;
+                std::process::exit(1);
+            }
+
+            let validation = fs::read(&binary_path)
+                .map_err(|error| error.to_string())
+                .and_then(|binary| validate_plugin_artifact(&metadata, &binary));
+            if let Err(error) = validation {
+                eprintln!("Invalid plugin artifact {}: {error}", binary_path.display());
+                std::process::exit(1);
             }
 
             plugins.push(PublishablePlugin {
                 metadata,
                 binary_path,
-                metadata_path: path,
             });
         }
     }
@@ -911,6 +985,7 @@ fn publish_plugins(args: &[String]) {
     let arch_suffix = parse_flag_value(args, "--arch-suffix");
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let sign = args.iter().any(|a| a == "--sign");
+    let report_path = parse_flag_value(args, "--report");
 
     if tag_override.is_some() && pre_release.is_some() {
         eprintln!("Error: --tag and --pre-release are mutually exclusive");
@@ -969,6 +1044,7 @@ fn publish_plugins(args: &[String]) {
         println!("  Pre-release label: {label}");
     }
 
+    let mut publications = Vec::new();
     for p in &plugins {
         let tag = make_tag(
             &p.metadata.version,
@@ -988,6 +1064,7 @@ fn publish_plugins(args: &[String]) {
             p.metadata.target_triple,
             reference
         );
+        publications.push((p, reference));
     }
 
     if dry_run {
@@ -1020,74 +1097,126 @@ fn publish_plugins(args: &[String]) {
             oci_client::secrets::RegistryAuth::Basic(username.clone(), password.clone())
         };
 
-        let mut publish_result = PublishBatchResult::default();
-
-        for p in &plugins {
-            let tag = make_tag(
-                &p.metadata.version,
-                tag_override.as_deref(),
-                pre_release.as_deref(),
-                arch_suffix.as_deref(),
-            );
-            let reference_str = format!(
-                "{}/{}/{}:{}",
-                registry, p.metadata.plugin_type, p.metadata.kind, tag
-            );
-
-            match publish_single_plugin(&client, &auth, &reference_str, p).await {
-                Ok(url) => {
-                    publish_result.record_pushed_artifact(
-                        sign,
-                        &reference_str,
-                        &p.metadata.target_triple,
-                        &url,
-                        cosign_sign_and_verify,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("  ✗ {reference_str} — {e}");
-                    publish_result.record_failure();
-                }
-            }
-        }
+        let (client, auth) = (&client, &auth);
+        let (publish_result, artifacts) = publish_batch(
+            &publications,
+            &registry,
+            sign,
+            |reference, plugin| async move {
+                publish_single_plugin(client, auth, &reference, plugin)
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            |reference| async move {
+                publish_directory_entry(client, auth, &reference)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| "required catalog upload failed".to_string())
+            },
+            cosign_sign_and_verify,
+        )
+        .await;
 
         println!(
-            "\n=== Published: {} succeeded, {} failed ===",
-            publish_result.success_count, publish_result.fail_count
+            "\n=== Artifacts: {} succeeded, {} failed; catalog: {} succeeded, {} failed ===",
+            publish_result.success_count,
+            publish_result.fail_count,
+            publish_result.catalog_success_count,
+            publish_result.catalog_fail_count
         );
-
-        // Update plugin directory with entries for each successfully published plugin
-        if publish_result.should_update_directory() {
-            println!("\n=== Updating plugin directory ===");
-            let mut dir_entries: Vec<(String, String)> = plugins
-                .iter()
-                .map(|p| (p.metadata.plugin_type.clone(), p.metadata.kind.clone()))
-                .collect();
-            dir_entries.sort();
-            dir_entries.dedup();
-
-            for (ptype, kind) in &dir_entries {
-                let dir_tag = format!("{ptype}.{kind}");
-                let dir_ref = format!("{registry}/drasi-plugin-directory:{dir_tag}");
-                match publish_directory_entry(&client, &auth, &dir_ref).await {
-                    Ok(_) => println!("  ✓ directory entry: {dir_tag}"),
-                    Err(e) => eprintln!("  ✗ directory entry: {dir_tag} — {e}"),
-                }
+        if let Some(path) = report_path {
+            let report = serde_json::json!({
+                "schema_version": 1,
+                "artifacts": artifacts,
+                "artifact_failures": publish_result.fail_count,
+                "catalog_successes": publish_result.catalog_success_count,
+                "catalog_failures": publish_result.catalog_fail_count,
+            });
+            if let Err(error) = fs::write(&path, report.to_string()) {
+                eprintln!("Cannot write publication report {path}: {error}");
+                std::process::exit(1);
             }
-        } else if publish_result.has_failures() {
-            eprintln!("\n=== Skipping plugin directory update because publishing had failures ===");
         }
-
-        if publish_result.has_failures() {
-            std::process::exit(1);
+        if publish_result.exit_code() != 0 {
+            eprintln!("Publication incomplete; uploaded artifacts have not been rolled back.");
+            std::process::exit(publish_result.exit_code());
         }
     });
+}
+
+async fn publish_batch<'a, Upload, UploadFuture, Catalog, CatalogFuture, Sign>(
+    publications: &[(&'a PublishablePlugin, String)],
+    registry: &str,
+    sign: bool,
+    mut upload: Upload,
+    mut update_catalog: Catalog,
+    mut sign_and_verify: Sign,
+) -> (PublishBatchResult, Vec<serde_json::Value>)
+where
+    Upload: FnMut(String, &'a PublishablePlugin) -> UploadFuture,
+    UploadFuture: std::future::Future<Output = Result<String, String>>,
+    Catalog: FnMut(String) -> CatalogFuture,
+    CatalogFuture: std::future::Future<Output = Result<(), String>>,
+    Sign: FnMut(&str) -> Result<(), String>,
+{
+    let mut result = PublishBatchResult::default();
+    let mut artifacts = Vec::new();
+    for (plugin, reference) in publications {
+        match upload(reference.clone(), plugin).await {
+            Ok(url) => {
+                if result.record_pushed_artifact(
+                    sign,
+                    reference,
+                    &plugin.metadata.target_triple,
+                    &url,
+                    &mut sign_and_verify,
+                ) {
+                    artifacts.push(serde_json::json!({
+                        "name": plugin.metadata.name,
+                        "version": plugin.metadata.version,
+                        "type": plugin.metadata.plugin_type,
+                        "kind": plugin.metadata.kind,
+                        "target": plugin.metadata.target_triple,
+                        "sdk_version": plugin.metadata.sdk_version,
+                        "abi_version": plugin.metadata.abi_version,
+                        "core_version": plugin.metadata.core_version,
+                        "lib_version": plugin.metadata.lib_version,
+                        "reference": reference,
+                        "digest_reference": digest_reference(reference, &url),
+                        "signed": sign,
+                        "verified": sign,
+                    }));
+                }
+            }
+            Err(error) => {
+                eprintln!("  ✗ {reference} — {error}");
+                result.record_failure();
+            }
+        }
+    }
+    if result.should_update_directory() {
+        println!("\n=== Updating plugin directory ===");
+        let entries: BTreeSet<_> = publications
+            .iter()
+            .map(|(plugin, _)| (&plugin.metadata.plugin_type, &plugin.metadata.kind))
+            .collect();
+        for (ptype, kind) in entries {
+            let reference = format!("{registry}/drasi-plugin-directory:{ptype}.{kind}");
+            let outcome = update_catalog(reference.clone()).await;
+            result.record_catalog_result(&reference, outcome);
+        }
+    } else if result.has_failures() {
+        eprintln!("\n=== Skipping plugin directory update because publishing had failures ===");
+    }
+    (result, artifacts)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PublishBatchResult {
     success_count: usize,
     fail_count: usize,
+    catalog_success_count: usize,
+    catalog_fail_count: usize,
 }
 
 impl PublishBatchResult {
@@ -1121,7 +1250,24 @@ impl PublishBatchResult {
     }
 
     fn has_failures(&self) -> bool {
-        self.fail_count > 0
+        self.fail_count > 0 || self.catalog_fail_count > 0
+    }
+
+    fn record_catalog_result(&mut self, reference: &str, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                self.catalog_success_count += 1;
+                println!("  ✓ directory entry: {reference}");
+            }
+            Err(error) => {
+                self.catalog_fail_count += 1;
+                eprintln!("  ✗ directory entry: {reference} — {error}");
+            }
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        i32::from(self.has_failures())
     }
 
     fn should_update_directory(&self) -> bool {
@@ -1131,7 +1277,9 @@ impl PublishBatchResult {
 
 fn digest_reference(reference: &str, manifest_url: &str) -> String {
     if let Some((_, digest)) = manifest_url.rsplit_once("/manifests/") {
-        let repo = reference.split(':').next().unwrap_or(reference);
+        let repo = reference
+            .rsplit_once(':')
+            .map_or(reference, |(repo, _)| repo);
         format!("{repo}@{digest}")
     } else {
         reference.to_string()
@@ -1448,9 +1596,10 @@ async fn publish_single_plugin(
     let reference: oci_client::Reference = reference_str.parse()?;
 
     let binary_data = fs::read(&plugin.binary_path)?;
+    validate_plugin_artifact(&plugin.metadata, &binary_data)?;
     let binary_size = binary_data.len();
 
-    let metadata_json = fs::read(&plugin.metadata_path)?;
+    let metadata_json = serde_json::to_vec_pretty(&plugin.metadata)?;
 
     let binary_layer = ImageLayer::new(
         bytes::Bytes::from(binary_data),
@@ -1472,42 +1621,11 @@ async fn publish_single_plugin(
         None,
     );
 
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        "org.opencontainers.image.title".to_string(),
-        plugin.metadata.name.clone(),
+    let manifest = oci_client::manifest::OciImageManifest::build(
+        &layers,
+        &config,
+        Some(plugin_annotations(&plugin.metadata)),
     );
-    annotations.insert(
-        "org.opencontainers.image.version".to_string(),
-        plugin.metadata.version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.kind".to_string(),
-        plugin.metadata.kind.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.type".to_string(),
-        plugin.metadata.plugin_type.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.sdk-version".to_string(),
-        plugin.metadata.sdk_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.core-version".to_string(),
-        plugin.metadata.core_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.lib-version".to_string(),
-        plugin.metadata.lib_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.target-triple".to_string(),
-        plugin.metadata.target_triple.clone(),
-    );
-
-    let manifest =
-        oci_client::manifest::OciImageManifest::build(&layers, &config, Some(annotations));
 
     let response = client
         .push(&reference, &layers, config, auth, Some(manifest))
@@ -1520,6 +1638,23 @@ async fn publish_single_plugin(
     );
 
     Ok(response.manifest_url)
+}
+
+fn plugin_annotations(metadata: &PluginArtifactMetadata) -> BTreeMap<String, String> {
+    [
+        ("org.opencontainers.image.title", &metadata.name),
+        ("org.opencontainers.image.version", &metadata.version),
+        ("io.drasi.plugin.kind", &metadata.kind),
+        ("io.drasi.plugin.type", &metadata.plugin_type),
+        ("io.drasi.plugin.sdk-version", &metadata.sdk_version),
+        ("io.drasi.plugin.abi-version", &metadata.abi_version),
+        ("io.drasi.plugin.core-version", &metadata.core_version),
+        ("io.drasi.plugin.lib-version", &metadata.lib_version),
+        ("io.drasi.plugin.target-triple", &metadata.target_triple),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.clone()))
+    .collect()
 }
 
 /// Publish a zero-byte directory entry to the plugin directory package.
@@ -1687,6 +1822,132 @@ mod tests {
             kind: kind.map(str::to_string),
             path: Some(PathBuf::from(name)),
         }
+    }
+
+    fn artifact_metadata() -> PluginArtifactMetadata {
+        PluginArtifactMetadata {
+            name: "drasi-source-mock".to_string(),
+            kind: "mock".to_string(),
+            plugin_type: "source".to_string(),
+            version: "0.1.0".to_string(),
+            sdk_version: "0.11.3".to_string(),
+            abi_version: "0.14.0".to_string(),
+            core_version: "0.5.10".to_string(),
+            lib_version: "0.9.3".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            description: None,
+            license: None,
+        }
+    }
+
+    #[test]
+    fn publication_preserves_sdk_package_annotation_and_adds_distinct_abi() {
+        let metadata = artifact_metadata();
+        let annotations = plugin_annotations(&metadata);
+        assert_eq!(annotations["io.drasi.plugin.sdk-version"], "0.11.3");
+        assert_eq!(annotations["io.drasi.plugin.abi-version"], "0.14.0");
+        assert_eq!(annotations["io.drasi.plugin.core-version"], "0.5.10");
+        assert_eq!(annotations["io.drasi.plugin.lib-version"], "0.9.3");
+        let json = serde_json::to_value(&metadata).expect("artifact metadata JSON");
+        assert_eq!(json["sdk_version"], "0.11.3");
+        assert_eq!(json["abi_version"], "0.14.0");
+    }
+
+    #[test]
+    fn publication_requires_exact_agreement_between_metadata_and_binary_abi() {
+        let mut metadata = artifact_metadata();
+        let binary = b"binary\0drasi-plugin-ffi-abi=0.14.0\0";
+        validate_plugin_artifact(&metadata, binary).expect("matching ABI");
+        for abi in ["0.13.0", "0.14.1", "invalid", ""] {
+            metadata.abi_version = abi.to_string();
+            let error =
+                validate_plugin_artifact(&metadata, binary).expect_err("incorrect metadata");
+            assert!(error.contains("disagrees with binary"), "{error}");
+        }
+        assert!(validate_plugin_artifact(&metadata, b"legacy binary").is_err());
+        assert!(plugin_binary_abi_version(b"drasi-plugin-ffi-abi=invalid\0").is_err());
+    }
+
+    #[test]
+    fn legacy_publication_metadata_must_not_infer_abi_from_package_version() {
+        let mut json = serde_json::to_value(artifact_metadata()).expect("artifact JSON");
+        json.as_object_mut()
+            .expect("metadata object")
+            .remove("abi_version");
+        let error = serde_json::from_value::<PluginArtifactMetadata>(json)
+            .err()
+            .expect("missing ABI metadata");
+        assert!(error.to_string().contains("abi_version"), "{error}");
+    }
+
+    #[test]
+    fn dry_run_publication_rejects_invalid_artifacts_before_upload() {
+        for scenario in [
+            "valid",
+            "legacy",
+            "mismatch",
+            "patch-mismatch",
+            "missing-marker",
+            "invalid-version",
+        ] {
+            let dir = test_temp_dir(scenario);
+            let mut metadata = artifact_metadata();
+            let binary: &[u8] = match scenario {
+                "missing-marker" => b"legacy binary",
+                "invalid-version" => {
+                    metadata.abi_version = "invalid".to_string();
+                    b"binary\0drasi-plugin-ffi-abi=invalid\0"
+                }
+                _ => b"binary\0drasi-plugin-ffi-abi=0.14.0\0",
+            };
+            if scenario == "mismatch" {
+                metadata.abi_version = "0.13.0".to_string();
+            } else if scenario == "patch-mismatch" {
+                metadata.abi_version = "0.14.1".to_string();
+            }
+            let mut json = serde_json::to_value(&metadata).expect("metadata JSON");
+            if scenario == "legacy" {
+                json.as_object_mut()
+                    .expect("metadata object")
+                    .remove("abi_version");
+            }
+            fs::write(
+                dir.join("libdrasi_source_mock.metadata.json"),
+                serde_json::to_vec(&json).expect("metadata bytes"),
+            )
+            .expect("write metadata");
+            fs::write(dir.join("libdrasi_source_mock.dylib"), binary)
+                .expect("write binary fixture");
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "tests::artifact_preflight_probe",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("ABI_PREFLIGHT_PLUGINS_DIR", &dir)
+                .output()
+                .expect("run publication preflight");
+            fs::remove_dir_all(&dir).expect("remove artifact fixtures");
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(scenario != "valid")),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture invoked by dry_run_publication_rejects_invalid_artifacts_before_upload"]
+    fn artifact_preflight_probe() {
+        let plugins_dir = std::env::var("ABI_PREFLIGHT_PLUGINS_DIR").expect("fixture directory");
+        publish_plugins(&[
+            "--plugins-dir".to_string(),
+            plugins_dir,
+            "--dry-run".to_string(),
+            "--sign".to_string(),
+        ]);
     }
 
     struct EnvGuard {
@@ -2304,7 +2565,8 @@ exit 2
             result,
             PublishBatchResult {
                 success_count: 0,
-                fail_count: 1
+                fail_count: 1,
+                ..Default::default()
             }
         );
         assert!(result.has_failures());
@@ -2327,11 +2589,133 @@ exit 2
             result,
             PublishBatchResult {
                 success_count: 1,
-                fail_count: 0
+                fail_count: 0,
+                ..Default::default()
             }
         );
         assert!(!result.has_failures());
         assert!(result.should_update_directory());
+    }
+
+    #[test]
+    fn mixed_catalog_outcomes_fail_publication() {
+        let mut result = PublishBatchResult {
+            success_count: 2,
+            ..Default::default()
+        };
+        assert!(result.should_update_directory());
+        result.record_catalog_result("test/directory:source.http", Err("injected failure".into()));
+        result.record_catalog_result("test/directory:reaction.http", Ok(()));
+        assert_eq!(result.success_count, 2);
+        assert_eq!(result.fail_count, 0);
+        assert_eq!(result.catalog_fail_count, 1);
+        assert_eq!(result.catalog_success_count, 1);
+        assert_eq!(result.exit_code(), 1);
+    }
+
+    #[test]
+    fn publication_process_exit_matches_required_outcomes() {
+        for scenario in ["success", "catalog", "upload", "sign", "verify"] {
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "tests::publication_exit_probe",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("PUBLICATION_TEST_SCENARIO", scenario)
+                .output()
+                .expect("run publication subprocess");
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(scenario != "success")),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if scenario == "catalog" {
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("test/drasi-plugin-directory:reaction.http"));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture invoked by publication_process_exit_matches_required_outcomes"]
+    fn publication_exit_probe() {
+        let scenario = std::env::var("PUBLICATION_TEST_SCENARIO").expect("test scenario");
+        let plugins: Vec<_> = ["source", "reaction"]
+            .iter()
+            .map(|ptype| PublishablePlugin {
+                metadata: PluginArtifactMetadata {
+                    name: format!("drasi-{ptype}-http"),
+                    kind: "http".into(),
+                    plugin_type: (*ptype).into(),
+                    version: "1.0.0".into(),
+                    sdk_version: "1.0.0".into(),
+                    abi_version: "0.14.0".into(),
+                    core_version: "1.0.0".into(),
+                    lib_version: "1.0.0".into(),
+                    target_triple: "target".into(),
+                    description: None,
+                    license: None,
+                },
+                binary_path: PathBuf::new(),
+            })
+            .collect();
+        let publications: Vec<_> = plugins
+            .iter()
+            .map(|plugin| {
+                (
+                    plugin,
+                    format!("test/{}/http:test", plugin.metadata.plugin_type),
+                )
+            })
+            .collect();
+        let mut catalog_calls = 0;
+        let (result, artifacts) =
+            tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(publish_batch(
+                    &publications,
+                    "test",
+                    true,
+                    |reference, _| {
+                        std::future::ready(
+                            if scenario == "upload" && reference.contains("/source/") {
+                                Err("injected upload failure".into())
+                            } else {
+                                Ok(format!("https://test/manifests/sha256:{}", "a".repeat(64)))
+                            },
+                        )
+                    },
+                    |reference| {
+                        catalog_calls += 1;
+                        std::future::ready(
+                            if scenario == "catalog" && reference.ends_with("reaction.http") {
+                                Err("injected catalog failure".into())
+                            } else {
+                                Ok(())
+                            },
+                        )
+                    },
+                    |reference| {
+                        if ["sign", "verify"].contains(&scenario.as_str())
+                            && reference.contains("/source/")
+                        {
+                            Err(format!("{scenario} failed"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                ));
+        if ["success", "catalog"].contains(&scenario.as_str()) {
+            assert_eq!(catalog_calls, 2);
+            assert_eq!(artifacts.len(), 2);
+        } else {
+            assert_eq!(catalog_calls, 0);
+            assert_eq!(artifacts.len(), 1);
+        }
+        std::process::exit(result.exit_code());
     }
 
     #[test]
@@ -2358,6 +2742,7 @@ exit 2
             args,
             [
                 "build",
+                "--locked",
                 "--lib",
                 "-p",
                 "drasi-source-http",
@@ -2400,6 +2785,7 @@ exit 2
                 args,
                 [
                     "build",
+                    "--locked",
                     "--lib",
                     "-p",
                     "drasi-source-http",

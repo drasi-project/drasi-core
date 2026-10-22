@@ -37,6 +37,60 @@ pub struct DownloadResult {
 /// Each tag in this package represents a registered plugin (e.g., "source.postgres").
 const PLUGIN_DIRECTORY_PACKAGE: &str = "drasi-plugin-directory";
 
+fn validate_binary_abi(binary: &[u8], advertised_abi: Option<&str>) -> Result<()> {
+    let advertised_abi = advertised_abi.context(
+        "missing FFI ABI metadata; legacy artifacts must be republished with validated ABI metadata",
+    )?;
+    let binary_abi =
+        drasi_ffi_primitives::read_plugin_abi_version(binary).map_err(anyhow::Error::msg)?;
+    if advertised_abi != binary_abi {
+        bail!(
+            "FFI ABI metadata disagrees with binary: metadata={advertised_abi}, binary={binary_abi}"
+        );
+    }
+    let host_abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
+    if !crate::loader::abi_versions_compatible(host_abi, binary_abi) {
+        bail!("FFI ABI version mismatch: host={host_abi}, binary={binary_abi}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod abi_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_matching_binary_metadata_and_host_abi() {
+        let abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
+        let binary = format!("binary\0drasi-plugin-ffi-abi={abi}\0");
+        validate_binary_abi(binary.as_bytes(), Some(abi)).expect("matching ABI");
+    }
+
+    #[test]
+    fn rejects_missing_or_incorrect_metadata_before_installation() {
+        let abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
+        let binary = format!("binary\0drasi-plugin-ffi-abi={abi}\0");
+        assert!(validate_binary_abi(binary.as_bytes(), None).is_err());
+        let error =
+            validate_binary_abi(binary.as_bytes(), Some("0.99.0")).expect_err("incorrect metadata");
+        assert!(
+            error.to_string().contains("disagrees with binary"),
+            "{error}"
+        );
+        assert!(validate_binary_abi(b"legacy binary", Some(abi)).is_err());
+    }
+
+    #[test]
+    fn rejects_incompatible_binary_even_when_metadata_agrees() {
+        let error = validate_binary_abi(b"binary\0drasi-plugin-ffi-abi=99.0.0\0", Some("99.0.0"))
+            .expect_err("incompatible binary");
+        assert!(
+            error.to_string().contains("FFI ABI version mismatch"),
+            "{error}"
+        );
+    }
+}
+
 /// OCI registry client for interacting with plugin artifact registries.
 pub struct OciRegistryClient {
     client: oci_client::Client,
@@ -68,6 +122,18 @@ impl OciRegistryClient {
             client: oci_client::Client::new(client_config),
             config,
             verifier,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test_registry(config: RegistryConfig) -> Self {
+        Self {
+            client: oci_client::Client::new(ClientConfig {
+                protocol: ClientProtocol::Http,
+                ..Default::default()
+            }),
+            config,
+            verifier: CosignVerifier::new(Default::default()),
         }
     }
 
@@ -155,9 +221,18 @@ impl OciRegistryClient {
         &self,
         reference: &str,
     ) -> Result<std::collections::BTreeMap<String, String>> {
+        self.fetch_manifest_annotations_with_digest(reference)
+            .await
+            .map(|(annotations, _digest)| annotations)
+    }
+
+    pub(crate) async fn fetch_manifest_annotations_with_digest(
+        &self,
+        reference: &str,
+    ) -> Result<(std::collections::BTreeMap<String, String>, String)> {
         let oci_ref: Reference = reference.parse().context("invalid OCI reference")?;
 
-        let (manifest, _digest) = self
+        let (manifest, digest) = self
             .client
             .pull_manifest(&oci_ref, &self.auth())
             .await
@@ -165,7 +240,7 @@ impl OciRegistryClient {
 
         match manifest {
             oci_client::manifest::OciManifest::Image(img) => {
-                Ok(img.annotations.unwrap_or_default())
+                Ok((img.annotations.unwrap_or_default(), digest))
             }
             oci_client::manifest::OciManifest::ImageIndex(_) => {
                 bail!("expected image manifest, got image index; specify a platform-specific tag")
@@ -239,6 +314,16 @@ impl OciRegistryClient {
         // Find the binary layer
         for layer in &image_data.layers {
             if layer.media_type == media_types::PLUGIN_BINARY {
+                let metadata_layer = image_data
+                    .layers
+                    .iter()
+                    .find(|layer| layer.media_type == media_types::PLUGIN_METADATA)
+                    .context("plugin artifact is missing its metadata layer")?;
+                let metadata: PluginMetadataJson = serde_json::from_slice(&metadata_layer.data)
+                    .context("failed to parse plugin metadata JSON")?;
+                validate_binary_abi(&layer.data, metadata.abi_version.as_deref())
+                    .with_context(|| format!("invalid plugin ABI metadata for {reference}"))?;
+
                 let dest_path = dest_dir.join(filename);
                 tokio::fs::create_dir_all(dest_dir)
                     .await

@@ -183,6 +183,20 @@ mod test_capture {
 // ============================================================================
 
 #[test]
+fn test_binary_abi_marker_matches_exported_metadata() {
+    for name in ["drasi-source-mock", "drasi-reaction-log"] {
+        let path = require_plugin(name);
+        let binary = std::fs::read(&path).expect("plugin binary");
+        let abi = drasi_ffi_primitives::read_plugin_abi_version(&binary)
+            .expect("binary ABI version marker");
+        let metadata =
+            drasi_host_sdk::scan_plugin_metadata(&path).expect("exported plugin metadata");
+        assert_eq!(abi, metadata.sdk_version, "{name}");
+        assert_eq!(abi, drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "{name}");
+    }
+}
+
+#[test]
 fn test_load_mock_source_plugin() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
@@ -213,7 +227,10 @@ fn test_load_mock_source_plugin() {
     );
 
     let meta = plugin.metadata_info.as_ref().unwrap();
-    assert!(meta.contains("sdk="), "Metadata should include SDK version");
+    assert!(
+        meta.contains("abi="),
+        "Metadata should include FFI ABI version"
+    );
     assert!(
         meta.contains("target="),
         "Metadata should include target triple"
