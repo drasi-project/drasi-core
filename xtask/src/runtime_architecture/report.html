@@ -70,7 +70,12 @@ for(const e of data.edges){
   }
 }
 function node(tag,text,className){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;}
-function source(file,line){const a=node("a",file+":"+line);a.href="../../"+file+"#L"+line;return a;}
+function source(file,line){
+ const a=node("a",file+":"+line);
+ const path=file.split("/").map(encodeURIComponent).join("/");
+ a.href="../../"+path+"#L"+encodeURIComponent(String(line));
+ return a;
+}
 function match(text,query){return text.toLowerCase().includes(query.trim().toLowerCase());}
 function cellLabel(edges){
  const variants=new Map();
