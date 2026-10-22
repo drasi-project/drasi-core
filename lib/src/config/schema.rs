@@ -158,9 +158,8 @@ pub struct SourceSubscriptionConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
 /// use drasi_lib::config::SourceSubscriptionSettings;
-/// use std::collections::HashSet;
 ///
 /// let settings = SourceSubscriptionSettings {
 ///     source_id: "orders_db".to_string(),

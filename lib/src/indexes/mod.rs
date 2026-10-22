@@ -64,11 +64,12 @@
 //! [`crate::builder::DrasiLibBuilder::with_index_provider`]. A query selects a provider
 //! by referencing that same name through [`StorageBackendRef::Named`]:
 //!
-//! ```ignore
+//! ```no_run
 //! use drasi_index_rocksdb::RocksDbIndexProvider;
 //! use drasi_lib::{DrasiLib, Query, StorageBackendRef};
 //! use std::sync::Arc;
 //!
+//! # async fn example() -> anyhow::Result<()> {
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false)
 //!     .with_memory_budget_bytes(512 << 20)?;
 //! let query = Query::cypher("my_query")
@@ -81,6 +82,9 @@
 //!     .with_query(query)
 //!     .build()
 //!     .await?;
+//! # core.shutdown().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Only in-memory backends can be instantiated purely from configuration in embedded

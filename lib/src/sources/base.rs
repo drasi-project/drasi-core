@@ -55,15 +55,19 @@ use drasi_core::models::SourceChange;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+/// use drasi_lib::{BootstrapProvider, channels::DispatchMode};
 ///
+/// fn build_base(my_provider: impl BootstrapProvider + 'static) -> anyhow::Result<SourceBase> {
 /// let params = SourceBaseParams::new("my-source")
 ///     .with_dispatch_mode(DispatchMode::Channel)
 ///     .with_dispatch_buffer_capacity(2000)
 ///     .with_bootstrap_provider(my_provider);
 ///
 /// let base = SourceBase::new(params)?;
+/// Ok(base)
+/// }
 /// ```
 pub struct SourceBaseParams {
     /// Unique identifier for the source
@@ -776,9 +780,11 @@ impl SourceBase {
     /// An initialized computation context is notified of the updated inventory.
     ///
     /// # Example
-    /// ```ignore
-    /// let provider = MyBootstrapProvider::new(config);
+    /// ```no_run
+    /// use drasi_lib::{BootstrapProvider, sources::SourceBase};
+    /// async fn attach(source_base: &SourceBase, provider: impl BootstrapProvider + 'static) {
     /// source_base.set_bootstrap_provider(provider).await;  // Ownership transferred
+    /// }
     /// ```
     pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static) {
         *self.bootstrap_provider.write().await = Some(Arc::new(provider));

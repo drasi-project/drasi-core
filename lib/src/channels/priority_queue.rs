@@ -272,16 +272,23 @@ impl Default for PriorityQueueMetrics {
 ///
 /// # Usage with Dispatch Modes
 ///
-/// ```ignore
+/// ```no_run
+/// use drasi_lib::channels::DispatchMode;
+/// use drasi_lib::channels::priority_queue::PriorityQueue;
+/// use drasi_lib::channels::events::Timestamped;
+/// # async fn enqueue<T: Timestamped + Clone + std::fmt::Debug + Send + Sync + 'static>(
+/// #     priority_queue: &PriorityQueue<T>, event: std::sync::Arc<T>, dispatch_mode: DispatchMode,
+/// # ) {
 /// // Channel mode (isolated channels) - SAFE to use blocking enqueue
 /// if dispatch_mode == DispatchMode::Channel {
 ///     priority_queue.enqueue_wait(event).await;  // Blocks until space available
 /// } else {
 ///     // Broadcast mode (shared channel) - MUST use non-blocking
 ///     if !priority_queue.enqueue(event).await {
-///         warn!("Dropped event - queue at capacity");
+///         log::warn!("Dropped event - queue at capacity");
 ///     }
 /// }
+/// # }
 /// ```
 pub struct PriorityQueue<T>
 where

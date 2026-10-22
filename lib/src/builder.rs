@@ -257,15 +257,20 @@ impl DrasiLibBuilder {
     /// storage backends can be used.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
     /// use drasi_index_rocksdb::RocksDbIndexProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
+    /// # async fn example() -> anyhow::Result<()> {
     /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
     /// let core = DrasiLib::builder()
     ///     .with_index_provider("rocks", Arc::new(provider))
     ///     .build()
     ///     .await?;
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_index_provider(
         mut self,
@@ -288,16 +293,21 @@ impl DrasiLibBuilder {
     /// Calling this more than once replaces the default with the most recent name.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
     /// use drasi_index_rocksdb::RocksDbIndexProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
+    /// # async fn example() -> anyhow::Result<()> {
     /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
     /// let core = DrasiLib::builder()
     ///     .with_default_index_provider("rocks", Arc::new(provider))
     ///     .build()
     ///     .await?;
     /// // All queries without an explicit storage_backend now persist to RocksDB.
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_default_index_provider(
         mut self,
@@ -319,15 +329,20 @@ impl DrasiLibBuilder {
     /// The in-memory provider does not persist state across restarts.
     ///
     /// # Example
-    /// ```ignore
-    /// use drasi_state_store_json::JsonStateStoreProvider;
+    /// ```no_run
+    /// use drasi_state_store_redb::RedbStateStoreProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
-    /// let state_store = JsonStateStoreProvider::new("/data/state");
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
     /// let core = DrasiLib::builder()
     ///     .with_state_store_provider(Arc::new(state_store))
     ///     .build()
     ///     .await?;
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_state_store_provider(mut self, provider: Arc<dyn StateStoreProvider>) -> Self {
         self.state_store_provider = Some(provider);
@@ -344,15 +359,17 @@ impl DrasiLibBuilder {
     /// for `context.identity_provider`.
     ///
     /// # Example
-    /// ```ignore
-    /// use drasi_identity_azure::AzureIdentityProvider;
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, identity::IdentityProvider};
     /// use std::sync::Arc;
     ///
-    /// let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")?;
+    /// async fn build_with_identity(provider: Arc<dyn IdentityProvider>) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
-    ///     .with_identity_provider(Arc::new(provider))
+    ///     .with_identity_provider(provider)
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
         self.identity_provider = Some(provider);
@@ -369,15 +386,20 @@ impl DrasiLibBuilder {
     /// will operate in their default fire-and-forget mode.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
     /// use drasi_wal_redb::RedbWalProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
+    /// # async fn example() -> anyhow::Result<()> {
     /// let wal = RedbWalProvider::new("/data/wal");
     /// let core = DrasiLib::builder()
     ///     .with_wal_provider(Arc::new(wal))
     ///     .build()
     ///     .await?;
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_wal_provider(mut self, provider: Arc<dyn WalProvider>) -> Self {
         self.wal_provider = Some(provider);
@@ -398,15 +420,17 @@ impl DrasiLibBuilder {
     /// with a "not implemented" error.
     ///
     /// # Example
-    /// ```ignore
-    /// use drasi_secret_store_file::FileSecretStoreProvider;
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, SecretStoreProvider};
     /// use std::sync::Arc;
     ///
-    /// let secrets = FileSecretStoreProvider::new("/etc/drasi/secrets.json").await?;
+    /// async fn build_with_secrets(secrets: Arc<dyn SecretStoreProvider>) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
-    ///     .with_secret_store_provider(Arc::new(secrets))
+    ///     .with_secret_store_provider(secrets)
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_secret_store_provider(mut self, provider: Arc<dyn SecretStoreProvider>) -> Self {
         self.secret_store_provider = Some(provider);
@@ -428,12 +452,16 @@ impl DrasiLibBuilder {
     /// drasi-lib only knows about the `Source` trait - it has no knowledge of which plugins exist.
     ///
     /// # Example
-    /// ```ignore
-    /// let source = MySource::new("my-source", config)?;
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, Source};
+    ///
+    /// async fn build_with_source(source: impl Source + 'static) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
     ///     .with_source(source)  // Ownership transferred
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_source(mut self, source: impl SourceTrait + 'static) -> Self {
         self.source_instances
@@ -474,10 +502,16 @@ impl DrasiLibBuilder {
     ///   ConfigValue envelopes intact for lossless roundtripping)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, DrasiLibBuilder, Source};
+    /// use std::collections::HashMap;
+    ///
+    /// fn configure(my_source: impl Source + 'static, config_properties: HashMap<String, serde_json::Value>) -> DrasiLibBuilder {
     /// let builder = DrasiLib::builder()
     ///     .with_source(my_source)
     ///     .with_bootstrap_for_source("my-source", "http", config_properties);
+    /// builder
+    /// }
     /// ```
     pub fn with_bootstrap_for_source(
         mut self,
@@ -496,12 +530,16 @@ impl DrasiLibBuilder {
     /// drasi-lib only knows about the `Reaction` trait - it has no knowledge of which plugins exist.
     ///
     /// # Example
-    /// ```ignore
-    /// let reaction = MyReaction::new("my-reaction", vec!["query1".into()]);
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, Reaction};
+    ///
+    /// async fn build_with_reaction(reaction: impl Reaction + 'static) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
     ///     .with_reaction(reaction)  // Ownership transferred
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_reaction(mut self, reaction: impl ReactionTrait + 'static) -> Self {
         self.reaction_instances

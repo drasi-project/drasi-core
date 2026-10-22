@@ -38,19 +38,30 @@
 //! # Usage
 //!
 //! ## Without a plugin (uses in-memory default)
-//! ```ignore
+//! ```no_run
+//! # use drasi_lib::DrasiLib;
+//! # async fn example() -> anyhow::Result<()> {
 //! let drasi = DrasiLib::builder()
-//!     .build()?;
+//!     .build().await?;
+//! # drasi.shutdown().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## With an external plugin
-//! ```ignore
-//! use drasi_state_store_json::JsonStateStoreProvider;
+//! ```no_run
+//! use drasi_state_store_redb::RedbStateStoreProvider;
+//! use drasi_lib::DrasiLib;
+//! use std::sync::Arc;
 //!
-//! let state_store = JsonStateStoreProvider::new("/data/state");
+//! # async fn example() -> anyhow::Result<()> {
+//! let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
 //! let drasi = DrasiLib::builder()
 //!     .with_state_store_provider(Arc::new(state_store))
-//!     .build()?;
+//!     .build().await?;
+//! # drasi.shutdown().await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use async_trait::async_trait;
@@ -121,8 +132,11 @@ pub type StateStoreResult<T> = Result<T, StateStoreError>;
 ///
 /// # Example Implementation
 ///
-/// ```ignore
-/// use drasi_lib::StateStoreProvider;
+/// This compile-checked skeleton requires a real storage implementation;
+/// `todo!` bodies are not successful writes or a durability guarantee.
+///
+/// ```no_run
+/// use drasi_lib::{StateStoreProvider, StateStoreResult};
 /// use async_trait::async_trait;
 ///
 /// pub struct MyStateStore {
@@ -132,18 +146,26 @@ pub type StateStoreResult<T> = Result<T, StateStoreError>;
 /// #[async_trait]
 /// impl StateStoreProvider for MyStateStore {
 ///     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
-///         // implementation
+///         todo!("Read from the actual store")
 ///     }
 ///
 ///     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
-///         // implementation
+///         todo!("Write using the declared durability policy")
 ///     }
 ///
 ///     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-///         // implementation
+///         todo!("Delete from the actual store")
 ///     }
 ///
 ///     // ... implement other methods
+/// #     async fn contains_key(&self, _: &str, _: &str) -> StateStoreResult<bool> { todo!() }
+/// #     async fn get_many(&self, _: &str, _: &[&str]) -> StateStoreResult<std::collections::HashMap<String, Vec<u8>>> { todo!() }
+/// #     async fn set_many(&self, _: &str, _: &[(&str, &[u8])]) -> StateStoreResult<()> { todo!() }
+/// #     async fn delete_many(&self, _: &str, _: &[&str]) -> StateStoreResult<usize> { todo!() }
+/// #     async fn clear_store(&self, _: &str) -> StateStoreResult<usize> { todo!() }
+/// #     async fn list_keys(&self, _: &str) -> StateStoreResult<Vec<String>> { todo!() }
+/// #     async fn store_exists(&self, _: &str) -> StateStoreResult<bool> { todo!() }
+/// #     async fn key_count(&self, _: &str) -> StateStoreResult<usize> { todo!() }
 /// }
 /// ```
 #[async_trait]
@@ -322,9 +344,10 @@ pub trait StateStoreProvider: Send + Sync {
 ///
 /// # Usage
 ///
-/// ```ignore
-/// use drasi_lib::MemoryStateStoreProvider;
+/// ```no_run
+/// use drasi_lib::{MemoryStateStoreProvider, StateStoreProvider};
 ///
+/// # async fn example() -> drasi_lib::StateStoreResult<()> {
 /// let provider = MemoryStateStoreProvider::new();
 ///
 /// // Store some data
@@ -334,6 +357,8 @@ pub trait StateStoreProvider: Send + Sync {
 /// if let Some(value) = provider.get("my-plugin", "key1").await? {
 ///     println!("Value: {:?}", value);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct MemoryStateStoreProvider {
     /// Data storage: store_id -> (key -> value)

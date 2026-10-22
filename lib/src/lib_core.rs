@@ -64,10 +64,13 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 ///
 /// ## Builder Pattern
 ///
-/// ```ignore
+/// ```no_run
 /// use drasi_lib::{DrasiLib, Query};
 ///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn example(
+/// #     my_source: impl drasi_lib::Source + 'static,
+/// #     my_reaction: impl drasi_lib::Reaction + 'static,
+/// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
 ///     .with_source(my_source)  // Pre-built source instance
@@ -91,16 +94,17 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 ///
 /// // Stop server
 /// core.stop().await?;
+/// # core.shutdown().await?;
 /// # Ok(())
 /// # }
 /// ```
 ///
 /// ## Dynamic Runtime Configuration
 ///
-/// ```ignore
+/// ```no_run
 /// use drasi_lib::{DrasiLib, Query};
 ///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn example(new_source_instance: impl drasi_lib::Source + 'static) -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder()
 ///     .with_id("dynamic-server")
 ///     .build()
@@ -126,6 +130,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// // Remove components
 /// core.remove_query("new-query").await?;
 /// core.remove_source("new-source", false).await?;
+/// # core.shutdown().await?;
 /// # Ok(())
 /// # }
 /// ```

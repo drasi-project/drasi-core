@@ -29,9 +29,10 @@
 //! Log capture is automatic when code runs within a tracing span that has
 //! `component_id` and `component_type` attributes:
 //!
-//! ```ignore
+//! ```no_run
 //! use tracing::Instrument;
 //!
+//! # async fn example(source_id: &str) {
 //! let span = tracing::info_span!(
 //!     "source",
 //!     component_id = %source_id,
@@ -43,15 +44,20 @@
 //!     tracing::info!("Starting source");
 //!     log::info!("Also captured via tracing-log bridge");
 //! }.instrument(span).await;
+//! # }
 //! ```
 //!
 //! Subscribers can stream logs from a component:
 //!
-//! ```ignore
+//! ```no_run
+//! # use drasi_lib::DrasiLib;
+//! # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
 //! let (history, mut receiver) = core.subscribe_source_logs("my-source").await?;
 //! while let Ok(log) = receiver.recv().await {
 //!     println!("[{}] {}: {}", log.level, log.component_id, log.message);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::{HashMap, VecDeque};

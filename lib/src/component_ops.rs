@@ -23,12 +23,16 @@
 //! boundary (in `lib_core_ops/*.rs`), these are converted to `DrasiError` variants
 //! using the helpers in this module.
 //!
-//! ```ignore
-//! // Internal manager returns anyhow::Result
-//! let result = self.source_manager.start_source(id).await;
+//! ```rust
+//! use drasi_lib::component_ops::map_component_error;
+//! use drasi_lib::error::DrasiError;
+//! let cause = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+//! let result: anyhow::Result<()> = Err(cause.into());
 //!
 //! // Convert to DrasiError at API boundary
-//! map_component_error(result, "source", id, "start")
+//! let error = map_component_error(result, "source", "my-source", "start").unwrap_err();
+//! assert!(matches!(error.classification(), DrasiError::OperationFailed { .. }));
+//! assert!(error.downcast_ref::<std::io::Error>().is_some());
 //! ```
 
 use crate::error::DrasiError;
@@ -57,9 +61,10 @@ use anyhow::Result as AnyhowResult;
 ///
 /// # Example
 ///
-/// ```ignore
-/// let result = self.source_manager.start_source(id.to_string()).await;
-/// map_component_error(result, "source", id, "start")
+/// ```rust
+/// use drasi_lib::component_ops::map_component_error;
+/// let result = map_component_error(Ok(42), "source", "my-source", "start");
+/// assert_eq!(result.unwrap(), 42);
 /// ```
 pub fn map_component_error<T>(
     result: AnyhowResult<T>,

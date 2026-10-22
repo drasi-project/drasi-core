@@ -649,7 +649,8 @@ impl InspectionAPI {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
     /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
     ///
