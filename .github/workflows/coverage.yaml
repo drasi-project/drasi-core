@@ -226,6 +226,13 @@ jobs:
           while IFS= read -r package; do
             native_package_args+=(-p "$package")
           done <<< "$native_packages"
+          make build-test-plugins
+          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug"
+          export DRASI_NATIVE_RECOVERY_PLUGIN="$PWD/target/debug/examples/libnative_recovery.so"
+          test -s "$DRASI_NATIVE_RECOVERY_PLUGIN"
+          while IFS= read -r package; do
+            test -s "$DRASI_NATIVE_PLUGIN_DIR/lib${package//-/_}.so"
+          done <<< "$native_packages"
           cargo llvm-cov clean --profraw-only
           cargo llvm-cov \
             -p drasi-source-postgres \
@@ -243,13 +250,6 @@ jobs:
             -p drasi-plugin-sdk \
             "${native_package_args[@]}" \
             --no-report
-          make build-test-plugins
-          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug"
-          export DRASI_NATIVE_RECOVERY_PLUGIN="$PWD/target/debug/examples/libnative_recovery.so"
-          test -s "$DRASI_NATIVE_RECOVERY_PLUGIN"
-          for library in source_http source_grpc sink_http sink_grpc sink_sse bootstrap_http; do
-            test -s "$DRASI_NATIVE_PLUGIN_DIR/libdrasi_computation_${library}.so"
-          done
           cargo llvm-cov --no-report \
             -p drasi-host-sdk --lib --test native_network_loopback --test native_network_wire
           cargo llvm-cov report --lcov --output-path plugins-lcov.info
