@@ -60,15 +60,121 @@ Open **[Temporal UI](http://localhost:18080)** and select `inventory-monitor`.
 Its history shows the three signals. The workflow stays running throughout.
 Set `TEMPORAL_UI_PORT` if port 18080 is already in use.
 
-The three pieces are small:
+## Read the setup
 
-- [Source table](inventory/init.sql): PostgreSQL `inventory`, with logical replication.
-- [Continuous query](inventory/query.cypher): `WHERE i.stock < 5`.
-- [Reaction mappings](inventory/reaction.json): three diff types, three signal names.
+`./demo.sh up` runs this setup for you. The [source table](inventory/init.sql)
+is PostgreSQL `inventory`, with logical replication enabled.
 
-The [example Worker](inventory/workflow.py) starts the monitor once and
-records its signals. The reaction never starts or cancels it. The inventory
-story and workflow ID exist only in this example, not in the reusable reaction.
+### Temporal workflow
+
+The workflow in [inventory/workflow.py](inventory/workflow.py) stays running
+and records each signal's payload:
+
+```python
+@workflow.defn
+class InventoryMonitor:
+	def __init__(self):
+		self.events = []
+
+	@workflow.run
+	async def run(self):
+		await workflow.wait_condition(lambda: False)
+
+	@workflow.signal
+	def low_stock(self, diff: dict):
+		self.events.append({"signal": "low_stock", "diff": diff})
+
+	@workflow.signal
+	def stock_changed(self, diff: dict):
+		self.events.append({"signal": "stock_changed", "diff": diff})
+
+	@workflow.signal
+	def stock_restored(self, diff: dict):
+		self.events.append({"signal": "stock_restored", "diff": diff})
+
+	@workflow.query
+	def events_received(self) -> list:
+		return self.events
+```
+
+The file imports `workflow` from the Temporal Python SDK. Its Worker registers
+`InventoryMonitor` on the `inventory` task queue and starts it with workflow ID
+`inventory-monitor`. On restart, it reuses the running workflow. The demo
+commands query `events_received` to confirm that each signal was processed.
+
+### Continuous query
+
+[inventory/query.cypher](inventory/query.cypher) selects low-stock products:
+
+```cypher
+MATCH (i:inventory)
+WHERE i.stock < 5
+RETURN i.product AS product, i.stock AS stock
+```
+
+The PostgreSQL source maps rows to `inventory` nodes. In [main.rs](main.rs),
+the query is named `changes` and reads from source `input`:
+
+```rust
+let query = Query::cypher("changes")
+	.query(query_text)
+	.from_source("input")
+	.enable_bootstrap(false)
+	.auto_start(true)
+	.build();
+```
+
+`query_text` contains the Cypher file above. Bootstrap is disabled because the
+demo inserts its initial row after Drasi is ready.
+
+### Reaction mappings
+
+[inventory/reaction.json](inventory/reaction.json) maps each kind of query
+diff to a signal on the same workflow:
+
+```json
+{
+	"endpoint": "http://temporal:7233",
+	"outputTemplates": {
+		"routes": {
+			"changes": {
+				"added": {
+					"action": "signal",
+					"workflowId": "inventory-monitor",
+					"signalName": "low_stock"
+				},
+				"updated": {
+					"action": "signal",
+					"workflowId": "inventory-monitor",
+					"signalName": "stock_changed"
+				},
+				"deleted": {
+					"action": "signal",
+					"workflowId": "inventory-monitor",
+					"signalName": "stock_restored"
+				}
+			}
+		}
+	}
+}
+```
+
+`temporal` is the Compose service name. The `changes` route matches the query
+ID, and each `signalName` matches a workflow handler. With no payload template,
+the reaction sends the standard diff envelope as the handler's `diff` argument,
+including the operation, sequence ID, and applicable `before` and `after` rows.
+
+[main.rs](main.rs) loads that JSON into `raw` and creates reaction `actions`,
+subscribed to query `changes`:
+
+```rust
+let reaction = TemporalReactionDescriptor
+	.create_reaction("actions", vec!["changes".into()], &raw, true)
+	.await?;
+```
+
+The reaction never starts or cancels the monitor in this demo. The inventory
+story and workflow ID exist only in the example, not in the reusable reaction.
 
 ## Stop
 
