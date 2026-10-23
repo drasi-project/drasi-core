@@ -5,7 +5,7 @@
 # RUSTFLAGS just ensures warnings are errors.
 RUSTFLAGS := -Dwarnings
 
-.PHONY: clippy clippy-fix help build-test-plugins test-host-sdk \
+.PHONY: clippy clippy-fix help build-test-plugins test-host-sdk test-salesforce-ffi \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
        publish-all publish-all-dry-run \
@@ -17,6 +17,7 @@ help:
 	@echo "  clippy                    - Run cargo clippy with same configuration as CI"
 	@echo "  build-test-plugins        - Build cdylib plugins needed for host-sdk integration tests"
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
+	@echo "  test-salesforce-ffi       - Build the Salesforce plugin and run its FFI integration tests"
 	@echo "  build-plugins             - Build all dynamic plugins (debug)"
 	@echo "  build-plugins-release     - Build all dynamic plugins (release)"
 	@echo "  list-plugins              - List all discovered dynamic plugin crates"
@@ -32,7 +33,7 @@ help:
 # Features to enable for clippy linting.
 # We avoid --all-features because bundled-jq triggers a flaky jq source build.
 # The jq feature (system libjq) covers the same Rust code.
-CLIPPY_FEATURES := drasi-middleware/all,drasi-host-sdk/registry,drasi-host-sdk/fetcher,drasi-host-sdk/watcher,drasi-lib/middleware-jq
+CLIPPY_FEATURES := drasi-middleware/all,drasi-host-sdk/registry,drasi-host-sdk/fetcher,drasi-host-sdk/watcher,drasi-lib/middleware-jq,drasi-source-salesforce/dynamic-plugin
 
 clippy:
 	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --workspace --all-targets --features "$(CLIPPY_FEATURES)"
@@ -52,7 +53,6 @@ build-test-plugins:
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
-	cargo build --lib -p drasi-source-salesforce --features drasi-source-salesforce/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
 	@for ext in dylib so dll; do \
@@ -62,14 +62,12 @@ build-test-plugins:
 		         target/debug/libdrasi_reaction_snapshot_test.$$ext \
 		         target/debug/libdrasi_identity_test.$$ext \
 		         target/debug/libdrasi_bootstrap_scriptfile.$$ext \
-		         target/debug/libdrasi_source_salesforce.$$ext \
 		         target/debug/drasi_source_mock.$$ext \
 		         target/debug/drasi_reaction_log.$$ext \
 		         target/debug/drasi_reaction_sse.$$ext \
 		         target/debug/drasi_reaction_snapshot_test.$$ext \
 		         target/debug/drasi_identity_test.$$ext \
-		         target/debug/drasi_bootstrap_scriptfile.$$ext \
-		         target/debug/drasi_source_salesforce.$$ext; do \
+		         target/debug/drasi_bootstrap_scriptfile.$$ext; do \
 			[ -f "$$f" ] && cp "$$f" $(PLUGIN_OUT_DIR)/ || true; \
 		done; \
 	done
@@ -79,9 +77,13 @@ build-test-plugins:
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
 	cargo test -p drasi-host-sdk --test integration_test \
-		--test bootstrap_provider_ffi_test \
-		--test salesforce_recovery_ffi_test -- --test-threads=1
+		--test bootstrap_provider_ffi_test -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
+
+test-salesforce-ffi:
+	cargo build --lib -p drasi-source-salesforce --features drasi-source-salesforce/dynamic-plugin
+	cargo test -p drasi-source-salesforce --features drasi-source-salesforce/dynamic-plugin \
+		--test ffi -- --test-threads=1
 
 # Deterministic cross-cdylib layout-mismatch regression for issue #602.
 #

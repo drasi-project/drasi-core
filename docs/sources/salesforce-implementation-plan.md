@@ -31,6 +31,11 @@ replay of a committed update after the snapshot boundary. The standalone
 example's tests, offline create/update/delete/repair flow and read-only live
 schema acceptance passed again.
 
+The Salesforce FFI tests live in the source crate's `tests/ffi.rs` and run with
+`make test-salesforce-ffi`. The host SDK crate, including its manifest and tests,
+matches the pre-branch baseline; Salesforce fixtures and test dependencies are
+owned by the source crate.
+
 `cargo test --workspace --exclude drasi-host-sdk` encountered an environmental
 failure in the unchanged `test_sse_basic_integration`: another Docker service
 owns `127.0.0.1:18080`. That service was left untouched. The workspace rerun with
@@ -83,7 +88,7 @@ Timestamp, and MultiSelect is Json with a list-of-strings description. Each
 relationship label has one declaration; ambiguous owner/target endpoints remain
 unspecified rather than letting generic graph aggregation select the first one.
 Existing local metadata fixtures cover public inspection, refreshes, failed
-publication and lifecycle behavior; the host fixture exercises positive schema
+publication and lifecycle behavior; the Salesforce FFI fixture exercises positive schema
 discovery through an independently loaded plugin without a cloud account.
 
 Historical schema-discovery verification, before contract restoration:
@@ -734,6 +739,7 @@ cargo fmt -- --check
 make clippy
 cargo test --workspace --exclude drasi-host-sdk
 make test-host-sdk
+make test-salesforce-ffi
 make test-ffi-layout-mismatch
 ```
 

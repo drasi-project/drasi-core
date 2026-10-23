@@ -13,9 +13,9 @@
 // limitations under the License.
 
 //! Salesforce uses the existing source ABI, including its in-plugin bootstrap.
-//! Run with `make test-host-sdk`; no Salesforce account is contacted.
+//! Run with `make test-salesforce-ffi`; no Salesforce account is contacted.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,16 +33,20 @@ use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
 use serde_json::json;
 
 fn load() -> LoadedPlugin {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let library = format!(
         "{}drasi_source_salesforce{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     );
-    let path = root.join("target/debug/plugins").join(library);
+    let path = std::env::current_exe()
+        .expect("test executable path")
+        .parent()
+        .and_then(Path::parent)
+        .expect("Cargo target directory")
+        .join(library);
     assert!(
         path.is_file(),
-        "missing {}; run make build-test-plugins",
+        "missing {}; run make test-salesforce-ffi",
         path.display()
     );
     load_plugin_from_path(

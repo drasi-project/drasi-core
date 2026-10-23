@@ -263,7 +263,13 @@ connects to a real Developer Edition org or sandbox.
 ```sh
 cargo test -p drasi-source-salesforce --tests -- --include-ignored
 cargo test -p drasi-salesforce-common
+make test-salesforce-ffi
 ```
+
+The source owns its dynamic-plugin tests in `tests/ffi.rs`, gated by the
+`dynamic-plugin` feature. `make test-salesforce-ffi` builds the source cdylib
+before running those tests through the unchanged host SDK. They use local
+protocol fixtures and require no Salesforce account.
 
 `PositionUnavailable` means retained history or source identity cannot satisfy
 the checkpoint. A checksum failure means an invalid artifact or wrong spool.

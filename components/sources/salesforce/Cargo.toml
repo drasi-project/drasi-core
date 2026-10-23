@@ -40,11 +40,17 @@ futures-util = "0.3"
 [dev-dependencies]
 apache-avro = { version = "0.20", default-features = false }
 axum = "0.7"
+drasi-host-sdk.workspace = true
 drasi-index-rocksdb.workspace = true
 drasi-reaction-application.workspace = true
 tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-test = "0.4"
+wiremock = "0.6"
 
 [features]
 dynamic-plugin = []
+
+[[test]]
+name = "ffi"
+required-features = ["dynamic-plugin"]
