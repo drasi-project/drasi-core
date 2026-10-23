@@ -918,7 +918,7 @@ fn test_validate_and_transition_nonexistent_component() {
 }
 
 #[test]
-fn test_validate_and_transition_cannot_stop_error_reaction() {
+fn test_validate_and_transition_stops_error_reaction() {
     let mut graph = create_test_graph();
     graph.add_component(reaction_node("r1")).unwrap();
     graph
@@ -928,17 +928,17 @@ fn test_validate_and_transition_cannot_stop_error_reaction() {
         .validate_and_transition("r1", ComponentStatus::Error, None)
         .unwrap();
 
-    let error = graph
+    let event = graph
         .validate_and_transition("r1", ComponentStatus::Stopping, None)
-        .unwrap_err();
-    assert!(error.to_string().contains("error state"));
-    assert!(graph
-        .update_status("r1", ComponentStatus::Stopping)
         .unwrap()
-        .is_none());
+        .unwrap();
+    assert_eq!(event.status, ComponentStatus::Stopping);
+    graph
+        .validate_and_transition("r1", ComponentStatus::Stopped, None)
+        .unwrap();
     assert_eq!(
         graph.get_component("r1").unwrap().status,
-        ComponentStatus::Error
+        ComponentStatus::Stopped
     );
 }
 

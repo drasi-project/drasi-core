@@ -1294,8 +1294,9 @@ pub struct DrasiQuery {
     source_manager: Arc<SourceManager>,
     // Track subscription tasks for cleanup
     subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
-    // Abort handles for bootstrap + supervisor tasks (for cleanup on stop)
+    // Abort bootstrap workers, then join their supervisor during stop.
     bootstrap_abort_handles: Arc<RwLock<Vec<tokio::task::AbortHandle>>>,
+    bootstrap_supervisor: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     // Track bootstrap state per source
     bootstrap_state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
     // IndexFactory for creating storage backend indexes
@@ -1354,6 +1355,7 @@ impl DrasiQuery {
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             bootstrap_abort_handles: Arc::new(RwLock::new(Vec::new())),
+            bootstrap_supervisor: Arc::new(RwLock::new(None)),
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
             middleware_registry,
@@ -2934,6 +2936,9 @@ impl Query for DrasiQuery {
                 let supervisor_handle = tokio::spawn(
                     async move {
                         let join_results = futures::future::join_all(bootstrap_handles).await;
+                        if join_results.iter().any(|result| matches!(result, Err(error) if error.is_cancelled())) {
+                            return;
+                        }
                         let panic_count = join_results.iter().filter(|r| matches!(r, Err(e) if e.is_panic())).count();
 
                         // Collect bootstrap provider failures reported by the per-source
@@ -3095,7 +3100,7 @@ impl Query for DrasiQuery {
                     }
                     .instrument(span),
                 );
-                abort_handles.push(supervisor_handle.abort_handle());
+                *self.bootstrap_supervisor.write().await = Some(supervisor_handle);
             }
 
             // Store abort handles for cleanup on stop()
@@ -3478,13 +3483,22 @@ impl Query for DrasiQuery {
             )
             .await;
 
-        // Abort bootstrap tasks and supervisor
+        // Abort bootstrap workers, then let their supervisor join every worker.
         let bootstrap_aborts: Vec<_> = {
             let mut handles = self.bootstrap_abort_handles.write().await;
             handles.drain(..).collect()
         };
         for handle in bootstrap_aborts {
             handle.abort();
+        }
+        let supervisor = self.bootstrap_supervisor.write().await.take();
+        if let Some(supervisor) = supervisor {
+            if let Err(error) = supervisor.await {
+                warn!(
+                    "Query '{}' bootstrap supervisor failed during stop: {error}",
+                    self.base.config.id
+                );
+            }
         }
 
         // Drain and abort source subscription forwarders so they don't leak across restarts

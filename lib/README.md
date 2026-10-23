@@ -404,6 +404,24 @@ cleanup. Updating a failed source leaves its replacement stopped. Managed
 `stop_source()` rejects an already stopped source, even if its direct `stop()`
 is idempotent.
 
+`stop_reaction()` also stops failed reaction runtimes, including processing tasks
+left behind by a failed start.
+
+### Terminal Shutdown
+
+Use `stop()` for a restartable pause and `shutdown()` for permanent teardown.
+Shutdown stops active and failed components even if `start()` did not finish,
+joins internal tasks, releases query index handles, and drops the graph's runtime
+instances without deprovisioning them or deleting persisted state. Stop errors
+are returned after the remaining cleanup is attempted. Repeated calls are safe;
+concurrent shutdown calls wait for teardown to complete.
+
+After shutdown, drop all `DrasiLib` clones and caller-held component/provider
+handles before reopening injected state stores or WAL providers at the same
+paths. These providers remain owned by the instance's configuration/managers
+until those owners are dropped. The reopened stores retain their data, and a new
+engine can recover in the same process. A shut-down instance cannot be restarted.
+
 ### Inspecting Components
 
 ```rust

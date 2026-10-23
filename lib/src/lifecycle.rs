@@ -146,7 +146,7 @@ impl LifecycleManager {
         Ok(())
     }
 
-    /// Stop all active components and clean up failed queries and sources.
+    /// Stop all active components and clean up failed runtimes.
     ///
     /// Components are stopped in reverse dependency order using the graph's
     /// topological ordering: Reactions → Queries → Sources.
