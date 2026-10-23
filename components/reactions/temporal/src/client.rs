@@ -21,6 +21,31 @@ use temporalio_common::protos::temporal::api::{
 
 use crate::{config::*, render::Command};
 
+#[async_trait::async_trait]
+pub(crate) trait Transport: Send + Sync {
+    async fn resolve_run(
+        &self,
+        config: &TemporalReactionConfig,
+        command: &Command,
+    ) -> Result<String>;
+    async fn send(&self, config: &TemporalReactionConfig, command: &Command) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl Transport for Client {
+    async fn resolve_run(
+        &self,
+        config: &TemporalReactionConfig,
+        command: &Command,
+    ) -> Result<String> {
+        resolve_run(self, config, command).await
+    }
+
+    async fn send(&self, config: &TemporalReactionConfig, command: &Command) -> Result<()> {
+        send(self, config, command).await
+    }
+}
+
 pub(crate) async fn connect(config: &TemporalReactionConfig, id: &str) -> Result<Client> {
     let endpoint = temporalio_client::Url::parse(&config.endpoint)?;
     let tls = if endpoint.scheme() == "https" {

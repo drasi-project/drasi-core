@@ -182,13 +182,20 @@ query boundary rather than dispatching a snapshot of existing results.
 Recovery uses `ReactionRecoveryPolicy::Strict`.
 
 The reaction renders every mapped row before sending any action for an
-emission. It persists the resulting commands, request IDs, and payloads before
-contacting Temporal. Each successful command advances persisted progress;
-the query checkpoint advances only after the entire emission succeeds.
+emission. It persists the resulting commands, request IDs, and payloads once,
+before contacting Temporal. A separate progress record stores the emission
+sequence, next command index, and any resolved run ID for the current command.
+Each successful command updates only that small record, not the command
+payloads. The query checkpoint advances only after the entire emission succeeds.
 
 One pending plan is retained per subscribed query. The next checkpointed
-emission replaces it. Cancel and Terminate also persist their resolved run IDs
-before sending their requests.
+emission replaces it. Cancel and Terminate persist their resolved run IDs in
+the progress record before sending their requests.
+
+Version 1 plans with inline progress are upgraded on replay. The reaction
+persists their existing progress and run pin before replacing the plan with
+version 2. Older binaries cannot read version 2 plans; downgrading a reaction
+that has written them is unsupported.
 
 This closes the tested crash windows without claiming exactly-once delivery.
 Temporal deduplication depends on the action, execution, and retained server
@@ -263,3 +270,17 @@ The existing shared SDK can leave a dynamically loaded reaction's background
 error absent from the host's cached status. This component does not modify
 that SDK. Dynamic hosts must not treat that cached status alone as proof of
 successful delivery.
+
+## Recovery tests
+
+Run `cargo test -p drasi-reaction-temporal`. Component tests exercise the real
+delivery loop with an injected transport and state-store write failures.
+They cover partial delivery, unknown RPC outcomes, progress and checkpoint
+failures, stable retry identities, pinned destructive targets, configuration
+mismatches, and upgrades from inline progress. A write-volume test bounds
+persistence to one plan plus small per-command updates.
+
+The Docker order walkthrough uses a real Temporal server. Its
+`verify-demo.sh` also runs command-confirmation regressions, including a
+pending database stage blocking the next mutation. The failure-injection
+tests live in the component, not in the example.

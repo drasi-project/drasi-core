@@ -83,6 +83,7 @@ reject_stage() {
 }
 
 ./demo.sh up
+"${compose[@]}" exec -T worker python -m unittest -v test_demo
 run_id="$("${compose[@]}" exec -T worker python -c 'import asyncio, os; from temporalio.client import Client
 async def run():
     client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])

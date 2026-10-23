@@ -107,4 +107,6 @@ drasi_plugin_sdk::export_plugin!(
 );
 
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod tests;
