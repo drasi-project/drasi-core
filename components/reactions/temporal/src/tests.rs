@@ -52,7 +52,7 @@ fn action_shapes_reject_unrelated_fields_and_unknown_operations() {
         );
     }
     assert!(serde_json::from_value::<TemporalReactionConfig>(
-        json!({"outputTemplates":{"routes":{"q":{"adedd":signal()}}}})
+        json!({"outputTemplates":{"routes":{"q":{"unsupported":signal()}}}})
     )
     .is_err());
     let cancel = config(json!({"action":"cancel","workflowId":"x","template":"{}"}));
