@@ -50,11 +50,7 @@ use super::types::FfiStr;
 ///   which raise their sequence counter above it for restart monotonicity
 ///   (#827). This changes the subscribe call contract, so old plugins must be
 ///   rejected by the loader's major.minor check.
-/// - `0.15.0`: bootstrap invocation properties/settings cross as versioned
-///   MessagePack; source subscribe outcomes preserve structured recovery errors.
-///   A separate resume-sequence presence flag preserves `Some(0)` for completed
-///   empty-bootstrap recovery instead of conflating it with a fresh subscription.
-pub const FFI_SDK_VERSION: &str = "0.15.0";
+pub const FFI_SDK_VERSION: &str = "0.14.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

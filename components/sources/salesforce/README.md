@@ -38,9 +38,11 @@ let query = Query::cypher("contacts-with-accounts")
     .build();
 ```
 
-The source installs its local snapshot bootstrap provider automatically. An
-explicit `with_bootstrap_provider(...)` override and the independently loaded
-Salesforce bootstrap plugin remain supported. Persistent queries also need a
+The source installs its local snapshot bootstrap provider automatically. The
+provider runs inside the source, including when the source is a dynamic plugin;
+there is no separate Salesforce bootstrap plugin or additional FFI contract.
+An explicit `with_bootstrap_provider(...)` override is available for Rust callers.
+Persistent queries also need a
 durable query index backend; the source spool does not replace query storage.
 
 ## Query schema
@@ -202,8 +204,11 @@ patterns. This matches live delivery and avoids missing required endpoints.
 Each query independently receives snapshot H, replay `(H,R]`, then live `>R`.
 Completed-bootstrap checkpoints pair cursor H with sequence **zero**, even for
 nonempty snapshots. Nonzero sequences must equal the local cursor ordinal.
-Missing, inconsistent or expired positions fail explicitly, including typed
-`PositionUnavailable`; there is no silent reset to latest.
+Missing, inconsistent or expired positions fail explicitly; there is no silent
+reset to latest. Rust callers receive typed `PositionUnavailable` errors. The
+unchanged plugin SDK reports subscription failures as generic errors, so typed
+`AutoReset` handling of unavailable positions is limited to static linking.
+Dynamic-plugin recovery failures require operator intervention.
 
 Retention pins protect catchup and unconfirmed live events. Capacity pressure
 cannot discard pinned history: the mutation fails atomically instead. Dropped
@@ -244,7 +249,7 @@ different source identity; ordinary discovered-field changes do not.
 | `snapshotTicketTtlSeconds` | 600 |
 | Snapshot file hard limit | 512 MiB |
 
-Both dynamically loaded plugins must see the same protected spool directory.
+The source and its internal bootstrap reader use the same protected spool.
 Do not share it between source owners or expose it through an unauthenticated
 file service. Consider Salesforce API quotas when selecting objects and intervals.
 
@@ -257,7 +262,7 @@ connects to a real Developer Edition org or sandbox.
 
 ```sh
 cargo test -p drasi-source-salesforce --tests -- --include-ignored
-cargo test -p drasi-salesforce-common -p drasi-bootstrap-salesforce
+cargo test -p drasi-salesforce-common
 ```
 
 `PositionUnavailable` means retained history or source identity cannot satisfy

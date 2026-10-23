@@ -26,9 +26,8 @@ use drasi_lib::channels::events::BootstrapEventSender;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_plugin_sdk::descriptor::BootstrapPluginDescriptor;
 use drasi_plugin_sdk::ffi::{
-    encode_bootstrap_invocation, release_bootstrap_receiver, release_result_receiver,
-    wrap_result_receiver, BootstrapPluginVtable, BootstrapProviderVtable, BootstrapStreamConsumer,
-    FfiStr,
+    release_bootstrap_receiver, release_result_receiver, wrap_result_receiver,
+    BootstrapPluginVtable, BootstrapProviderVtable, BootstrapStreamConsumer, FfiStr,
 };
 use libloading::Library;
 
@@ -60,9 +59,8 @@ impl BootstrapProvider for BootstrapProviderProxy {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
-        settings: Option<&SourceSubscriptionSettings>,
+        _settings: Option<&SourceSubscriptionSettings>,
     ) -> anyhow::Result<BootstrapResult> {
-        let invocation = encode_bootstrap_invocation(context, settings)?;
         // Start the provider and take ownership of the stream handles inside a
         // block so no raw pointer is held across an await point. The guard
         // keeps the result callback context alive until the result is read.
@@ -89,8 +87,6 @@ impl BootstrapProvider for BootstrapProviderProxy {
                 FfiStr::from_str(&request.request_id),
                 FfiStr::from_str(&context.server_id),
                 FfiStr::from_str(&context.source_id),
-                invocation.as_ptr(),
-                invocation.len(),
             );
 
             if stream_ptr.is_null() {

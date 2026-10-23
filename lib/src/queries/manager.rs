@@ -27,8 +27,8 @@ use drasi_core::{
     evaluation::variable_value::VariableValue,
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
     interface::{
-        BootstrapState, CheckpointStore, IndexError, LiveResultsWriter, OutboxWriter, RowMutation,
-        SessionControl, SessionGuard,
+        CheckpointStore, IndexError, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl,
+        SessionGuard,
     },
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
@@ -970,12 +970,6 @@ async fn persist_bootstrap_boundary(
             .stage_result_sequence(query_id, 0)
             .await
             .context("stage bootstrap result sequence")?;
-        let mut sources: Vec<_> = positions.keys().cloned().collect();
-        sources.sort();
-        checkpoint_store
-            .stage_bootstrap_state(BootstrapState::Complete { sources })
-            .await
-            .context("stage bootstrap completion")?;
     }
     if let Some(session) = session {
         session
@@ -1141,17 +1135,20 @@ async fn load_durable_output(
         (Vec::new(), false)
     };
 
-    // A completed bootstrap publishes a snapshot at sequence zero without an
-    // outbox entry. Only the atomic completion marker proves this is not a
-    // partially wiped or legacy snapshot.
+    // Bootstrap commits its snapshot, result sequence zero, and handover
+    // checkpoints together without an outbox entry.
     let completed_snapshot = if stored_sequence == Some(0) && outbox_sequences.is_empty() {
-        matches!(stores
+        let checkpoints = stores
             .checkpoint_store
-            .read_bootstrap_state()
+            .read_all_checkpoints()
             .await
             .map_err(|e| DurableOutputInconsistency::ReadFailed {
-                message: format!("failed to read bootstrap completion: {e}"),
-            })?, Some(BootstrapState::Complete { sources }) if !sources.is_empty())
+                message: format!("failed to read bootstrap checkpoints: {e}"),
+            })?;
+        !checkpoints.is_empty()
+            && checkpoints
+                .values()
+                .all(|checkpoint| checkpoint.sequence == 0 && checkpoint.source_position.is_some())
     } else {
         false
     };
@@ -1852,52 +1849,23 @@ impl Query for DrasiQuery {
                 future_queue: &future_queue,
             };
 
-            let bootstrap_metadata = checkpoint_store
-                .read_bootstrap_state()
+            let bootstrap_result_sequence = checkpoint_store
+                .read_result_sequence(&self.base.config.id)
                 .await
-                .context("Failed to read durable bootstrap state; refusing to reset")?;
+                .context("Failed to read durable output boundary; refusing to reset")?;
             let stored_config_hash = checkpoint_store.read_config_hash().await;
             if self.base.config.enable_bootstrap {
                 if let Err(e) = &stored_config_hash {
                     anyhow::bail!("Failed to read config hash before bootstrap recovery; refusing to reset: {e}");
                 }
             }
-            let bootstrap_problem = match &bootstrap_metadata {
-                Some(BootstrapState::InProgress) => Some("incomplete durable bootstrap"),
-                None if self.base.config.enable_bootstrap
-                    && matches!(stored_config_hash, Ok(Some(hash)) if hash == current_hash) =>
-                {
-                    // Legacy handover checkpoints did not atomically persist the
-                    // initial output snapshot. Even a positive source sequence
-                    // cannot prove that untouched bootstrap rows survived.
-                    Some("legacy bootstrap has no completion metadata; completeness cannot be proven")
-                }
-                Some(BootstrapState::Complete { sources })
-                    if self.base.config.enable_bootstrap
-                        && matches!(stored_config_hash, Ok(Some(hash)) if hash == current_hash) =>
-                {
-                    let checkpoints = checkpoint_store.read_all_checkpoints().await.context(
-                        "Failed to read completed bootstrap checkpoints; refusing to reset",
-                    )?;
-                    let sequence = checkpoint_store
-                        .read_result_sequence(&self.base.config.id)
-                        .await
-                        .context(
-                            "Failed to read completed bootstrap result sequence; refusing to reset",
-                        )?;
-                    if sequence.is_none() {
-                        Some("completed bootstrap is missing its result sequence")
-                    } else if sources.iter().any(|source_id| {
-                        !checkpoints
-                            .get(source_id)
-                            .is_some_and(|cp| cp.source_position.is_some() || cp.sequence > 0)
-                    }) {
-                        Some("completed bootstrap is missing a source checkpoint boundary")
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
+            let bootstrap_problem = if self.base.config.enable_bootstrap
+                && matches!(stored_config_hash, Ok(Some(hash)) if hash == current_hash)
+                && bootstrap_result_sequence.is_none()
+            {
+                Some("incomplete durable bootstrap or legacy bootstrap without a committed output boundary")
+            } else {
+                None
             };
             let config_matches = match (bootstrap_problem, stored_config_hash) {
                 (Some(problem), _) => match self.resolved_recovery_policy {
@@ -2204,8 +2172,7 @@ impl Query for DrasiQuery {
                                     self.base.config.id, settings.source_id, cp.sequence
                                 );
                             } else if !settings.enable_bootstrap
-                                || matches!(&bootstrap_metadata, Some(BootstrapState::Complete { sources })
-                                    if !sources.contains(&settings.source_id))
+                                || bootstrap_result_sequence.is_some()
                             {
                                 // Streaming-only query: no checkpoint means replay
                                 // WAL from seq 0. Bootstrap-enabled queries stay
@@ -2895,31 +2862,22 @@ impl Query for DrasiQuery {
                         "source returned bootstrap while resuming completed query indexes"
                     );
                 }
-                let control = session_control
-                    .as_ref()
-                    .context("persistent bootstrap requires session control")?;
-                let session = SessionGuard::begin(control.clone())
-                    .await
-                    .context("begin durable bootstrap marker")?;
-                let state = if bootstrap_channels.is_empty() {
+                if bootstrap_channels.is_empty() {
+                    let control = session_control
+                        .as_ref()
+                        .context("persistent bootstrap requires session control")?;
+                    let session = SessionGuard::begin(control.clone())
+                        .await
+                        .context("begin empty bootstrap output")?;
                     checkpoint_store
                         .stage_result_sequence(&self.base.config.id, 0)
                         .await
                         .context("stage empty bootstrap result sequence")?;
-                    BootstrapState::Complete {
-                        sources: Vec::new(),
-                    }
-                } else {
-                    BootstrapState::InProgress
-                };
-                checkpoint_store
-                    .stage_bootstrap_state(state)
-                    .await
-                    .context("stage durable bootstrap marker")?;
-                session
-                    .commit()
-                    .await
-                    .context("commit durable bootstrap marker")?;
+                    session
+                        .commit()
+                        .await
+                        .context("commit empty bootstrap output")?;
+                }
                 Ok(())
             }
             .await;

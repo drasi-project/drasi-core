@@ -220,19 +220,6 @@ struct FailingCheckpointStore {
 
 #[async_trait]
 impl CheckpointStore for FailingCheckpointStore {
-    async fn stage_bootstrap_state(
-        &self,
-        state: drasi_core::interface::BootstrapState,
-    ) -> Result<(), IndexError> {
-        self.inner.stage_bootstrap_state(state).await
-    }
-
-    async fn read_bootstrap_state(
-        &self,
-    ) -> Result<Option<drasi_core::interface::BootstrapState>, IndexError> {
-        self.inner.read_bootstrap_state().await
-    }
-
     fn is_persistent(&self) -> bool {
         self.inner.is_persistent()
     }

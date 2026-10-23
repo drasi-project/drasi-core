@@ -1467,20 +1467,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CheckpointStore for PersistentInMemoryCheckpointStore {
-        async fn stage_bootstrap_state(
-            &self,
-            state: drasi_core::interface::BootstrapState,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.stage_bootstrap_state(state).await
-        }
-
-        async fn read_bootstrap_state(
-            &self,
-        ) -> Result<Option<drasi_core::interface::BootstrapState>, drasi_core::interface::IndexError>
-        {
-            self.inner.read_bootstrap_state().await
-        }
-
         fn is_persistent(&self) -> bool {
             true
         }
@@ -2267,20 +2253,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CheckpointStore for FailableCheckpointStore {
-        async fn stage_bootstrap_state(
-            &self,
-            state: drasi_core::interface::BootstrapState,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.stage_bootstrap_state(state).await
-        }
-
-        async fn read_bootstrap_state(
-            &self,
-        ) -> Result<Option<drasi_core::interface::BootstrapState>, drasi_core::interface::IndexError>
-        {
-            self.inner.read_bootstrap_state().await
-        }
-
         fn is_persistent(&self) -> bool {
             true
         }
@@ -3484,20 +3456,6 @@ mod orchestration_tests {
 
     #[async_trait::async_trait]
     impl CheckpointStore for PersistentInMemoryCheckpointStore {
-        async fn stage_bootstrap_state(
-            &self,
-            state: drasi_core::interface::BootstrapState,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.stage_bootstrap_state(state).await
-        }
-
-        async fn read_bootstrap_state(
-            &self,
-        ) -> Result<Option<drasi_core::interface::BootstrapState>, drasi_core::interface::IndexError>
-        {
-            self.inner.read_bootstrap_state().await
-        }
-
         fn is_persistent(&self) -> bool {
             true
         }

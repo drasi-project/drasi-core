@@ -1,7 +1,3 @@
-#![allow(unexpected_cfgs)]
-
-pub mod descriptor;
-
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
@@ -454,17 +450,6 @@ async fn sha256_file_bounded(path: PathBuf, max_bytes: usize, label: &str) -> Re
     })
     .await?
 }
-
-#[cfg(feature = "dynamic-plugin")]
-drasi_plugin_sdk::export_plugin!(
-    plugin_id = "salesforce-bootstrap",
-    core_version = env!("CARGO_PKG_VERSION"),
-    lib_version = env!("CARGO_PKG_VERSION"),
-    plugin_version = env!("CARGO_PKG_VERSION"),
-    source_descriptors = [],
-    reaction_descriptors = [],
-    bootstrap_descriptors = [descriptor::SalesforceBootstrapDescriptor],
-);
 
 #[cfg(test)]
 mod tests {

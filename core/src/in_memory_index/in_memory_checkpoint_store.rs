@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::RwLock;
 
-use crate::interface::{BootstrapState, CheckpointStore, IndexError, SourceCheckpoint};
+use crate::interface::{CheckpointStore, IndexError, SourceCheckpoint};
 
 /// Internal checkpoint state for a single source.
 #[derive(Debug, Clone)]
@@ -43,7 +43,6 @@ pub struct InMemoryCheckpointStore {
     config_hash: RwLock<Option<u64>>,
     result_sequences: RwLock<HashMap<String, u64>>,
     output_generations: RwLock<HashMap<String, u64>>,
-    bootstrap_state: RwLock<Option<BootstrapState>>,
 }
 
 impl Default for InMemoryCheckpointStore {
@@ -59,7 +58,6 @@ impl InMemoryCheckpointStore {
             config_hash: RwLock::new(None),
             result_sequences: RwLock::new(HashMap::new()),
             output_generations: RwLock::new(HashMap::new()),
-            bootstrap_state: RwLock::new(None),
         }
     }
 }
@@ -68,15 +66,6 @@ impl InMemoryCheckpointStore {
 impl CheckpointStore for InMemoryCheckpointStore {
     fn is_persistent(&self) -> bool {
         false
-    }
-
-    async fn stage_bootstrap_state(&self, state: BootstrapState) -> Result<(), IndexError> {
-        *self.bootstrap_state.write().await = Some(state);
-        Ok(())
-    }
-
-    async fn read_bootstrap_state(&self) -> Result<Option<BootstrapState>, IndexError> {
-        Ok(self.bootstrap_state.read().await.clone())
     }
 
     async fn stage_checkpoint(
@@ -132,7 +121,6 @@ impl CheckpointStore for InMemoryCheckpointStore {
         seq.clear();
         let mut generations = self.output_generations.write().await;
         generations.clear();
-        *self.bootstrap_state.write().await = None;
         Ok(())
     }
 
@@ -181,34 +169,6 @@ impl CheckpointStore for InMemoryCheckpointStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn bootstrap_state_applies_immediately_and_clears() {
-        let store = InMemoryCheckpointStore::new();
-        assert_eq!(store.read_bootstrap_state().await.unwrap(), None);
-        store
-            .stage_bootstrap_state(BootstrapState::InProgress)
-            .await
-            .unwrap();
-        assert_eq!(
-            store.read_bootstrap_state().await.unwrap(),
-            Some(BootstrapState::InProgress)
-        );
-        store
-            .stage_bootstrap_state(BootstrapState::Complete {
-                sources: vec!["source".into()],
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            store.read_bootstrap_state().await.unwrap(),
-            Some(BootstrapState::Complete {
-                sources: vec!["source".into()]
-            })
-        );
-        store.clear_checkpoints().await.unwrap();
-        assert_eq!(store.read_bootstrap_state().await.unwrap(), None);
-    }
 
     #[tokio::test]
     async fn test_checkpoint_round_trip() {

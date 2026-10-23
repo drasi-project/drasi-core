@@ -1,5 +1,6 @@
 #![allow(unexpected_cfgs)]
 
+mod bootstrap;
 mod config;
 mod replay;
 mod runtime;
@@ -794,7 +795,7 @@ impl SalesforceSourceBuilder {
         let bootstrap = match self.bootstrap_provider {
             Some(provider) => provider,
             None => Box::new(
-                drasi_bootstrap_salesforce::SalesforceBootstrapProvider::builder()
+                bootstrap::SalesforceBootstrapProvider::builder()
                     .with_spool_root(&config.spool_root)
                     .with_max_rows(config.max_rows)
                     .with_max_row_bytes(config.max_projected_row_bytes)
@@ -827,9 +828,9 @@ impl SalesforceSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::SalesforceBootstrapProvider;
     use anyhow::Context;
     use async_trait::async_trait;
-    use drasi_bootstrap_salesforce::SalesforceBootstrapProvider;
     use drasi_core::models::{
         Element, ElementMetadata, ElementReference, ElementValue, SourceChange,
     };
@@ -1817,7 +1818,7 @@ mod tests {
         let source = SalesforceSource::builder(source_id)
             .with_config(config.clone())
             .with_bootstrap_provider(
-                drasi_bootstrap_salesforce::SalesforceBootstrapProvider::builder()
+                SalesforceBootstrapProvider::builder()
                     .with_spool_root(&spool)
                     .build()?,
             )

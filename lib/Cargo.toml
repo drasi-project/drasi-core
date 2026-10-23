@@ -76,7 +76,7 @@ drasi-middleware = { workspace = true, optional = true }
 #   2. Create an IndexBackendPlugin instance
 #   3. Pass it to DrasiLib::builder().with_index_provider(...)
 
-bytes = { version = "1", features = ["serde"] }
+bytes = "1"
 tokio = { version = "1.0", features = ["rt", "sync", "time", "macros"] }
 tokio-stream = "0.1"
 serde = { version = "1.0", features = ["derive"] }

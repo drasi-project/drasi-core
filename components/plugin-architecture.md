@@ -172,7 +172,7 @@ pub struct SourceVtable {
     pub start_fn: extern "C" fn(*mut c_void) -> FfiResult,
     pub stop_fn: extern "C" fn(*mut c_void) -> FfiResult,
     pub status_fn: extern "C" fn(*const c_void) -> FfiComponentStatus,
-    pub subscribe_fn: extern "C" fn(...) -> FfiSubscribeResult,
+    pub subscribe_fn: extern "C" fn(...) -> *mut FfiSubscriptionResponse,
     pub drop_fn: extern "C" fn(*mut c_void),
     // ... more methods
 }
@@ -210,28 +210,6 @@ Some services flow from host to plugin:
 
 The host builds a vtable from its own trait implementation and passes it to the plugin, which wraps it in a local proxy (`FfiStateStoreProxy`, `FfiBootstrapProviderProxy`).
 
-### Recovery Metadata
-
-SDK ABI 0.15 carries bootstrap invocation properties, the next bootstrap sequence,
-and optional complete subscription settings as versioned MessagePack. Each proxy
-hop forwards this metadata; the receiving provider copies it before the borrowed
-buffer is released. Bootstrap metadata is limited to 8 MiB. Source-owned snapshot
-tickets can therefore cross from a source plugin through the host to a separately
-loaded bootstrap plugin without sharing Rust objects or credentials.
-
-`FfiSubscribeResult` distinguishes a successful response from a serialized failure.
-The host reconstructs `SourceError::PositionUnavailable` with its original source
-ID, requested position, and optional earliest position, so strict and auto-reset
-recovery behave consistently for static and dynamic sources. Generic errors remain
-generic; malformed or unsupported recovery payloads never trigger a reset by
-masquerading as an unavailable position. Failure metadata is limited to 1 MiB,
-positions to 64 KiB, and producer-owned failure buffers are released through their
-supplied deallocator.
-
-Source subscriptions also carry a separate resume-sequence presence flag:
-`Some(0)` resumes a completed empty bootstrap, while `None` is a fresh
-subscription. Zero must not be used as an absent-value sentinel.
-
 ## Runtime Model
 
 ### Multiple Tokio Runtimes
@@ -257,12 +235,6 @@ Host calls vtable.start_fn(state)
 ```
 
 This avoids nesting tokio runtimes (which would panic) by running `block_on` on a fresh OS thread.
-
-Source subscription calls additionally run on the host's `spawn_blocking` pool,
-leaving a current-thread host free to drain channels while the source acquires its
-subscription gate. An owning handle retains the source and loaded library until
-the call finishes, even if the subscribing task is cancelled. A cancelled call
-that returns a subscription releases its receivers before releasing that handle.
 
 ## Logging and Tracing
 

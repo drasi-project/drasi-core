@@ -1,9 +1,9 @@
 # Salesforce source implementation plan
 
-**Status:** Metadata-driven source and public example implemented and accepted
-against the developer org. Repository-wide verification passed.
-The earlier single-object receipts below are retained as baseline evidence,
-separate from metadata-graph acceptance.
+**Status:** Metadata-driven source and public example implemented. The current
+scope preserves the existing FFI, SDK version, public interfaces, and index
+storage formats. Historical verification receipts below describe earlier
+revisions and do not replace verification of the contract-preserving revision.
 
 **Decision:** Current-state convergence with durable local replay and persistent
 query recovery in the first release. Durability is not a later phase. This
@@ -14,6 +14,30 @@ The [source-planner](../../.github/agents/source-planner.md),
 [source guide](../../components/sources/README.md), and
 [bootstrap guide](../../components/bootstrappers/README.md) govern delivery.
 Executable repository APIs take precedence over stale guide examples.
+
+## Contract-preserving revision
+
+The FFI implementation, SDK version, shared source/bootstrap/checkpoint
+interfaces, DTOs and index formats match the pre-branch baseline `207ef6f3`.
+The default bootstrap provider now runs inside the Salesforce source rather
+than in a separate plugin. Query recovery uses existing checkpoint, result
+sequence and live-results operations; there is no new completion-marker format.
+
+Current verification includes 132 common/source tests, 223 query-runtime tests,
+bootstrap-failure cleanup and output-atomicity regressions, and the parallel
+solver tests. The two source-plugin FFI cases exercise the unchanged ABI,
+including populated/empty snapshots, schema discovery, invalid positions and
+replay of a committed update after the snapshot boundary. The standalone
+example's tests, offline create/update/delete/repair flow and read-only live
+schema acceptance passed again.
+
+`cargo test --workspace --exclude drasi-host-sdk` encountered an environmental
+failure in the unchanged `test_sse_basic_integration`: another Docker service
+owns `127.0.0.1:18080`. That service was left untouched. The workspace rerun with
+`-- --skip test_sse_basic_integration` passed, as did
+`JQ_LIB_DIR=/opt/homebrew/opt/jq/lib make clippy`. The original macOS FFI CI failure
+was a missing `protoc` introduced by the host test's Salesforce-common
+dependency; that unnecessary dependency has been removed.
 
 ## Metadata-driven graph design
 
@@ -31,8 +55,9 @@ RETURN c.Name AS contact, a.Name AS account
 ```
 
 `SalesforceSourceConfig.objects` replaces `projection`. Normal source startup
-discovers metadata and installs a local snapshot bootstrap provider by default;
-the standalone bootstrap plugin remains supported. Runtime schema inspection
+discovers metadata and installs a source-internal snapshot bootstrap provider.
+The provider stays inside the source plugin; no separate Salesforce bootstrap
+plugin or cross-plugin invocation metadata is needed. Runtime schema inspection
 is separate from `Source.properties()`, which continues to persist configuration.
 
 ### Standard source schema discovery
@@ -61,7 +86,7 @@ Existing local metadata fixtures cover public inspection, refreshes, failed
 publication and lifecycle behavior; the host fixture exercises positive schema
 discovery through an independently loaded plugin without a cloud account.
 
-Verification for this addition:
+Historical schema-discovery verification, before contract restoration:
 
 - `cargo test -p drasi-salesforce-common -p drasi-source-salesforce` — passed,
   124 tests.
@@ -260,7 +285,7 @@ persistence remain unverified boundaries.
 | --- | --- |
 | `drasi-salesforce-common` | Authentication, protocol, metadata catalog, record-owned graph mapping, local positions and framed snapshots |
 | `drasi-source-salesforce` | Native CDC, REST reconciliation, transactional mirror/journal, snapshot exports, independent replay and live delivery |
-| `drasi-bootstrap-salesforce` | Read a source-owned immutable snapshot; no independent REST enumeration or Salesforce credentials |
+| Source-private `bootstrap` module | Read a source-owned immutable snapshot; no independent REST enumeration or Salesforce credentials |
 
 One source represents one Salesforce organization and a selected object set.
 Describe discovers supported fields and physical lookup relationships. Objects
@@ -295,7 +320,8 @@ not per-change billing or an upstream audit trail.
 
 Object selection, metadata-derived fields and relationships, whole-object
 membership, channel backpressure, bounded resources, static embedding and
-independently loaded source/bootstrap plugins. No arbitrary SOQL predicates,
+an independently loaded source plugin with an internal bootstrap provider.
+No arbitrary SOQL predicates,
 joined SOQL projections, Bulk API or automatic Salesforce metadata provisioning.
 
 Salesforce has no supported local server image. Developer-org acceptance is the
@@ -558,19 +584,20 @@ and configured Salesforce client credentials. Resolve credentials at the network
 boundary, redact Debug/error output and refresh without logging tokens. Restrict
 redirects and validate destinations before attaching authorization metadata.
 
-Both descriptors use `ConfigValue`, camelCase DTOs, complete persisted properties
-and gated `dynamic-plugin` exports. Config properties preserve secret references;
+The source descriptor uses `ConfigValue`, camelCase DTOs, complete persisted
+properties and a gated `dynamic-plugin` export. Config properties preserve secret references;
 logs and diagnostic formatting do not reveal resolved secrets.
 
-`FFI_SDK_VERSION` **0.15.0** carries bootstrap properties, optional subscription settings
-and starting sequence as bounded/versioned MessagePack through both proxies.
-Structured subscribe failures preserve `SourceError::PositionUnavailable`.
-Malformed metadata stays a generic error, never a reason to auto-reset.
+The existing FFI and `FFI_SDK_VERSION` **0.14.0** are unchanged. Snapshot tickets
+stay inside the source plugin. Bootstrap events, results and replay positions
+use the existing source subscription transport. No host proxy, vtable, envelope,
+or resume-sequence encoding changes are included.
 
-The host offloads synchronous subscribe vtables without pinning a current-thread
-runtime. Source/library ownership survives cancellation until the call ends;
-unused successful subscriptions are released. Do not share Rust payload pointers
-or depend on cross-cdylib identity of bootstrap sequence-counter Arcs.
+Static subscriptions preserve typed `SourceError::PositionUnavailable`.
+The existing SDK reports dynamic subscription failures generically, so a
+dynamic source cannot trigger the runtime's typed-error AutoReset path. It fails
+explicitly instead. Host callback scheduling and lifetime behavior remain those
+of the existing SDK; this source adds no stronger forwarding guarantee.
 
 ## 5.5. Replay and recovery design
 
@@ -593,27 +620,19 @@ bootstrap, the first live event, reconnection and process restart.
 
 ### Durable query bootstrap
 
-`CheckpointStore` adds required `stage_bootstrap_state` and
-`read_bootstrap_state` methods. Persistent implementations stage in the active
-index transaction and read only committed state. A no-op default is unsafe.
-
-`BootstrapState::InProgress` is committed before the first bootstrap index write.
-`Complete { sources }` commits atomically with all snapshot boundaries, initial
-live-results snapshot and query result sequence zero. The source list records
-which inputs were bootstrapped, including completed empty snapshots.
-
-RocksDB and Garnet use dedicated `bootstrap_state` metadata: `[1,0]` means
-in-progress; `[1,1]` followed by a JSON source-ID array means complete. Missing
-metadata is new/legacy state, not proof of completed bootstrap. Unknown formats
-are corruption errors. Clearing checkpoints also clears this metadata.
+The existing `CheckpointStore`, `LiveResultsWriter` and session operations commit
+source boundaries, the initial live-results snapshot and result sequence zero
+together. No trait methods, index storage keys, or serialization changes are
+introduced. Source boundaries remain opaque existing checkpoint values.
 
 Begin, staging or handover-commit failure cancels bootstrap/tail processing and
 fails the query. No live result may follow a failed durable handover.
 
-Strict recovery rejects incomplete or unprovable legacy bootstrapped indexes.
-AutoReset explicitly clears and rebuilds them. Existing durable bootstrapped
-queries without completion metadata therefore need an intentional migration
-decision; do not silently approve their partial state.
+Strict recovery rejects a matching bootstrap-enabled configuration with no
+committed result sequence, including interrupted initial snapshots and legacy
+handover-only checkpoints. AutoReset explicitly clears and rebuilds them.
+This does not add a new marker that retroactively proves the completeness of
+legacy snapshots with an existing result sequence.
 
 ## 6. Testing strategy
 
@@ -627,7 +646,7 @@ compilation. Use bounded deadlines and deterministic fault injection.
 | Snapshot | Immutable H; populated/empty snapshots; high-bit epoch codec; expiry/checksum/count/size failure; path traversal and symlinks; cancelled export cleanup |
 | Replay | Strictly-after boundaries; two independent positions; retention pinning; partial fanout; `(H,R]` cutover; capacity-one backpressure; quota cleanup |
 | Runtime | Fresh persistent bootstrap; no-live-event restart; partial bootstrap; Strict/AutoReset; failed begin/stage/commit; mixed inputs; immediate live event then reopen |
-| Dynamic | Independent source/bootstrap cdylibs; context/settings/sequence preservation; typed expiry; malformed payloads; deallocation; current-thread liveness and cancellation |
+| Dynamic | Independently loaded source on the unchanged ABI; internal populated/empty bootstrap; schema inspection; replay; invalid positions fail without silently resetting |
 | Live | Authorized developer org, real native Pub/Sub, full observations, aggregates, restart, missing-hint repair and independently verified cleanup |
 
 Local HTTP/gRPC fixtures must include pagination, auth failures, throttling,
@@ -636,7 +655,7 @@ production endpoints, invented tokens or fixed sleeps for synchronization.
 
 The production example includes `setup.sh`, `quickstart.sh`, `diagnose.sh` and
 `test-updates.sh`. `quickstart.sh --org <alias>` watches the real org using the
-production source/bootstrap crates, CLI-supplied runtime identity, persistent
+production source and its internal bootstrap reader, CLI-supplied runtime identity, persistent
 RocksDB queries and console reaction output. Users edit their Accounts and Contacts in
 the UI; the watcher never writes Salesforce data. State survives Ctrl+C/restart.
 `--local` explicitly selects the offline protocol demonstration; it and live
@@ -683,9 +702,9 @@ LATEST for a query's missing local history.
    before using it for dispatch.
 2. Snapshot exports, source subscription/catchup and local bootstrap provider;
    prove race-free cutover and bounded resources.
-3. Durable query-bootstrap markers and FFI transport/liveness prerequisites;
-   migrate every checkpoint backend and test double.
-4. Integrate persistent query, independently loaded plugins, cancellation,
+3. Commit the bootstrap output and source boundaries using existing checkpoint
+   operations; leave all shared interfaces and FFI definitions unchanged.
+4. Integrate persistent queries, the independently loaded source, cancellation,
    retention and crash tests; resolve every failed behavioral contract.
 5. Run authorized Salesforce acceptance, independently audit cleanup, complete
    the example/docs and obtain an independent code review.
@@ -695,8 +714,8 @@ substitute for a completed recovery path.
 
 ## 9. Definition of done
 
-- All three crates are conventionally registered and discovered by xtask; static
-  linking and separately built cdylibs work.
+- The common and source crates are registered; xtask discovers the source plugin.
+  Static linking and the separately built source cdylib work.
 - Source/bootstrap IDs and projected values agree; real aggregates converge.
 - Durable snapshot/replay and incomplete-bootstrap recovery work without
   requiring the user to disable persistent query state.
@@ -736,8 +755,10 @@ Only selected, unambiguously resolved lookup targets produce relationships;
 unsupported fields and omitted targets are reported by schema inspection.
 
 The spool is single-owner local storage, not distributed high availability.
-Dynamic source and bootstrap plugins need the same filesystem view. Losing both
-the spool and its backup requires the query's explicit recovery policy.
+The internal bootstrap reader uses the source's filesystem view. Losing both
+the spool and its backup requires an explicit recovery decision. The existing
+FFI loses typed subscription failures, so dynamic-plugin AutoReset cannot
+classify an unavailable position and requires operator intervention.
 
 Live prototype acceptance used developer tooling for tokens. Production client-
 credentials acceptance requires an appropriately configured Salesforce OAuth
@@ -832,12 +853,12 @@ authorized by test execution.
   [RocksDB implementation](../../components/indexes/rocksdb/src/checkpoint.rs),
   [Garnet implementation](../../components/indexes/garnet/src/checkpoint.rs).
 - [Plugin architecture](../../components/plugin-architecture.md),
-  [recovery wire metadata](../../components/plugin-sdk/src/ffi/recovery.rs),
+  [existing FFI definitions](../../components/plugin-sdk/src/ffi/vtables.rs),
   [source proxy](../../components/host-sdk/src/proxies/source.rs),
   [bootstrap proxy](../../components/host-sdk/src/proxies/bootstrap_provider.rs).
 - [Common crate](../../components/salesforce-common/Cargo.toml),
   [source crate](../../components/sources/salesforce/Cargo.toml),
-  [bootstrap crate](../../components/bootstrappers/salesforce/Cargo.toml).
+  [internal bootstrap reader](../../components/sources/salesforce/src/bootstrap.rs).
 
 ### Salesforce
 

@@ -413,7 +413,7 @@ pub struct SubscriptionResponse {
     pub position_handle: Option<Arc<AtomicU64>>,
     /// Receives the `BootstrapResult` after bootstrap completes, carrying the
     /// optional `source_position` snapshot boundary for the bootstrap-to-streaming
-    /// transition, including for FFI/plugin sources. `None` when bootstrap is not active.
+    /// transition. `None` when bootstrap is not active or for FFI/plugin sources.
     pub bootstrap_result_receiver:
         Option<tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
 }

@@ -54,8 +54,8 @@ type BootstrapCompletion = Arc<
 mod durable_bootstrap_tests {
     use super::*;
     use drasi_core::interface::{
-        BootstrapState, CheckpointStore, CreatedIndexes, IndexError, LiveResultsWriter,
-        RowMutation, SessionControl, SourceCheckpoint,
+        CheckpointStore, CreatedIndexes, IndexError, LiveResultsWriter, RowMutation,
+        SessionControl, SourceCheckpoint,
     };
 
     #[derive(Default)]
@@ -107,13 +107,6 @@ mod durable_bootstrap_tests {
     impl CheckpointStore for FaultStore {
         fn is_persistent(&self) -> bool {
             true
-        }
-        async fn stage_bootstrap_state(&self, state: BootstrapState) -> Result<(), IndexError> {
-            self.fault.check(4)?;
-            self.inner.stage_bootstrap_state(state).await
-        }
-        async fn read_bootstrap_state(&self) -> Result<Option<BootstrapState>, IndexError> {
-            self.inner.read_bootstrap_state().await
         }
         async fn stage_checkpoint(
             &self,
@@ -252,7 +245,6 @@ mod durable_bootstrap_tests {
     #[case::begin(1)]
     #[case::second_checkpoint(2)]
     #[case::commit(3)]
-    #[case::completion_metadata(4)]
     #[case::result_sequence(5)]
     #[case::missing_boundary(6)]
     #[case::provider_failure(7)]
@@ -347,10 +339,7 @@ mod durable_bootstrap_tests {
         .await
         .unwrap();
         let store = concrete.get_checkpoint_store().await.unwrap();
-        assert_eq!(
-            store.read_bootstrap_state().await.unwrap(),
-            Some(BootstrapState::InProgress)
-        );
+        assert_eq!(store.read_result_sequence("handover").await.unwrap(), None);
         assert!(
             store.read_all_checkpoints().await.unwrap().is_empty(),
             "all sources must roll back together"
@@ -383,10 +372,10 @@ mod durable_bootstrap_tests {
                 .checkpoint_store
                 .as_ref()
                 .unwrap()
-                .read_bootstrap_state()
+                .read_result_sequence("handover")
                 .await
                 .unwrap(),
-            Some(BootstrapState::InProgress)
+            None
         );
         assert!(reopened
             .live_results_writer
@@ -404,81 +393,6 @@ mod durable_bootstrap_tests {
             .await
             .unwrap()
             .is_empty());
-    }
-
-    #[rstest::rstest]
-    #[case::begin(1)]
-    #[case::stage(4)]
-    #[case::commit(3)]
-    #[tokio::test]
-    #[serial]
-    async fn test_bootstrap_marker_failure_prevents_index_writes(#[case] stage: u32) {
-        let directory = tempfile::tempdir_in(".").unwrap();
-        let fault = Arc::new(Fault::default());
-        let core = DrasiLib::builder()
-            .with_index_provider(
-                "persistent",
-                Arc::new(FaultProvider {
-                    inner: RocksDbIndexProvider::new(directory.path(), false, false),
-                    fault: fault.clone(),
-                }),
-            )
-            .build()
-            .await
-            .unwrap();
-        let mut source = E2eTestSource::new("source", true).unwrap();
-        source.bootstrap = true;
-        source.subscribe_fault = Some((fault.stage.clone(), stage));
-        let events = source.event_sender();
-        core.add_source(source).await.unwrap();
-        let mut config = make_persistent_query("marker", "source", None);
-        config.enable_bootstrap = true;
-        core.add_query(config).await.unwrap();
-        core.start().await.unwrap();
-        core.start_source("source").await.unwrap();
-        let error = core.start_query("marker").await.unwrap_err();
-        assert!(format!("{error:#}").contains("bootstrap marker"));
-        let query_instance = core
-            .query_manager()
-            .get_query_instance("marker")
-            .await
-            .unwrap();
-        let query = query_instance
-            .as_any()
-            .downcast_ref::<super::super::manager::DrasiQuery>()
-            .unwrap();
-        assert!(query.get_current_results().await.is_empty());
-        assert_eq!(query.subscription_task_count().await, 0);
-        assert!(events.read().await.as_ref().unwrap().is_closed());
-        assert_eq!(
-            query
-                .get_checkpoint_store()
-                .await
-                .unwrap()
-                .read_bootstrap_state()
-                .await
-                .unwrap(),
-            None
-        );
-        fault.stage.store(0, Ordering::SeqCst);
-        core.shutdown().await.unwrap();
-        drop(query_instance);
-        drop(core);
-        let indexes = RocksDbIndexProvider::new(directory.path(), false, false)
-            .create_indexes("marker")
-            .await
-            .unwrap();
-        indexes.set.session_control.begin().await.unwrap();
-        assert!(indexes
-            .set
-            .element_index
-            .get_element(&drasi_core::models::ElementReference::new(
-                "source", "snapshot"
-            ))
-            .await
-            .unwrap()
-            .is_none());
-        indexes.set.session_control.commit().await.unwrap();
     }
 
     #[rstest::rstest]
@@ -595,17 +509,14 @@ mod durable_bootstrap_tests {
             .checkpoint_store
             .as_ref()
             .unwrap()
-            .read_bootstrap_state()
+            .read_result_sequence("partial")
             .await
             .unwrap();
         assert_eq!(
             state,
             match policy {
-                RecoveryPolicy::Strict if legacy_checkpoint.is_some() => None,
-                RecoveryPolicy::Strict => Some(BootstrapState::InProgress),
-                RecoveryPolicy::AutoReset => Some(BootstrapState::Complete {
-                    sources: vec!["source".into()]
-                }),
+                RecoveryPolicy::Strict => None,
+                RecoveryPolicy::AutoReset => Some(0),
             }
         );
     }
@@ -631,7 +542,6 @@ struct E2eTestSource {
     bootstrap_node_id: &'static str,
     bootstrap_empty: bool,
     bootstrap_sequence: u64,
-    subscribe_fault: Option<(Arc<AtomicU32>, u32)>,
 }
 
 impl E2eTestSource {
@@ -650,7 +560,6 @@ impl E2eTestSource {
             bootstrap_node_id: "snapshot",
             bootstrap_empty: false,
             bootstrap_sequence: 0,
-            subscribe_fault: None,
         })
     }
 
@@ -826,9 +735,6 @@ impl Source for E2eTestSource {
             (None, None)
         };
 
-        if let Some((fault, stage)) = &self.subscribe_fault {
-            fault.store(*stage, Ordering::SeqCst);
-        }
         Ok(SubscriptionResponse {
             query_id: settings.query_id,
             source_id: self.id().to_string(),

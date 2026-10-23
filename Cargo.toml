@@ -40,7 +40,6 @@ members = [
   "components/bootstrappers/neo4j",
   "components/neo4j-common",
   "components/bootstrappers/kafka",
-  "components/bootstrappers/salesforce",
 
   # Source Plugins
   "components/sources/postgres",
@@ -190,7 +189,6 @@ drasi-source-hyperliquid = { version = "0.1.11", path = "components/sources/hype
 drasi-source-cloudflare-radar = { version = "0.1.10", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.15", path = "components/bootstrappers/application" }
 drasi-source-salesforce = { version = "0.1.0", path = "components/sources/salesforce" }
-drasi-bootstrap-salesforce = { version = "0.1.0", path = "components/bootstrappers/salesforce" }
 drasi-reaction-http = { version = "0.3.5", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.4.5", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.6", path = "components/reactions/file" }

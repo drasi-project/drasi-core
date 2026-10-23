@@ -40,9 +40,9 @@ use drasi_lib::bootstrap::{
 };
 use drasi_lib::channels::events::{BootstrapEvent, BootstrapEventSender};
 use drasi_plugin_sdk::ffi::{
-    build_bootstrap_provider_vtable, encode_bootstrap_invocation, release_bootstrap_receiver,
-    release_result_receiver, wrap_result_receiver, BootstrapStreamConsumer,
-    FfiBootstrapProviderProxy, FfiStr, BOOTSTRAP_BRIDGE_CAPACITY, BOOTSTRAP_PROVIDER_CAPACITY,
+    build_bootstrap_provider_vtable, release_bootstrap_receiver, release_result_receiver,
+    wrap_result_receiver, BootstrapStreamConsumer, FfiBootstrapProviderProxy, FfiStr,
+    BOOTSTRAP_BRIDGE_CAPACITY, BOOTSTRAP_PROVIDER_CAPACITY,
 };
 
 /// Mirrors the query-side channel in drasi-lib sources/base.rs.
@@ -154,77 +154,6 @@ fn req() -> BootstrapRequest {
 
 fn ctx() -> BootstrapContext {
     BootstrapContext::new_minimal("probe-server".to_string(), "probe-src".to_string())
-}
-
-struct ContextProvider;
-
-#[async_trait]
-impl BootstrapProvider for ContextProvider {
-    async fn bootstrap(
-        &self,
-        request: BootstrapRequest,
-        context: &BootstrapContext,
-        _event_tx: BootstrapEventSender,
-        settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> anyhow::Result<BootstrapResult> {
-        anyhow::ensure!(request.query_id == "probe-query");
-        anyhow::ensure!(context.server_id == "probe-server");
-        anyhow::ensure!(context.source_id == "probe-src");
-        anyhow::ensure!(
-            context.get_property("snapshot")
-                == Some(serde_json::json!({"epoch": "fixture", "cut": 42}))
-        );
-        anyhow::ensure!(context.next_sequence() == 17);
-        let settings = settings.ok_or_else(|| anyhow::anyhow!("missing subscription settings"))?;
-        anyhow::ensure!(settings.source_id == "probe-src");
-        anyhow::ensure!(settings.query_id == "probe-query");
-        anyhow::ensure!(settings.enable_bootstrap);
-        anyhow::ensure!(settings.nodes.contains("Probe"));
-        anyhow::ensure!(settings.relations.contains("LINK"));
-        anyhow::ensure!(settings.resume_from == Some(bytes::Bytes::from_static(&[3, 0, 2])));
-        anyhow::ensure!(settings.resume_sequence == Some(42));
-        anyhow::ensure!(settings.request_position_handle);
-        Ok(BootstrapResult {
-            event_count: 0,
-            source_position: Some(bytes::Bytes::from_static(&[3, 0, 2])),
-        })
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn bootstrap_context_survives_both_proxy_hops() {
-    let provider_vtable = build_bootstrap_provider_vtable(Box::new(ContextProvider), noop_executor);
-    let host_proxy = BootstrapProviderProxy::new(provider_vtable, None);
-    let host_vtable = build_bootstrap_provider_vtable(Box::new(host_proxy), noop_executor);
-    let plugin_proxy = FfiBootstrapProviderProxy::new(host_vtable);
-    let context = BootstrapContext::with_properties(
-        "probe-server".into(),
-        "probe-src".into(),
-        std::collections::HashMap::from([(
-            "snapshot".into(),
-            serde_json::json!({"epoch": "fixture", "cut": 42}),
-        )]),
-    );
-    context.sequence_counter.store(17, Ordering::SeqCst);
-    let settings = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "probe-src".into(),
-        enable_bootstrap: true,
-        query_id: "probe-query".into(),
-        nodes: ["Probe".into()].into(),
-        relations: ["LINK".into()].into(),
-        resume_from: Some(bytes::Bytes::from_static(&[3, 0, 2])),
-        resume_sequence: Some(42),
-        request_position_handle: true,
-    };
-    let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        plugin_proxy.bootstrap(req(), &context, tx, Some(&settings)),
-    )
-    .await
-    .expect("bootstrap bridge stalled")
-    .expect("bootstrap context was lost");
-    assert_eq!(result.source_position, settings.resume_from);
 }
 
 /// A consumer that stays idle until the gate opens, then drains everything.
@@ -541,7 +470,6 @@ async fn releasing_receivers_cancels_provider() {
     };
     let vtable = build_bootstrap_provider_vtable(Box::new(provider), noop_executor);
 
-    let invocation = encode_bootstrap_invocation(&ctx(), None).unwrap();
     let stream_ptr = (vtable.bootstrap_fn)(
         vtable.state,
         FfiStr::from_str("probe-query"),
@@ -552,8 +480,6 @@ async fn releasing_receivers_cancels_provider() {
         FfiStr::from_str("probe-request"),
         FfiStr::from_str("probe-server"),
         FfiStr::from_str("probe-src"),
-        invocation.as_ptr(),
-        invocation.len(),
     );
     assert!(!stream_ptr.is_null());
     let stream = unsafe { *Box::from_raw(stream_ptr) };
@@ -605,7 +531,6 @@ async fn null_label_arrays_are_treated_as_empty() {
     let vtable = build_bootstrap_provider_vtable(Box::new(provider), noop_executor);
 
     // Null arrays with NON-ZERO counts: must not be walked.
-    let invocation = encode_bootstrap_invocation(&ctx(), None).unwrap();
     let stream_ptr = (vtable.bootstrap_fn)(
         vtable.state,
         FfiStr::from_str("probe-query"),
@@ -616,8 +541,6 @@ async fn null_label_arrays_are_treated_as_empty() {
         FfiStr::from_str("probe-request"),
         FfiStr::from_str("probe-server"),
         FfiStr::from_str("probe-src"),
-        invocation.as_ptr(),
-        invocation.len(),
     );
     assert!(!stream_ptr.is_null());
     let stream = unsafe { *Box::from_raw(stream_ptr) };
