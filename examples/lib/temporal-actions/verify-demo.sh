@@ -4,9 +4,9 @@
 set -euo pipefail
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-export COMPOSE_PROJECT_NAME="inventory-check-$(date +%s)-$$"
+export COMPOSE_PROJECT_NAME="orders-check-$(date +%s)-$$"
 export TEMPORAL_UI_PORT=0
-compose=(docker compose --file inventory/compose.yaml)
+compose=(docker compose --file orders/compose.yaml)
 evidence="$PWD/.runs/$COMPOSE_PROJECT_NAME"
 mkdir -p "$evidence"
 exec > >(tee "$evidence/verify.log") 2>&1
@@ -22,68 +22,112 @@ cleanup() {
 trap cleanup EXIT
 
 assert_state() {
-    "${compose[@]}" exec -T worker python - "$1" "$2" <<'PY'
+    "${compose[@]}" exec -T worker python - "$1" "$run_id" <<'PY'
 import asyncio, os, sys
 import psycopg
 from temporalio.client import Client
-from demo import drasi_status, events
+from demo import ORDER_ID, STAGES, drasi_status, progress
 
 async def check():
     client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
-    workflow = client.get_workflow_handle("inventory-monitor")
-    received = await events(workflow)
-    names = [event["signal"] for event in received]
-    expected = sys.argv[2].split(",") if sys.argv[2] else []
+    workflow = client.get_workflow_handle(f"order-{ORDER_ID}")
+    current = sys.argv[1]
+    expected = list(STAGES[:STAGES.index(current) + 1]) if current in STAGES else []
+    state = await progress(workflow)
+    names = [event["signal"] for event in state["events"]]
     assert names == expected, (names, expected)
-    assert (await workflow.describe()).status.name == "RUNNING"
+    assert state["status"] == current, state
+    assert state["workflowStatus"] == ("COMPLETED" if current == "delivered" else "RUNNING"), state
+    assert (await workflow.describe()).run_id == sys.argv[2], "Startup replaced the workflow execution"
+    history_signals = [
+        event.workflow_execution_signaled_event_attributes.signal_name
+        async for event in workflow.fetch_history_events()
+        if event.HasField("workflow_execution_signaled_event_attributes")
+    ]
+    assert history_signals == expected, history_signals
     with psycopg.connect() as db:
-        assert db.execute("SELECT stock FROM inventory WHERE product = 'coffee-beans'").fetchone()[0] == int(sys.argv[1])
-    status = drasi_status()
-    expected_rows = [] if int(sys.argv[1]) >= 5 else [{"product": "coffee-beans", "stock": int(sys.argv[1])}]
-    assert status["results"] == expected_rows, status
-    assert [event["diff"]["sequenceId"] for event in received] == list(range(1, len(received) + 1))
-    for event in received:
-        assert event["diff"]["queryId"] == "changes"
-        assert event["diff"]["operation"] == {"low_stock": "ADD", "stock_changed": "UPDATE", "stock_restored": "DELETE"}[event["signal"]]
-    print(f"PASS: PostgreSQL stock={sys.argv[1]}, Temporal signals={names}, workflow still running")
+        rows = db.execute("SELECT id, status FROM orders").fetchall()
+        assert rows == ([(ORDER_ID, current)] if expected else []), rows
+    for event in state["events"]:
+        diff = event["diff"]
+        assert diff["queryId"] == event["signal"]
+        assert diff["operation"] == "ADD"
+        assert diff["sequenceId"] == 1
+        assert diff["after"] == {"orderId": ORDER_ID, "status": event["signal"]}
+    for _ in range(100):
+        queries = drasi_status()["queries"]
+        settled = True
+        for stage in STAGES:
+            expected_rows = [{"orderId": ORDER_ID, "status": current}] if stage == current else []
+            checkpoint = queries[stage]["checkpoint"]
+            sequence = 1 if stage == current else 2 if stage in expected else 0
+            settled &= queries[stage]["results"] == expected_rows
+            settled &= checkpoint is not None and checkpoint["sequence"] == sequence
+        if settled:
+            break
+        await asyncio.sleep(0.1)
+    assert settled, queries
+    print(f"PASS: order={current}, signals={names}, execution={state['workflowStatus']}, same run ID")
 
 asyncio.run(check())
 PY
 }
 
+reject_stage() {
+    if failure="$(./demo.sh "$1" 2>&1)"; then
+        echo "An invalid transition to $1 was accepted" >&2
+        exit 1
+    fi
+    echo "$failure"
+    [[ "$failure" == *"Cannot move order"* ]]
+}
+
 ./demo.sh up
+run_id="$("${compose[@]}" exec -T worker python -c 'import asyncio, os; from temporalio.client import Client
+async def run():
+    client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
+    print((await client.get_workflow_handle("order-1001").describe()).run_id)
+asyncio.run(run())')"
 "${compose[@]}" exec -T worker python -c 'from urllib.request import urlopen; response = urlopen("http://temporal:8233", timeout=5); assert response.status == 200; assert b"<html" in response.read(); print("PASS: Temporal Web UI is served")'
-assert_state 20 ""
-./demo.sh stock 4
-assert_state 4 "low_stock"
-./demo.sh stock 2
-assert_state 2 "low_stock,stock_changed"
-./demo.sh stock 20
-assert_state 20 "low_stock,stock_changed,stock_restored"
-./demo.sh stock 20
-./demo.sh stock 8
-./demo.sh stock 4
-assert_state 4 "low_stock,stock_changed,stock_restored,low_stock"
-if ./demo.sh stock -1; then
-    echo "Negative stock was accepted" >&2
+assert_state awaiting_placement
+reject_stage paid
+assert_state awaiting_placement
+./demo.sh placed
+assert_state placed
+./demo.sh placed
+assert_state placed
+reject_stage shipped
+assert_state placed
+./demo.sh paid
+assert_state paid
+if ./demo.sh invalid; then
+    echo "An unknown stage was accepted" >&2
     exit 1
 fi
 ./demo.sh up
-assert_state 4 "low_stock,stock_changed,stock_restored,low_stock"
+assert_state paid
 ./demo.sh down
 ./demo.sh up
-assert_state 4 "low_stock,stock_changed,stock_restored,low_stock"
-./demo.sh stock 20
-assert_state 20 "low_stock,stock_changed,stock_restored,low_stock,stock_restored"
+assert_state paid
 "${compose[@]}" stop drasi
 drasi_container="$("${compose[@]}" ps --all --quiet drasi)"
 [[ "$(docker inspect --format '{{.State.ExitCode}}' "$drasi_container")" == 0 ]]
-if failure="$(./demo.sh stock 3 2>&1)"; then
+if failure="$(./demo.sh shipped 2>&1)"; then
     echo "A command reported success while Drasi was unavailable" >&2
     exit 1
 fi
 echo "$failure"
 [[ "$failure" == *"Cannot reach Drasi"* ]]
 ./demo.sh up
-assert_state 20 "low_stock,stock_changed,stock_restored,low_stock,stock_restored"
-echo "PASS: Docker-only walkthrough, signal payloads, unchanged stock, invalid input, repeated up, restart, and explicit outage failure"
+assert_state paid
+./demo.sh shipped
+assert_state shipped
+./demo.sh delivered
+assert_state delivered
+./demo.sh delivered
+assert_state delivered
+reject_stage placed
+./demo.sh down
+./demo.sh up
+assert_state delivered
+echo "PASS: four SQL-driven signals, workflow completion, payloads, no-op, invalid transitions, repeated up, restart before/after completion, and explicit outage failure"

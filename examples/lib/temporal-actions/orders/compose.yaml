@@ -1,6 +1,6 @@
 # Copyright 2026 The Drasi Authors.
 # SPDX-License-Identifier: Apache-2.0
-name: drasi-temporal-inventory
+name: drasi-temporal-orders
 
 services:
   postgres:
@@ -8,13 +8,13 @@ services:
     environment:
       POSTGRES_USER: drasi
       POSTGRES_PASSWORD: local-demo-only
-      POSTGRES_DB: inventory
+      POSTGRES_DB: orders
     command: ["postgres", "-c", "wal_level=logical"]
     volumes:
       - postgres:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/inventory.sql:ro
+      - ./init.sql:/docker-entrypoint-initdb.d/orders.sql:ro
     healthcheck:
-      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "drasi", "-d", "inventory"]
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "drasi", "-d", "orders"]
       interval: 2s
       timeout: 5s
       retries: 30
@@ -39,7 +39,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       PGHOST: postgres
-      PGDATABASE: inventory
+      PGDATABASE: orders
       PGUSER: drasi
       PGPASSWORD: local-demo-only
     depends_on:
@@ -55,22 +55,22 @@ services:
   drasi:
     build:
       context: ../../../..
-      dockerfile: examples/lib/temporal-actions/inventory/Drasi.Dockerfile
+      dockerfile: examples/lib/temporal-actions/orders/Drasi.Dockerfile
     environment:
       PGHOST: postgres
       PGPORT: "5432"
-      PGDATABASE: inventory
+      PGDATABASE: orders
       PGUSER: drasi
       PGPASSWORD: local-demo-only
-      PGSLOT: inventory
-      PGTABLE: public.inventory
+      PGSLOT: orders
+      PGTABLE: public.orders
       DATA_DIR: /home/demo/state
-      QUERY_FILE: /config/query.cypher
+      QUERY_DIR: /config/queries
       TEMPORAL_CONFIG_FILE: /config/reaction.json
       RUST_LOG: warn
     volumes:
       - drasi:/home/demo
-      - ./query.cypher:/config/query.cypher:ro
+      - ./queries:/config/queries:ro
       - ./reaction.json:/config/reaction.json:ro
     depends_on:
       worker:

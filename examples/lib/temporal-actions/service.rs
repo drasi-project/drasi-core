@@ -41,8 +41,10 @@ pub async fn run(core: &DrasiLib, store: &impl StateStoreProvider) -> Result<()>
                     BufReader::new((&mut stream).take(1024)).read_line(&mut request).await?;
                     let (code, body) = if request.starts_with("GET /status HTTP/") {
                         let status = crate::status(core, store).await?;
-                        let healthy = ["status", "sourceStatus", "queryStatus"]
-                            .iter().all(|key| status[key] == "Running");
+                        let healthy = ["status", "sourceStatus"]
+                            .iter().all(|key| status[key] == "Running")
+                            && crate::QUERY_IDS.iter()
+                                .all(|id| status["queries"][*id]["status"] == "Running");
                         (if healthy { "200 OK" } else { "503 Service Unavailable" },
                          serde_json::to_vec(&status)?)
                     } else {

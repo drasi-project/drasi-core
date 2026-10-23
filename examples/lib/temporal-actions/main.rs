@@ -13,18 +13,29 @@ use drasi_state_store_redb::RedbStateStoreProvider;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc};
 
+const QUERY_IDS: [&str; 4] = ["placed", "paid", "shipped", "delivered"];
+
 async fn status(core: &DrasiLib, store: &impl StateStoreProvider) -> Result<Value> {
-    let checkpoint = store
-        .get("actions", "checkpoint:changes")
-        .await?
-        .map(|v| bincode::deserialize::<ReactionCheckpoint>(&v))
-        .transpose()?;
+    let mut queries = serde_json::Map::new();
+    for id in QUERY_IDS {
+        let checkpoint = store
+            .get("actions", &format!("checkpoint:{id}"))
+            .await?
+            .map(|v| bincode::deserialize::<ReactionCheckpoint>(&v))
+            .transpose()?;
+        queries.insert(
+            id.into(),
+            json!({
+                "status": format!("{:?}", core.get_query_status(id).await?),
+                "checkpoint": checkpoint,
+                "results": core.get_query_results(id).await?
+            }),
+        );
+    }
     Ok(json!({
         "status": format!("{:?}", core.get_reaction_status("actions").await?),
         "sourceStatus": format!("{:?}", core.get_source_status("input").await?),
-        "queryStatus": format!("{:?}", core.get_query_status("changes").await?),
-        "checkpoint": checkpoint,
-        "results": core.get_query_results("changes").await?
+        "queries": queries
     }))
 }
 
@@ -47,7 +58,12 @@ async fn main() -> Result<()> {
         std::env::var("TEMPORAL_CONFIG_FILE").context("TEMPORAL_CONFIG_FILE is required")?,
     )?)?;
     let reaction = TemporalReactionDescriptor
-        .create_reaction("actions", vec!["changes".into()], &raw, true)
+        .create_reaction(
+            "actions",
+            QUERY_IDS.iter().map(|id| (*id).into()).collect(),
+            &raw,
+            true,
+        )
         .await?;
     let store = Arc::new(RedbStateStoreProvider::new(dir.join("reaction.redb"))?);
     let source = PostgresReplicationSource::builder("input")
@@ -67,26 +83,27 @@ async fn main() -> Result<()> {
         ])
         .with_ssl_mode(SslMode::Disable)
         .build()?;
-    let query_text =
-        std::fs::read_to_string(std::env::var("QUERY_FILE").context("QUERY_FILE is required")?)?;
-    let query = Query::cypher("changes")
-        .query(query_text)
-        .from_source("input")
-        .enable_bootstrap(false)
-        .auto_start(true)
-        .build();
-    let core = DrasiLib::builder()
+    let query_dir = PathBuf::from(std::env::var("QUERY_DIR").context("QUERY_DIR is required")?);
+    let mut builder = DrasiLib::builder()
         .with_id("temporal-actions-example")
         .with_source(source)
-        .with_query(query)
         .with_reaction(reaction)
         .with_default_index_provider(
             "rocks",
             Arc::new(RocksDbIndexProvider::new(dir.join("index"), false, false)),
         )
-        .with_state_store_provider(store.clone())
-        .build()
-        .await?;
+        .with_state_store_provider(store.clone());
+    for id in QUERY_IDS {
+        let query_text = std::fs::read_to_string(query_dir.join(format!("{id}.cypher")))?;
+        let query = Query::cypher(id)
+            .query(query_text)
+            .from_source("input")
+            .enable_bootstrap(false)
+            .auto_start(true)
+            .build();
+        builder = builder.with_query(query);
+    }
+    let core = builder.build().await?;
     core.start().await?;
     ensure!(
         core.get_source_status("input").await? == drasi_lib::ComponentStatus::Running,

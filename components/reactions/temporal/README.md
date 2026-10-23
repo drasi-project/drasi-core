@@ -8,8 +8,8 @@ Each `added`, `updated`, or `deleted` mapping selects one action. Any action
 can be assigned to any operation. The workflow type and application handlers
 belong to your Temporal Worker, not this reaction.
 
-The [Docker-only inventory demo](../../../examples/lib/temporal-actions/README.md)
-shows PostgreSQL changes becoming Temporal signals.
+The [Docker-only order lifecycle demo](../../../examples/lib/temporal-actions/README.md)
+shows PostgreSQL order changes becoming Temporal signals from four queries.
 
 ## Configuration
 

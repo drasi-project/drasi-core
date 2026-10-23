@@ -1,11 +1,12 @@
-# Low stock? Tell a Temporal workflow.
+# Follow an order from placed to delivered
 
-Change a stock level in PostgreSQL. Drasi detects when it enters, changes
-within, or leaves a low-stock query and signals a running Temporal workflow.
+Move an order through **placed -> paid -> shipped -> delivered** in PostgreSQL.
+Drasi queries detect each new state and signal a Temporal workflow, which
+completes when the order is delivered.
 
 ```text
-PostgreSQL inventory  ->  Drasi: stock < 5  ->  Temporal inventory-monitor
-      source              continuous query        signals via reaction
+PostgreSQL orders  ->  Drasi queries for each status  ->  Temporal order-1001
+      source               continuous queries              signals
 ```
 
 ## Try it
@@ -20,138 +21,201 @@ cd examples/lib/temporal-actions
 ./demo.sh up
 ```
 
-Wait for `Ready`. The demo starts PostgreSQL, Drasi, Temporal, and its Worker,
-then creates one inventory row: `coffee-beans`, stock **20**.
+Wait for `Ready`. The demo starts PostgreSQL, Drasi, Temporal, and its Worker.
+Workflow `order-1001` is running and waiting for the order to be placed.
+The database has no order yet.
 
 ```sh
-./demo.sh stock 4
+./demo.sh placed
 ```
 
 ```text
-PostgreSQL: stock changed from 20 to 4
-Drasi:     product entered the low-stock query
-Temporal:  inventory-monitor processed low_stock
+PostgreSQL: order 1001 placed
+Drasi:     order entered the placed query
+Temporal:  order-1001 processed placed
 ```
 
-Now change it twice more:
+Move the same order through the remaining states:
 
 ```sh
-./demo.sh stock 2
-./demo.sh stock 20
+./demo.sh paid
+./demo.sh shipped
+./demo.sh delivered
 ```
 
-| Stock change | Query result change | Signal |
-| --- | --- | --- |
-| 20 to 4 | Added: now low | `low_stock` |
-| 4 to 2 | Updated: still low | `stock_changed` |
-| 2 to 20 | Deleted: no longer low | `stock_restored` |
+The final command prints:
 
-**All three commands update the same database row.** A deleted query result
-means the row stopped matching, not that the database row was deleted.
+```text
+PostgreSQL: order 1001 changed from shipped to delivered
+Drasi:     order entered the delivered query
+Temporal:  order-1001 processed delivered
+Temporal:  workflow completed
+```
+
+`placed` inserts the order. The other commands update its `status` column.
+Each transition adds a result to the next query and removes it from the
+previous query. Only additions send signals; removals have no action configured.
 
 Each signal confirmation comes from the workflow's actual state, not just
 the database commit. If delivery cannot be confirmed, the command reports an
-error instead of printing success. Setting the existing value makes no change;
-moving between two values of 5 or higher requires no signal.
+error instead of printing success. Repeating the current state confirms its
+signal without changing the row. Skipping a step or moving backward fails
+before changing the database.
 
 ## See what happened
 
-Open **[Temporal UI](http://localhost:18080)** and select `inventory-monitor`.
-Its history shows the three signals. The workflow stays running throughout.
+Open **[Temporal UI](http://localhost:18080)** and select `order-1001`.
+Its history shows the four signals and the completed workflow result.
 Set `TEMPORAL_UI_PORT` if port 18080 is already in use.
 
 ## Read the setup
 
-`./demo.sh up` runs this setup for you. The [source table](inventory/init.sql)
-is PostgreSQL `inventory`, with logical replication enabled.
+`./demo.sh up` runs this setup for you. The [source table](orders/init.sql)
+is PostgreSQL `orders`, with `id` and `status` columns and logical replication
+enabled.
 
 ### Temporal workflow
 
-The workflow in [inventory/workflow.py](inventory/workflow.py) stays running
-and records each signal's payload:
+The workflow in [orders/workflow.py](orders/workflow.py) waits for each signal
+before advancing. Waiting consumes no polling loop or database connection in
+the workflow:
 
 ```python
 @workflow.defn
-class InventoryMonitor:
+class OrderLifecycle:
 	def __init__(self):
+		self.status = "awaiting_placement"
 		self.events = []
 
 	@workflow.run
 	async def run(self):
-		await workflow.wait_condition(lambda: False)
+		for stage in ("placed", "paid", "shipped", "delivered"):
+			await workflow.wait_condition(
+				lambda: any(event["signal"] == stage for event in self.events)
+			)
+			self.status = stage
+		return self.progress()
 
 	@workflow.signal
-	def low_stock(self, diff: dict):
-		self.events.append({"signal": "low_stock", "diff": diff})
+	def placed(self, diff: dict):
+		self.events.append({"signal": "placed", "diff": diff})
 
 	@workflow.signal
-	def stock_changed(self, diff: dict):
-		self.events.append({"signal": "stock_changed", "diff": diff})
+	def paid(self, diff: dict):
+		self.events.append({"signal": "paid", "diff": diff})
 
 	@workflow.signal
-	def stock_restored(self, diff: dict):
-		self.events.append({"signal": "stock_restored", "diff": diff})
+	def shipped(self, diff: dict):
+		self.events.append({"signal": "shipped", "diff": diff})
+
+	@workflow.signal
+	def delivered(self, diff: dict):
+		self.events.append({"signal": "delivered", "diff": diff})
 
 	@workflow.query
-	def events_received(self) -> list:
-		return self.events
+	def progress(self) -> dict:
+		return {"status": self.status, "events": self.events}
 ```
 
 The file imports `workflow` from the Temporal Python SDK. Its Worker registers
-`InventoryMonitor` on the `inventory` task queue and starts it with workflow ID
-`inventory-monitor`. On restart, it reuses the running workflow. The demo
-commands query `events_received` to confirm that each signal was processed.
+`OrderLifecycle` on the `orders` task queue and starts it with workflow ID
+`order-1001`. On restart, it keeps the same execution, even after completion.
+The demo commands query `progress` while it runs and read its result after it
+completes. The workflow buffers received signals so that its stages advance
+in order even if signals arrive in a different order.
 
-### Continuous query
+### Continuous queries
 
-[inventory/query.cypher](inventory/query.cypher) selects low-stock products:
+Each file in [orders/queries/](orders/queries/) selects one status.
+The query ID is the file name without `.cypher`.
+
+`placed.cypher`:
 
 ```cypher
-MATCH (i:inventory)
-WHERE i.stock < 5
-RETURN i.product AS product, i.stock AS stock
+MATCH (o:orders)
+WHERE o.status = 'placed'
+RETURN o.id AS orderId, o.status AS status
 ```
 
-The PostgreSQL source maps rows to `inventory` nodes. In [main.rs](main.rs),
-the query is named `changes` and reads from source `input`:
+`paid.cypher`:
+
+```cypher
+MATCH (o:orders)
+WHERE o.status = 'paid'
+RETURN o.id AS orderId, o.status AS status
+```
+
+`shipped.cypher`:
+
+```cypher
+MATCH (o:orders)
+WHERE o.status = 'shipped'
+RETURN o.id AS orderId, o.status AS status
+```
+
+`delivered.cypher`:
+
+```cypher
+MATCH (o:orders)
+WHERE o.status = 'delivered'
+RETURN o.id AS orderId, o.status AS status
+```
+
+The PostgreSQL source maps rows to `orders` nodes. [main.rs](main.rs) registers
+all four queries against source `input`:
 
 ```rust
-let query = Query::cypher("changes")
-	.query(query_text)
-	.from_source("input")
-	.enable_bootstrap(false)
-	.auto_start(true)
-	.build();
+for id in QUERY_IDS {
+	let query_text = std::fs::read_to_string(query_dir.join(format!("{id}.cypher")))?;
+	let query = Query::cypher(id)
+		.query(query_text)
+		.from_source("input")
+		.enable_bootstrap(false)
+		.auto_start(true)
+		.build();
+	builder = builder.with_query(query);
+}
 ```
 
-`query_text` contains the Cypher file above. Bootstrap is disabled because the
-demo inserts its initial row after Drasi is ready.
+`QUERY_IDS` is `["placed", "paid", "shipped", "delivered"]`. Bootstrap is
+disabled because the demo places the order after Drasi is ready.
 
 ### Reaction mappings
 
-[inventory/reaction.json](inventory/reaction.json) maps each kind of query
-diff to a signal on the same workflow:
+[orders/reaction.json](orders/reaction.json) maps additions from each query
+to the corresponding signal:
 
 ```json
 {
 	"endpoint": "http://temporal:7233",
 	"outputTemplates": {
 		"routes": {
-			"changes": {
+			"placed": {
 				"added": {
 					"action": "signal",
-					"workflowId": "inventory-monitor",
-					"signalName": "low_stock"
-				},
-				"updated": {
+					"workflowId": "order-1001",
+					"signalName": "placed"
+				}
+			},
+			"paid": {
+				"added": {
 					"action": "signal",
-					"workflowId": "inventory-monitor",
-					"signalName": "stock_changed"
-				},
-				"deleted": {
+					"workflowId": "order-1001",
+					"signalName": "paid"
+				}
+			},
+			"shipped": {
+				"added": {
 					"action": "signal",
-					"workflowId": "inventory-monitor",
-					"signalName": "stock_restored"
+					"workflowId": "order-1001",
+					"signalName": "shipped"
+				}
+			},
+			"delivered": {
+				"added": {
+					"action": "signal",
+					"workflowId": "order-1001",
+					"signalName": "delivered"
 				}
 			}
 		}
@@ -159,22 +223,28 @@ diff to a signal on the same workflow:
 }
 ```
 
-`temporal` is the Compose service name. The `changes` route matches the query
-ID, and each `signalName` matches a workflow handler. With no payload template,
+`temporal` is the Compose service name. Each route matches a query ID, and
+each `signalName` matches a workflow handler. With no payload template,
 the reaction sends the standard diff envelope as the handler's `diff` argument,
 including the operation, sequence ID, and applicable `before` and `after` rows.
 
 [main.rs](main.rs) loads that JSON into `raw` and creates reaction `actions`,
-subscribed to query `changes`:
+subscribed to all four queries:
 
 ```rust
 let reaction = TemporalReactionDescriptor
-	.create_reaction("actions", vec!["changes".into()], &raw, true)
+	.create_reaction(
+		"actions",
+		QUERY_IDS.iter().map(|id| (*id).into()).collect(),
+		&raw,
+		true,
+	)
 	.await?;
 ```
 
-The reaction never starts or cancels the monitor in this demo. The inventory
-story and workflow ID exist only in the example, not in the reusable reaction.
+The reaction only sends signals. The Worker starts the workflow, and the
+workflow decides when to complete. The order story and workflow ID exist only
+in this example, not in the reusable reaction.
 
 ## Stop
 
@@ -182,8 +252,8 @@ story and workflow ID exist only in the example, not in the reusable reaction.
 ./demo.sh down
 ```
 
-Data is preserved. `./demo.sh up` resumes with the same stock level and
-workflow history. It does not reset them to 20.
+Data is preserved. `./demo.sh up` resumes with the same order and workflow
+history. A delivered order stays delivered, and its workflow stays completed.
 
 This is a local development demo with fixed demo credentials. Only Temporal's
 UI is exposed, on loopback. The database and Drasi status endpoint are internal
@@ -193,11 +263,15 @@ For a fresh independent run, set `COMPOSE_PROJECT_NAME` to a new name before
 running the commands. To delete a run's saved data after stopping it:
 
 ```sh
-docker compose -f inventory/compose.yaml down --volumes
+docker compose -f orders/compose.yaml down --volumes
 ```
 
 That removes all three of that project's data volumes together. Do not delete
 only one of them and keep unrelated checkpoints from another run.
+
+This story uses a new Compose project, `drasi-temporal-orders`, so it does not
+reuse the previous inventory demo's data. If that demo still occupies port
+18080, stop its containers first or choose another `TEMPORAL_UI_PORT`.
 
 ## Go deeper
 
