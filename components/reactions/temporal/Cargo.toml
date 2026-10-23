@@ -36,4 +36,8 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 chrono = "0.4"
+temporalio-macros = "1.1"
+temporalio-sdk = { version = "1.1", default-features = false }
+temporalio-workflow = "1.1"
+testcontainers = "0.27"
 tokio = { version = "1", features = ["macros", "rt", "test-util"] }

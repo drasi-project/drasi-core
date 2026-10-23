@@ -595,52 +595,34 @@ async fn failed_run_pin_write_never_sends_a_destructive_request() {
 }
 
 #[tokio::test]
-async fn legacy_inline_progress_migrates_without_losing_successes_or_run_pins() {
-    for action in ["signal", "cancel", "terminate"] {
-        for interrupted_upgrade in [false, true] {
+async fn unsupported_plans_fail_without_rpc_or_state_changes() {
+    for version in [1, 3] {
+        for inline_progress in [false, true] {
             let store = Arc::new(TestStore::default());
             let server = Server::new(store.clone());
-            let cfg = config(action);
+            let cfg = config("signal");
             let qr = emission(1, 3);
-            let mut commands = crate::render::commands(&cfg, &qr).unwrap();
-            if action != "signal" {
-                commands[1].resolved_run_id = Some("legacy-run".into());
-            }
-            let legacy = json!({
-                "version":1, "sequence":1, "config_hash":42,
+            let mut unsupported = json!({
+                "version":version, "sequence":1, "config_hash":42,
                 "routing":crate::render::routing(&cfg, "q").unwrap(),
-                "commands":commands, "next":1,
+                "commands":crate::render::commands(&cfg, &qr).unwrap(),
             });
+            if inline_progress {
+                unsupported["next"] = json!(1);
+            }
             store
-                .set("r", PLAN, serde_json::to_vec(&legacy).unwrap())
+                .set("r", PLAN, serde_json::to_vec(&unsupported).unwrap())
                 .await
                 .unwrap();
-            if interrupted_upgrade {
-                let interrupted = initialized(store.clone(), cfg.clone()).await;
-                store.fail_write(PLAN, 1, false);
-                interrupted.start_with_client(server.clone()).await.unwrap();
-                interrupted.enqueue_query_result(qr.clone()).await.unwrap();
-                wait_for(&interrupted, 0, ComponentStatus::Error).await;
-                interrupted.stop().await.unwrap();
-                assert!(server.0.lock().unwrap().attempts.is_empty());
-            }
             let replay = initialized(store.clone(), cfg).await;
+            store.writes.lock().unwrap().clear();
             replay.start_with_client(server.clone()).await.unwrap();
             replay.enqueue_query_result(qr).await.unwrap();
-            wait_for(&replay, 1, ComponentStatus::Running).await;
+            wait_for(&replay, 0, ComponentStatus::Error).await;
             replay.stop().await.unwrap();
-            assert_eq!(store.json(PLAN).await["version"], 2);
-            let state = server.0.lock().unwrap();
-            assert_eq!(state.attempts.len(), 2);
-            assert_eq!(state.attempts[0].request_id, commands[1].request_id);
-            assert_eq!(state.attempts[1].request_id, commands[2].request_id);
-            if action != "signal" {
-                assert_eq!(
-                    state.attempts[0].resolved_run_id.as_deref(),
-                    Some("legacy-run")
-                );
-                assert_eq!(state.resolutions, 1);
-            }
+            assert_eq!(store.json(PLAN).await, unsupported);
+            assert!(store.writes.lock().unwrap().is_empty());
+            assert!(server.0.lock().unwrap().attempts.is_empty());
         }
     }
 }

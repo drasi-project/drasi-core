@@ -10,36 +10,15 @@ use drasi_lib::{
     Reaction, ReactionRecoveryPolicy,
 };
 use futures_util::FutureExt;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, panic::AssertUnwindSafe, sync::Arc};
 
 use crate::{
     client,
     config::{Action, TemporalReactionConfig},
-    render::{self, Command},
+    store::PlanStore,
     TemporalReactionBuilder,
 };
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Pending {
-    version: u32,
-    sequence: u64,
-    config_hash: u64,
-    routing: Value,
-    commands: Vec<Command>,
-    #[serde(default, rename = "next", skip_serializing)]
-    legacy_next: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Progress {
-    sequence: u64,
-    next: usize,
-    resolved_run_id: Option<String>,
-}
 
 pub(crate) async fn deliver(
     base: &ReactionBase,
@@ -55,89 +34,8 @@ pub(crate) async fn deliver(
         .read_checkpoint(&result.query_id)
         .await?
         .context("host must seed the query checkpoint before delivery")?;
-    let key = format!("temporal:pending:{}", result.query_id);
-    let progress_key = format!("temporal:progress:{}", result.query_id);
-    let routing = render::routing(config, &result.query_id)?;
-    let previous = store
-        .get(&base.id, &key)
-        .await?
-        .map(|bytes| serde_json::from_slice::<Pending>(&bytes))
-        .transpose()?;
-    let (mut pending, is_new) = match previous {
-        Some(previous) if previous.sequence > checkpoint.sequence => {
-            ensure!(matches!(previous.version, 1 | 2) && previous.sequence == result.sequence
-                && previous.config_hash == checkpoint.config_hash && previous.routing == routing,
-                "pending Temporal actions do not match this query/configuration; restore the original configuration before replay");
-            (previous, false)
-        }
-        _ => (
-            Pending {
-                version: 2,
-                sequence: result.sequence,
-                config_hash: checkpoint.config_hash,
-                routing,
-                commands: render::commands(config, result)?,
-                legacy_next: 0,
-            },
-            true,
-        ),
-    };
-    let previous_progress = store
-        .get(&base.id, &progress_key)
-        .await?
-        .map(|bytes| serde_json::from_slice::<Progress>(&bytes))
-        .transpose()?;
-    let mut progress = match previous_progress {
-        Some(progress) if progress.sequence == pending.sequence => {
-            ensure!(!is_new, "Temporal progress has no matching pending plan");
-            progress
-        }
-        previous => {
-            ensure!(
-                previous.is_none_or(|p| p.sequence < pending.sequence),
-                "Temporal progress is newer than its pending plan"
-            );
-            Progress {
-                sequence: pending.sequence,
-                next: pending.legacy_next,
-                resolved_run_id: pending
-                    .commands
-                    .get(pending.legacy_next)
-                    .and_then(|command| command.resolved_run_id.clone()),
-            }
-        }
-    };
-    ensure!(
-        progress.next >= pending.legacy_next && progress.next <= pending.commands.len(),
-        "invalid pending Temporal progress"
-    );
-    if let Some(run) = &progress.resolved_run_id {
-        ensure!(
-            !run.is_empty()
-                && pending
-                    .commands
-                    .get(progress.next)
-                    .is_some_and(|command| matches!(
-                        command.action,
-                        Action::Cancel { .. } | Action::Terminate { .. }
-                    )),
-            "invalid pending Temporal run resolution"
-        );
-    }
-    if pending.version == 1 {
-        // Preserve v1's inline progress before replacing it with the immutable v2 plan.
-        store
-            .set(&base.id, &progress_key, serde_json::to_vec(&progress)?)
-            .await?;
-        pending.version = 2;
-        store
-            .set(&base.id, &key, serde_json::to_vec(&pending)?)
-            .await?;
-    } else if is_new {
-        store
-            .set(&base.id, &key, serde_json::to_vec(&pending)?)
-            .await?;
-    }
+    let store = PlanStore::new(store.as_ref(), &base.id, &result.query_id);
+    let (pending, mut progress) = store.prepare(config, result, &checkpoint).await?;
     while progress.next < pending.commands.len() {
         let mut command = pending.commands[progress.next].clone();
         command.resolved_run_id = progress.resolved_run_id.clone();
@@ -156,17 +54,13 @@ pub(crate) async fn deliver(
             );
             progress.resolved_run_id = Some(run.clone());
             // Persist the exact execution before any destructive RPC, including its retries.
-            store
-                .set(&base.id, &progress_key, serde_json::to_vec(&progress)?)
-                .await?;
+            store.save_progress(&progress).await?;
             command.resolved_run_id = Some(run);
         }
         client.send(config, &command).await?;
         progress.next += 1;
         progress.resolved_run_id = None;
-        store
-            .set(&base.id, &progress_key, serde_json::to_vec(&progress)?)
-            .await?;
+        store.save_progress(&progress).await?;
     }
     Ok(())
 }
@@ -178,6 +72,7 @@ pub struct TemporalReaction {
 }
 
 impl TemporalReaction {
+    /// Starts configuring a reaction with no query subscriptions and default settings.
     pub fn builder(id: impl Into<String>) -> TemporalReactionBuilder {
         TemporalReactionBuilder::new(id)
     }

@@ -192,10 +192,10 @@ One pending plan is retained per subscribed query. The next checkpointed
 emission replaces it. Cancel and Terminate persist their resolved run IDs in
 the progress record before sending their requests.
 
-Version 1 plans with inline progress are upgraded on replay. The reaction
-persists their existing progress and run pin before replacing the plan with
-version 2. Older binaries cannot read version 2 plans; downgrading a reaction
-that has written them is unsupported.
+The plan format is versioned. Only the current version (2) is supported;
+the unreleased development format with inline progress is rejected without
+sending commands or altering state. Development installations using that old
+format must start with fresh, consistently reset query and reaction state.
 
 This closes the tested crash windows without claiming exactly-once delivery.
 Temporal deduplication depends on the action, execution, and retained server
@@ -271,16 +271,29 @@ error absent from the host's cached status. This component does not modify
 that SDK. Dynamic hosts must not treat that cached status alone as proof of
 successful delivery.
 
-## Recovery tests
+## Tests
 
-Run `cargo test -p drasi-reaction-temporal`. Component tests exercise the real
-delivery loop with an injected transport and state-store write failures.
+Run `cargo test -p drasi-reaction-temporal` with a running Docker daemon.
+The default suite includes a real Temporal development server managed by
+`testcontainers` and an in-process workflow worker from the official Rust SDK.
+It exercises all five actions through the reaction's normal start/enqueue/checkpoint
+path, exact workflow payloads and history, duplicate request identities, Start
+conflict/reuse policies, accepted/completed Updates, Update rejection, missing
+workflows, and Cancel/Terminate retries after a replacement execution starts.
+The test is not ignored or feature-gated, so the existing workspace CI command
+runs it. No Python installation or pre-running Temporal service is required.
+
+Pure request-building tests cover action-specific protobuf fields, JSON encoding,
+optional payloads, policy mappings, and persisted run-ID precedence.
+Recovery tests exercise the real delivery loop with an injected transport
+and state-store write failures.
 They cover partial delivery, unknown RPC outcomes, progress and checkpoint
 failures, stable retry identities, pinned destructive targets, configuration
-mismatches, and upgrades from inline progress. A write-volume test bounds
+mismatches, and rejection of unsupported plan formats. A write-volume test bounds
 persistence to one plan plus small per-command updates.
 
 The Docker order walkthrough uses a real Temporal server. Its
 `verify-demo.sh` also runs command-confirmation regressions, including a
 pending database stage blocking the next mutation. The failure-injection
-tests live in the component, not in the example.
+tests live in the component, not in the example. The Python tests and Docker
+walkthrough are manual checks, not part of workspace CI.

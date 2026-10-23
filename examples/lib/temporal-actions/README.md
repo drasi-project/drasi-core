@@ -277,5 +277,10 @@ reuse the previous inventory demo's data. If that demo still occupies port
 
 - [Action configuration reference](../../../components/reactions/temporal/README.md)
 - Run `./verify-demo.sh` to repeat the walkthrough, check workflow state, and
-  exercise repeated startup and restart. It uses its own temporary Compose
+  exercise repeated startup and restart. It also runs the Python command-confirmation
+  tests. This is a manual check, not a CI job. It uses its own temporary Compose
   project and removes only that project's data.
+
+Like the other `examples/lib` demos, this is a standalone Cargo workspace.
+Its committed `Cargo.lock` pins the Docker build's dependencies independently
+of the root workspace; workspace CI does not build this example.

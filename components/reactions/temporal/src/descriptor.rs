@@ -32,7 +32,8 @@ pub struct TlsConfigDto {
     pub client_identity: Option<ClientIdentityDto>,
 }
 
-/// Declarative configuration. Sensitive values are intentionally not Debug.
+/// Declarative configuration whose values can be literals or host-resolved references,
+/// such as secrets. `Debug` is not implemented to prevent accidental credential logging.
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::temporal::TemporalReactionConfig)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]

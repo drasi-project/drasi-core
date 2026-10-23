@@ -33,6 +33,33 @@ fn add(row: Value) -> ResultDiff {
 }
 
 #[test]
+fn builder_replaces_queries_and_config_but_appends_individual_queries() {
+    let config = TemporalReactionConfig {
+        priority_queue_capacity: 23,
+        ..Default::default()
+    };
+    let reaction = TemporalReaction::builder("r")
+        .with_query("replaced")
+        .with_queries(vec!["first".into()])
+        .with_query("second")
+        .with_priority_queue_capacity(11)
+        .with_config(config)
+        .with_auto_start(false)
+        .build()
+        .unwrap();
+    assert_eq!(reaction.query_ids(), ["first", "second"]);
+    assert!(!reaction.auto_start());
+    assert_eq!(reaction.properties()["priorityQueueCapacity"], 23);
+    let reaction = TemporalReaction::builder("r")
+        .with_query("q")
+        .with_priority_queue_capacity(31)
+        .build()
+        .unwrap();
+    assert!(reaction.auto_start());
+    assert_eq!(reaction.properties()["priorityQueueCapacity"], 31);
+}
+
+#[test]
 fn action_shapes_reject_unrelated_fields_and_unknown_operations() {
     for spec in [
         json!({"action":"signal","workflowId":"x","signalName":"s","workflowType":"Wrong"}),

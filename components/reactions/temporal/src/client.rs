@@ -8,18 +8,20 @@ use temporalio_client::{
     ConnectionOptions, TlsOptions,
 };
 use temporalio_common::protos::temporal::api::{
-    common::v1::{Payload, Payloads, WorkflowExecution, WorkflowType},
-    enums::v1::{
-        UpdateWorkflowExecutionLifecycleStage, WorkflowExecutionStatus, WorkflowIdConflictPolicy,
-        WorkflowIdReusePolicy,
-    },
-    taskqueue::v1::TaskQueue,
-    update::v1::{self as update, outcome::Value as UpdateOutcome},
+    common::v1::{Payload, Payloads, WorkflowExecution},
+    enums::v1::{UpdateWorkflowExecutionLifecycleStage, WorkflowExecutionStatus},
+    update::v1::outcome::Value as UpdateOutcome,
     workflow::v1::WorkflowExecutionInfo,
     workflowservice::v1::*,
 };
 
 use crate::{config::*, render::Command};
+
+mod requests;
+use requests::ActionRequest;
+
+#[cfg(test)]
+mod live_tests;
 
 #[async_trait::async_trait]
 pub(crate) trait Transport: Send + Sync {
@@ -173,90 +175,46 @@ async fn send_inner(
     command: &Command,
 ) -> Result<()> {
     let mut service = client.clone();
-    let namespace = config.namespace.clone();
-    let identity = "drasi-temporal-reaction".to_owned();
-    match &command.action {
-        Action::Signal { signal_name, .. } => {
+    let request = requests::build(config, command)?;
+    if matches!(
+        request,
+        ActionRequest::Cancel(_) | ActionRequest::Terminate(_)
+    ) {
+        let terminal = if matches!(request, ActionRequest::Cancel(_)) {
+            WorkflowExecutionStatus::Canceled
+        } else {
+            WorkflowExecutionStatus::Terminated
+        } as i32;
+        let info = describe(client, config, command).await?;
+        if info.status == terminal {
+            log::info!(
+                "Temporal request {} already reached its requested terminal state",
+                command.request_id
+            );
+            return Ok(());
+        }
+        ensure!(
+            info.status == WorkflowExecutionStatus::Running as i32,
+            "target execution has already closed"
+        );
+    }
+    match request {
+        ActionRequest::Signal(request) => {
             service
-                .signal_workflow_execution(Request::new(SignalWorkflowExecutionRequest {
-                    namespace,
-                    workflow_execution: Some(execution(command)),
-                    signal_name: signal_name.clone(),
-                    input: payload(command)?,
-                    identity,
-                    request_id: command.request_id.clone(),
-                    ..Default::default()
-                }))
+                .signal_workflow_execution(Request::new(request))
                 .await?;
         }
-        Action::Start {
-            workflow_id,
-            workflow_type,
-            task_queue,
-            conflict_policy,
-            reuse_policy,
-        } => {
+        ActionRequest::Start(request) => {
             service
-                .start_workflow_execution(Request::new(StartWorkflowExecutionRequest {
-                    namespace,
-                    workflow_id: workflow_id.clone(),
-                    workflow_type: Some(WorkflowType {
-                        name: workflow_type.clone(),
-                    }),
-                    task_queue: Some(TaskQueue {
-                        name: task_queue.clone(),
-                        ..Default::default()
-                    }),
-                    input: payload(command)?,
-                    identity,
-                    request_id: command.request_id.clone(),
-                    workflow_id_conflict_policy: match conflict_policy {
-                        ConflictPolicy::Fail => WorkflowIdConflictPolicy::Fail as i32,
-                        ConflictPolicy::UseExisting => WorkflowIdConflictPolicy::UseExisting as i32,
-                    },
-                    workflow_id_reuse_policy: match reuse_policy {
-                        ReusePolicy::RejectDuplicate => {
-                            WorkflowIdReusePolicy::RejectDuplicate as i32
-                        }
-                        ReusePolicy::AllowDuplicate => WorkflowIdReusePolicy::AllowDuplicate as i32,
-                        ReusePolicy::AllowDuplicateFailedOnly => {
-                            WorkflowIdReusePolicy::AllowDuplicateFailedOnly as i32
-                        }
-                    },
-                    ..Default::default()
-                }))
+                .start_workflow_execution(Request::new(request))
                 .await?;
         }
-        Action::Update {
-            update_name,
-            wait_for,
-            ..
-        } => {
-            let stage = match wait_for {
-                UpdateWait::Accepted => UpdateWorkflowExecutionLifecycleStage::Accepted,
-                UpdateWait::Completed => UpdateWorkflowExecutionLifecycleStage::Completed,
-            } as i32;
-            let request = UpdateWorkflowExecutionRequest {
-                namespace,
-                workflow_execution: Some(execution(command)),
-                wait_policy: Some(update::WaitPolicy {
-                    lifecycle_stage: stage,
-                }),
-                request: Some(update::Request {
-                    request_id: command.request_id.clone(),
-                    meta: Some(update::Meta {
-                        update_id: command.request_id.clone(),
-                        identity,
-                    }),
-                    input: Some(update::Input {
-                        name: update_name.clone(),
-                        args: payload(command)?,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
+        ActionRequest::Update(request) => {
+            let stage = request
+                .wait_policy
+                .as_ref()
+                .context("Update wait policy is missing")?
+                .lifecycle_stage;
             loop {
                 let response = service
                     .update_workflow_execution(Request::new(request.clone()))
@@ -268,7 +226,7 @@ async fn send_inner(
                     bail!("Temporal Update rejected or failed: {}", failure.message);
                 }
                 if response.stage >= stage {
-                    if *wait_for == UpdateWait::Completed {
+                    if stage == UpdateWorkflowExecutionLifecycleStage::Completed as i32 {
                         ensure!(
                             matches!(
                                 response.outcome.and_then(|o| o.value),
@@ -282,53 +240,15 @@ async fn send_inner(
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
-        Action::Cancel { reason, .. } | Action::Terminate { reason, .. } => {
-            ensure!(
-                command.resolved_run_id.is_some() || command.action.run_id().is_some(),
-                "cancel/terminate requires a persisted runId"
-            );
-            let terminal = if matches!(command.action, Action::Cancel { .. }) {
-                WorkflowExecutionStatus::Canceled
-            } else {
-                WorkflowExecutionStatus::Terminated
-            } as i32;
-            let info = describe(client, config, command).await?;
-            if info.status == terminal {
-                log::info!(
-                    "Temporal request {} already reached its requested terminal state",
-                    command.request_id
-                );
-                return Ok(());
-            }
-            ensure!(
-                info.status == WorkflowExecutionStatus::Running as i32,
-                "target execution has already closed"
-            );
-            if matches!(command.action, Action::Cancel { .. }) {
-                service
-                    .request_cancel_workflow_execution(Request::new(
-                        RequestCancelWorkflowExecutionRequest {
-                            namespace,
-                            workflow_execution: Some(execution(command)),
-                            reason: reason.clone(),
-                            identity,
-                            request_id: command.request_id.clone(),
-                            ..Default::default()
-                        },
-                    ))
-                    .await?;
-            } else {
-                service
-                    .terminate_workflow_execution(Request::new(TerminateWorkflowExecutionRequest {
-                        namespace,
-                        workflow_execution: Some(execution(command)),
-                        reason: reason.clone(),
-                        identity,
-                        details: payload(command)?,
-                        ..Default::default()
-                    }))
-                    .await?;
-            }
+        ActionRequest::Cancel(request) => {
+            service
+                .request_cancel_workflow_execution(Request::new(request))
+                .await?;
+        }
+        ActionRequest::Terminate(request) => {
+            service
+                .terminate_workflow_execution(Request::new(request))
+                .await?;
         }
     }
     Ok(())
