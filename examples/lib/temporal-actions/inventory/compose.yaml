@@ -1,0 +1,89 @@
+# Copyright 2026 The Drasi Authors.
+# SPDX-License-Identifier: Apache-2.0
+name: drasi-temporal-inventory
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: drasi
+      POSTGRES_PASSWORD: local-demo-only
+      POSTGRES_DB: inventory
+    command: ["postgres", "-c", "wal_level=logical"]
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/inventory.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "drasi", "-d", "inventory"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  temporal:
+    image: temporalio/temporal:1.9.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--ui-ip", "0.0.0.0", "--db-filename", "/home/temporal/temporal.db"]
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_PORT:-18080}:8233"
+    volumes:
+      - temporal:/home/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  worker:
+    build:
+      context: .
+      dockerfile: Worker.Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      PGHOST: postgres
+      PGDATABASE: inventory
+      PGUSER: drasi
+      PGPASSWORD: local-demo-only
+    depends_on:
+      temporal:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "demo.py", "health"]
+      interval: 3s
+      timeout: 10s
+      retries: 30
+  drasi:
+    build:
+      context: ../../../..
+      dockerfile: examples/lib/temporal-actions/inventory/Drasi.Dockerfile
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: inventory
+      PGUSER: drasi
+      PGPASSWORD: local-demo-only
+      PGSLOT: inventory
+      PGTABLE: public.inventory
+      DATA_DIR: /home/demo/state
+      QUERY_FILE: /config/query.cypher
+      TEMPORAL_CONFIG_FILE: /config/reaction.json
+      RUST_LOG: warn
+    volumes:
+      - drasi:/home/demo
+      - ./query.cypher:/config/query.cypher:ro
+      - ./reaction.json:/config/reaction.json:ro
+    depends_on:
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "drasi-demo", "--healthcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    stop_signal: SIGINT
+    stop_grace_period: 15s
+
+volumes:
+  postgres:
+  temporal:
+  drasi:
