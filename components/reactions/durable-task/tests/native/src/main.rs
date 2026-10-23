@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use drasi_bootstrap_postgres::PostgresBootstrapProvider;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::{
-    channels::DispatchMode, ComponentStatus, DrasiLib, Query, ReactionCheckpoint,
+    channels::DispatchMode, ComponentStatus, DrasiLib, Query, ReactionCheckpoint, RecoveryPolicy,
     StateStoreProvider, StorageBackendRef,
 };
 use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
@@ -27,13 +27,19 @@ enum Action {
         outbox: bool,
     },
     Checkpoint,
+    RewindCheckpoint {
+        sequence: u64,
+    },
     Quit,
 }
 
-async fn checkpoint(store: &dyn StateStoreProvider) -> Result<u64> {
+async fn checkpoint(store: &dyn StateStoreProvider) -> Result<ReactionCheckpoint> {
     match store.get("dts", "checkpoint:order-issues").await? {
-        Some(bytes) => Ok(bincode::deserialize::<ReactionCheckpoint>(&bytes)?.sequence),
-        None => Ok(0),
+        Some(bytes) => Ok(bincode::deserialize::<ReactionCheckpoint>(&bytes)?),
+        None => Ok(ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 0,
+        }),
     }
 }
 
@@ -83,6 +89,20 @@ async fn main() -> Result<()> {
     let config_path =
         std::env::var("DTS_REACTION_CONFIG").context("DTS_REACTION_CONFIG is required")?;
     let config: Value = serde_json::from_slice(&std::fs::read(config_path)?)?;
+    let outbox_capacity = match std::env::var("DTS_TEST_OUTBOX_CAPACITY") {
+        Ok(value) => value.parse().context("Invalid test outbox capacity")?,
+        Err(std::env::VarError::NotPresent) => 10_000,
+        Err(error) => return Err(error.into()),
+    };
+    let (query, recovery_policy) = match std::env::var("DTS_TEST_QUERY") {
+        Ok(query) => (query, RecoveryPolicy::AutoReset),
+        Err(std::env::VarError::NotPresent) => (
+            std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("query.cypher"))
+                .context("Cannot read query.cypher")?,
+            RecoveryPolicy::Strict,
+        ),
+        Err(error) => return Err(error.into()),
+    };
     let reaction = DurableTaskReactionDescriptor
         .create_reaction("dts", vec!["order-issues".into()], &config, true)
         .await?;
@@ -131,15 +151,11 @@ async fn main() -> Result<()> {
         .with_source(source)
         .with_query(
             Query::cypher("order-issues")
-                .query(
-                    std::fs::read_to_string(
-                        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("query.cypher"),
-                    )
-                    .context("Cannot read query.cypher")?,
-                )
+                .query(query)
+                .with_recovery_policy(recovery_policy)
                 .from_source("orders")
                 .with_storage_backend(StorageBackendRef::Named("rocks".into()))
-                .with_outbox_capacity(10_000)
+                .with_outbox_capacity(outbox_capacity)
                 .enable_bootstrap(true)
                 .auto_start(true)
                 .build(),
@@ -156,7 +172,18 @@ async fn main() -> Result<()> {
             let action: Action = serde_json::from_str(&line)?;
             let response = match action {
                 Action::Quit => break,
-                Action::Checkpoint => json!({"sequence": checkpoint(state.as_ref()).await?}),
+                Action::Checkpoint => {
+                    let current = checkpoint(state.as_ref()).await?;
+                    json!({"sequence": current.sequence, "configHash": current.config_hash})
+                }
+                Action::RewindCheckpoint { sequence } => {
+                    drasi.stop_reaction("dts").await?;
+                    let mut current = checkpoint(state.as_ref()).await?;
+                    anyhow::ensure!(sequence <= current.sequence, "Cannot advance a rewind");
+                    current.sequence = sequence;
+                    state.set("dts", "checkpoint:order-issues", bincode::serialize(&current)?).await?;
+                    json!({"sequence": sequence})
+                }
                 Action::PauseReaction => {
                     drasi.stop_reaction("dts").await?;
                     json!({"paused":true})
@@ -178,7 +205,7 @@ async fn main() -> Result<()> {
                                     .await?
                                     .latest_sequence
                             } else {
-                                checkpoint(state.as_ref()).await?
+                                checkpoint(state.as_ref()).await?.sequence
                             };
                             if current > after {
                                 return Ok::<_, anyhow::Error>(current);
@@ -188,7 +215,7 @@ async fn main() -> Result<()> {
                     })
                     .await
                     .context("Timed out waiting for the PostgreSQL change to reach the outbox/checkpoint")??;
-                    json!({"sequence":sequence,"checkpoint":checkpoint(state.as_ref()).await?})
+                    json!({"sequence":sequence,"checkpoint":checkpoint(state.as_ref()).await?.sequence})
                 }
             };
             println!("{response}");

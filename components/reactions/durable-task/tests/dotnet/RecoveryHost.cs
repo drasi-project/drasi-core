@@ -24,7 +24,8 @@ internal sealed partial class DemoHost
             Path.Combine(AppContext.BaseDirectory, "recovery-schema.sql"), cancellation));
     }
 
-    public async Task StartRecoveryDrasiAsync(string mode = "correlated", string? configPath = null)
+    public async Task StartRecoveryDrasiAsync(string mode = "correlated", string? configPath = null,
+        int? outboxCapacity = null, string? query = null)
     {
         ProcessStartInfo start = StartInfo(
             recoveryExecutable ?? throw new InvalidOperationException("Missing recovery executable"), []);
@@ -33,6 +34,10 @@ internal sealed partial class DemoHost
         start.Environment["DTS_PRODUCER_ID"] = RunId + "-" + mode;
         start.Environment["APP_STATE_DIR"] = Path.Combine(ArtifactDirectory, mode);
         start.Environment["DTS_REACTION_CONFIG"] = configPath ?? Path.Combine(AppContext.BaseDirectory, "reaction.json");
+        if (outboxCapacity is not null)
+            start.Environment["DTS_TEST_OUTBOX_CAPACITY"] = outboxCapacity.Value.ToString(CultureInfo.InvariantCulture);
+        if (query is not null)
+            start.Environment["DTS_TEST_QUERY"] = query;
         string slot = "drasi_" + mode.Replace('-', '_');
         start.Environment["PGHOST"] = "127.0.0.1";
         start.Environment["PGPORT"] = PostgresPort.ToString(CultureInfo.InvariantCulture);

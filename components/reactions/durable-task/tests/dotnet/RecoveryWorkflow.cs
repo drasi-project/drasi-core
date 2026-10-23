@@ -34,6 +34,21 @@ public sealed class RecoveryWorkflow : TaskOrchestrator<Command, Outcome>
     }
 }
 
+public sealed class ContinuingWorkflow : TaskOrchestrator<Command, Command>
+{
+    public override async Task<Command> RunAsync(TaskOrchestrationContext context, Command order)
+    {
+        if (order.revision == 1)
+        {
+            await context.WaitForExternalEvent<object>("continue");
+            context.ContinueAsNew(order with { revision = 2 });
+            return order;
+        }
+        context.SetCustomStatus(order);
+        return await context.WaitForExternalEvent<Command>("finish");
+    }
+}
+
 public record Command(string commandId, string episodeId, string kind, long revision, string reason);
 public record Progress(string[] applied, int duplicateEvents, Command lastCommand);
 public record Outcome(string episodeId, long finalRevision, string[] applied, int duplicateEvents);

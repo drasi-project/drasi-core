@@ -14,7 +14,7 @@ use drasi_lib::{
     component_graph::ComponentGraph,
     context::ReactionRuntimeContext,
     identity::{ApplicationIdentityProvider, Credentials},
-    ComponentStatus,
+    ComponentStatus, ReactionCheckpoint, ReactionRecoveryPolicy,
 };
 use drasi_state_store_redb::RedbStateStoreProvider;
 use tokio::{net::TcpListener, sync::Mutex};
@@ -37,6 +37,7 @@ struct Scheduler {
     starts: Mutex<Vec<proto::CreateInstanceRequest>>,
     events: Mutex<Vec<proto::RaiseEventRequest>>,
     terminations: Mutex<Vec<proto::TerminateRequest>>,
+    lookups: Mutex<Vec<proto::GetInstanceRequest>>,
     lose_start_response: AtomicBool,
     lose_event_response: AtomicBool,
     unavailable: AtomicBool,
@@ -100,12 +101,9 @@ impl TaskHubSidecarService for Arc<Scheduler> {
         request: Request<proto::GetInstanceRequest>,
     ) -> Result<Response<proto::GetInstanceResponse>, Status> {
         self.metadata(&request)?;
-        let state = self
-            .states
-            .lock()
-            .await
-            .get(&request.into_inner().instance_id)
-            .cloned();
+        let request = request.into_inner();
+        self.lookups.lock().await.push(request.clone());
+        let state = self.states.lock().await.get(&request.instance_id).cloned();
         Ok(Response::new(proto::GetInstanceResponse {
             exists: state.is_some(),
             orchestration_state: state,
@@ -574,4 +572,270 @@ async fn invalid_auth_credentials_fail_without_constructing_authorization() {
             .await
             .is_err());
     }
+}
+
+#[tokio::test]
+async fn target_checks_do_not_fetch_workflow_payloads() {
+    let server = Server::new().await;
+    let mut client = DtsClient::new(&server.config(), None).unwrap();
+    server
+        .state
+        .states
+        .lock()
+        .await
+        .insert("target".into(), proto::OrchestrationState::default());
+    client
+        .dispatch(&Dispatch::Event {
+            instance_id: "target".into(),
+            event_name: "approved".into(),
+            input: "{}".into(),
+            on_missing: TargetPolicy::Error,
+            on_terminal: TargetPolicy::Error,
+        })
+        .await
+        .unwrap();
+    client
+        .dispatch(&Dispatch::Terminate {
+            instance_id: "target".into(),
+            output: "\"done\"".into(),
+            recursive: false,
+            on_missing: TargetPolicy::Error,
+        })
+        .await
+        .unwrap();
+    let lookups = server.state.lookups.lock().await;
+    assert_eq!(lookups.len(), 2);
+    assert!(lookups
+        .iter()
+        .all(|request| !request.get_inputs_and_outputs));
+}
+
+#[tokio::test]
+async fn start_replay_survives_continue_as_new_without_accepting_changed_commands() {
+    let server = Server::new().await;
+    let mut client = DtsClient::new(&server.config(), None).unwrap();
+    let operation = Dispatch::Start {
+        instance_id: "continued".into(),
+        orchestration: "Workflow".into(),
+        version: "1".into(),
+        input: "{\"page\":1}".into(),
+        command_id: "original-command".into(),
+        on_conflict: TargetPolicy::Error,
+    };
+    client.dispatch(&operation).await.unwrap();
+    {
+        let mut states = server.state.states.lock().await;
+        let state = states.get_mut("continued").unwrap();
+        state.version = Some("2".into());
+        state.input = Some("{\"page\":2}".into());
+    }
+    client.dispatch(&operation).await.unwrap();
+    for changed in ["name", "version", "input", "command"] {
+        let mut conflict = operation.clone();
+        if let Dispatch::Start {
+            orchestration,
+            version,
+            input,
+            command_id,
+            ..
+        } = &mut conflict
+        {
+            match changed {
+                "name" => *orchestration = "OtherWorkflow".into(),
+                "version" => *version = "2".into(),
+                "input" => *input = "{\"page\":2}".into(),
+                "command" => *command_id = "different-command".into(),
+                _ => unreachable!(),
+            }
+        }
+        assert!(client.dispatch(&conflict).await.is_err(), "{changed}");
+    }
+    assert_eq!(
+        server.state.states.lock().await["continued"]
+            .input
+            .as_deref(),
+        Some("{\"page\":2}"),
+        "reconciliation must not replace the continued execution"
+    );
+    assert!(server
+        .state
+        .lookups
+        .lock()
+        .await
+        .iter()
+        .all(|request| !request.get_inputs_and_outputs));
+    server
+        .state
+        .states
+        .lock()
+        .await
+        .get_mut("continued")
+        .unwrap()
+        .tags
+        .remove("drasi-start-fingerprint");
+    assert!(
+        client.dispatch(&operation).await.is_err(),
+        "missing original-start evidence must not be accepted"
+    );
+}
+
+#[tokio::test]
+async fn running_publication_has_a_task_handle_and_gates_queued_work() {
+    let server = Server::new().await;
+    server.state.unavailable.store(true, Ordering::SeqCst);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbStateStoreProvider::new(dir.path().join("state.redb")).unwrap());
+    let mut config = server.config();
+    config.max_retries = 0;
+    let reaction = Arc::new(DurableTaskReaction::new("r", vec!["orders".into()], config).unwrap());
+    let (updates, receiver) = tokio::sync::mpsc::channel(1);
+    reaction
+        .initialize(ReactionRuntimeContext::new(
+            "dts-test",
+            "r",
+            Some(store),
+            updates,
+            None,
+        ))
+        .await;
+    reaction
+        .enqueue_query_result(emission(1, vec![add("a")]))
+        .await
+        .unwrap();
+    let mut status = reaction.base.status_handle().subscribe_status();
+    let starting = tokio::spawn({
+        let reaction = reaction.clone();
+        async move { reaction.start().await }
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|status| *status == ComponentStatus::Running),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        reaction.base.processing_task.read().await.is_some(),
+        "Running must not be visible before its task handle is installed"
+    );
+    assert_eq!(
+        server.state.attempts.load(Ordering::SeqCst),
+        0,
+        "queued work must wait until Running publication finishes"
+    );
+    drop(receiver);
+    starting.await.unwrap().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|status| *status == ComponentStatus::Error),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_uses_the_hosts_new_query_epoch_instead_of_the_startup_snapshot() {
+    let server = Server::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbStateStoreProvider::new(dir.path().join("state.redb")).unwrap());
+    let reaction = DurableTaskReaction::builder("r")
+        .with_queries(vec!["orders".into()])
+        .with_config(server.config())
+        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
+        .build()
+        .unwrap();
+    initialize(&reaction, store).await;
+    reaction
+        .base
+        .write_checkpoint(
+            "orders",
+            &ReactionCheckpoint {
+                sequence: 99,
+                config_hash: 1,
+            },
+        )
+        .await
+        .unwrap();
+    reaction.start().await.unwrap();
+    reaction
+        .base
+        .write_checkpoint(
+            "orders",
+            &ReactionCheckpoint {
+                sequence: 3,
+                config_hash: 2,
+            },
+        )
+        .await
+        .unwrap();
+    reaction
+        .enqueue_query_result(emission(4, vec![add("new-epoch")]))
+        .await
+        .unwrap();
+    checkpoint(&reaction, 4).await;
+    assert_eq!(
+        reaction
+            .base
+            .read_checkpoint("orders")
+            .await
+            .unwrap()
+            .unwrap()
+            .config_hash,
+        2
+    );
+    assert_eq!(server.state.starts.lock().await.len(), 1);
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_recovery_checkpoint_skips_buffered_emissions_without_regressing() {
+    let server = Server::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbStateStoreProvider::new(dir.path().join("state.redb")).unwrap());
+    let reaction = DurableTaskReaction::new("r", vec!["orders".into()], server.config()).unwrap();
+    initialize(&reaction, store).await;
+    reaction.start().await.unwrap();
+    reaction
+        .enqueue_query_result(emission(1, vec![add("initial")]))
+        .await
+        .unwrap();
+    checkpoint(&reaction, 1).await;
+    reaction
+        .base
+        .write_checkpoint(
+            "orders",
+            &ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 7,
+            },
+        )
+        .await
+        .unwrap();
+    reaction
+        .enqueue_query_result(emission(2, vec![add("skipped")]))
+        .await
+        .unwrap();
+    reaction
+        .enqueue_query_result(emission(11, vec![add("latest")]))
+        .await
+        .unwrap();
+    checkpoint(&reaction, 11).await;
+    assert_eq!(
+        server.state.starts.lock().await.len(),
+        2,
+        "host-skipped emissions must not be delivered"
+    );
+    assert_eq!(
+        reaction
+            .base
+            .read_checkpoint("orders")
+            .await
+            .unwrap()
+            .unwrap()
+            .config_hash,
+        7
+    );
+    reaction.stop().await.unwrap();
 }

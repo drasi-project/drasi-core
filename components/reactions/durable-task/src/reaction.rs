@@ -63,17 +63,20 @@ impl DurableTaskReaction {
         );
         let client = DtsClient::new(&self.config, self.base.identity_provider().await)?;
         let initial = self.base.read_all_checkpoints().await?;
-        let shutdown = self.base.create_shutdown_channel().await;
+        let mut shutdown = self.base.create_shutdown_channel().await;
         let base = self.base.clone_shared();
         let config = Arc::new(self.config.clone());
         let registry = Arc::new(dispatch::handlebars());
         let id = self.base.id.clone();
-        let policy = self
-            .base
-            .recovery_policy
-            .unwrap_or(ReactionRecoveryPolicy::Strict);
-        self.base.set_status(ComponentStatus::Running, None).await;
+        let policy = self.default_recovery_policy();
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let started = ready.clone();
         let handle = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                _ = started.notified() => {}
+            }
             let result = base
                 .run_standard_loop(shutdown, initial, policy, |emission| {
                     let mut client = client.clone();
@@ -96,6 +99,8 @@ impl DurableTaskReaction {
             }
         });
         self.base.set_processing_task(handle).await;
+        self.base.set_status(ComponentStatus::Running, None).await;
+        ready.notify_one();
         Ok(())
     }
 }
@@ -126,7 +131,9 @@ impl Reaction for DurableTaskReaction {
         true
     }
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
-        ReactionRecoveryPolicy::Strict
+        self.base
+            .recovery_policy
+            .unwrap_or(ReactionRecoveryPolicy::Strict)
     }
     async fn initialize(&self, context: ReactionRuntimeContext) {
         self.base.initialize(context).await;

@@ -18,6 +18,20 @@ use crate::{
 
 mod rpc;
 
+#[test]
+fn configured_recovery_policy_is_reported_to_the_host() {
+    let reaction = DurableTaskReaction::builder("r")
+        .with_queries(vec!["orders".into()])
+        .with_config(config())
+        .with_recovery_policy(drasi_lib::ReactionRecoveryPolicy::AutoSkipGap)
+        .build()
+        .unwrap();
+    assert_eq!(
+        reaction.default_recovery_policy(),
+        drasi_lib::ReactionRecoveryPolicy::AutoSkipGap
+    );
+}
+
 fn start(instance_id: Option<&str>) -> DurableTaskTemplate {
     DurableTaskTemplate::with_extension(
         "",

@@ -24,6 +24,7 @@ internal sealed class TestWorker : IAsyncDisposable
             {
                 tasks.AddOrchestrator<OrderWorkflow>();
                 tasks.AddOrchestrator<RecoveryWorkflow>();
+                tasks.AddOrchestrator<ContinuingWorkflow>();
                 tasks.AddOrchestrator<RecordChange>();
                 tasks.AddActivity<ReportStatus>();
                 tasks.AddActivity(new RecordEffect(effectsDirectory));

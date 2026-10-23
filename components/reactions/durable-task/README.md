@@ -84,8 +84,11 @@ Each operation specification has an `action` and an optional JSON `template`.
 `error` fails the emission; Strict recovery retains its previous checkpoint.
 
 `start` never replaces an existing instance, even after completion. An identical
-retry succeeds after comparing the existing orchestration name, version, input,
-and `drasi-command-id` tag. A different command using that ID follows `onConflict`.
+retry succeeds after comparing the `drasi-command-id` and
+`drasi-start-fingerprint` tags. The fingerprint is a UUIDv5 of the original
+orchestration name, version, and serialized input. Unlike the current execution's
+input and version, those tags survive `ContinueAsNew`. Preserve both tags when
+continuing a workflow. Missing or different evidence follows `onConflict`.
 This distinguishes retry reconciliation from silently accepting an ID collision.
 Replacement is not an automatic retry behavior: a fast-completing workflow could
 otherwise execute twice after a lost start response. A new business episode can
@@ -199,13 +202,14 @@ Restart resumes from the persisted checkpoint.
 
 Connections are lazy. Running status means the processing loop is ready;
 connection failures are reported when delivery is attempted.
+Status and reconciliation lookups request metadata only, not workflow payloads.
 
 Command IDs are UUIDv5 values over `producerId`, reaction ID, full query ID,
 sequence, diff position, row signature, and operation. They remain stable during
 outbox replay. There is no separate inbox service. Operational constraints remain:
 
 - A crash after DTS accepts a request but before checkpoint persistence can
-  resend it. Starts reconcile using their ID and tag. Workflows must deduplicate
+  resend it. Starts reconcile using their ID and both tags. Workflows must deduplicate
   external events by command ID.
 - A successful `RaiseEvent` means enqueueing, not consumption. The reaction
   checks missing and terminal state before sending, but completion can race that
@@ -252,7 +256,9 @@ cargo clippy -p drasi-reaction-durable-task --all-targets --features dynamic-plu
 
 The tests include lost responses, duplicate starts, target policies, exact retry
 payloads, bounded retry exhaustion, persistent checkpoints, partial-emission
-replay, descriptor round-trips, and token acquisition.
+replay, descriptor round-trips, and token acquisition. They also cover metadata-only
+lookups, start reconciliation after `ContinueAsNew`, startup publication ordering,
+and checkpoint refresh after host recovery.
 
 ### Live integration tests
 
@@ -269,14 +275,16 @@ into the example. Append `-- --skip-rust-build` to reuse an already-built
 recovery host; the final walkthrough check builds and uses the actual example
 host.
 
-Expect `PASS all 19 checks`. They cover early-event buffering, duplicate starts
+Expect `PASS all 22 checks`. They cover early-event buffering, duplicate starts
 and events, worker SIGKILL/replay, Drasi outbox recovery, PostgreSQL WAL replay and
 snapshot before-images, physical row deletion, all four configurable actions,
 and the actual guided example's prompts/cancellation/output. The example check
 observes one workflow through placed, paid, shipped, and delivered, with delivery
 arriving as an UPDATE rather than a removal. It also checks the local dashboard
-URL and the final inspection pause before cleanup. The recovery
-scenarios must produce exactly sixteen file effects; the guided business workflow
+URL and the final inspection pause before cleanup. Additional scenarios replay an
+original start after a real `ContinueAsNew`, restart with a pruned outbox under
+`autoSkipGap`, and reset a changed query with an explicitly rotated producer epoch.
+The recovery scenarios must produce exactly nineteen file effects; the guided business workflow
 reports to the console instead.
 
 Diagnostics are retained under the example's ignored `artifacts/` directory.

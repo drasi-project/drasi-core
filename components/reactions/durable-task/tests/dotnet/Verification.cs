@@ -262,12 +262,103 @@ internal static class Verification
             host.ReadEffects().Count(value => value.episodeId == terminationEpisode) == 1,
             "Config alone ignored UPDATE and force-terminated on DELETE without extra effects");
         await host.StopDrasiAsync();
+
+        JsonNode continuingConfig = config.DeepClone();
+        continuingConfig["defaultTemplate"]!["added"]!["orchestration"] = nameof(ContinuingWorkflow);
+        continuingConfig["defaultTemplate"]!["updated"] = new JsonObject { ["action"] = "ignore" };
+        continuingConfig["defaultTemplate"]!["deleted"] = new JsonObject { ["action"] = "ignore" };
+        string continuingPath = Path.Combine(host.ArtifactDirectory, "continuing.json");
+        await File.WriteAllTextAsync(continuingPath, continuingConfig.ToJsonString(JsonOptions));
+        await host.StartRecoveryDrasiAsync("continuing", continuingPath);
+        string continuingEpisode = episode + "-continuing";
+        await host.Database.InsertOrderAsync(continuingEpisode, 1, "original input");
+        JsonNode originalCheckpoint = await host.ControlAsync(new { action = "awaitChange", after = 0 });
+        OrchestrationState original = await host.StateWhenAsync(continuingEpisode,
+            state => state.OrchestrationStatus == OrchestrationStatus.Running);
+        await host.Client.RaiseEventAsync(new OrchestrationInstance { InstanceId = continuingEpisode },
+            "continue", new { }).WaitAsync(TimeSpan.FromSeconds(20), host.Cancellation);
+        OrchestrationState continued = await host.StateWhenAsync(continuingEpisode,
+            state => state.OrchestrationInstance.ExecutionId != original.OrchestrationInstance.ExecutionId
+                && !string.IsNullOrEmpty(state.Status) && Read<Command>(state.Status).revision == 2);
+        Require(original.Tags.TryGetValue("drasi-start-fingerprint", out string? fingerprint)
+            && continued.Tags.TryGetValue("drasi-start-fingerprint", out string? continuedFingerprint)
+            && continuedFingerprint == fingerprint
+            && continued.Tags.TryGetValue("drasi-command-id", out string? continuedCommand)
+            && continuedCommand == original.Tags["drasi-command-id"],
+            "ContinueAsNew must preserve both immutable start tags");
+        await host.ControlAsync(new { action = "rewindCheckpoint", sequence = 0 });
+        await host.CrashDrasiAsync();
+        await host.StartRecoveryDrasiAsync("continuing", continuingPath);
+        JsonNode reconciled = await host.ControlAsync(new { action = "awaitChange", after = 0 });
+        OrchestrationState afterReplay = await host.StateWhenAsync(continuingEpisode, _ => true);
+        Check("continue-as-new-start-replay",
+            JsonNode.DeepEquals(reconciled["checkpoint"], originalCheckpoint["checkpoint"])
+            && afterReplay.OrchestrationInstance.ExecutionId == continued.OrchestrationInstance.ExecutionId
+            && Read<Command>(afterReplay.Status).revision == 2,
+            "Actual ContinueAsNew preserved start evidence; replay of the original outbox command checkpointed without replacing the continued execution");
+        await host.Client.RaiseEventAsync(new OrchestrationInstance { InstanceId = continuingEpisode },
+            "finish", Read<Command>(continued.Status)).WaitAsync(TimeSpan.FromSeconds(20), host.Cancellation);
+        await host.StateWhenAsync(continuingEpisode, state => state.OrchestrationStatus == OrchestrationStatus.Completed);
+        await host.Database.DeleteOrderAsync(continuingEpisode);
+        await host.StopDrasiAsync();
+
+        JsonNode gapConfig = perChange.DeepClone();
+        gapConfig["recoveryPolicy"] = "autoSkipGap";
+        string gapPath = Path.Combine(host.ArtifactDirectory, "gap.json");
+        await File.WriteAllTextAsync(gapPath, gapConfig.ToJsonString(JsonOptions));
+        await host.StartRecoveryDrasiAsync("gap", gapPath, outboxCapacity: 2);
+        string gapEpisode = episode + "-gap";
+        await host.Database.InsertOrderAsync(gapEpisode, 1, "before gap");
+        await EffectAsync(host, gapEpisode, "ADD");
+        JsonNode gapHead = await host.ControlAsync(new { action = "awaitChange", after = 0 });
+        await host.ControlAsync(new { action = "pauseReaction" });
+        for (int revision = 2; revision <= 5; revision++)
+        {
+            await host.Database.UpdateOrderAsync(gapEpisode, revision, "retention gap");
+            gapHead = await host.ControlAsync(new
+            { action = "awaitChange", after = gapHead["sequence"]!.GetValue<long>(), outbox = true });
+        }
+        await host.StopDrasiAsync();
+        await host.StartRecoveryDrasiAsync("gap", gapPath, outboxCapacity: 2);
+        JsonNode skipped = await host.ControlAsync(new { action = "checkpoint" });
+        await host.Database.UpdateOrderAsync(gapEpisode, 6, "delivered after gap");
+        Command postGap = await EffectAsync(host, gapEpisode, "UPDATE");
+        await host.ControlAsync(new { action = "awaitChange", after = skipped["sequence"]!.GetValue<long>() });
+        Check("pruned-outbox-recovery", JsonNode.DeepEquals(skipped["sequence"], gapHead["sequence"])
+            && postGap.revision == 6 && host.ReadEffects().Count(value => value.episodeId == gapEpisode) == 2,
+            "Configured autoSkipGap survived a real restart with a two-entry outbox, skipped lost history, and delivered the next change");
+        await host.StopDrasiAsync();
+
+        gapConfig["producerId"] = host.RunId + "-new-query-epoch";
+        await File.WriteAllTextAsync(gapPath, gapConfig.ToJsonString(JsonOptions));
+        const string changedQuery = """
+            MATCH (o:recovery_orders)
+            WHERE o.needs_attention = true
+            RETURN o.episode_id AS episodeId, o.revision + 100 AS revision, o.reason AS reason
+            """;
+        await host.StartRecoveryDrasiAsync("gap", gapPath, outboxCapacity: 2, query: changedQuery);
+        JsonNode newEpoch = await host.ControlAsync(new { action = "checkpoint" });
+        await host.Database.DeleteOrderAsync(gapEpisode);
+        Command postReset = await EffectAsync(host, gapEpisode, "DELETE");
+        await host.ControlAsync(new { action = "awaitChange", after = newEpoch["sequence"]!.GetValue<long>() });
+        JsonNode advancedEpoch = await host.ControlAsync(new { action = "checkpoint" });
+        await host.StopDrasiAsync();
+        await host.StartRecoveryDrasiAsync("gap", gapPath, outboxCapacity: 2, query: changedQuery);
+        JsonNode restartedEpoch = await host.ControlAsync(new { action = "checkpoint" });
+        Check("changed-query-recovery", newEpoch["sequence"]!.GetValue<long>() == 0
+            && !JsonNode.DeepEquals(newEpoch["configHash"], skipped["configHash"])
+            && JsonNode.DeepEquals(advancedEpoch["configHash"], newEpoch["configHash"])
+            && JsonNode.DeepEquals(restartedEpoch, advancedEpoch)
+            && advancedEpoch["sequence"]!.GetValue<long>() == 1 && postReset.revision == 106,
+            "After an explicit query reset and producer-epoch rotation, delivery preserved the host's new hash and lower sequence across another restart");
+        await host.StopDrasiAsync();
+
         await host.StartDrasiAsync();
         await GuidedWalkthroughVerification.RunAsync(host);
         Check("guided-walkthrough", true,
             "Named event waits preserved stage order; prompts preceded SQL; quit/EOF changed no rows; the local dashboard stayed available through the final inspection pause");
-        Check("no-late-effects", host.ReadEffects().Length == 16,
-            "Thirteen original integration effects plus three buffered-event effects, with no extras");
+        Check("no-late-effects", host.ReadEffects().Length == 19,
+            "Sixteen existing integration effects plus three gap/query-recovery effects, with no extras");
         await host.SaveResultAsync(new
         {
             image = EmulatorImage,

@@ -18,6 +18,7 @@ use crate::{
 };
 
 const COMMAND_TAG: &str = "drasi-command-id";
+const START_TAG: &str = "drasi-start-fingerprint";
 
 #[derive(Clone)]
 pub(crate) struct DtsClient {
@@ -119,7 +120,7 @@ impl DtsClient {
         let request = self
             .request(proto::GetInstanceRequest {
                 instance_id: instance_id.to_owned(),
-                get_inputs_and_outputs: true,
+                get_inputs_and_outputs: false,
             })
             .await?;
         let response = match self.inner.get_instance(request).await {
@@ -147,6 +148,11 @@ impl DtsClient {
                 command_id,
                 on_conflict,
             } => {
+                let fingerprint = uuid::Uuid::new_v5(
+                    &uuid::Uuid::NAMESPACE_URL,
+                    &serde_json::to_vec(&(orchestration, version, input))?,
+                )
+                .to_string();
                 let request = self
                     .request(proto::CreateInstanceRequest {
                         instance_id: instance_id.clone(),
@@ -156,7 +162,10 @@ impl DtsClient {
                         orchestration_id_reuse_policy: Some(proto::OrchestrationIdReusePolicy {
                             replaceable_status: Vec::new(),
                         }),
-                        tags: HashMap::from([(COMMAND_TAG.into(), command_id.clone())]),
+                        tags: HashMap::from([
+                            (COMMAND_TAG.into(), command_id.clone()),
+                            (START_TAG.into(), fingerprint.clone()),
+                        ]),
                         ..Default::default()
                     })
                     .await?;
@@ -171,10 +180,8 @@ impl DtsClient {
                     Err(error) if error.code() == Code::AlreadyExists => {
                         let existing = self.get(instance_id).await?;
                         if existing.as_ref().is_some_and(|state| {
-                            state.name == *orchestration
-                                && state.version.as_deref().unwrap_or_default() == version
-                                && state.input.as_deref() == Some(input)
-                                && state.tags.get(COMMAND_TAG) == Some(command_id)
+                            state.tags.get(COMMAND_TAG) == Some(command_id)
+                                && state.tags.get(START_TAG) == Some(&fingerprint)
                         }) {
                             return Ok(());
                         }
