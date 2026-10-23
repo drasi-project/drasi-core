@@ -23,7 +23,7 @@ use tonic::{Request, Response, Status};
 
 use super::*;
 use crate::{
-    client::DtsClient,
+    client::{DtsClient, GrpcDtsApi},
     proto::{
         self,
         task_hub_sidecar_service_server::{TaskHubSidecarService, TaskHubSidecarServiceServer},
@@ -482,7 +482,7 @@ async fn authentication_refreshes_tokens_and_marks_metadata_sensitive() {
         ..config()
     };
     assert!(DtsClient::new(&c, None).is_err());
-    let client = DtsClient::new(&c, Some(provider)).unwrap();
+    let client = GrpcDtsApi::new(&c, Some(provider)).unwrap();
     let first = client.request(()).await.unwrap();
     let second = client.request(()).await.unwrap();
     assert_eq!(
@@ -499,6 +499,38 @@ async fn authentication_refreshes_tokens_and_marks_metadata_sensitive() {
         .unwrap()
         .is_sensitive());
     assert_eq!(counter.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn invalid_second_diff_sends_nothing_and_does_not_checkpoint() {
+    let server = Server::new().await;
+    let mut c = server.config();
+    c.default_template.as_mut().unwrap().added = Some(start(Some("{{after.id}}")));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbStateStoreProvider::new(dir.path().join("state.redb")).unwrap());
+    let reaction = DurableTaskReaction::new("r", vec!["orders".into()], c).unwrap();
+    initialize(&reaction, store).await;
+    let mut status = reaction.base.status_handle().subscribe_status();
+    reaction.start().await.unwrap();
+    reaction
+        .enqueue_query_result(emission(1, vec![add("valid"), add("@entity")]))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|status| *status == ComponentStatus::Error),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(server.state.attempts.load(Ordering::SeqCst), 0);
+    assert!(reaction
+        .base
+        .read_checkpoint("orders")
+        .await
+        .unwrap()
+        .is_none());
+    reaction.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -566,7 +598,7 @@ async fn invalid_auth_credentials_fail_without_constructing_authorization() {
             authentication: Authentication::Identity,
             ..config()
         };
-        assert!(DtsClient::new(&c, Some(provider))
+        assert!(GrpcDtsApi::new(&c, Some(provider))
             .unwrap()
             .request(())
             .await

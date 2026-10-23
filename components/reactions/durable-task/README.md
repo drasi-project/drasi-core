@@ -56,7 +56,7 @@ an operation with no configured action is ignored.
 | `scope` | `https://durabletask.io/.default` | Token audience requested from the identity provider. |
 | `timeoutMs` | `10000` | Connection, credential acquisition, and individual RPC timeout. |
 | `maxRetries` | `3` | Additional attempts after transient gRPC failures, at most 10. |
-| `retryDelayMs` | `250` | Initial retry delay, 1 through 30000 ms. Exponential delay is capped at 30 seconds. |
+| `retryDelayMs` | `250` | Initial exponential-backoff ceiling, 1 through 30000 ms. Each delay is randomly selected from the upper half of the current ceiling, capped at 30 seconds. |
 | `priorityQueueCapacity` | `10000` | Maximum inbound queue size. Must be positive. |
 | `recoveryPolicy` | `strict` | `strict` stops on delivery failures or outbox gaps. `autoSkipGap` explicitly permits lost deliveries. |
 | `defaultTemplate` | None | `added`, `updated`, and `deleted` operation specifications. |
@@ -82,6 +82,11 @@ Each operation specification has an `action` and an optional JSON `template`.
 `onConflict`, `onMissing`, and `onTerminal` each accept `error` or `ignore`, with
 `error` as the default. `ignore` logs the condition and acknowledges the operation.
 `error` fails the emission; Strict recovery retains its previous checkpoint.
+Events therefore require a status lookup for either `onTerminal` setting:
+`ignore` means acknowledge without sending, not send regardless of status.
+Termination also checks status so already-terminal instances are no-ops, including
+recursive requests. These metadata-only preflights do not make the subsequent
+mutation atomic; a `NotFound` response still follows `onMissing`.
 
 `start` never replaces an existing instance, even after completion. An identical
 retry succeeds after comparing the `drasi-command-id` and
@@ -166,7 +171,10 @@ specification, then ignore. An explicit `ignore` stops fallback. Unknown route
 keys and invalid template syntax fail construction.
 
 A body render error or invalid JSON logs a warning and uses the canonical
-envelope for that row, following the reaction plugin contract. A routing-field
+envelope for that row, as required by the
+[reaction plugin contract](../README.md#render-failure-behavior).
+This applies to starts, events, and termination output; Strict recovery does not
+override that template-fallback contract. A routing-field
 render error fails the emission rather than sending to an unrelated target.
 The reaction renders the whole emission before sending its first operation.
 
@@ -196,9 +204,13 @@ Source replay uses PostgreSQL's retained WAL.
 
 The shared `ReactionBase` loop processes emissions in order and checkpoints only
 after all configured operations succeed or are explicitly ignored. Transient
-gRPC failures retry with bounded exponential backoff. Exhausted retries,
+gRPC failures retry with bounded exponential backoff and jitter. Exhausted retries,
 permanent errors, and checkpoint failures stop delivery under Strict recovery.
 Restart resumes from the persisted checkpoint.
+The generic operation executor owns the only RPC retry loop. Its four-method
+`DtsApi` boundary separates authentication/gRPC transport from target policies and
+reconciliation. The shared `ReactionBase` loop handles checkpoints and recovery;
+it does not add a second in-process RPC retry layer.
 
 Connections are lazy. Running status means the processing loop is ready;
 connection failures are reported when delivery is attempted.
@@ -259,6 +271,15 @@ payloads, bounded retry exhaustion, persistent checkpoints, partial-emission
 replay, descriptor round-trips, and token acquisition. They also cover metadata-only
 lookups, start reconciliation after `ContinueAsNew`, startup publication ordering,
 and checkpoint refresh after host recovery.
+Transport-free tests exercise reconciliation and target policies through `DtsApi`;
+the gRPC tests independently check the wire requests and authentication.
+Rendered-field tests reject invalid IDs/names before any operation in an emission
+is sent.
+
+The [plugin coverage job](../../../.github/workflows/coverage.yaml) includes
+`drasi-reaction-durable-task`. Its exclusion from the separate core coverage job
+avoids counting it twice; coverage jobs skip draft PRs. The .NET/Docker suite below
+is run manually and is not currently a CI job.
 
 ### Live integration tests
 
@@ -275,7 +296,7 @@ into the example. Append `-- --skip-rust-build` to reuse an already-built
 recovery host; the final walkthrough check builds and uses the actual example
 host.
 
-Expect `PASS all 22 checks`. They cover early-event buffering, duplicate starts
+Expect a final `PASS all <N> checks` line. The checks cover early-event buffering, duplicate starts
 and events, worker SIGKILL/replay, Drasi outbox recovery, PostgreSQL WAL replay and
 snapshot before-images, physical row deletion, all four configurable actions,
 and the actual guided example's prompts/cancellation/output. The example check
@@ -284,8 +305,8 @@ arriving as an UPDATE rather than a removal. It also checks the local dashboard
 URL and the final inspection pause before cleanup. Additional scenarios replay an
 original start after a real `ContinueAsNew`, restart with a pruned outbox under
 `autoSkipGap`, and reset a changed query with an explicitly rotated producer epoch.
-The recovery scenarios must produce exactly nineteen file effects; the guided business workflow
-reports to the console instead.
+The suite asserts the exact activity payloads and total effect count to catch lost
+or duplicate deliveries; the guided business workflow reports to the console instead.
 
 Diagnostics are retained under the example's ignored `artifacts/` directory.
 Each run owns and removes its containers. The database and DTS remain running

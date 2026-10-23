@@ -141,6 +141,42 @@ fn generated_ids_are_stable_and_distinguish_producers_rows_and_operations() {
 }
 
 #[test]
+fn retry_configuration_enforces_safe_backoff_bounds() {
+    for retries in [11, 32, u32::MAX] {
+        assert!(DurableTaskReaction::new(
+            "r",
+            vec!["orders".into()],
+            DurableTaskReactionConfig {
+                max_retries: retries,
+                ..config()
+            }
+        )
+        .is_err());
+    }
+    for delay in [0, 30_001, u64::MAX] {
+        assert!(DurableTaskReaction::new(
+            "r",
+            vec!["orders".into()],
+            DurableTaskReactionConfig {
+                retry_delay_ms: delay,
+                ..config()
+            }
+        )
+        .is_err());
+    }
+    assert!(DurableTaskReaction::new(
+        "r",
+        vec!["orders".into()],
+        DurableTaskReactionConfig {
+            max_retries: 10,
+            retry_delay_ms: 30_000,
+            ..config()
+        }
+    )
+    .is_ok());
+}
+
+#[test]
 fn all_operations_use_selected_actions_and_canonical_envelopes() {
     let c = config();
     let results = emission(
@@ -247,6 +283,104 @@ fn body_failure_falls_back_but_target_failure_never_sends_elsewhere() {
     );
     c.default_template.as_mut().unwrap().added = Some(start(Some("{{after.missing}}")));
     assert!(prepare(&c, "r", &emission(1, vec![add("a")]), &handlebars()).is_err());
+}
+
+#[test]
+fn rendered_required_fields_reject_invalid_values_for_the_entire_emission() {
+    let cases = [
+        ("instanceId", start(Some("{{after.id}}")).extension),
+        (
+            "instanceId",
+            Action::RaiseEvent {
+                instance_id: "{{after.id}}".into(),
+                event_name: "changed".into(),
+                on_missing: TargetPolicy::Error,
+                on_terminal: TargetPolicy::Error,
+            },
+        ),
+        (
+            "instanceId",
+            Action::Terminate {
+                instance_id: "{{after.id}}".into(),
+                recursive: false,
+                on_missing: TargetPolicy::Error,
+            },
+        ),
+        (
+            "orchestration",
+            Action::Start {
+                orchestration: "{{after.id}}".into(),
+                version: String::new(),
+                instance_id: None,
+                on_conflict: TargetPolicy::Error,
+            },
+        ),
+        (
+            "eventName",
+            Action::RaiseEvent {
+                instance_id: "target".into(),
+                event_name: "{{after.id}}".into(),
+                on_missing: TargetPolicy::Error,
+                on_terminal: TargetPolicy::Error,
+            },
+        ),
+    ];
+    for (field, action) in cases {
+        for invalid in ["", "  ", "a\nb", "@entity"] {
+            if invalid == "@entity" && field != "instanceId" {
+                continue;
+            }
+            let mut c = config();
+            c.default_template.as_mut().unwrap().added =
+                Some(DurableTaskTemplate::with_extension("", action.clone()));
+            let error = prepare(
+                &c,
+                "r",
+                &emission(1, vec![add("valid"), add(invalid)]),
+                &handlebars(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(field),
+                "{field}={invalid:?}: {error:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn body_failure_preserves_the_canonical_payload_for_every_action() {
+    for action in [
+        start(None).extension,
+        Action::RaiseEvent {
+            instance_id: "target".into(),
+            event_name: "changed".into(),
+            on_missing: TargetPolicy::Error,
+            on_terminal: TargetPolicy::Error,
+        },
+        Action::Terminate {
+            instance_id: "target".into(),
+            recursive: false,
+            on_missing: TargetPolicy::Error,
+        },
+    ] {
+        for template in ["{{missing}}", "not valid JSON"] {
+            let mut c = config();
+            c.default_template.as_mut().unwrap().added = Some(DurableTaskTemplate::with_extension(
+                template,
+                action.clone(),
+            ));
+            let operations = prepare(&c, "r", &emission(1, vec![add("a")]), &handlebars()).unwrap();
+            let body = match &operations[0] {
+                Dispatch::Start { input, .. } | Dispatch::Event { input, .. } => input,
+                Dispatch::Terminate { output, .. } => output,
+            };
+            let body: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(body["after"]["id"], "a");
+            assert_eq!(body["operation"], "ADD");
+            assert!(body["commandId"].as_str().is_some());
+        }
+    }
 }
 
 #[tokio::test]

@@ -28,10 +28,15 @@ pub struct DurableTaskReaction {
 }
 
 impl DurableTaskReaction {
+    /// Creates a builder for the given reaction ID.
     pub fn builder(id: impl Into<String>) -> DurableTaskReactionBuilder {
         DurableTaskReactionBuilder::new(id)
     }
 
+    /// Creates a reaction with the supplied subscriptions and DTS configuration.
+    ///
+    /// # Errors
+    /// Returns the validation errors described by [`DurableTaskReactionBuilder::build`].
     pub fn new(
         id: impl Into<String>,
         queries: Vec<String>,

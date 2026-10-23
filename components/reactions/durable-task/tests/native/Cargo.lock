@@ -760,6 +760,7 @@ dependencies = [
  "chrono",
  "drasi-lib",
  "drasi-plugin-sdk",
+ "fastrand",
  "handlebars",
  "log",
  "prost 0.14.4",
