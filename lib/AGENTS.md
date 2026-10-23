@@ -12,6 +12,6 @@ Embedded Drasi: sources -> continuous queries -> reactions running fully in-proc
 - A query's inbound priority-queue enqueue strategy is chosen by the SOURCE's dispatch_mode, not the query's (Channel = blocking backpressure, Broadcast = drop on full; src/queries/manager.rs); the query's own dispatch_mode only governs outbound result dispatch to reactions
 
 ## Plugin FFI compatibility surfaces (changes here are wire-format changes: update plugin-sdk/host-sdk marshaling and bump FFI_SDK_VERSION per components/AGENTS.md)
-- BootstrapProvider calls cross the FFI boundary through a fixed-arity vtable: the `settings` argument and BootstrapContext properties are dropped today and silently never reach dynamically loaded providers; a new field must be threaded through the vtable and both bootstrap proxies
+- BootstrapProvider calls carry settings, BootstrapContext properties and the starting bootstrap sequence as versioned MessagePack through both bootstrap proxies; new invocation fields must be threaded through that wire payload and both boundaries
 - src/channels event types are the wire format: QueryResult crosses the cdylib boundary serialized as-is (its serde shape IS the schema - changes compile clean but break independently built plugins); SourceEventWrapper/BootstrapEvent cross via mirror payload structs in components/plugin-sdk/src/ffi/payload.rs
 - SourceSubscriptionSettings (src/config/schema.rs) crosses as individual per-field arguments through the subscribe path

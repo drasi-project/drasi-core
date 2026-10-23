@@ -275,6 +275,31 @@ let config = Query::gql("active-orders")
 | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
 | `build() -> QueryConfig` | Build the configuration | — |
 
+### Persistent Bootstrap Recovery
+
+Persistent queries commit an incomplete-bootstrap marker before indexing snapshot
+rows. Bootstrap completion, every source's snapshot boundary, the initial result
+snapshot and result sequence zero then commit atomically. A failed begin, staging
+operation or handover commit stops the query before live processing. Completed
+empty snapshots can recover without waiting for a first live event.
+
+`RecoveryPolicy::Strict` refuses incomplete bootstrap state. It also refuses
+legacy bootstrapped indexes without completion metadata: existing source
+checkpoints alone cannot prove that the initial result snapshot was persisted.
+The explicit `AutoReset` policy rebuilds output, indexes and checkpoints from
+available source snapshots/replay. Before upgrading an existing persistent
+bootstrapped query, preserve its storage and choose the recovery policy
+deliberately, including the consequences for downstream reaction checkpoints.
+There is no silent migration or fallback to the current source head.
+
+Custom `CheckpointStore` implementations must implement `stage_bootstrap_state`
+and `read_bootstrap_state`. Persistent staging requires the active index
+transaction; reads expose only committed state. Missing metadata is unknown
+state, while malformed metadata is an error. RocksDB and Garnet store the
+versioned marker under `bootstrap_state`: `[1, 0]` for incomplete, or `[1, 1]`
+followed by a JSON array of bootstrapped source IDs for complete. Checkpoint
+cleanup must remove that marker too.
+
 ---
 
 ## Multi-Source Queries and Joins
@@ -358,6 +383,15 @@ core.start().await?;                    // Start sources -> queries -> reactions
 core.stop().await?;                     // Stop reactions -> queries -> sources
 let running = core.is_running().await;  // Check if running
 ```
+
+Use `core.shutdown().await?` for permanent teardown. Unlike restartable `stop()`,
+it releases the runtime-owned components and persistent index handles without
+deleting their stored data, so a new instance can reopen the same directories.
+Save configuration first: topology and event history remain inspectable, but the
+component runtime instances are removed and the instance cannot restart.
+Cancelling the caller does not cancel teardown; another `shutdown()` call joins
+the same owned task. A failed shutdown reports the error, retains component
+ownership, and can be retried.
 
 ### Adding, Removing, and Updating Components at Runtime
 

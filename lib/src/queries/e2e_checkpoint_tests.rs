@@ -45,6 +45,572 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 // E2E test source
 // ============================================================================
 
+type BootstrapCompletion = Arc<
+    tokio::sync::Mutex<
+        Option<tokio::sync::oneshot::Sender<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
+    >,
+>;
+
+mod durable_bootstrap_tests {
+    use super::*;
+    use drasi_core::interface::{
+        BootstrapState, CheckpointStore, CreatedIndexes, IndexError, LiveResultsWriter,
+        RowMutation, SessionControl, SourceCheckpoint,
+    };
+
+    #[derive(Default)]
+    struct Fault {
+        stage: Arc<AtomicU32>,
+        checkpoint_calls: AtomicU32,
+        rollbacks: AtomicU32,
+    }
+
+    impl Fault {
+        fn check(&self, stage: u32) -> Result<(), IndexError> {
+            if self.stage.load(Ordering::SeqCst) == stage {
+                Err(IndexError::other(std::io::Error::other(format!(
+                    "injected bootstrap failure {stage}"
+                ))))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct FaultSession {
+        inner: Arc<dyn SessionControl>,
+        fault: Arc<Fault>,
+    }
+
+    #[async_trait]
+    impl SessionControl for FaultSession {
+        async fn begin(&self) -> Result<(), IndexError> {
+            self.fault.check(1)?;
+            self.inner.begin().await
+        }
+        async fn commit(&self) -> Result<(), IndexError> {
+            self.fault.check(3)?;
+            self.inner.commit().await
+        }
+        fn rollback(&self) -> Result<(), IndexError> {
+            self.fault.rollbacks.fetch_add(1, Ordering::SeqCst);
+            self.inner.rollback()
+        }
+    }
+
+    struct FaultStore {
+        inner: Arc<dyn CheckpointStore>,
+        fault: Arc<Fault>,
+    }
+
+    #[async_trait]
+    impl CheckpointStore for FaultStore {
+        fn is_persistent(&self) -> bool {
+            true
+        }
+        async fn stage_bootstrap_state(&self, state: BootstrapState) -> Result<(), IndexError> {
+            self.fault.check(4)?;
+            self.inner.stage_bootstrap_state(state).await
+        }
+        async fn read_bootstrap_state(&self) -> Result<Option<BootstrapState>, IndexError> {
+            self.inner.read_bootstrap_state().await
+        }
+        async fn stage_checkpoint(
+            &self,
+            source: &str,
+            sequence: u64,
+            position: Option<&Bytes>,
+        ) -> Result<(), IndexError> {
+            if self.fault.stage.load(Ordering::SeqCst) == 2
+                && self.fault.checkpoint_calls.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                self.fault.check(2)?;
+            }
+            self.inner
+                .stage_checkpoint(source, sequence, position)
+                .await
+        }
+        async fn read_checkpoint(
+            &self,
+            source: &str,
+        ) -> Result<Option<SourceCheckpoint>, IndexError> {
+            self.inner.read_checkpoint(source).await
+        }
+        async fn read_all_checkpoints(
+            &self,
+        ) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+            self.inner.read_all_checkpoints().await
+        }
+        async fn clear_checkpoints(&self) -> Result<(), IndexError> {
+            self.inner.clear_checkpoints().await
+        }
+        async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
+            self.inner.write_config_hash(hash).await
+        }
+        async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
+            self.inner.read_config_hash().await
+        }
+        async fn stage_result_sequence(
+            &self,
+            query: &str,
+            sequence: u64,
+        ) -> Result<(), IndexError> {
+            self.fault.check(5)?;
+            self.inner.stage_result_sequence(query, sequence).await
+        }
+        async fn write_result_sequence(
+            &self,
+            query: &str,
+            sequence: u64,
+        ) -> Result<(), IndexError> {
+            self.inner.write_result_sequence(query, sequence).await
+        }
+        async fn read_result_sequence(&self, query: &str) -> Result<Option<u64>, IndexError> {
+            self.inner.read_result_sequence(query).await
+        }
+        async fn write_output_generation(
+            &self,
+            query: &str,
+            generation: u64,
+        ) -> Result<(), IndexError> {
+            self.inner.write_output_generation(query, generation).await
+        }
+        async fn read_output_generation(&self, query: &str) -> Result<Option<u64>, IndexError> {
+            self.inner.read_output_generation(query).await
+        }
+    }
+
+    struct FaultProvider {
+        inner: RocksDbIndexProvider,
+        fault: Arc<Fault>,
+    }
+
+    struct FaultSnapshot {
+        inner: Arc<dyn LiveResultsWriter>,
+        fault: Arc<Fault>,
+    }
+
+    #[async_trait]
+    impl LiveResultsWriter for FaultSnapshot {
+        async fn apply_mutations(
+            &self,
+            query: &str,
+            mutations: &[RowMutation<'_>],
+        ) -> Result<(), IndexError> {
+            self.fault.check(9)?;
+            self.inner.apply_mutations(query, mutations).await
+        }
+        async fn read_snapshot(&self, query: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+            self.inner.read_snapshot(query).await
+        }
+        async fn clear(&self, query: &str) -> Result<(), IndexError> {
+            self.inner.clear(query).await
+        }
+        async fn row_count(&self, query: &str) -> Result<usize, IndexError> {
+            self.inner.row_count(query).await
+        }
+    }
+
+    #[async_trait]
+    impl IndexBackendPlugin for FaultProvider {
+        async fn create_indexes(&self, query: &str) -> Result<CreatedIndexes, IndexError> {
+            let mut indexes = self.inner.create_indexes(query).await?;
+            indexes.set.session_control = Arc::new(FaultSession {
+                inner: indexes.set.session_control,
+                fault: self.fault.clone(),
+            });
+            indexes.checkpoint_store = Some(Arc::new(FaultStore {
+                inner: indexes.checkpoint_store.unwrap(),
+                fault: self.fault.clone(),
+            }));
+            indexes.live_results_writer = Some(Arc::new(FaultSnapshot {
+                inner: indexes.live_results_writer.unwrap(),
+                fault: self.fault.clone(),
+            }));
+            Ok(indexes)
+        }
+        fn is_volatile(&self) -> bool {
+            false
+        }
+    }
+
+    async fn wait_for_bootstrap_rows(query: &Arc<dyn super::super::manager::Query>, count: usize) {
+        let query = query
+            .as_any()
+            .downcast_ref::<super::super::manager::DrasiQuery>()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while query.get_current_results().await.len() != count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bootstrap index writes must finish before injecting the fault");
+    }
+
+    #[rstest::rstest]
+    #[case::begin(1)]
+    #[case::second_checkpoint(2)]
+    #[case::commit(3)]
+    #[case::completion_metadata(4)]
+    #[case::result_sequence(5)]
+    #[case::missing_boundary(6)]
+    #[case::provider_failure(7)]
+    #[case::dropped_provider(8)]
+    #[case::snapshot_write(9)]
+    #[tokio::test]
+    #[serial]
+    async fn test_bootstrap_handover_failure_cancels_tail_and_rolls_back(#[case] stage: u32) {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let fault = Arc::new(Fault::default());
+        let provider = Arc::new(FaultProvider {
+            inner: RocksDbIndexProvider::new(directory.path(), false, false),
+            fault: fault.clone(),
+        });
+        let core = DrasiLib::builder()
+            .with_index_provider("persistent", provider)
+            .build()
+            .await
+            .unwrap();
+        let mut completions = Vec::new();
+        let mut senders = Vec::new();
+        for id in ["left", "right"] {
+            let mut source = E2eTestSource::new(id, true).unwrap();
+            source.bootstrap = true;
+            let completion = Arc::new(tokio::sync::Mutex::new(None));
+            source.bootstrap_completion = Some(completion.clone());
+            completions.push(completion);
+            senders.push(source.event_sender());
+            core.add_source(source).await.unwrap();
+        }
+        core.add_query(
+            Query::cypher("handover")
+                .query("MATCH (n:Node) RETURN n.id AS id, n.value AS value")
+                .from_source("left")
+                .from_source("right")
+                .enable_bootstrap(true)
+                .auto_start(false)
+                .with_storage_backend(StorageBackendRef::Named("persistent".into()))
+                .build(),
+        )
+        .await
+        .unwrap();
+        core.start().await.unwrap();
+        for id in ["left", "right"] {
+            core.start_source(id).await.unwrap();
+        }
+        core.start_query("handover").await.unwrap();
+        let query = core
+            .query_manager()
+            .get_query_instance("handover")
+            .await
+            .unwrap();
+        wait_for_bootstrap_rows(&query, 2).await;
+        // The tail is already queued when handover fails.
+        send_event(&senders[0], "left", 1, b"live-1").await;
+        fault.stage.store(stage, Ordering::SeqCst);
+        for (completion, id) in completions.iter().zip(["left", "right"]) {
+            if (7..=8).contains(&stage) {
+                if id == "left" {
+                    let sender = completion.lock().await.take().unwrap();
+                    if stage == 7 {
+                        sender
+                            .send(Err(anyhow::anyhow!("injected provider failure")))
+                            .unwrap();
+                    }
+                }
+                // The other provider never finishes; the supervisor must cancel it.
+                continue;
+            }
+            completion
+                .lock()
+                .await
+                .take()
+                .unwrap()
+                .send(Ok(crate::bootstrap::BootstrapResult {
+                    event_count: 1,
+                    source_position: (stage != 6).then(|| Bytes::from(format!("snapshot-{id}"))),
+                }))
+                .unwrap();
+        }
+        wait_for_status(&core, "handover", ComponentStatus::Error).await;
+        assert!(query.fetch_snapshot().await.is_err());
+        let concrete = query
+            .as_any()
+            .downcast_ref::<super::super::manager::DrasiQuery>()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while concrete.subscription_task_count().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let store = concrete.get_checkpoint_store().await.unwrap();
+        assert_eq!(
+            store.read_bootstrap_state().await.unwrap(),
+            Some(BootstrapState::InProgress)
+        );
+        assert!(
+            store.read_all_checkpoints().await.unwrap().is_empty(),
+            "all sources must roll back together"
+        );
+        assert_eq!(
+            concrete.get_current_results().await.len(),
+            2,
+            "tail must not run after failure"
+        );
+        if (2..=5).contains(&stage) || stage == 9 {
+            assert_eq!(fault.rollbacks.load(Ordering::SeqCst), 1);
+        }
+        for sender in &senders {
+            assert!(
+                sender.read().await.as_ref().unwrap().is_closed(),
+                "forwarders must be cancelled"
+            );
+        }
+        fault.stage.store(0, Ordering::SeqCst);
+        core.shutdown().await.unwrap();
+        drop(store);
+        drop(query);
+        drop(core);
+        let reopened = RocksDbIndexProvider::new(directory.path(), false, false)
+            .create_indexes("handover")
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .checkpoint_store
+                .as_ref()
+                .unwrap()
+                .read_bootstrap_state()
+                .await
+                .unwrap(),
+            Some(BootstrapState::InProgress)
+        );
+        assert!(reopened
+            .live_results_writer
+            .as_ref()
+            .unwrap()
+            .read_snapshot("handover")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(reopened
+            .outbox_writer
+            .as_ref()
+            .unwrap()
+            .read_from("handover", 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::begin(1)]
+    #[case::stage(4)]
+    #[case::commit(3)]
+    #[tokio::test]
+    #[serial]
+    async fn test_bootstrap_marker_failure_prevents_index_writes(#[case] stage: u32) {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let fault = Arc::new(Fault::default());
+        let core = DrasiLib::builder()
+            .with_index_provider(
+                "persistent",
+                Arc::new(FaultProvider {
+                    inner: RocksDbIndexProvider::new(directory.path(), false, false),
+                    fault: fault.clone(),
+                }),
+            )
+            .build()
+            .await
+            .unwrap();
+        let mut source = E2eTestSource::new("source", true).unwrap();
+        source.bootstrap = true;
+        source.subscribe_fault = Some((fault.stage.clone(), stage));
+        let events = source.event_sender();
+        core.add_source(source).await.unwrap();
+        let mut config = make_persistent_query("marker", "source", None);
+        config.enable_bootstrap = true;
+        core.add_query(config).await.unwrap();
+        core.start().await.unwrap();
+        core.start_source("source").await.unwrap();
+        let error = core.start_query("marker").await.unwrap_err();
+        assert!(format!("{error:#}").contains("bootstrap marker"));
+        let query_instance = core
+            .query_manager()
+            .get_query_instance("marker")
+            .await
+            .unwrap();
+        let query = query_instance
+            .as_any()
+            .downcast_ref::<super::super::manager::DrasiQuery>()
+            .unwrap();
+        assert!(query.get_current_results().await.is_empty());
+        assert_eq!(query.subscription_task_count().await, 0);
+        assert!(events.read().await.as_ref().unwrap().is_closed());
+        assert_eq!(
+            query
+                .get_checkpoint_store()
+                .await
+                .unwrap()
+                .read_bootstrap_state()
+                .await
+                .unwrap(),
+            None
+        );
+        fault.stage.store(0, Ordering::SeqCst);
+        core.shutdown().await.unwrap();
+        drop(query_instance);
+        drop(core);
+        let indexes = RocksDbIndexProvider::new(directory.path(), false, false)
+            .create_indexes("marker")
+            .await
+            .unwrap();
+        indexes.set.session_control.begin().await.unwrap();
+        assert!(indexes
+            .set
+            .element_index
+            .get_element(&drasi_core::models::ElementReference::new(
+                "source", "snapshot"
+            ))
+            .await
+            .unwrap()
+            .is_none());
+        indexes.set.session_control.commit().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::strict(RecoveryPolicy::Strict, None)]
+    #[case::auto_reset(RecoveryPolicy::AutoReset, None)]
+    #[case::legacy_partial_strict(RecoveryPolicy::Strict, Some(false))]
+    #[case::legacy_partial_auto_reset(RecoveryPolicy::AutoReset, Some(false))]
+    #[case::legacy_checkpoint_strict(RecoveryPolicy::Strict, Some(true))]
+    #[case::legacy_checkpoint_auto_reset(RecoveryPolicy::AutoReset, Some(true))]
+    #[tokio::test]
+    #[serial]
+    async fn test_bootstrap_partial_restart_obeys_recovery_policy(
+        #[case] policy: RecoveryPolicy,
+        #[case] legacy_checkpoint: Option<bool>,
+    ) {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let config = || {
+            Query::cypher("partial")
+                .query("MATCH (n:Node) RETURN count(n) AS count")
+                .from_source("source")
+                .enable_bootstrap(true)
+                .auto_start(false)
+                .with_storage_backend(StorageBackendRef::Named("persistent".into()))
+                .with_recovery_policy(policy)
+                .build()
+        };
+        {
+            let core = build_e2e_lib("partial-instance", &directory, None)
+                .await
+                .unwrap();
+            let mut source = E2eTestSource::new("source", true).unwrap();
+            source.bootstrap = true;
+            source.bootstrap_node_id = "orphan-from-interrupted-snapshot";
+            source.bootstrap_completion = Some(Arc::new(tokio::sync::Mutex::new(None)));
+            core.add_source(source).await.unwrap();
+            core.add_query(config()).await.unwrap();
+            core.start().await.unwrap();
+            core.start_source("source").await.unwrap();
+            core.start_query("partial").await.unwrap();
+            let query = core
+                .query_manager()
+                .get_query_instance("partial")
+                .await
+                .unwrap();
+            wait_for_bootstrap_rows(&query, 1).await;
+            // Stop while the provider is still incomplete. This leaves the exact
+            // durable state of a crash after an indexed bootstrap row commit.
+            core.shutdown().await.unwrap();
+        }
+        if let Some(with_checkpoint) = legacy_checkpoint {
+            let indexes = RocksDbIndexProvider::new(directory.path(), false, false)
+                .create_indexes("partial")
+                .await
+                .unwrap();
+            let store = indexes.checkpoint_store.as_ref().unwrap();
+            let hash = store.read_config_hash().await.unwrap().unwrap();
+            store.clear_checkpoints().await.unwrap();
+            store.write_config_hash(hash).await.unwrap();
+            if with_checkpoint {
+                indexes.set.session_control.begin().await.unwrap();
+                store
+                    .stage_checkpoint("source", 0, Some(&Bytes::from_static(b"legacy-boundary")))
+                    .await
+                    .unwrap();
+                indexes.set.session_control.commit().await.unwrap();
+            }
+        }
+        let core = build_e2e_lib("partial-instance", &directory, None)
+            .await
+            .unwrap();
+        let mut source = E2eTestSource::new("source", true).unwrap();
+        source.bootstrap = true;
+        let subscriptions = source.subscribe_count_handle();
+        let resumed = source.last_resume_from();
+        core.add_source(source).await.unwrap();
+        core.add_query(config()).await.unwrap();
+        core.start().await.unwrap();
+        core.start_source("source").await.unwrap();
+        let started = core.start_query("partial").await;
+        match policy {
+            RecoveryPolicy::Strict => {
+                let expected = if legacy_checkpoint.is_some() {
+                    "legacy bootstrap"
+                } else {
+                    "incomplete durable bootstrap"
+                };
+                assert!(format!("{:#}", started.unwrap_err()).contains(expected));
+                assert_eq!(subscriptions.load(Ordering::SeqCst), 0);
+            }
+            RecoveryPolicy::AutoReset => {
+                started.unwrap();
+                let query = core
+                    .query_manager()
+                    .get_query_instance("partial")
+                    .await
+                    .unwrap();
+                let snapshot = query.fetch_snapshot().await.unwrap();
+                assert_eq!(
+                    snapshot.to_vec(),
+                    vec![serde_json::json!({"count": 1})],
+                    "both orphaned graph rows and aggregation state must be cleared"
+                );
+                assert_eq!(snapshot.output_generation, 1);
+                assert_eq!(*resumed.read().await, None);
+            }
+        }
+        core.shutdown().await.unwrap();
+        drop(core);
+        let indexes = RocksDbIndexProvider::new(directory.path(), false, false)
+            .create_indexes("partial")
+            .await
+            .unwrap();
+        let state = indexes
+            .checkpoint_store
+            .as_ref()
+            .unwrap()
+            .read_bootstrap_state()
+            .await
+            .unwrap();
+        assert_eq!(
+            state,
+            match policy {
+                RecoveryPolicy::Strict if legacy_checkpoint.is_some() => None,
+                RecoveryPolicy::Strict => Some(BootstrapState::InProgress),
+                RecoveryPolicy::AutoReset => Some(BootstrapState::Complete {
+                    sources: vec!["source".into()]
+                }),
+            }
+        );
+    }
+}
+
 struct E2eTestSource {
     base: SourceBase,
     replay_capable: bool,
@@ -60,6 +626,12 @@ struct E2eTestSource {
     position_handle_removed: Arc<AtomicU32>,
     /// Sender for injecting events. Recreated in subscribe() for each subscription.
     event_tx: Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
+    bootstrap: bool,
+    bootstrap_completion: Option<BootstrapCompletion>,
+    bootstrap_node_id: &'static str,
+    bootstrap_empty: bool,
+    bootstrap_sequence: u64,
+    subscribe_fault: Option<(Arc<AtomicU32>, u32)>,
 }
 
 impl E2eTestSource {
@@ -73,6 +645,12 @@ impl E2eTestSource {
             remaining_failures: Arc::new(AtomicU32::new(0)),
             position_handle_removed: Arc::new(AtomicU32::new(0)),
             event_tx: Arc::new(RwLock::new(None)),
+            bootstrap: false,
+            bootstrap_completion: None,
+            bootstrap_node_id: "snapshot",
+            bootstrap_empty: false,
+            bootstrap_sequence: 0,
+            subscribe_fault: None,
         })
     }
 
@@ -196,13 +774,68 @@ impl Source for E2eTestSource {
             None
         };
 
+        let (bootstrap_receiver, bootstrap_result_receiver) = if self.bootstrap
+            && settings.enable_bootstrap
+            && settings.resume_from.is_none()
+            && settings.resume_sequence.is_none()
+        {
+            use drasi_core::models::{
+                Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
+                SourceChange,
+            };
+            let (events, rx) = mpsc::channel(1);
+            let (result, result_rx) = tokio::sync::oneshot::channel();
+            let mut properties = ElementPropertyMap::new();
+            properties.insert("id", ElementValue::String(self.id().into()));
+            properties.insert("value", ElementValue::Integer(42));
+            if !self.bootstrap_empty {
+                events
+                    .send(crate::channels::BootstrapEvent {
+                        source_id: self.id().to_string(),
+                        change: SourceChange::Insert {
+                            element: Element::Node {
+                                metadata: ElementMetadata {
+                                    reference: ElementReference::new(
+                                        self.id(),
+                                        self.bootstrap_node_id,
+                                    ),
+                                    labels: Arc::from(vec![Arc::from("Node")]),
+                                    effective_from: 0,
+                                },
+                                properties,
+                            },
+                        },
+                        timestamp: chrono::Utc::now(),
+                        sequence: self.bootstrap_sequence,
+                    })
+                    .await
+                    .unwrap();
+            }
+            if let Some(completion) = &self.bootstrap_completion {
+                *completion.lock().await = Some(result);
+            } else {
+                result
+                    .send(Ok(crate::bootstrap::BootstrapResult {
+                        event_count: usize::from(!self.bootstrap_empty),
+                        source_position: Some(Bytes::from(format!("snapshot-{}", self.id()))),
+                    }))
+                    .unwrap();
+            }
+            (Some(rx), Some(result_rx))
+        } else {
+            (None, None)
+        };
+
+        if let Some((fault, stage)) = &self.subscribe_fault {
+            fault.store(*stage, Ordering::SeqCst);
+        }
         Ok(SubscriptionResponse {
             query_id: settings.query_id,
             source_id: self.id().to_string(),
             receiver: Box::new(ChannelChangeReceiver::new(rx)),
-            bootstrap_receiver: None,
+            bootstrap_receiver,
             position_handle,
-            bootstrap_result_receiver: None,
+            bootstrap_result_receiver,
         })
     }
 
@@ -352,6 +985,165 @@ async fn wait_for_outbox_sequence(
 // ============================================================================
 // E2E Tests
 // ============================================================================
+
+#[rstest::rstest]
+#[case::rows(false, 2)]
+#[case::empty_snapshot(true, 2)]
+#[case::mixed_sources(false, 1)]
+#[case::no_bootstrap_providers(false, 0)]
+#[tokio::test]
+#[serial]
+async fn test_e2e_bootstrap_snapshot_reopens_without_live_events(
+    #[case] empty: bool,
+    #[case] bootstrap_sources: usize,
+) {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    for restart in [false, true] {
+        let core = build_e2e_lib("bootstrap-reopen", &directory, Some(RecoveryPolicy::Strict))
+            .await
+            .unwrap();
+        let mut resumes = Vec::new();
+        for (index, id) in ["left", "right"].iter().enumerate() {
+            let mut source = E2eTestSource::new(id, true).unwrap();
+            source.bootstrap = index < bootstrap_sources;
+            source.bootstrap_empty = empty;
+            resumes.push((source.last_resume_from(), source.last_resume_sequence()));
+            core.add_source(source).await.unwrap();
+        }
+        let config = Query::cypher("bootstrap-q")
+            .query("MATCH (n:Node) RETURN n.id AS id, n.value AS value")
+            .from_source("left")
+            .from_source("right")
+            .enable_bootstrap(true)
+            .auto_start(false)
+            .with_storage_backend(StorageBackendRef::Named("persistent".into()))
+            .build();
+        core.add_query(config).await.unwrap();
+        core.start().await.unwrap();
+        for id in ["left", "right"] {
+            core.start_source(id).await.unwrap();
+        }
+        core.start_query("bootstrap-q").await.unwrap();
+        let query = core
+            .query_manager()
+            .get_query_instance("bootstrap-q")
+            .await
+            .unwrap();
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snapshot.as_of_sequence, 0);
+        let mut rows = snapshot.to_vec();
+        rows.sort_by_key(|row| row["id"].as_str().unwrap().to_string());
+        let expected = if empty {
+            vec![]
+        } else {
+            vec![
+                serde_json::json!({"id": "left", "value": 42}),
+                serde_json::json!({"id": "right", "value": 42}),
+            ]
+            .into_iter()
+            .take(bootstrap_sources)
+            .collect()
+        };
+        assert_eq!(rows, expected, "restart={restart}");
+        assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
+        for (index, ((resume, sequence), id)) in resumes.iter().zip(["left", "right"]).enumerate() {
+            assert_eq!(
+                *resume.read().await,
+                (restart && index < bootstrap_sources)
+                    .then(|| Bytes::from(format!("snapshot-{id}")))
+            );
+            assert_eq!(*sequence.read().await, restart.then_some(0));
+        }
+        core.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn bootstrap_and_live_sequences_remain_independent_of_source_cursor_on_restart() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    const BOOTSTRAP_SEQUENCE: u64 = 1_000_000;
+    const FIRST_CURSOR: &[u8] = b"local-epoch:7";
+    const SECOND_CURSOR: &[u8] = b"local-epoch:8";
+    for restart in [false, true] {
+        let core = build_e2e_lib(
+            "sequence-instance",
+            &directory,
+            Some(RecoveryPolicy::Strict),
+        )
+        .await
+        .unwrap();
+        let mut source = E2eTestSource::new("cursor-source", true).unwrap();
+        source.bootstrap = true;
+        source.bootstrap_sequence = BOOTSTRAP_SEQUENCE;
+        let resumed_cursor = source.last_resume_from();
+        let resumed_sequence = source.last_resume_sequence();
+        let events = source.event_sender();
+        core.add_source(source).await.unwrap();
+        let mut config = make_persistent_query("cursor-query", "cursor-source", None);
+        config.enable_bootstrap = true;
+        core.add_query(config).await.unwrap();
+        core.start().await.unwrap();
+        core.start_source("cursor-source").await.unwrap();
+        core.start_query("cursor-query").await.unwrap();
+        assert_eq!(
+            *resumed_cursor.read().await,
+            restart.then(|| Bytes::from_static(FIRST_CURSOR))
+        );
+        assert_eq!(
+            *resumed_sequence.read().await,
+            restart.then_some(BOOTSTRAP_SEQUENCE + 1)
+        );
+        let query = core
+            .query_manager()
+            .get_query_instance("cursor-query")
+            .await
+            .unwrap();
+        if restart {
+            let restored = query.fetch_snapshot().await.unwrap();
+            assert_eq!(restored.as_of_sequence, 1);
+            assert_eq!(restored.to_vec().len(), 2);
+        }
+
+        let result_sequence = if restart { 2 } else { 1 };
+        let event_sequence = BOOTSTRAP_SEQUENCE + result_sequence;
+        let cursor = if restart { SECOND_CURSOR } else { FIRST_CURSOR };
+        // On the first start this arrives immediately, potentially while the
+        // bootstrap gate is still closed.
+        send_event(&events, "cursor-source", event_sequence, cursor).await;
+        let outbox = wait_for_outbox_sequence(&core, "cursor-query", result_sequence).await;
+        assert_eq!(outbox.latest_sequence, result_sequence);
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snapshot.as_of_sequence, result_sequence);
+        let rows = snapshot.to_vec();
+        assert_eq!(rows.len(), result_sequence as usize + 1);
+        assert!(rows.contains(&serde_json::json!({"id": "cursor-source", "value": 42})));
+        for live in 1..=result_sequence {
+            assert!(rows.contains(&serde_json::json!({
+                "id": format!("node-{}", BOOTSTRAP_SEQUENCE + live),
+                "value": BOOTSTRAP_SEQUENCE + live,
+            })));
+        }
+        let store = query
+            .as_any()
+            .downcast_ref::<super::manager::DrasiQuery>()
+            .unwrap()
+            .get_checkpoint_store()
+            .await
+            .unwrap();
+        let checkpoint = store
+            .read_checkpoint("cursor-source")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.sequence, event_sequence);
+        assert_eq!(
+            checkpoint.source_position,
+            Some(Bytes::copy_from_slice(cursor))
+        );
+        core.shutdown().await.unwrap();
+    }
+}
 
 #[rstest::rstest]
 #[case::insert_only(1, false)]

@@ -21,7 +21,8 @@
 //! and share the same session state. [`CheckpointStore::stage_checkpoint`] writes
 //! into the currently-active session transaction (opened by
 //! [`SessionControl::begin`](super::SessionControl)) and is committed by the
-//! session's outer commit alongside the index updates. All other methods operate
+//! session's outer commit alongside the index updates. Other `stage_*` methods
+//! have the same transactional semantics. Non-staging writes operate
 //! outside a session transaction and commit independently.
 //!
 //! This trait lives in core (not lib) so that index plugins can implement it
@@ -56,15 +57,30 @@ impl SourceCheckpoint {
     }
 }
 
+/// Query-wide bootstrap boundary, independent of any source's opaque position.
+///
+/// `InProgress` must be committed before the first bootstrap index write.
+/// `Complete` must commit atomically with every source's handover checkpoint,
+/// the initial live-results snapshot and its result sequence. Missing metadata
+/// is legacy/unknown state, not evidence that bootstrap completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapState {
+    InProgress,
+    Complete {
+        /// Sources whose snapshots were indexed. Other sources can resume from
+        /// sequence zero if they have not produced a checkpoint yet.
+        sources: Vec<String>,
+    },
+}
+
 /// Atomic checkpoint persistence for source sequence tracking and config hashing.
 ///
 /// # Method semantics
 ///
-/// - [`stage_checkpoint`](Self::stage_checkpoint) SHOULD be called between
-///   `SessionControl::begin` and `SessionControl::commit` for persistent backends.
-///   The write is staged into the active session transaction and persisted by the
-///   outer commit. For volatile (in-memory) backends, it applies immediately.
-/// - All other methods operate independently of the session transaction and
+/// - `stage_*` methods require an active session for persistent backends.
+///   Writes persist at the outer `SessionControl::commit` alongside index
+///   updates. For volatile (in-memory) backends, they apply immediately.
+/// - Non-staging writes operate independently of the session transaction and
 ///   commit on their own.
 ///
 /// # Source positions
@@ -81,6 +97,19 @@ pub trait CheckpointStore: Send + Sync {
     /// (in-memory) stores return `false`; persistent stores (RocksDB, Garnet)
     /// return `true`.
     fn is_persistent(&self) -> bool;
+
+    /// Stage the query-wide bootstrap state in the active index session.
+    ///
+    /// Persistent implementations must reject calls without an active session;
+    /// volatile implementations apply immediately. There is deliberately no
+    /// default: a no-op would permit recovery against partially built indexes.
+    async fn stage_bootstrap_state(&self, state: BootstrapState) -> Result<(), IndexError>;
+
+    /// Read committed bootstrap metadata, independently of any active session.
+    ///
+    /// `None` means no metadata exists (new or legacy storage). Unknown versions
+    /// and invalid values must return an error, never `None`.
+    async fn read_bootstrap_state(&self) -> Result<Option<BootstrapState>, IndexError>;
 
     /// Stage a source checkpoint into the active session transaction.
     ///
@@ -111,7 +140,7 @@ pub trait CheckpointStore: Send + Sync {
     /// Reads committed state directly; does not require an active session.
     async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError>;
 
-    /// Delete all source checkpoints and the config hash.
+    /// Delete all source checkpoints, bootstrap metadata and the config hash.
     ///
     /// Used during auto-reset recovery and `delete_query(cleanup: true)`.
     /// Standalone commit; not part of any outer session transaction.

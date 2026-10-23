@@ -27,6 +27,7 @@ use std::ffi::c_void;
 use std::sync::mpsc;
 use std::sync::Arc;
 
+use anyhow::Context;
 use drasi_core::models::{ElementMetadata, SourceChange};
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::{
@@ -70,13 +71,27 @@ fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
 
 /// Decode the `resume_sequence` FFI parameter into `Option<u64>`.
 ///
-/// `0` is the sentinel for "no checkpointed sequence" (real framework sequences
-/// start at 1), so it maps to `None`; any non-zero value is the checkpointed
-/// sequence and maps to `Some(n)`. Shared by both source vtable builders so the
-/// sentinel convention is defined in exactly one place.
+/// Presence is separate because zero resumes a completed empty bootstrap.
 #[inline]
-fn decode_resume_sequence(resume_sequence: u64) -> Option<u64> {
-    (resume_sequence != 0).then_some(resume_sequence)
+fn decode_resume_sequence(resume_sequence: u64, has_resume_sequence: bool) -> Option<u64> {
+    has_resume_sequence.then_some(resume_sequence)
+}
+
+unsafe fn decode_resume_position(ptr: *const u8, len: u32) -> anyhow::Result<Option<bytes::Bytes>> {
+    anyhow::ensure!(
+        len as usize <= drasi_lib::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES,
+        "Resume position exceeds the 64 KiB limit"
+    );
+    if ptr.is_null() {
+        anyhow::ensure!(len == 0, "Null resume position has a nonzero length");
+        return Ok(None);
+    }
+    if len == 0 {
+        return Ok(Some(bytes::Bytes::new()));
+    }
+    Ok(Some(bytes::Bytes::copy_from_slice(unsafe {
+        std::slice::from_raw_parts(ptr, len as usize)
+    })))
 }
 
 /// Serialize an FFI event payload (`SourceEventPayload` / `BootstrapEventPayload`)
@@ -785,61 +800,30 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_len: u32,
         request_position_handle: bool,
         resume_sequence: u64,
-    ) -> *mut FfiSubscriptionResponse {
-        let w = unsafe { &*(state as *const SourceWrapper<T>) };
-        let source_id_str = unsafe { source_id.to_string() };
-        let qid = unsafe { query_id.to_string() };
-        let nodes_str = unsafe { nodes_json.to_string() };
-        let rels_str = unsafe { relations_json.to_string() };
-
-        let nodes: HashSet<String> = serde_json::from_str(&nodes_str).unwrap_or_default();
-        let relations: HashSet<String> = serde_json::from_str(&rels_str).unwrap_or_default();
-
-        let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
-            None
-        } else if resume_from_len as usize > 65_536 {
-            tracing::warn!(
-                "resume_from_len {} exceeds 64 KB limit; ignoring position",
-                resume_from_len
-            );
-            None
-        } else {
-            let slice =
-                unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
-            Some(bytes::Bytes::copy_from_slice(slice))
-        };
-
-        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
-        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
-        // and a floor derived from 0 would be 1 (the default) anyway, so treating
-        // it as absent is a no-op — the sentinel is safe either way.
-        let resume_sequence = decode_resume_sequence(resume_sequence);
-
-        let settings = SourceSubscriptionSettings {
-            source_id: source_id_str,
-            enable_bootstrap,
-            query_id: qid,
-            nodes,
-            relations,
-            resume_from,
-            resume_sequence,
-            request_position_handle,
-        };
-
-        let handle = (w.runtime_handle)().handle().clone();
-        let ptr = SendPtr(state as *const SourceWrapper<T>);
-        let result = dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { ptr.as_ref() };
-            inner.inner.subscribe(settings).await
-        });
-
-        match result {
-            Ok(sub) => wrap_subscription_response(sub, w.vtable_executor, handle),
-            Err(e) => {
-                log::error!("Subscribe failed: {e}");
-                std::ptr::null_mut()
-            }
-        }
+        has_resume_sequence: bool,
+    ) -> FfiSubscribeResult {
+        FfiSubscribeResult::catch_unwind(|| {
+            let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            let settings = SourceSubscriptionSettings {
+                source_id: unsafe { source_id.to_string() },
+                enable_bootstrap,
+                query_id: unsafe { query_id.to_string() },
+                nodes: serde_json::from_str(unsafe { nodes_json.as_str() })
+                    .context("Invalid subscription node labels")?,
+                relations: serde_json::from_str(unsafe { relations_json.as_str() })
+                    .context("Invalid subscription relation labels")?,
+                resume_from: unsafe { decode_resume_position(resume_from_ptr, resume_from_len) }?,
+                resume_sequence: decode_resume_sequence(resume_sequence, has_resume_sequence),
+                request_position_handle,
+            };
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            let sub = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.subscribe(settings).await
+            })?;
+            Ok(wrap_subscription_response(sub, w.vtable_executor, handle))
+        })
     }
 
     extern "C" fn initialize_fn<T: Source + 'static>(
@@ -1183,64 +1167,30 @@ pub fn build_source_vtable_from_boxed(
         resume_from_len: u32,
         request_position_handle: bool,
         resume_sequence: u64,
-    ) -> *mut FfiSubscriptionResponse {
-        let w = unsafe { &*(state as *const DynSourceWrapper) };
-        let source_id_str = unsafe { source_id.to_string() };
-        let qid = unsafe { query_id.to_string() };
-        let nodes_str = unsafe { nodes_json.to_string() };
-        let rels_str = unsafe { relations_json.to_string() };
-
-        let nodes: HashSet<String> = serde_json::from_str(&nodes_str).unwrap_or_default();
-        let relations: HashSet<String> = serde_json::from_str(&rels_str).unwrap_or_default();
-
-        let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
-            None
-        } else if resume_from_len as usize > 65_536 {
-            tracing::warn!(
-                "resume_from_len {} exceeds 64 KB limit; ignoring position",
-                resume_from_len
-            );
-            None
-        } else {
-            let slice =
-                unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
-            Some(bytes::Bytes::copy_from_slice(slice))
-        };
-
-        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
-        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
-        // and a floor derived from 0 would be 1 (the default) anyway, so treating
-        // it as absent is a no-op — the sentinel is safe either way.
-        let resume_sequence = decode_resume_sequence(resume_sequence);
-
-        let settings = SourceSubscriptionSettings {
-            source_id: source_id_str,
-            enable_bootstrap,
-            query_id: qid,
-            nodes,
-            relations,
-            resume_from,
-            resume_sequence,
-            request_position_handle,
-        };
-
-        let handle = (w.runtime_handle)().handle().clone();
-        let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-        let result = dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { inner_ptr.as_ref() };
-            inner.inner.subscribe(settings).await
-        });
-
-        match result {
-            Ok(sub) => {
-                let executor = unsafe { &*(state as *const DynSourceWrapper) }.vtable_executor;
-                wrap_subscription_response(sub, executor, handle)
-            }
-            Err(e) => {
-                log::error!("Subscribe failed: {e}");
-                std::ptr::null_mut()
-            }
-        }
+        has_resume_sequence: bool,
+    ) -> FfiSubscribeResult {
+        FfiSubscribeResult::catch_unwind(|| {
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let settings = SourceSubscriptionSettings {
+                source_id: unsafe { source_id.to_string() },
+                enable_bootstrap,
+                query_id: unsafe { query_id.to_string() },
+                nodes: serde_json::from_str(unsafe { nodes_json.as_str() })
+                    .context("Invalid subscription node labels")?,
+                relations: serde_json::from_str(unsafe { relations_json.as_str() })
+                    .context("Invalid subscription relation labels")?,
+                resume_from: unsafe { decode_resume_position(resume_from_ptr, resume_from_len) }?,
+                resume_sequence: decode_resume_sequence(resume_sequence, has_resume_sequence),
+                request_position_handle,
+            };
+            let handle = (w.runtime_handle)().handle().clone();
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            let sub = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.subscribe(settings).await
+            })?;
+            Ok(wrap_subscription_response(sub, w.vtable_executor, handle))
+        })
     }
 
     extern "C" fn initialize_fn(state: *mut c_void, ctx: *const FfiRuntimeContext) {
@@ -2398,9 +2348,15 @@ pub fn build_bootstrap_provider_vtable(
         request_id: FfiStr,
         server_id: FfiStr,
         source_id: FfiStr,
+        invocation_ptr: *const u8,
+        invocation_len: usize,
     ) -> *mut FfiBootstrapStream {
         ffi_guard(std::ptr::null_mut(), || {
-            use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
+            use drasi_lib::bootstrap::BootstrapRequest;
+
+            let invocation = unsafe {
+                super::recovery::decode_bootstrap_invocation(invocation_ptr, invocation_len)
+            };
 
             // Defensive: a null array with a non-zero count would be UB to
             // walk. The host always passes valid arrays; treat null as empty.
@@ -2441,6 +2397,13 @@ pub fn build_bootstrap_provider_vtable(
             let spawned = std::thread::Builder::new()
                 .name("drasi-bootstrap-provider".to_string())
                 .spawn(move || {
+                    let invocation = match invocation {
+                        Ok(invocation) => invocation,
+                        Err(error) => {
+                            let _ = result_tx.send(Err(format!("{error:#}")));
+                            return;
+                        }
+                    };
                     let rt = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -2452,9 +2415,13 @@ pub fn build_bootstrap_provider_vtable(
                             return;
                         }
                     };
-                    let context = BootstrapContext::new_minimal(server_id_str, source_id_str);
-                    let outcome =
-                        rt.block_on(provider.bootstrap(request, &context, event_tx, None));
+                    let context = invocation.context(server_id_str, source_id_str);
+                    let outcome = rt.block_on(provider.bootstrap(
+                        request,
+                        &context,
+                        event_tx,
+                        invocation.settings.as_ref(),
+                    ));
                     let _ = result_tx.send(outcome.map_err(|e| format!("{e:#}")));
                 });
             if let Err(e) = spawned {
@@ -3910,11 +3877,10 @@ mod snapshot_stream_tests {
     }
 
     #[test]
-    fn decode_resume_sequence_maps_zero_sentinel_to_none() {
-        // 0 is the "absent" sentinel; every non-zero value decodes to Some(n).
-        assert_eq!(decode_resume_sequence(0), None);
-        assert_eq!(decode_resume_sequence(1), Some(1));
-        assert_eq!(decode_resume_sequence(42), Some(42));
-        assert_eq!(decode_resume_sequence(u64::MAX), Some(u64::MAX));
+    fn decode_resume_sequence_preserves_presence_and_zero() {
+        for value in [0, 1, 42, u64::MAX] {
+            assert_eq!(decode_resume_sequence(value, false), None);
+            assert_eq!(decode_resume_sequence(value, true), Some(value));
+        }
     }
 }

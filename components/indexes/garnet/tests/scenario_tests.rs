@@ -1524,6 +1524,85 @@ mod checkpoint_tests {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
+    async fn bootstrap_state_is_transactional_and_versioned() {
+        use drasi_core::interface::{BootstrapState, IndexError};
+        use redis::AsyncCommands;
+        let redis = shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let mut connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let control = GarnetSessionControl::new(state.clone());
+        let store = GarnetCheckpointStore::new(&query_id, connection.clone(), state);
+        assert_eq!(store.read_bootstrap_state().await.unwrap(), None);
+        assert!(store
+            .stage_bootstrap_state(BootstrapState::InProgress)
+            .await
+            .is_err());
+        control.begin().await.unwrap();
+        store
+            .stage_bootstrap_state(BootstrapState::InProgress)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read_bootstrap_state().await.unwrap(),
+            None,
+            "read committed state only"
+        );
+        control.commit().await.unwrap();
+        control.begin().await.unwrap();
+        store
+            .stage_bootstrap_state(BootstrapState::Complete {
+                sources: vec!["source".into()],
+            })
+            .await
+            .unwrap();
+        store
+            .stage_checkpoint("source", 0, Some(&bytes::Bytes::from_static(b"snapshot")))
+            .await
+            .unwrap();
+        control.rollback().unwrap();
+        assert_eq!(
+            store.read_bootstrap_state().await.unwrap(),
+            Some(BootstrapState::InProgress)
+        );
+        assert!(store.read_all_checkpoints().await.unwrap().is_empty());
+        control.begin().await.unwrap();
+        store
+            .stage_bootstrap_state(BootstrapState::Complete {
+                sources: vec!["source".into()],
+            })
+            .await
+            .unwrap();
+        control.commit().await.unwrap();
+        assert_eq!(
+            store.read_bootstrap_state().await.unwrap(),
+            Some(BootstrapState::Complete {
+                sources: vec!["source".into()]
+            })
+        );
+        store.clear_checkpoints().await.unwrap();
+        assert_eq!(store.read_bootstrap_state().await.unwrap(), None);
+        let key = format!("ss:{{{query_id}}}:bootstrap_state");
+        for invalid in [
+            vec![],
+            vec![1u8],
+            vec![2, 0],
+            vec![1, 2],
+            vec![1, 0, 0],
+            vec![1, 1],
+        ] {
+            connection.set::<_, _, ()>(&key, invalid).await.unwrap();
+            assert!(matches!(
+                store.read_bootstrap_state().await,
+                Err(IndexError::CorruptedData)
+            ));
+        }
+        connection.del::<_, ()>(&key).await.unwrap();
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
     async fn sequence_counter() {
         let redis = shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();

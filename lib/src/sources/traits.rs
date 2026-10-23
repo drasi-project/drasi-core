@@ -59,6 +59,7 @@ use crate::context::SourceRuntimeContext;
 pub enum SourceError {
     /// The requested resume position is no longer available.
     /// The caller should consult its recovery_policy to decide next steps.
+    /// Dynamic source subscriptions preserve this typed error across the FFI boundary.
     #[error("Source '{source_id}' cannot resume from requested position: position unavailable (earliest available: {earliest_available:?})")]
     PositionUnavailable {
         source_id: String,
@@ -318,12 +319,8 @@ pub trait Source: Send + Sync {
     ///
     /// The default is a no-op for sources that do not manage position handles.
     ///
-    /// **Note:** This method has no FFI vtable entry yet. `SourceProxy`
-    /// overrides it with an explicit no-op + log message, and overrides
-    /// `supports_replay()` to return `false` so the orchestration layer
-    /// does not expect plugin sources to support position handles. A future
-    /// FFI SDK update (see issue #371) will add the vtable entry so plugin
-    /// sources can participate in position-handle cleanup.
+    /// `SourceProxy` forwards this method through the FFI vtable so dynamic
+    /// sources participate in the same position-handle cleanup.
     async fn remove_position_handle(&self, _query_id: &str) {}
 
     /// Signal that the initial batch of query subscriptions is complete.

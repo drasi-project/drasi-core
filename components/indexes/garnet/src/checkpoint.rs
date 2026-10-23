@@ -23,6 +23,7 @@
 //! - `ss:{<query_id>}:pos:<source_id>` → raw opaque bytes
 //! - `ss:{<query_id>}:sources` → JSON array of source IDs with checkpoints
 //! - `ss:{<query_id>}:config_hash` → decimal u64 hash
+//! - `ss:{<query_id>}:bootstrap_state` → `[1, 0]` in-progress; `[1, 1]` + JSON source-ID array complete
 //!
 //! `stage_checkpoint` writes into the active `GarnetSessionState` write buffer
 //! so it commits atomically with index updates.
@@ -32,7 +33,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core::interface::{BootstrapState, CheckpointStore, IndexError, SourceCheckpoint};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 
 use crate::session_state::{BufferReadResult, GarnetSessionState};
@@ -83,12 +84,51 @@ impl GarnetCheckpointStore {
     fn output_generation_key(&self) -> String {
         format!("ss:{{{}}}:output_gen", self.query_id)
     }
+
+    fn bootstrap_state_key(&self) -> String {
+        format!("ss:{{{}}}:bootstrap_state", self.query_id)
+    }
 }
 
 #[async_trait]
 impl CheckpointStore for GarnetCheckpointStore {
     fn is_persistent(&self) -> bool {
         true
+    }
+
+    async fn stage_bootstrap_state(&self, state: BootstrapState) -> Result<(), IndexError> {
+        let value = match state {
+            BootstrapState::InProgress => vec![1, 0],
+            BootstrapState::Complete { sources } => {
+                let mut value = vec![1, 1];
+                value.extend(serde_json::to_vec(&sources).map_err(IndexError::other)?);
+                value
+            }
+        };
+        match self.session_state.with_active_buffer(|buffer| {
+            buffer.string_set(self.bootstrap_state_key(), value);
+        })? {
+            Some(()) => Ok(()),
+            None => Err(IndexError::other(std::io::Error::other(
+                "stage_bootstrap_state requires an active session",
+            ))),
+        }
+    }
+
+    async fn read_bootstrap_state(&self) -> Result<Option<BootstrapState>, IndexError> {
+        let mut con = self.connection.clone();
+        let value: Option<Vec<u8>> = con
+            .get(self.bootstrap_state_key())
+            .await
+            .map_err(IndexError::other)?;
+        match value.as_deref() {
+            None => Ok(None),
+            Some([1, 0]) => Ok(Some(BootstrapState::InProgress)),
+            Some([1, 1, sources @ ..]) => Ok(Some(BootstrapState::Complete {
+                sources: serde_json::from_slice(sources).map_err(|_| IndexError::CorruptedData)?,
+            })),
+            Some(_) => Err(IndexError::CorruptedData),
+        }
     }
 
     async fn stage_checkpoint(
@@ -271,6 +311,9 @@ impl CheckpointStore for GarnetCheckpointStore {
 
         let config_hash_key = self.config_hash_key();
         con.del::<&str, ()>(&config_hash_key)
+            .await
+            .map_err(IndexError::other)?;
+        con.del::<String, ()>(self.bootstrap_state_key())
             .await
             .map_err(IndexError::other)?;
 

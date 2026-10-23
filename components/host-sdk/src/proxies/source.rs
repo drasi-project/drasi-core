@@ -73,12 +73,9 @@ extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
 /// The host creates this proxy when the plugin factory produces a `SourceVtable`.
 /// All trait method calls dispatch through the vtable function pointers.
 pub struct SourceProxy {
-    vtable: SourceVtable,
-    _library: Arc<Library>,
+    vtable: Arc<SourceHandle>,
     cached_id: String,
     cached_type_name: String,
-    /// Keeps the per-instance callback context alive for the lifetime of this proxy.
-    _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
     /// Per-source identity provider set programmatically via
     /// [`Source::set_identity_provider`]. When present, it takes precedence over
     /// any instance-wide provider supplied via
@@ -86,8 +83,29 @@ pub struct SourceProxy {
     identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
 }
 
-unsafe impl Send for SourceProxy {}
-unsafe impl Sync for SourceProxy {}
+struct SourceHandle {
+    vtable: SourceVtable,
+    _library: Arc<Library>,
+    _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
+}
+
+impl std::ops::Deref for SourceHandle {
+    type Target = SourceVtable;
+
+    fn deref(&self) -> &Self::Target {
+        &self.vtable
+    }
+}
+
+// The source is Send + Sync; the owning handle outlives every blocking FFI call.
+unsafe impl Send for SourceHandle {}
+unsafe impl Sync for SourceHandle {}
+
+struct PendingSubscription {
+    response: SubscriptionResponse,
+    // Drop the receivers before releasing their source and loaded library.
+    _source: Arc<SourceHandle>,
+}
 
 impl SourceProxy {
     pub fn new(vtable: SourceVtable, library: Arc<Library>) -> Self {
@@ -95,11 +113,13 @@ impl SourceProxy {
         let cached_type_name =
             unsafe { (vtable.type_name_fn)(vtable.state as *const c_void).to_string() };
         Self {
-            vtable,
-            _library: library,
+            vtable: Arc::new(SourceHandle {
+                vtable,
+                _library: library,
+                _callback_ctx: std::sync::Mutex::new(None),
+            }),
             cached_id,
             cached_type_name,
-            _callback_ctx: std::sync::Mutex::new(None),
             identity_provider: std::sync::Mutex::new(None),
         }
     }
@@ -197,213 +217,231 @@ impl Source for SourceProxy {
         &self,
         settings: SourceSubscriptionSettings,
     ) -> anyhow::Result<SubscriptionResponse> {
-        let nodes_json = serde_json::to_string(&settings.nodes)?;
-        let relations_json = serde_json::to_string(&settings.relations)?;
+        let source = Arc::clone(&self.vtable);
+        let pending =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<PendingSubscription> {
+                let nodes_json = serde_json::to_string(&settings.nodes)?;
+                let relations_json = serde_json::to_string(&settings.relations)?;
 
-        let source_id_ffi = FfiStr::from_str(&settings.source_id);
-        let query_id_ffi = FfiStr::from_str(&settings.query_id);
-        let nodes_ffi = FfiStr::from_str(&nodes_json);
-        let relations_ffi = FfiStr::from_str(&relations_json);
-        let enable_bootstrap = settings.enable_bootstrap;
+                let source_id_ffi = FfiStr::from_str(&settings.source_id);
+                let query_id_ffi = FfiStr::from_str(&settings.query_id);
+                let nodes_ffi = FfiStr::from_str(&nodes_json);
+                let relations_ffi = FfiStr::from_str(&relations_json);
+                let enable_bootstrap = settings.enable_bootstrap;
 
-        // Pass resume_from position bytes across FFI (null ptr + 0 len if None)
-        let (resume_from_ptr, resume_from_len) = match &settings.resume_from {
-            Some(bytes) => (bytes.as_ptr(), bytes.len() as u32),
-            None => (std::ptr::null(), 0u32),
-        };
+                // Pass resume_from position bytes across FFI (null ptr + 0 len if None)
+                let (resume_from_ptr, resume_from_len) = match &settings.resume_from {
+                    Some(bytes) => {
+                        anyhow::ensure!(
+                            bytes.len()
+                                <= drasi_lib::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES,
+                            "Resume position exceeds the 64 KiB limit"
+                        );
+                        (bytes.as_ptr(), u32::try_from(bytes.len())?)
+                    }
+                    None => (std::ptr::null(), 0u32),
+                };
 
-        // Pass resume_sequence across FFI. 0 is the sentinel for None; real
-        // sequences start at 1 (the framework counter starts at 1), so 0 never
-        // collides with a genuine checkpoint — and a floor derived from 0 would
-        // be 1 (the default) anyway, making the sentinel a no-op either way.
-        // Lets out-of-process sources raise their sequence counter for restart
-        // monotonicity.
-        let resume_sequence = settings.resume_sequence.unwrap_or(0);
+                // Zero resumes a completed empty bootstrap; it is not absence.
+                let resume_sequence = settings.resume_sequence.unwrap_or(0);
 
-        let resp_ptr = (self.vtable.subscribe_fn)(
-            self.vtable.state,
-            source_id_ffi,
-            enable_bootstrap,
-            query_id_ffi,
-            nodes_ffi,
-            relations_ffi,
-            resume_from_ptr,
-            resume_from_len,
-            settings.request_position_handle,
-            resume_sequence,
-        );
+                let outcome = (source.subscribe_fn)(
+                    source.state,
+                    source_id_ffi,
+                    enable_bootstrap,
+                    query_id_ffi,
+                    nodes_ffi,
+                    relations_ffi,
+                    resume_from_ptr,
+                    resume_from_len,
+                    settings.request_position_handle,
+                    resume_sequence,
+                    settings.resume_sequence.is_some(),
+                );
 
-        if resp_ptr.is_null() {
-            return Err(anyhow::anyhow!("Subscribe returned null"));
-        }
+                let resp_ptr = unsafe { outcome.into_result() }?;
+                let ffi_resp = unsafe { *Box::from_raw(resp_ptr) };
+                let query_id = unsafe { ffi_resp.query_id.into_string() };
+                let source_id = unsafe { ffi_resp.source_id.into_string() };
 
-        let ffi_resp = unsafe { *Box::from_raw(resp_ptr) };
-        let query_id = unsafe { ffi_resp.query_id.into_string() };
-        let source_id = unsafe { ffi_resp.source_id.into_string() };
+                let receiver = if ffi_resp.receiver.is_null() {
+                    return Err(anyhow::anyhow!("Subscribe returned null receiver"));
+                } else {
+                    let ffi_cr = unsafe { *Box::from_raw(ffi_resp.receiver) };
+                    // Run on a dedicated thread to avoid initializing plugin TLS
+                    // on the caller's thread. On macOS, plugin TLS destructors
+                    // can deadlock with the still-running plugin runtime during
+                    // thread exit.
+                    let proxy = std::thread::spawn(move || ChangeReceiverProxy::new(ffi_cr))
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("ChangeReceiverProxy::new thread panicked"))?;
+                    Box::new(proxy)
+                        as Box<
+                            dyn drasi_lib::channels::ChangeReceiver<
+                                drasi_lib::channels::events::SourceEventWrapper,
+                            >,
+                        >
+                };
 
-        let receiver = if ffi_resp.receiver.is_null() {
-            return Err(anyhow::anyhow!("Subscribe returned null receiver"));
-        } else {
-            let ffi_cr = unsafe { *Box::from_raw(ffi_resp.receiver) };
-            // Run on a dedicated thread to avoid initializing plugin TLS
-            // on the caller's thread. On macOS, plugin TLS destructors
-            // can deadlock with the still-running plugin runtime during
-            // thread exit.
-            let proxy = std::thread::spawn(move || ChangeReceiverProxy::new(ffi_cr))
-                .join()
-                .map_err(|_| anyhow::anyhow!("ChangeReceiverProxy::new thread panicked"))?;
-            Box::new(proxy)
-                as Box<
-                    dyn drasi_lib::channels::ChangeReceiver<
-                        drasi_lib::channels::events::SourceEventWrapper,
-                    >,
-                >
-        };
+                let bootstrap_receiver = if ffi_resp.bootstrap_receiver.is_null() {
+                    None
+                } else {
+                    let ffi_br = unsafe { *Box::from_raw(ffi_resp.bootstrap_receiver) };
+                    // Same thread isolation for bootstrap receiver
+                    let proxy = std::thread::spawn(move || BootstrapReceiverProxy::new(ffi_br))
+                        .join()
+                        .map_err(|_| {
+                            anyhow::anyhow!("BootstrapReceiverProxy::new thread panicked")
+                        })?;
+                    Some(proxy.into_mpsc_receiver())
+                };
 
-        let bootstrap_receiver = if ffi_resp.bootstrap_receiver.is_null() {
-            None
-        } else {
-            let ffi_br = unsafe { *Box::from_raw(ffi_resp.bootstrap_receiver) };
-            // Same thread isolation for bootstrap receiver
-            let proxy = std::thread::spawn(move || BootstrapReceiverProxy::new(ffi_br))
-                .join()
-                .map_err(|_| anyhow::anyhow!("BootstrapReceiverProxy::new thread panicked"))?;
-            Some(proxy.into_mpsc_receiver())
-        };
+                // Reconstruct position_handle from Arc::into_raw pointer
+                let position_handle = if ffi_resp.position_handle_ptr.is_null() {
+                    None
+                } else {
+                    // Safety: the plugin side did Arc::into_raw(arc) which transfers one
+                    // ref-count. We reconstruct the Arc without incrementing. The plugin's
+                    // SourceBase holds another clone, so the AtomicU64 stays alive until
+                    // both sides drop their Arcs.
+                    Some(unsafe {
+                        std::sync::Arc::from_raw(
+                            ffi_resp.position_handle_ptr as *const std::sync::atomic::AtomicU64,
+                        )
+                    })
+                };
 
-        // Reconstruct position_handle from Arc::into_raw pointer
-        let position_handle = if ffi_resp.position_handle_ptr.is_null() {
-            None
-        } else {
-            // Safety: the plugin side did Arc::into_raw(arc) which transfers one
-            // ref-count. We reconstruct the Arc without incrementing. The plugin's
-            // SourceBase holds another clone, so the AtomicU64 stays alive until
-            // both sides drop their Arcs.
-            Some(unsafe {
-                std::sync::Arc::from_raw(
-                    ffi_resp.position_handle_ptr as *const std::sync::atomic::AtomicU64,
-                )
-            })
-        };
+                // Reconstruct bootstrap_result_receiver via push-based callback
+                let bootstrap_result_receiver = if ffi_resp.bootstrap_result_receiver.is_null() {
+                    None
+                } else {
+                    let ffi_brr = unsafe { *Box::from_raw(ffi_resp.bootstrap_result_receiver) };
+                    let (host_tx, host_rx) = tokio::sync::oneshot::channel::<
+                        anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+                    >();
 
-        // Reconstruct bootstrap_result_receiver via push-based callback
-        let bootstrap_result_receiver = if ffi_resp.bootstrap_result_receiver.is_null() {
-            None
-        } else {
-            let ffi_brr = unsafe { *Box::from_raw(ffi_resp.bootstrap_result_receiver) };
-            let (host_tx, host_rx) = tokio::sync::oneshot::channel::<
-                anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
-            >();
-
-            // Wrap sender in Mutex<Option<...>> so duplicate callbacks are
-            // harmless (second call sees None and is a no-op).
-            struct BootstrapResultCtx {
-                tx: std::sync::Mutex<
-                    Option<
-                        tokio::sync::oneshot::Sender<
-                            anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+                    // Wrap sender in Mutex<Option<...>> so duplicate callbacks are
+                    // harmless (second call sees None and is a no-op).
+                    struct BootstrapResultCtx {
+                        tx: std::sync::Mutex<
+                            Option<
+                                tokio::sync::oneshot::Sender<
+                                    anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+                                >,
+                            >,
                         >,
-                    >,
-                >,
-            }
+                    }
 
-            // Callback the plugin will invoke when bootstrap result is ready
-            extern "C" fn host_bootstrap_result_callback(
-                ctx: *mut std::ffi::c_void,
-                result: *mut drasi_plugin_sdk::ffi::FfiBootstrapResult,
-            ) {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if ctx.is_null() {
-                        return;
-                    }
-                    let wrapper = unsafe { Box::from_raw(ctx as *mut BootstrapResultCtx) };
-                    let tx = match wrapper.tx.lock() {
-                        Ok(mut guard) => guard.take(),
-                        Err(_) => None,
-                    };
-                    let Some(tx) = tx else {
-                        return;
-                    };
-                    if result.is_null() {
-                        let _ = tx.send(Err(anyhow::anyhow!(
-                            "Bootstrap result receiver dropped without result"
-                        )));
-                        return;
-                    }
-                    let ffi_result = unsafe { *Box::from_raw(result) };
-                    // Extract (and free) the provider error text unconditionally
-                    // so the buffer never leaks, whichever branch we take below.
-                    let error_text = if !ffi_result.error_ptr.is_null() && ffi_result.error_len > 0
-                    {
-                        let bytes = unsafe {
-                            std::slice::from_raw_parts(ffi_result.error_ptr, ffi_result.error_len)
-                        };
-                        let text = String::from_utf8_lossy(bytes).into_owned();
-                        if let Some(drop_fn) = ffi_result.error_drop_fn {
-                            (drop_fn)(ffi_result.error_ptr as *mut u8, ffi_result.error_len);
-                        }
-                        Some(text)
-                    } else {
-                        None
-                    };
-                    if ffi_result.event_count < 0 {
-                        let _ = tx.send(Err(match error_text {
-                            Some(msg) => anyhow::anyhow!("Bootstrap failed: {msg}"),
-                            None => anyhow::anyhow!(
-                                "Bootstrap failed with code {}",
-                                ffi_result.event_count
-                            ),
+                    // Callback the plugin will invoke when bootstrap result is ready
+                    extern "C" fn host_bootstrap_result_callback(
+                        ctx: *mut std::ffi::c_void,
+                        result: *mut drasi_plugin_sdk::ffi::FfiBootstrapResult,
+                    ) {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if ctx.is_null() {
+                                return;
+                            }
+                            let wrapper = unsafe { Box::from_raw(ctx as *mut BootstrapResultCtx) };
+                            let tx = match wrapper.tx.lock() {
+                                Ok(mut guard) => guard.take(),
+                                Err(_) => None,
+                            };
+                            let Some(tx) = tx else {
+                                return;
+                            };
+                            if result.is_null() {
+                                let _ = tx.send(Err(anyhow::anyhow!(
+                                    "Bootstrap result receiver dropped without result"
+                                )));
+                                return;
+                            }
+                            let ffi_result = unsafe { *Box::from_raw(result) };
+                            // Extract (and free) the provider error text unconditionally
+                            // so the buffer never leaks, whichever branch we take below.
+                            let error_text =
+                                if !ffi_result.error_ptr.is_null() && ffi_result.error_len > 0 {
+                                    let bytes = unsafe {
+                                        std::slice::from_raw_parts(
+                                            ffi_result.error_ptr,
+                                            ffi_result.error_len,
+                                        )
+                                    };
+                                    let text = String::from_utf8_lossy(bytes).into_owned();
+                                    if let Some(drop_fn) = ffi_result.error_drop_fn {
+                                        (drop_fn)(
+                                            ffi_result.error_ptr as *mut u8,
+                                            ffi_result.error_len,
+                                        );
+                                    }
+                                    Some(text)
+                                } else {
+                                    None
+                                };
+                            if ffi_result.event_count < 0 {
+                                let _ = tx.send(Err(match error_text {
+                                    Some(msg) => anyhow::anyhow!("Bootstrap failed: {msg}"),
+                                    None => anyhow::anyhow!(
+                                        "Bootstrap failed with code {}",
+                                        ffi_result.event_count
+                                    ),
+                                }));
+                                return;
+                            }
+                            let source_position = if !ffi_result.source_position_ptr.is_null()
+                                && ffi_result.source_position_len > 0
+                            {
+                                let bytes = unsafe {
+                                    std::slice::from_raw_parts(
+                                        ffi_result.source_position_ptr,
+                                        ffi_result.source_position_len,
+                                    )
+                                };
+                                let owned = bytes::Bytes::copy_from_slice(bytes);
+                                if let Some(drop_fn) = ffi_result.source_position_drop_fn {
+                                    (drop_fn)(
+                                        ffi_result.source_position_ptr as *mut u8,
+                                        ffi_result.source_position_len,
+                                    );
+                                }
+                                Some(owned)
+                            } else {
+                                None
+                            };
+                            let _ = tx.send(Ok(drasi_lib::bootstrap::BootstrapResult {
+                                event_count: ffi_result.event_count as usize,
+                                source_position,
+                            }));
                         }));
-                        return;
                     }
-                    let source_position = if !ffi_result.source_position_ptr.is_null()
-                        && ffi_result.source_position_len > 0
-                    {
-                        let bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                ffi_result.source_position_ptr,
-                                ffi_result.source_position_len,
-                            )
-                        };
-                        let owned = bytes::Bytes::copy_from_slice(bytes);
-                        if let Some(drop_fn) = ffi_result.source_position_drop_fn {
-                            (drop_fn)(
-                                ffi_result.source_position_ptr as *mut u8,
-                                ffi_result.source_position_len,
-                            );
-                        }
-                        Some(owned)
-                    } else {
-                        None
-                    };
-                    let _ = tx.send(Ok(drasi_lib::bootstrap::BootstrapResult {
-                        event_count: ffi_result.event_count as usize,
-                        source_position,
-                    }));
-                }));
-            }
 
-            let ctx_wrapper = Box::new(BootstrapResultCtx {
-                tx: std::sync::Mutex::new(Some(host_tx)),
-            });
-            let ctx = Box::into_raw(ctx_wrapper) as *mut std::ffi::c_void;
-            (ffi_brr.start_fn)(ffi_brr.state, host_bootstrap_result_callback, ctx);
-            // Safe to call drop_fn: the plugin state is Arc-based, so the
-            // spawned task holds its own clone. Dropping the FFI handle's Arc
-            // reference won't free the state while the task is alive.
-            (ffi_brr.drop_fn)(ffi_brr.state);
+                    let ctx_wrapper = Box::new(BootstrapResultCtx {
+                        tx: std::sync::Mutex::new(Some(host_tx)),
+                    });
+                    let ctx = Box::into_raw(ctx_wrapper) as *mut std::ffi::c_void;
+                    (ffi_brr.start_fn)(ffi_brr.state, host_bootstrap_result_callback, ctx);
+                    // Safe to call drop_fn: the plugin state is Arc-based, so the
+                    // spawned task holds its own clone. Dropping the FFI handle's Arc
+                    // reference won't free the state while the task is alive.
+                    (ffi_brr.drop_fn)(ffi_brr.state);
 
-            Some(host_rx)
-        };
+                    Some(host_rx)
+                };
 
-        Ok(SubscriptionResponse {
-            query_id,
-            source_id,
-            receiver,
-            bootstrap_receiver,
-            position_handle,
-            bootstrap_result_receiver,
-        })
+                Ok(PendingSubscription {
+                    response: SubscriptionResponse {
+                        query_id,
+                        source_id,
+                        receiver,
+                        bootstrap_receiver,
+                        position_handle,
+                        bootstrap_result_receiver,
+                    },
+                    _source: source,
+                })
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("Source subscription bridge failed: {error}"))??;
+        Ok(pending.response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -496,7 +534,7 @@ impl Source for SourceProxy {
         let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut c_void;
 
         // Store the Arc so it stays alive as long as this proxy
-        if let Ok(mut guard) = self._callback_ctx.lock() {
+        if let Ok(mut guard) = self.vtable._callback_ctx.lock() {
             *guard = Some(per_instance_ctx);
         }
 
@@ -575,7 +613,7 @@ impl Source for SourceProxy {
     }
 }
 
-impl Drop for SourceProxy {
+impl Drop for SourceHandle {
     fn drop(&mut self) {
         // Run plugin drop on the shared worker thread to avoid TLS destructor
         // races on macOS arm64 (see drop_worker module for details).

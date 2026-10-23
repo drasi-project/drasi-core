@@ -780,6 +780,7 @@ mod tests {
                 paths: HashSet::from([0]),
                 optional: false,
             }],
+            slot_kinds: vec![crate::path_solver::match_path::SlotKind::Relation],
             optional_paths: HashSet::new(),
         }
     }

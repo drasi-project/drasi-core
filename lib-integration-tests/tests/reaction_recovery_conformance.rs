@@ -930,8 +930,8 @@ async fn recover_phase(paths: &FixturePaths) -> Result<()> {
     let final_journal = wait_for_journal_sequences(&paths.journal, 4).await?;
     let final_journal = journal_emissions(&final_journal)?;
 
+    let final_checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 4).await?;
     fixture.state_store.sync().await?;
-    let final_checkpoint = read_reaction_checkpoint(fixture.state_store.as_ref()).await?;
 
     let observed = RecoveryObservation {
         checkpoint_before_start: checkpoint_before_start.sequence,

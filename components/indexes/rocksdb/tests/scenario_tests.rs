@@ -657,6 +657,82 @@ mod checkpoint_tests {
     use drasi_index_rocksdb::checkpoint::RocksDbCheckpointStore;
 
     #[tokio::test]
+    async fn bootstrap_state_is_transactional_and_versioned() {
+        use drasi_core::interface::{BootstrapState, IndexError};
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let control = RocksDbSessionControl::new(state.clone());
+        let store = RocksDbCheckpointStore::new(db.clone(), state);
+        assert_eq!(store.read_bootstrap_state().await.unwrap(), None);
+        assert!(store
+            .stage_bootstrap_state(BootstrapState::InProgress)
+            .await
+            .is_err());
+        control.begin().await.unwrap();
+        store
+            .stage_bootstrap_state(BootstrapState::InProgress)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read_bootstrap_state().await.unwrap(),
+            None,
+            "read committed state only"
+        );
+        control.commit().await.unwrap();
+        control.begin().await.unwrap();
+        store
+            .stage_bootstrap_state(BootstrapState::Complete {
+                sources: vec!["source".into()],
+            })
+            .await
+            .unwrap();
+        store
+            .stage_checkpoint("source", 0, Some(&bytes::Bytes::from_static(b"snapshot")))
+            .await
+            .unwrap();
+        control.rollback().unwrap();
+        assert_eq!(
+            store.read_bootstrap_state().await.unwrap(),
+            Some(BootstrapState::InProgress)
+        );
+        assert!(store.read_all_checkpoints().await.unwrap().is_empty());
+        control.begin().await.unwrap();
+        store
+            .stage_bootstrap_state(BootstrapState::Complete {
+                sources: vec!["source".into()],
+            })
+            .await
+            .unwrap();
+        control.commit().await.unwrap();
+        assert_eq!(
+            store.read_bootstrap_state().await.unwrap(),
+            Some(BootstrapState::Complete {
+                sources: vec!["source".into()]
+            })
+        );
+        store.clear_checkpoints().await.unwrap();
+        assert_eq!(store.read_bootstrap_state().await.unwrap(), None);
+        let cf = db.cf_handle("stream_state").unwrap();
+        for invalid in [
+            vec![],
+            vec![1],
+            vec![2, 0],
+            vec![1, 2],
+            vec![1, 0, 0],
+            vec![1, 1],
+        ] {
+            db.put_cf(&cf, "bootstrap_state", invalid).unwrap();
+            assert!(matches!(
+                store.read_bootstrap_state().await,
+                Err(IndexError::CorruptedData)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn sequence_counter() {
         let config = RocksDbQueryConfig::new();
         let query_id = format!("test-{}", Uuid::new_v4());

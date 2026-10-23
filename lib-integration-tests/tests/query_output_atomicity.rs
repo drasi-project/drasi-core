@@ -220,6 +220,19 @@ struct FailingCheckpointStore {
 
 #[async_trait]
 impl CheckpointStore for FailingCheckpointStore {
+    async fn stage_bootstrap_state(
+        &self,
+        state: drasi_core::interface::BootstrapState,
+    ) -> Result<(), IndexError> {
+        self.inner.stage_bootstrap_state(state).await
+    }
+
+    async fn read_bootstrap_state(
+        &self,
+    ) -> Result<Option<drasi_core::interface::BootstrapState>, IndexError> {
+        self.inner.read_bootstrap_state().await
+    }
+
     fn is_persistent(&self) -> bool {
         self.inner.is_persistent()
     }
@@ -1155,7 +1168,7 @@ async fn zero_checkpoint_recovery_with_bootstrap_enabled_replays_wal() -> Result
 }
 
 #[tokio::test]
-async fn restart_without_checkpoint_still_bootstraps() -> Result<()> {
+async fn completed_empty_bootstrap_restarts_without_rebootstrapping() -> Result<()> {
     if in_recover_child() {
         return Ok(());
     }
@@ -1166,8 +1179,8 @@ async fn restart_without_checkpoint_still_bootstraps() -> Result<()> {
     spawn_phase_child("bootstrap_idle", &paths, "normal", false, None, true, true)?;
     let second = bootstrap_call_count(&paths.bootstrap_marker)?;
     assert_eq!(
-        second, 2,
-        "restart with no checkpoint must invoke bootstrap again, got {second}"
+        second, 1,
+        "durably completed empty bootstrap must resume WAL at zero instead of bootstrapping again, got {second}"
     );
     paths.cleanup();
     Ok(())

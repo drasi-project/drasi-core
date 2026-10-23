@@ -52,6 +52,8 @@ build-test-plugins:
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+	cargo build --lib -p drasi-source-salesforce --features drasi-source-salesforce/dynamic-plugin
+	cargo build --lib -p drasi-bootstrap-salesforce --features drasi-bootstrap-salesforce/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
 	@for ext in dylib so dll; do \
@@ -61,12 +63,16 @@ build-test-plugins:
 		         target/debug/libdrasi_reaction_snapshot_test.$$ext \
 		         target/debug/libdrasi_identity_test.$$ext \
 		         target/debug/libdrasi_bootstrap_scriptfile.$$ext \
+		         target/debug/libdrasi_source_salesforce.$$ext \
+		         target/debug/libdrasi_bootstrap_salesforce.$$ext \
 		         target/debug/drasi_source_mock.$$ext \
 		         target/debug/drasi_reaction_log.$$ext \
 		         target/debug/drasi_reaction_sse.$$ext \
 		         target/debug/drasi_reaction_snapshot_test.$$ext \
 		         target/debug/drasi_identity_test.$$ext \
-		         target/debug/drasi_bootstrap_scriptfile.$$ext; do \
+		         target/debug/drasi_bootstrap_scriptfile.$$ext \
+		         target/debug/drasi_source_salesforce.$$ext \
+		         target/debug/drasi_bootstrap_salesforce.$$ext; do \
 			[ -f "$$f" ] && cp "$$f" $(PLUGIN_OUT_DIR)/ || true; \
 		done; \
 	done
@@ -75,7 +81,9 @@ build-test-plugins:
 # Build test plugins, then run host-sdk integration tests.
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
-	cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1
+	cargo test -p drasi-host-sdk --test integration_test \
+		--test bootstrap_provider_ffi_test --test source_recovery_ffi_test \
+		--test salesforce_recovery_ffi_test -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 # Deterministic cross-cdylib layout-mismatch regression for issue #602.

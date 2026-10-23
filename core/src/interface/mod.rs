@@ -26,8 +26,8 @@ mod source_middleware;
 use std::error::Error;
 use std::fmt::Display;
 
-pub use checkpoint_store::CheckpointStore;
 pub use checkpoint_store::SourceCheckpoint;
+pub use checkpoint_store::{BootstrapState, CheckpointStore};
 use drasi_query_ast::api::QueryParseError;
 pub use element_index::ElementArchiveIndex;
 pub use element_index::ElementIndex;

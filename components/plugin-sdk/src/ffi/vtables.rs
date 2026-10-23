@@ -279,6 +279,17 @@ pub struct FfiBootstrapResult {
 unsafe impl Send for FfiBootstrapResult {}
 unsafe impl Sync for FfiBootstrapResult {}
 
+/// Subscription success or a producer-owned, serialized recovery error.
+#[repr(C)]
+pub enum FfiSubscribeResult {
+    Success(*mut FfiSubscriptionResponse),
+    Failure {
+        payload_ptr: *const u8,
+        payload_len: usize,
+        payload_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
+    },
+}
+
 // ============================================================================
 // Runtime context — host services provided to plugins during initialization
 // ============================================================================
@@ -360,7 +371,7 @@ drasi_ffi_primitives::ffi_vtable! {
         /// optional resume_from position bytes, and `resume_sequence` (the last
         /// checkpointed framework sequence, or 0 when absent) so out-of-process
         /// sources can raise their sequence counter for restart monotonicity.
-        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool, resume_sequence: u64) -> *mut FfiSubscriptionResponse,
+        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool, resume_sequence: u64, has_resume_sequence: bool) -> FfiSubscribeResult,
 
         /// Host calls this to inject an external bootstrap provider (from another plugin).
         fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),
@@ -541,7 +552,8 @@ drasi_ffi_primitives::ffi_vtable! {
         /// Returns a heap-allocated FfiBootstrapStream (caller must free via
         /// Box::from_raw and consume both receivers), or null if the bootstrap
         /// could not be started.
-        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr) -> *mut FfiBootstrapStream,
+        /// Invocation metadata is borrowed MessagePack, copied before this call returns.
+        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr, invocation_ptr: *const u8, invocation_len: usize) -> *mut FfiBootstrapStream,
     }
 }
 

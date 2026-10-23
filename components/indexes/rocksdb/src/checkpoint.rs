@@ -21,10 +21,11 @@
 //! - `source_sequence:{source_id}` → 8-byte big-endian `u64` sequence
 //! - `source_position:{source_id}` → raw opaque bytes
 //! - `config_hash` → 8-byte big-endian `u64`
+//! - `bootstrap_state` → `[1, 0]` in-progress; `[1, 1]` + JSON source-ID array complete
 //!
-//! `stage_checkpoint` writes into the active session transaction so it commits
-//! atomically with index updates. All other methods (reads, config hash,
-//! clear) operate directly on the DB without requiring an active session.
+//! `stage_*` writes commit atomically with index updates in the active session.
+//! Bootstrap metadata reads see only committed state. Non-staging writes
+//! (config hash, clear) operate directly on the DB.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +33,7 @@ use std::sync::Arc;
 use crate::IndexDb;
 use async_trait::async_trait;
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core::interface::{BootstrapState, CheckpointStore, IndexError, SourceCheckpoint};
 use rocksdb::ColumnFamilyDescriptor;
 use tokio::task;
 
@@ -46,6 +47,7 @@ const SOURCE_POSITION_PREFIX: &str = "source_position:";
 const CONFIG_HASH_KEY: &str = "config_hash";
 const RESULT_SEQUENCE_PREFIX: &str = "result_sequence:";
 const OUTPUT_GENERATION_PREFIX: &str = "output_generation:";
+const BOOTSTRAP_STATE_KEY: &str = "bootstrap_state";
 
 /// Returns the column family descriptor for the stream_state CF.
 pub(crate) fn stream_state_cf_descriptor(
@@ -142,6 +144,54 @@ fn read_all_checkpoints_impl(
 impl CheckpointStore for RocksDbCheckpointStore {
     fn is_persistent(&self) -> bool {
         true
+    }
+
+    async fn stage_bootstrap_state(&self, state: BootstrapState) -> Result<(), IndexError> {
+        let db = self.db.clone();
+        let session_state = self.session_state.clone();
+        task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+            let value = match state {
+                BootstrapState::InProgress => vec![1, 0],
+                BootstrapState::Complete { sources } => {
+                    let mut value = vec![1, 1];
+                    value.extend(serde_json::to_vec(&sources).map_err(IndexError::other)?);
+                    value
+                }
+            };
+            session_state.with_txn(|txn| {
+                txn.put_cf(&cf, BOOTSTRAP_STATE_KEY, value)
+                    .map_err(IndexError::other)
+            })
+        })
+        .await
+        .map_err(IndexError::other)?
+    }
+
+    async fn read_bootstrap_state(&self) -> Result<Option<BootstrapState>, IndexError> {
+        let db = self.db.clone();
+        task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+            match db
+                .get_cf(&cf, BOOTSTRAP_STATE_KEY)
+                .map_err(IndexError::other)?
+                .as_deref()
+            {
+                None => Ok(None),
+                Some([1, 0]) => Ok(Some(BootstrapState::InProgress)),
+                Some([1, 1, sources @ ..]) => Ok(Some(BootstrapState::Complete {
+                    sources: serde_json::from_slice(sources)
+                        .map_err(|_| IndexError::CorruptedData)?,
+                })),
+                Some(_) => Err(IndexError::CorruptedData),
+            }
+        })
+        .await
+        .map_err(IndexError::other)?
     }
 
     async fn stage_checkpoint(
@@ -300,6 +350,8 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
             // Delete config hash
             db.delete_cf(&cf, CONFIG_HASH_KEY)
+                .map_err(IndexError::other)?;
+            db.delete_cf(&cf, BOOTSTRAP_STATE_KEY)
                 .map_err(IndexError::other)?;
 
             Ok(())
