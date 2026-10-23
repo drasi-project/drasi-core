@@ -161,6 +161,7 @@ pub struct DrasiLib {
     pub(crate) reaction_manager: Arc<ReactionManager>,
     pub(crate) running: Arc<RwLock<bool>>,
     pub(crate) is_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown_complete: Arc<tokio::sync::Mutex<bool>>,
     pub(crate) state_guard: StateGuard,
     // Inspection API for querying server state
     pub(crate) inspection: InspectionAPI,
@@ -194,6 +195,7 @@ impl Clone for DrasiLib {
             reaction_manager: Arc::clone(&self.reaction_manager),
             running: Arc::clone(&self.running),
             is_shutdown: Arc::clone(&self.is_shutdown),
+            shutdown_complete: Arc::clone(&self.shutdown_complete),
             state_guard: self.state_guard.clone(),
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
@@ -377,6 +379,7 @@ impl DrasiLib {
             reaction_manager,
             running: Arc::new(RwLock::new(false)),
             is_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            shutdown_complete: Arc::new(tokio::sync::Mutex::new(false)),
             state_guard,
             inspection,
             lifecycle,
@@ -570,8 +573,9 @@ impl DrasiLib {
     ///
     /// Unlike [`stop()`](Self::stop), which allows the server to be restarted,
     /// `shutdown()` performs a full teardown: it stops all components, aborts
-    /// the internal graph update loop, and releases the persistent index-backend
-    /// handles held by queries. After `shutdown()`, the instance cannot
+    /// the internal graph update loop, releases the persistent index-backend
+    /// handles held by queries, and drops the graph's runtime instances to break
+    /// their ownership cycles. After `shutdown()`, the instance cannot
     /// be restarted — create a new `DrasiLib` instance instead.
     ///
     /// Releasing the index handles is non-destructive: on-disk data is left intact,
@@ -580,8 +584,16 @@ impl DrasiLib {
     /// than only when the whole `DrasiLib` value is dropped. This lets a new `DrasiLib`
     /// reopen the same path — and recover the prior state — within the same process.
     ///
-    /// This method is idempotent — calling it on an already-stopped server will
-    /// still clean up the graph update loop.
+    /// State-store and WAL providers injected through the builder remain owned by
+    /// the instance's configuration/managers until all `DrasiLib` clones are
+    /// dropped. Drop any caller-held component/provider handles too before
+    /// reopening those stores. Shutdown never deprovisions components or deletes
+    /// persisted state.
+    ///
+    /// This method is idempotent. It also cleans up components started individually
+    /// or left active by a failed `start()`, even when the server is not running.
+    /// Concurrent calls wait for teardown to finish. Stop errors are returned
+    /// after the remaining cleanup has been attempted.
     ///
     /// # Examples
     ///
@@ -596,19 +608,19 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn shutdown(&self) -> crate::error::Result<()> {
-        // Mark as permanently shut down; idempotent if already set
-        if self
-            .is_shutdown
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
+        let mut complete = self.shutdown_complete.lock().await;
+        if *complete {
             return Ok(());
         }
+        self.is_shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
 
-        // Stop components if still running (tolerate stop errors during shutdown)
-        if self.is_running().await {
-            if let Err(e) = self.stop().await {
-                warn!("Errors during shutdown stop: {e}");
-            }
+        // A failed start or an individually started component can own tasks even
+        // while the instance's running flag is false.
+        let stop_result = self.lifecycle.stop_all_components().await;
+        *self.running.write().await = false;
+        if let Err(e) = &stop_result {
+            warn!("Errors during shutdown stop: {e}");
         }
 
         // Abort the graph update loop task to prevent leaked spawned tasks.
@@ -626,8 +638,14 @@ impl DrasiLib {
         // intact for a future reopen.
         self.query_manager.release_all_persistent_handles().await;
 
+        // Runtime instances can refer back to this graph through their bootstrap,
+        // source, and snapshot providers. Keeping them here leaks the entire graph
+        // (including state stores) even after the caller drops every DrasiLib clone.
+        self.component_graph.write().await.clear_runtimes();
+        *complete = true;
+
         info!("drasi-lib shut down permanently");
-        Ok(())
+        stop_result.map_err(DrasiError::Internal)
     }
 
     // ============================================================================

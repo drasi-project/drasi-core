@@ -791,6 +791,77 @@ async fn wait_for_snapshot_row(
     }
 }
 
+#[tokio::test]
+async fn terminal_shutdown_recovers_durable_topology_in_same_process() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let paths = FixturePaths::under(dir.path());
+    let fixture = build_fixture(&paths).await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+    insert_person(&fixture.source, "p1", "Alice", true).await?;
+    wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 1).await?;
+
+    insert_person(&fixture.source, "p2", "Bob", false).await?;
+    let checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 2).await?;
+    let snapshot = observe_snapshot(&fixture.core).await?;
+    assert_eq!(
+        snapshot.people,
+        vec![person("p1", "Alice", true), person("p2", "Bob", false)]
+    );
+    let outbox = query_instance(&fixture.core).await?.fetch_outbox(0).await?;
+    assert_eq!(outbox.results.len(), 2);
+    let graph = Arc::downgrade(&fixture.core.component_graph());
+    let store = Arc::downgrade(&fixture.state_store);
+    tokio::time::timeout(Duration::from_secs(10), fixture.core.shutdown()).await??;
+    fixture.core.shutdown().await?;
+    drop(fixture);
+
+    // Reopening all three providers immediately proves teardown, not a delayed
+    // process exit or a sleep that happens to let detached tasks release locks.
+    let recovered = build_fixture(&paths).await?;
+    assert!(graph.upgrade().is_none(), "old component graph is retained");
+    assert!(store.upgrade().is_none(), "old state provider is retained");
+    assert_eq!(
+        read_reaction_checkpoint(recovered.state_store.as_ref()).await?,
+        checkpoint
+    );
+    recovered.core.start().await?;
+    wait_for_status(&recovered.core, REACTION_ID, ComponentStatus::Running).await?;
+    assert_eq!(observe_snapshot(&recovered.core).await?, snapshot);
+    assert_eq!(
+        outbox_emissions(
+            &query_instance(&recovered.core)
+                .await?
+                .fetch_outbox(0)
+                .await?
+                .results
+        )?,
+        outbox_emissions(&outbox.results)?
+    );
+    insert_person(&recovered.source, "p3", "Carol", true).await?;
+    assert_eq!(
+        wait_for_checkpoint_sequence(recovered.state_store.as_ref(), 3)
+            .await?
+            .sequence,
+        3
+    );
+    assert_eq!(
+        journal_emissions(&read_journal(&paths.journal)?)?,
+        vec![
+            add_emission(1, "p1", "Alice", true),
+            add_emission(2, "p2", "Bob", false),
+            add_emission(3, "p3", "Carol", true),
+        ]
+    );
+    recovered.core.shutdown().await?;
+    drop(recovered);
+    let store = RedbStateStoreProvider::new(&paths.state)?;
+    assert_eq!(read_reaction_checkpoint(&store).await?.sequence, 3);
+    store.set("fixture", "after-recovery", vec![4]).await?;
+    assert_eq!(store.get("fixture", "after-recovery").await?, Some(vec![4]));
+    Ok(())
+}
+
 async fn seed_phase(paths: &FixturePaths) -> Result<()> {
     let fixture = build_fixture(paths).await?;
     fixture.core.start().await?;

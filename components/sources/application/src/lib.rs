@@ -642,12 +642,30 @@ impl Source for ApplicationSource {
             .await;
 
         // Cancel WAL pruning task
-        if let Some(handle) = self.prune_task.write().await.take() {
+        let prune_task = self.prune_task.write().await.take();
+        if let Some(handle) = prune_task {
             handle.abort();
+            if let Err(error) = handle.await {
+                if !error.is_cancelled() {
+                    error!(
+                        "ApplicationSource '{}' WAL pruning task failed during stop: {error}",
+                        self.base.id
+                    );
+                }
+            }
         }
 
-        if let Some(handle) = self.base.task_handle.write().await.take() {
+        let task = self.base.task_handle.write().await.take();
+        if let Some(handle) = task {
             handle.abort();
+            if let Err(error) = handle.await {
+                if !error.is_cancelled() {
+                    error!(
+                        "ApplicationSource '{}' task failed during stop: {error}",
+                        self.base.id
+                    );
+                }
+            }
         }
 
         self.base
