@@ -22,6 +22,13 @@ CMake. The first build may take several minutes.
 The app starts everything. **Press Enter to advance each step**, or `q` / Ctrl+C
 to quit. It shows the SQL being executed and waits for the workflow to process it.
 
+**Open the printed `DTS dashboard` URL in your browser.** Select the `default`
+task hub. After the first step, open `order-42` and select **History**. Keep the
+dashboard beside the terminal and refresh after each step to see the named events
+and activities.
+The URL uses a free localhost port chosen for this run; no Azure account or login
+is needed.
+
 | Step | Database change | Query change | Workflow |
 |------|-----------------|--------------|----------|
 | Placed | Insert `order-42` with `status='placed'` | ADDED | Starts |
@@ -42,8 +49,11 @@ The delivered order stays in the database and the query result. Delivery reaches
 the workflow as an UPDATE, just like paid and shipped. The .NET app never sends
 these events directly to DTS.
 
-The PostgreSQL and DTS containers are local and disposable. The app removes them
-when it finishes or you quit; it prints the location of retained diagnostics.
+After delivery, the app pauses so you can inspect the completed workflow's
+history. **Press Enter or `q` once more to clean up.** The PostgreSQL and DTS
+containers are local and disposable; cleanup also closes the dashboard.
+Ctrl+C or closed input exits as well. The app prints the location of retained
+diagnostics.
 
 ## Query
 

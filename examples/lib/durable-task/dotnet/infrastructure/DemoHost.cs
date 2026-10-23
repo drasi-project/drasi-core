@@ -33,6 +33,7 @@ internal sealed partial class DemoHost : IAsyncDisposable
     public string RunId { get; } = Guid.NewGuid().ToString("N")[..12];
     public string ArtifactDirectory { get; }
     public string Endpoint { get; private set; } = "";
+    public string DashboardUrl { get; private set; } = "";
     public int PostgresPort { get; private set; }
     public string ConnectionString => $"Endpoint={Endpoint};TaskHub=default;Authentication=None";
     public TaskHubClient Client => client ?? throw new InvalidOperationException("Host has not been initialized");
@@ -56,6 +57,9 @@ internal sealed partial class DemoHost : IAsyncDisposable
         string binding = (await RunAsync("docker", ["port", container, "8080/tcp"],
             TimeSpan.FromSeconds(20), cancellation)).Trim();
         Endpoint = "http://" + binding;
+        string dashboardBinding = (await RunAsync("docker", ["port", container, "8082/tcp"],
+            TimeSpan.FromSeconds(20), cancellation)).Trim();
+        DashboardUrl = "http://" + dashboardBinding;
         service = new(AzureManagedOrchestrationServiceOptions.FromConnectionString(ConnectionString), logging);
         client = new(service);
         Stopwatch elapsed = Stopwatch.StartNew();

@@ -274,7 +274,8 @@ and events, worker SIGKILL/replay, Drasi outbox recovery, PostgreSQL WAL replay 
 snapshot before-images, physical row deletion, all four configurable actions,
 and the actual guided example's prompts/cancellation/output. The example check
 observes one workflow through placed, paid, shipped, and delivered, with delivery
-arriving as an UPDATE rather than a removal. The recovery
+arriving as an UPDATE rather than a removal. It also checks the local dashboard
+URL and the final inspection pause before cleanup. The recovery
 scenarios must produce exactly sixteen file effects; the guided business workflow
 reports to the console instead.
 

@@ -8,6 +8,14 @@ internal static class GuidedWalkthroughVerification
 {
     public static async Task RunAsync(DemoHost host)
     {
+        Require(Uri.TryCreate(host.DashboardUrl, UriKind.Absolute, out Uri? dashboard)
+            && dashboard.IsLoopback && dashboard.Scheme == Uri.UriSchemeHttp,
+            "The dashboard URL must use the emulator's local HTTP binding");
+        using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(10) };
+        using HttpResponseMessage page = await http.GetAsync(dashboard, host.Cancellation);
+        Require(page.IsSuccessStatusCode && page.Content.Headers.ContentType?.MediaType == "text/html",
+            "The dashboard URL did not serve the emulator UI");
+
         int writesBefore = host.Database.Writes.Count;
         foreach (string reply in new[] { "q\n", "", "invalid\nq\n" })
         {
@@ -23,14 +31,14 @@ internal static class GuidedWalkthroughVerification
         string outcome = await Walkthrough.RunAsync(host, console)
             ?? throw new InvalidOperationException("Walkthrough unexpectedly cancelled");
         OrderRow? row = await host.Database.ReadOrderAsync(Walkthrough.OrderId);
-        Require(prompts.Reads == 4 && row is { Status: "delivered" },
+        Require(prompts.Reads == 5 && row is { Status: "delivered" },
             "The guided steps did not leave the expected database row");
         Require(host.Database.Writes.Count == writesBefore + 4, "Walkthrough submitted unexpected SQL writes");
         OrchestrationState completed = await host.StateWhenAsync(Walkthrough.OrderId,
             state => state.OrchestrationStatus == OrchestrationStatus.Completed);
         Require(Read<OrderStatus>(completed.Input) == new OrderStatus(Walkthrough.OrderId, "placed")
             && Read<string>(completed.Status) == "delivered"
-            && prompts.States.Count == 3
+            && prompts.States.Count == 4
             && prompts.States.Select(state => state.OrchestrationInstance.ExecutionId)
                 .Append(completed.OrchestrationInstance.ExecutionId).Distinct().Count() == 1,
             "The status updates did not reach the same workflow instance");
@@ -45,6 +53,13 @@ internal static class GuidedWalkthroughVerification
             "Unexpected workflow output or an internal readiness message leaked into the walkthrough");
         Require(!text.Contains("exception", StringComparison.OrdinalIgnoreCase),
             "The walkthrough used error terminology for an order status");
+        Require(text.Contains($"DTS dashboard: {host.DashboardUrl}")
+            && text.IndexOf($"DTS dashboard: {host.DashboardUrl}", StringComparison.Ordinal)
+                < text.IndexOf("1/4.", StringComparison.Ordinal)
+            && text.Contains($"then find {Walkthrough.OrderId} after the first step")
+            && text.Contains($"Inspect the completed workflow's history in the dashboard: {host.DashboardUrl}")
+            && text.Contains("Press Enter or q to stop the demo and remove its containers."),
+            "Dashboard instructions or the final inspection pause were missing");
         await File.WriteAllTextAsync(Path.Combine(host.ArtifactDirectory, "walkthrough.log"), text, host.Cancellation);
         host.Database.CommandOutput = null;
 
@@ -82,18 +97,20 @@ internal static class GuidedWalkthroughVerification
                 1 => row is { Status: "placed" },
                 2 => row is { Status: "paid" },
                 3 => row is { Status: "shipped" },
+                4 => row is { Status: "delivered" },
                 _ => false,
             };
             Require(expected, $"SQL ran before prompt {Reads + 1}, or an unexpected prompt was shown");
             if (row is not null)
             {
                 OrchestrationState state = await host.WaitForStatusAsync(Walkthrough.OrderId, row.Status);
-                Require(state.OrchestrationStatus == OrchestrationStatus.Running,
-                    "The workflow completed before delivery");
+                Require(state.OrchestrationStatus == (Reads == 4
+                        ? OrchestrationStatus.Completed : OrchestrationStatus.Running),
+                    "The workflow did not stay running until delivery or complete before the dashboard pause");
                 States.Add(state);
             }
             Reads++;
-            return "";
+            return Reads == 5 ? "q" : "";
         }
     }
 }

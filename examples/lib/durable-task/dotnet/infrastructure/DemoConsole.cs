@@ -7,12 +7,13 @@ internal sealed class DemoConsole(TextReader input, TextWriter output, Cancellat
 {
     public TextWriter Output => output;
 
-    public async Task<bool> NextStepAsync(string description)
+    public async Task<bool> NextStepAsync(
+        string description, string prompt = "Press Enter to continue, or q to quit.")
     {
         await output.WriteLineAsync($"\n{description}");
         while (true)
         {
-            await output.WriteLineAsync("Press Enter to continue, or q to quit.");
+            await output.WriteLineAsync(prompt);
             string? reply = await input.ReadLineAsync(cancellation);
             if (reply is null || reply.Trim().Equals("q", StringComparison.OrdinalIgnoreCase)) return false;
             if (string.IsNullOrWhiteSpace(reply)) return true;

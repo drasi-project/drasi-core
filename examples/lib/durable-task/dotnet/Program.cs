@@ -12,6 +12,9 @@ internal static class Walkthrough
         host.Database.CommandOutput = console.Output;
         await console.Output.WriteLineAsync("\nFollow one order: placed -> paid -> shipped -> delivered.");
         await console.Output.WriteLineAsync("PostgreSQL -> Drasi query/reaction -> DTS -> OrderWorkflow");
+        await console.Output.WriteLineAsync($"\nDTS dashboard: {host.DashboardUrl}");
+        await console.Output.WriteLineAsync($"Open it in your browser. Select the default task hub, then find {OrderId} after the first step.");
+        await console.Output.WriteLineAsync("Open History, then refresh after each step to see the named events and activities.");
         await console.Output.WriteLineAsync("\nThe query watches each order's status:");
         await console.Output.WriteLineAsync(await File.ReadAllTextAsync(
             Path.Combine(host.Root, "query.cypher"), host.Cancellation));
@@ -37,6 +40,9 @@ internal static class Walkthrough
         await console.ShowResultAsync(host.Database, OrderId, "UPDATED", completed);
         await console.Output.WriteLineAsync(outcome);
         await console.Output.WriteLineAsync("\nEvery status change reached the workflow through Drasi. The delivered order stays in the query.");
+        await console.NextStepAsync(
+            $"Inspect the completed workflow's history in the dashboard: {host.DashboardUrl}",
+            "Press Enter or q to stop the demo and remove its containers.");
         return outcome;
     }
 }

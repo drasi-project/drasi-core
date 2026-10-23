@@ -265,7 +265,7 @@ internal static class Verification
         await host.StartDrasiAsync();
         await GuidedWalkthroughVerification.RunAsync(host);
         Check("guided-walkthrough", true,
-            "Drasi sent named paid/shipped/delivered events; explicit waits prevented an early delivery from skipping stages; prompts preceded SQL; quit/EOF changed no rows");
+            "Named event waits preserved stage order; prompts preceded SQL; quit/EOF changed no rows; the local dashboard stayed available through the final inspection pause");
         Check("no-late-effects", host.ReadEffects().Length == 16,
             "Thirteen original integration effects plus three buffered-event effects, with no extras");
         await host.SaveResultAsync(new
