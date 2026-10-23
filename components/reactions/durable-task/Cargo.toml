@@ -1,0 +1,50 @@
+# Copyright 2026 The Drasi Authors.
+# Licensed under the Apache License, Version 2.0.
+
+[package]
+name = "drasi-reaction-durable-task"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Configurable Durable Task Scheduler reaction for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "reaction", "workflow", "durable-task"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+dynamic-plugin = []
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-plugin-sdk.workspace = true
+utoipa.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+chrono = "0.4"
+handlebars = "5.1"
+log = "0.4"
+prost = "0.14"
+prost-types = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tonic = { version = "0.14", features = ["tls-native-roots", "tls-ring"] }
+tonic-prost = "0.14"
+url = "2"
+uuid = { version = "1", features = ["v5"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "net", "test-util"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+drasi-state-store-redb.workspace = true
+tempfile = "3"
