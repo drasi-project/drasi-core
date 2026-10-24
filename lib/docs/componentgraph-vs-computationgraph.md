@@ -1,9 +1,10 @@
 # ComponentGraph and ComputationGraph
 
-**Development snapshot: 21 October 2026.** Comparison of the
+**Scope:** Comparison of the
 [ComponentGraph-based implementation][old-core] with the current Core and
-matching Server checkouts, including the native database and shared-host
-additions. This is a working-tree capability comparison, not a published-release
+matching Server checkouts, including native database components, shared hosting,
+OTel progress measurements and the verified standard-gRPC crash-recovery path.
+This is a development capability comparison, not a published-release
 or full-workspace qualification claim.
 
 ## The main difference
@@ -23,6 +24,10 @@ running queries already existed. The improvements below extend or strengthen
 those capabilities; they are not a new query engine.
 Here, **native components** use the new graph's direct interfaces rather than
 the older source/reaction interfaces.
+Both ordinary and native queries run through `ContinuousQueryTransformer` and
+the same evaluator. Converting every plugin to the native interfaces, deleting
+the ordinary adapters and making queries dynamically loadable are separate work;
+they are not prerequisites for using this single runtime.
 
 <a id="new-built-in-capabilities"></a>
 
@@ -55,13 +60,14 @@ the older source/reaction interfaces.
 | Initial data from several providers | Initial loading was coordinated through source-specific subscription and bootstrap paths. | The query owns preparation, loading and handover. Multiple real providers can be composed with separate initialization state and checked completion, including PostgreSQL plus HTTP. |
 | SQLite snapshot/live ownership | The ordinary bootstrapper opened a separate read-only file connection; direct Rust source handles and REST supplied the write path. | Independently loaded paired bootstrappers can use the actual source-owned snapshot/journal engine and query owners. Standalone file loading remains available; no public DrasiLib SQL read/write API is added. |
 | Checking recovery promises | Guarantees depended on the selected source/query/reaction implementations and settings. | The graph checks actual processing owners, storage, connections and completion behavior before accepting a requested recovery guarantee. A flag or matching resource name is not enough. |
+| Retained input during staggered restart | WAL cleanup used the confirmed positions of subscribers already attached. | Ordinary HTTP/gRPC cleanup waits for the initial subscription group before releasing retained history. Replay registration is protected against pruning; missing history fails explicitly rather than looking like an empty replay. The actual two-query standard-gRPC crash case is verified below. |
 
 ## Managing, hosting and using applications
 
 | Area | ComponentGraph-based implementation | ComputationGraph |
 |---|---|---|
 | Ownership and cleanup | Each manager coordinated its component type and associated tasks. | Components, connections and declared resources follow a common ownership model. Producers drain before their actual progress owners retire; accepted stop operations survive cancelled waiters. Failed cleanup remains owned without blocking unrelated cleanup unnecessarily. |
-| Missing dependencies | Startup and dependency handling were spread across the specialized managers. | Valid declarations can wait for missing sources, resources, factories or connections and activate when they arrive, while respecting an explicit stop. |
+| Missing dependencies | Startup and dependency handling were spread across the specialized managers. | Empty graphs and valid unconnected declarations can wait for missing sources, resources, factories or connections, while respecting an explicit stop. Invalid connected outputs without stream bindings are rejected. A waiting instance host remains manageable after library startup returns, without falsely reporting readiness. |
 | Live changes | Managers supplied category-specific update and removal behavior. | Updates check that the expected application version is still current, coordinate affected resources and protect pending work. Unrelated instances stay unchanged. This is not rollback of external effects. |
 | Failure handling | Reporting and recovery behavior depended on the manager/component path. | Supported returned errors and catchable failures leave the failed component inspectable, preserve causes and prevent reuse of a damaged instance. Healthy unrelated branches can continue. |
 | Saved application definitions | Server and component configuration described the specialized application model. | Rebuildable definitions include arbitrary native components, connections and resource recipes. Accepted changes and retry records can be saved before construction; a failed component does not erase the accepted definition. |
@@ -73,6 +79,7 @@ the older source/reaction interfaces.
 | Credential refresh | Supported ordinary reactions resolved their identity provider on each start. | Native factories can opt into an actual Host identity resource resolved on every activation, preserving provider precedence without caching stale credentials or changing saved configuration. This preserves a legacy capability rather than inventing one. |
 | Separate-process hosting | Applications could arrange their own processes and connections. | The host can own child and grandchild DrasiLib processes, track their failures and connect them through explicit data/control links, including authenticated encrypted links and selected saved-delivery modes. |
 | Inspection and query access | ComponentGraph supplied shared metadata and asynchronously received manager/component status updates. | The running graph publishes coherent status and dependency information. Native queries use the same result-reading surface; Server streams begin with current rows, then subsequent changes, including after reconnect. |
+| Processing-progress measurements | Query-output and reaction-checkpoint metrics existed in specialized paths. | Read actual committed query input and produced-output positions, with lifecycle and output identity. Server optionally exports them through an application-owned OTel provider. An input producing no result still advances input progress; missing measurements are not zero progress. This is not yet all-component OTel coverage or destination-completion proof. |
 | Server configuration | Configuration and routes included older single-instance and component-family forms. | Server uses explicit instances and supports native component/resource definitions, batch creation and metadata-derived configuration. Secret settings can remain references rather than copied values. |
 
 The runtime graph is the application's processing layout, not the graph of
@@ -103,6 +110,29 @@ Code references: [old settings recovery][old-hash-error] and [current recovery][
 [current task ownership][execution];
 [old event decoding][old-decoder] and [current event decoding][current-decoder].
 
+## What the completed recovery check proves
+
+The [versioned Building Comfort evidence][completed-recovery] uses the actual
+Server, separately rebuilt ordinary gRPC source/reaction libraries running in
+ComputationGraph, and the external test-service. It is not an embedded-only test
+or qualification of the native gRPC factories.
+
+| Check | Recorded result |
+|---|---|
+| Uninterrupted reference | Both queries committed all 100,000 inputs; receivers recorded and finalized the complete output |
+| Pending-input SIGKILL/restart | The aggregate query restored input 88,748 and replayed the remaining 11,252 events without reapplying definitions |
+| Exact delivery comparison | All 99,981 room and 49,860 aggregate outputs matched, with no missing, extra, duplicate, conflicting or reordered records |
+| Independent final-state check | 12 room rows and 3 floor rows matched the captured source data; each floor appeared once |
+
+Completion uses fresh OTel measurements from the current Server process, complete
+recorded producer batches and awaited logger finalization, not quiet output or
+record counts alone. The local run used Rust 1.95.0 debug builds on macOS and a
+100,000-entry outbox per query; it is not a throughput or universal exactly-once
+guarantee. The [manual strict workflow][completed-workflow] requires fresh
+matching-build reference and recovery runs. Its recipe is not evidence that the
+Linux CI run has passed. The older scheduled multi-transport workflow remains a
+separate snapshot-only check, and the incomplete v1 reference is preserved.
+
 <a id="performance-and-qualification-boundaries"></a>
 
 ## Current limits
@@ -121,9 +151,12 @@ Code references: [old settings recovery][old-hash-error] and [current recovery][
 - **Variable-length relationship execution is unfinished.** Some patterns parse,
   but their hop bounds are discarded by the current single-edge planner. Parsed
   syntax must not be mistaken for working multi-hop execution.
-- **Recovery guarantees remain specific.** Shared-source restart with undrained
-  persistent input queues is not qualified. HTTP snapshots/live prices and SSE
-  notifications do not gain durable replay merely by being connected to the graph.
+- **Recovery guarantees remain specific.** Standard gRPC with the ordinary
+  adapters and a source WAL has the completed pending-input restart evidence
+  above. Cold restart with undrained native persistent input-pipe frames and
+  other transport/failure combinations still need qualification. HTTP
+  snapshots/live prices and SSE notifications do not gain durable replay merely
+  by being connected to the graph.
 - **Transactions remain local to their actual owners.** Several queries,
   databases or remote effects do not become one atomic operation. The time merger
   also cannot prove that no unseen earlier event will arrive. Processing layouts
@@ -131,6 +164,15 @@ Code references: [old settings recovery][old-hash-error] and [current recovery][
 - **Lifecycle and scale work remains.** The complete startup/shutdown deadline
   policy is unfinished. Large-graph reporting and repeated removal/addition costs
   still need measurement and improvement; no universal speedup is claimed.
+- **Monitoring is only partly implemented.** Optional OTLP/HTTP JSON export
+  currently covers query input/output progress, not every component's throughput,
+  latency, errors, queue pressure or completed destination work. Metrics do not
+  replace stored recovery state.
+- **Local qualification is not all CI or demo qualification.** The supported
+  library profiles and public doctests pass; intentional subprocess-worker
+  ignores are executed by their parent tests. Broader CI checks and recorded
+  test-infra lint failures remain separate. Move-a-wall and GPU Lab have not
+  been rerun against the latest OTel and WAL changes.
 - **Process isolation has limits.** The selected child-host behavior is qualified
   on macOS/Linux, not Windows or as a security sandbox. Arbitrary non-yielding
   native code cannot always be stopped safely inside a process.
@@ -151,3 +193,5 @@ that every defect in the old system has been fixed.
 [execution]: ../src/computation/v1/graph/execution.rs
 [old-decoder]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/components/host-sdk/src/proxies/change_receiver.rs
 [current-decoder]: ../../components/host-sdk/src/proxies/change_receiver.rs
+[completed-recovery]: https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2
+[completed-workflow]: https://github.com/drasi-project/test-infra/blob/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/.github/workflows/e2e-building-comfort-completion.yml

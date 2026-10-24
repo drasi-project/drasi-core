@@ -9,6 +9,30 @@ includes 100,000 inputs, complete delivery, independently checked final state an
 replay of 11,252 inputs left pending at the crash. This is a qualified slice, not
 completion of every deployment requirement listed below.
 
+Completed work is no longer a prerequisite to repeat from scratch:
+
+| Completed item | What it established |
+|---|---|
+| Declaration and lifecycle fixes | Empty and waiting declarations remain valid; connected outputs without stream bindings are rejected. The complete 29-case lifecycle target passes without exclusions. |
+| Library test repair and coverage | Recorded default/no-default profiles each pass 1,684 tests; the extended recovery/middleware profile passes 1,843. All 135 public doctests pass with none ignored. |
+| Actual progress reporting | Query subscription counts reflect live receivers. Query committed-input and produced-output positions are available for optional Server OTLP export. |
+| Host and shutdown fixes | A host waiting for missing dependencies remains manageable after library startup. Shutdown refreshes a stale revision only when its stop request was rejected before effects. |
+| Pending-input recovery | Startup WAL pruning no longer lets a fast subscriber discard the slower subscriber's history. The matching-build external Server run proves actual replay, complete recording and exact final state. |
+
+The test profiles retain intentional ignored subprocess workers, invoked by
+their normal parent tests, and an optional serialization timing probe with a
+separate ordinary correctness test. These are not disabled functional failures.
+The counts describe the recorded local runs, not a passing full-workspace CI
+suite. The full native FFI review, dependency advisories, other CI checks and
+test-infra lint issues remain open where listed below.
+
+Native conversion of every plugin, old-adapter retirement and independently
+loadable query packaging are **not universal merge prerequisites**. Qualify the
+actual components and guarantees needed by a deployment; supported ordinary
+adapters already use the same ComputationGraph runtime. The broader
+[cleanup plan](computation-graph-cleanup-plan.md) covers the broader native-only
+target, not an additional condition on the completed readiness work.
+
 <a id="cw-06"></a>
 
 ## 1. Finish startup and shutdown deadlines (CW-06)
@@ -19,6 +43,11 @@ completion of every deployment requirement listed below.
 and resources, and the whole shutdown across the remaining providers. A timeout
 must identify unfinished work and its actual owner without abandoning accepted
 operations, revoking readers needed for drain, or pretending cleanup succeeded.
+
+**Already fixed:** Missing-dependency readiness no longer holds the instance
+host's management loop indefinitely after library startup returns. A shutdown
+request rejected for a stale graph revision is refreshed before stop effects;
+real cleanup failures still surface. These fixes do not complete every deadline.
 
 **Finish when:** Slow or failing components cannot cause an unexplained indefinite
 wait, and cleanup can be safely retried after a timeout or cancellation.
@@ -83,9 +112,10 @@ or misleading success states.
 
 **Priority:** High for deployments needing this recovery mode. **Effort:** Large.
 
-**Work:** Establish safe reconstruction after a process dies with unprocessed
-messages still in persistent input queues. Saved consumer progress alone does
-not describe every queued message or its transport number. Extend source-history
+**Work:** Establish cold reconstruction with undrained **native persistent
+input-pipe frames**, and qualify remaining source/provider combinations after a
+process dies. Saved consumer progress alone does not describe every queued
+message or its transport number. Extend source-history
 and initial-loading checks to the remaining required connectors.
 
 **Implemented repair:** Ordinary HTTP/gRPC WAL cleanup waits for the actual
@@ -93,6 +123,8 @@ startup subscription batch, protects replay registration against pruning, and
 retains submitted cleanup through cancellation. Missing retained history fails
 explicitly. This closes the discovered fast-subscriber/slow-subscriber startup
 race; it does not qualify every native persistent-input-pipe restart profile.
+The ordinary source-WAL case is verified in [CW-36](#cw-36); it is no longer an
+unproved blanket requirement.
 
 **Finish when:** A fresh process restores the exact outstanding work without
 missing or repeating effects, inventing progress, or deleting queued messages.
@@ -115,6 +147,11 @@ recovery. Both queries reached input 100,000; all 99,981 room outputs and 49,860
 aggregate outputs matched with no duplicates or reordering. Final state matched
 an independent source replay: 12 room rows and 3 floor rows. The incomplete v1
 reference and the failed pre-fix recovery remain separately identified evidence.
+The executed run used macOS, Rust 1.95.0 debug builds, freshly built ordinary
+gRPC source/reaction adapters and a 100,000-entry outbox per query. It does not
+qualify native gRPC factories, every transport or every lost-reply window.
+The manual workflow recipe is present; a successful Linux CI execution is not
+claimed. The older scheduled multi-transport snapshot gate remains distinct.
 
 **Finish when:** Incomplete captures cannot pass, and each required behavior has
 an exact expected result and a matching recorded run.
@@ -185,6 +222,10 @@ examples for the remaining selected connectors, and verify readiness, reset and
 expected effects. Fix the Learning Trading build's unused `createdReaction`
 field without disabling compiler checks.
 
+**Still to run:** Fresh Move-a-wall and GPU Lab end-to-end checks against the
+OTel/WAL-retention build. Earlier demo results do not establish that this latest
+cross-cutting change set preserves their behavior.
+
 **Finish when:** Required examples build normally and run against the supported
 Server with clear setup, shutdown and recovery behavior.
 
@@ -223,7 +264,7 @@ exhausting the call stack or terminating the process.
 
 **Work:** Resolve the RustSec findings recorded during
 [PR #988's dependency review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780).
-The current workspace lock reports 23 advisory entries affecting `azure_core`
+That review scan recorded 23 advisory entries affecting `azure_core`
 0.21, `quick-xml` 0.31/0.37, `quinn-proto` 0.11.17, `rustls` 0.21/0.23.44,
 `rustls-webpki` 0.101/0.103.15, the 1.0.9 WebPKI root packages, and `rsa` 0.9.10.
 Trace each production use, upgrade to patched versions where available, and
@@ -483,6 +524,12 @@ depend on them. Isolate shared test state and reproduce the Trading
 separate checks for valid deferred construction and genuinely invalid topology;
 do not exclude failing cases from a claimed full-suite pass.
 
+**Already fixed:** The stale empty-graph and missing-dependency lifecycle
+expectations, real subscription-count/cleanup checks, public doctests and the
+Server telemetry fixture's assumed immediate query readiness. Preserve the
+intentional child-worker ignores: the parent tests execute them with the required
+state and watchdogs.
+
 Replace the workspace-wide `--test-threads=1` workaround only after identifying
 and isolating the tests that actually share ports, files or global state. Add a
 normal parallel CI run without dropping serialized coverage where it is still
@@ -501,6 +548,12 @@ and on both supported runtime styles, without weakened assertions or inflated ti
 **Work:** Enable unused-code warnings in manageable parts of the project, remove
 genuine leftovers and keep only justified exceptions. Reproduce and resolve the
 recorded test-infra code-check failures rather than hiding them with broad suppression.
+
+The recorded Rust 1.95 `make lint-check` failure starts in unchanged
+`test-data-store` code. The focused `test-run-host` check also reports an unused
+`ProfilerSummary`, derivable defaults, checked-then-unwrapped options and manual
+multiple-of checks. Passing the receiver's 139 unit tests does not close these
+lint failures.
 
 **Finish when:** Selected packages pass their normal checks with useful warnings
 enabled across supported configurations.
@@ -589,8 +642,12 @@ Keep names and units consistent, prevent double counting and exclude sensitive d
 **Implemented first slice:** Query committed-input and produced-output positions
 can be read from their actual owners, with lifecycle/output identity and
 persistence information. Server has optional OTLP export of those measurements.
-This is not yet all-component instrumentation or proof of completed external
-delivery; the wider measurements and recovery qualification remain unfinished.
+`drasi.query.progress.sequence` distinguishes `input.committed` from
+`output.produced`; filtered inputs advance the former without inventing output.
+The standard-gRPC recovery evidence combines these observations with actual
+recorded batches and final snapshots. Remaining work is all-component
+instrumentation and qualification of the other profiles, not implementation of
+this first exporter or another Server progress endpoint.
 
 **Finish when:** Enabled measurements report exact expected counts and timing
 boundaries across normal work, retries, batching and failure.

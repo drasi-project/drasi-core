@@ -5,12 +5,15 @@ CG-01 through CG-28 descriptions, design rationale and dated measurement evidenc
 It is not maintained as a second active backlog.
 
 The [consolidated outstanding-work inventory](computation-graph-remaining-work.md)
-is the single current list. It includes the pre-review work, every runtime-review
-finding, Phase 0 and post-merge dispositions, and a crosswalk for all CG IDs.
+is the single current list, using CW identifiers. It records completed readiness
+work, OTel progress support and the standard-gRPC pending-input recovery evidence
+separately from the remaining deployment requirements.
 The scope, priorities and completion statements below describe their dated
 assessment; use the consolidated inventory for current planning.
 
-## Active core-only work
+<a id="active-core-only-work"></a>
+
+## Core-only work at the historical assessment
 
 | Work | Status and boundary |
 |---|---|

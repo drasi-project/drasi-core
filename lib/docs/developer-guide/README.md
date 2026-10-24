@@ -1,7 +1,7 @@
 # The drasi-lib developer guide
 
-**Development API snapshot: 24 October 2026.** This guide describes the current
-checkout, including native MySQL/SQLite, shared Host and query-progress additions. Use
+**Development API guide.** This guide describes the current checkout, including
+native MySQL/SQLite components, shared hosting and query-progress measurements. Use
 matching Core/Server sources and rebuilt plugin libraries; an older published
 commit or registry binary does not contain all of these interfaces.
 
@@ -1834,6 +1834,13 @@ connections. Repair the missing dependency while preserving auto-start settings
 and explicit stops. Reserve retries for failures classified as retryable, rather
 than treating every unready component as a failed constructor.
 
+An empty graph and an unconnected declaration are valid starting points.
+A connected output without its required stream binding is not: that connection
+is rejected before processing starts. A successful `DrasiLib::start()` does not
+mean every declared component is running; wait on the particular component you
+need. The instance host remains available for management while dependencies are
+missing after library startup returns.
+
 **Try it.** In your copied `main.rs`, find the default edge list in
 `build_application` and temporarily remove `("inventory", query_id)`, leaving
 `(query_id, "alerts")`. Run `cargo run --locked`. The graph declaration and
@@ -2091,19 +2098,56 @@ lifecycle metrics at their respective owners. Useful Stockroom signals include:
 Your application chooses a metrics exporter or endpoint and exposes the
 measurements it needs.
 
-`DrasiLib::get_query_progress_metrics()` reads actual committed input and produced
-output positions for ready queries. It performs no storage or network I/O, so a
-host can use it in an OpenTelemetry observable-instrument callback. It includes
-component generation/operation, output generation and configuration hash; keep
-those identities with the measurements. Unavailable queries are omitted, not
-reported as zero. Filtered inputs can advance input without producing output.
-Drasi Server provides an optional application-owned OTLP exporter for this first
-progress slice; it does not install a global provider in an embedding application.
+`DrasiLib::get_query_progress_metrics()` is a synchronous read of actual query
+input and output progress. It performs no storage or network I/O, so an embedding
+application can call it from an OpenTelemetry observable-instrument callback.
+It does not install an exporter or replace a global meter provider.
+
+| Value | Meaning |
+|---|---|
+| `input_sequences` | The committed logical position for each source or stream; not an ingress receipt or count of results |
+| `output_sequence` | The produced result position, at least as recent as the reported input; not a destination acknowledgement |
+| `persistent` | Whether both input and output progress use persistent storage |
+| Component generation/operation, output generation and configuration hash | Which component and output state the measurement describes |
+
+An input filtered out by the query still advances input progress, but not output
+progress. Unready, stopped or unsupported queries are omitted, never reported as
+zero. A terminal graph or a failed read returns an error. Do not replace that
+error with zero or reuse an old collector sample as a fresh observation.
+
+When hosting through **Drasi Server**, add this optional section at the root of
+the Server configuration, outside `instances`:
+
+```yaml
+metrics:
+  endpoint: "${OTEL_METRICS_ENDPOINT:-http://127.0.0.1:4318/v1/metrics}"
+  exportIntervalMs: 1000
+  exportTimeoutMs: 1000
+```
+
+This sends OTLP/HTTP JSON to an existing collector; it does not start one. The
+`drasi.progress` scope exports `drasi.query.progress.sequence` with
+`drasi.progress.stage` set to `input.committed` or `output.produced`. Input points
+identify the source/stream. All points carry instance/query and component/output
+identity; `service.instance.id` changes when the metrics runtime is reconstructed.
+See the [Server metrics reference](https://github.com/drasi-project/drasi-server/blob/006b038cffffd948cd54d4b4fb71f57e5e27aa02/README.md#opentelemetry-progress-metrics)
+for limits, attributes and authentication settings.
+
+With `metrics` absent, Server creates no metrics exporter or worker. When enabled,
+a restart creates a new provider and reads progress from the actual reconstructed
+queries, not from the collector. Change the endpoint or intervals by updating
+configuration and restarting Server; there is no live metrics-reconfiguration API.
+Export failures are logged, and shutdown failures are returned. Export and SDK
+shutdown run away from the application's Tokio executor; cancelled cleanup
+retains the worker. This first slice does not export all-component throughput,
+latency, queue pressure or completed destination work.
 
 Progress does not, by itself, mean a workload is finished. Establish the last
-input actually sent, verify every required destination's completed records,
-account for scheduled work, and capture final state at that boundary. Old
-collector samples or a quiet output stream are not substitutes.
+input actually sent, wait for every required query to commit it, verify each
+destination recorded all output through the resulting output position, and
+finalize the capture. Account separately for scheduled work and take final
+snapshots at that completed boundary. Quiet output, matching record counts and
+logger flush alone cannot prove these steps.
 
 Profiling metadata measures elapsed intervals, including queueing and storage,
 not CPU time. Source-to-query delay, evaluation, output dispatch, and destination
@@ -2399,9 +2443,21 @@ all-or-nothing state matters.
 
 `WalProvider` stores partitioned input history. Register a partition before
 appending, honor its capacity policy, and preserve the meaning of its allocated
-sequence. A head sequence can exceed the last persisted event after a failed
-write. `WalSourceResource` and `WalReplaySource` can expose an actual WAL and
-processing progress owner as a native replay source.
+sequence. The redb provider's `head_sequence()` reads the committed storage
+counter, not an allocated-but-uncommitted sequence. It can remain positive after
+old events have been pruned; that does not mean those events are still replayable.
+Missing requested history fails explicitly, including a fully pruned log.
+`WalSourceResource` and `WalReplaySource` can expose an actual WAL and processing
+progress owner as a native replay source.
+
+Ordinary HTTP/gRPC sources protect retained WAL input while their initial query
+subscriptions are restored. The first fast subscriber cannot authorize deletion
+of data still needed by a slower one. Replay registration is protected against
+pruning, and stop awaits submitted pruning work. If you host these plugins
+directly rather than through DrasiLib, call `on_subscriptions_complete()` only
+after establishing every required initial subscription; a timer is not a
+replacement for that signal. See the
+[source-authoring contract](../../../components/sources/README.md#pattern-b--transient-source-with-drasi-wal-durability).
 
 A WAL, query outbox, consumer progress store, and configuration store are not
 interchangeable. Each proves completion only at its own boundary.
@@ -3541,6 +3597,14 @@ source times, grouped totals, and temporal retractions.
 Exercise both current-thread and multi-threaded Tokio runtimes when supporting
 both hosts.
 
+The [completed Building Comfort reference and recovery](https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2)
+is an example of that evidence with the external Server and rebuilt ordinary
+gRPC adapters. Both queries processed 100,000 inputs; after SIGKILL, the aggregate
+restored input 88,748 and replayed 11,252 remaining events. Exact delivery and
+independently checked final snapshots matched the completed reference. This is
+the standard-gRPC/source-WAL profile, not proof for every native pipe, transport,
+effect or crash window. The wider application matrix still needs its own runs.
+
 Measure boundedness under the intended workload. Include full envelope sizes,
 retained membership, outbox growth, component-local expansion, backend memory,
 and cleanup latency. A queue capacity is not an RSS bound; a fast demonstration
@@ -4293,10 +4357,12 @@ current journal head. Dropping a reader, observing a disconnected subscriber
 or editing a stored member list cannot release an obligation. Failed cleanup
 or uncertain configuration acceptance must keep the old ownership fenced.
 
-The shared-source qualification covers drained reconstruction and explicit
+The native shared-source qualification covers drained reconstruction and explicit
 drain-barrier replacement, not cold reconstruction with undrained persistent
 input-pipe frames. Do not infer the missing queued counters from handled
 progress or erase the queue to make a replacement start.
+The ordinary gRPC source-WAL recovery case described in Chapter 14 is a separate
+supported path; it does not close this native input-pipe limitation.
 
 #### Preview changes to unmanaged topology
 
@@ -4884,6 +4950,8 @@ The book supplies the application path; the reference supplies the catalog.
 | Supply state and credentials | `state_store`, `identity`, `secret_store`, `wal`; `ComputationIndexProvider` in `drasi-core` |
 | Save desired configuration | `management`; [managed configuration](../managed-configuration.md) |
 | Inspect and observe | `ComputationInspector`, `ComponentGraphView`, `DrasiLib::get_source_schema`, `get_graph_schema`, `observability`, `metrics`, `profiling` |
+| Observe committed query progress | `DrasiLib::get_query_progress_metrics`; [progress measurements](#follow-pressure-and-progress) and Server's optional OTLP exporter |
+| Understand internal data representation and flow | [Internal data design](../computation-graph-data-design.md): records, standard schemas, transport, query transformations, persistence and replay |
 | Handle public failures | `DrasiError`, `error::OperationFailures`, `GraphError`, lifecycle reports |
 | Package native code | [Native plugin SDK](../../../components/computation-plugin-sdk/README.md) and [Host SDK](../../../components/host-sdk/README.md) |
 | Host independent processes | [Instance host](../../../components/instance-host/README.md) and [bridges](../../../components/computation-plugins/common/bridge/README.md) |

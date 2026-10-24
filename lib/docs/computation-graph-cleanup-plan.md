@@ -5,13 +5,34 @@ controlled performance comparison and Server configuration/API consolidation.
 Stage 6 remains in progress: the named HTTP/gRPC/SSE/PostgreSQL/MySQL/SQLite, generic fan-out
 and real-consumer slices are qualified, but the full native-only inventory and
 old-consumer cutover are not complete. Stages 7-9 remain pending.**
-**Updated: 21 October 2026.**
-**Code baseline:** Core `e900b70d932e350d4d1ec7acb36ae2ba3cbf913c`
-(guide refresh over implementation `54735c056ca45bd784462cd462c14f0a514de442`),
-Server `15dafa225ac76ba9868452a7082f693027621ad7`, plus the current
+**Status reconciled: 24 October 2026.**
+**Published readiness baseline:** Core `fccbd5da45409c64676e153104cd934be94b732a`
+(implementation `3dd8a27d4d7d38e48031be0d3774d255e35300e0`),
+Server `006b038cffffd948cd54d4b4fb71f57e5e27aa02`, plus the current
 [remaining-work inventory](computation-graph-remaining-work.md).
-Test-infra is at `e4636204982a461fbfefd637ade22be9ac617071`; Learning is at
+Test-infra is at `13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57`; Learning is at
 `5320f0b8ae06fa8789edf7ec4c763939ebb599d6`.
+
+**Current priority:** Runtime production readiness does not require converting
+every plugin first. Ordinary sources/reactions remain supported graph-owned
+adapters. The PR-feedback, library-test and concrete PR-01 through PR-07 recovery
+work is complete for its stated scope. The broader native-only cleanup stages
+below remain a separate target, not a prerequisite for that result.
+
+The completed standard-gRPC Building Comfort check used the actual Server,
+rebuilt ordinary gRPC libraries and external test-service. Both queries committed
+100,000 inputs; SIGKILL recovery replayed 11,252 pending aggregate inputs. Exact
+delivery and independently checked final state matched the uninterrupted run.
+The [v2 evidence](https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2)
+preserves build hashes, fresh OTel observations, complete receiver batches,
+12 room rows and 3 floor rows. The incomplete v1 capture remains unchanged.
+
+Related published repairs keep a waiting host manageable, distinguish actual
+subscriptions from declared ones, refresh a shutdown revision rejected before
+effects, and prevent startup WAL pruning from deleting a late subscriber's
+input. Optional Server OTel export covers committed query input and produced
+output; all-component measurements remain unfinished. The local recovery pass
+is not a full CI pass or fresh Move-a-wall/GPU Lab qualification.
 
 **Earlier priority change - user directed, 19 October:** complete the HTTP source,
 reaction and bootstrap, gRPC source and reaction, existing SSE reaction/sink,
@@ -22,7 +43,7 @@ ComputationGraph. Other connector families, application/SQLite migration and
 general cleanup are paused unless strictly required by these components.
 This overrides the earlier execution order and explicitly includes SSE.
 
-**Current database priority - user directed, 20 October:** complete MySQL and
+**Earlier database priority - user directed, 20 October:** complete MySQL and
 SQL Server source, bootstrapper and stored-procedure sink, plus SQLite source and
 bootstrapper, in parallel. Preserve working legacy capabilities and compare them
 explicitly with the native implementations. A library build or test-count match
@@ -37,7 +58,7 @@ source/bootstrap ownership coordination and a separate read-only source-schema
 capability. The source library owns the shared initialization engine; the paired
 bootstrap library acquires its existing provider, not another SQL worker.
 
-The current database changes are uncommitted work. Shared schema/coordination
+The database changes described below are published. Shared schema/coordination
 and shutdown ownership fixes are implemented and qualified. SQLite's selected
 source/bootstrap scope is complete, preserving its original Rust/REST behavior
 with real static/dynamic and Server coverage. MySQL's selected source,
@@ -78,7 +99,7 @@ remain outside this active database slice; no SQLite reaction was invented.
 | 6 | Partly complete. Prioritized network/PG slices, MySQL's selected source/bootstrap/sink scope, SQLite's source/bootstrap scope, generic fan-out, composed bootstrap and selected real consumers have static/dynamic proof. Shared per-start credentials are implemented. Deferred/incomplete SQL Server work, other selected families and old consumers still prevent closure. Kafka/SQLite reactions and functional gRPC bootstrap remain excluded. |
 | 7-9 | Pending: old-stack retirement, surviving-code cleanup, and integrated qualification. |
 
-**Current four-family status, 20 October:** HTTP/gRPC now have independent native
+**Four-family qualification record, 20 October:** HTTP/gRPC have independent native
 source/sink libraries and HTTP bootstrap, reusing the legacy authentication,
 mapping, rendering and protocol helpers. Actual static/dynamic graph flows and
 the external Server/test-service legacy/native comparison pass, with exact
@@ -375,18 +396,23 @@ reconciliation, configuration-snapshot and metadata-retirement suites pass.
 
 Raw run logs are saved in the session artifacts as
 `cleanup-stage0-baseline.log`, `cleanup-stage1-*.log` and
-`cleanup-stage2-*.log`. Changes remain uncommitted.
+`cleanup-stage2-*.log`. These are historical run records for changes that have
+since been committed and pushed, not pending implementation.
 
 ## Goal and release policy
 
 Remove unwanted compatibility code, simplify the paths that remain, and update
 all affected consumers without losing required functionality.
 
-This is an intentional **breaking release**. No migration facility, old-API
+The native-only cleanup target is an intentional **breaking release**.
+No migration facility, old-API
 wrapper, previous-format reader, dual-version deployment or rollback to older
 binaries is required. Consumers will use the new interfaces and be rebuilt.
 Tests may adopt new names, request formats and response shapes; they must not
 lose the meaningful behavior they previously checked.
+This is the eventual cleanup target, not permission to remove the ordinary
+adapters currently needed by supported applications or to make that removal a
+runtime-merge prerequisite.
 
 Breaking compatibility does not authorize deleting user data or weakening
 current-version correctness. Normal bootstrap, transactions, source progress,
@@ -1227,6 +1253,12 @@ clear ownership and absence of obsolete code are.
 ## Stage 9 - Integrated qualification and final completion record
 
 **Supporting items:** CW-36/37/41/46/47, not blanket completion of those packages.
+
+The standard-gRPC/source-WAL reference and pending-input crash case is complete,
+as recorded above. The full cleanup-stage qualification is not: remaining
+selected native consumers, broader CI/lint checks and fresh Move-a-wall/GPU Lab
+runs still need their own evidence. Earlier demo passes in this document are
+historical, not verification of the latest OTel/WAL build.
 
 Rebuild the selected Core, Server and actual plugin artifacts. Run the updated
 runtime/connector profiles, public API workflows and demos against that exact
