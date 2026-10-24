@@ -1,5 +1,14 @@
 # ComputationGraph remaining work
 
+**Verified readiness slice:** The concrete PR-01 through PR-07 work is complete:
+valid empty/waiting declarations are covered, the library test profiles pass,
+and the standard-gRPC Building Comfort run now has a completed reference and an
+exact matching-build crash/restart comparison. The
+[versioned evidence](https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2)
+includes 100,000 inputs, complete delivery, independently checked final state and
+replay of 11,252 inputs left pending at the crash. This is a qualified slice, not
+completion of every deployment requirement listed below.
+
 <a id="cw-06"></a>
 
 ## 1. Finish startup and shutdown deadlines (CW-06)
@@ -94,10 +103,18 @@ missing or repeating effects, inventing progress, or deleting queued messages.
 
 **Priority:** High. **Effort:** Medium to large.
 
-**Work:** Prove that all required query processing and destination work finished
-before comparing results. Add genuine completion evidence to Building Comfort
-baseline and recovery captures. Update the requirement checklist to reference
-the newer tests and distinguish proved behavior from incomplete evidence.
+**Work:** Extend proof-bearing completion checks to the remaining required
+transport/deployment profiles. Keep older snapshot-only or advisory workflows
+clearly separate from tests that prove processing and delivery completed.
+Update the requirement checklist as those additional profiles are qualified.
+
+**Verified standard-gRPC profile:** The
+[strict workflow](https://github.com/drasi-project/test-infra/blob/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/.github/workflows/e2e-building-comfort-completion.yml)
+builds matching components and requires a completed reference and SIGKILL
+recovery. Both queries reached input 100,000; all 99,981 room outputs and 49,860
+aggregate outputs matched with no duplicates or reordering. Final state matched
+an independent source replay: 12 room rows and 3 floor rows. The incomplete v1
+reference and the failed pre-fix recovery remain separately identified evidence.
 
 **Finish when:** Incomplete captures cannot pass, and each required behavior has
 an exact expected result and a matching recorded run.
