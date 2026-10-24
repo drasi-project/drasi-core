@@ -135,6 +135,7 @@ impl SalesforceRestClient {
         }
 
         let mut results = Vec::new();
+        let mut remaining_bytes = max_response_bytes;
         const BATCH_SIZE: usize = 100;
         for chunk in ids.chunks(BATCH_SIZE) {
             for id in chunk {
@@ -151,7 +152,7 @@ impl SalesforceRestClient {
                 plan.name
             );
             let mut rows = self
-                .query_records(session, &soql, max_response_bytes, chunk.len())
+                .query_records(session, &soql, &mut remaining_bytes, chunk.len())
                 .await?
                 .into_iter()
                 .map(|row| plan.snapshot(&row))
@@ -170,8 +171,9 @@ impl SalesforceRestClient {
     ) -> Result<Vec<Record>> {
         self.ensure_session_matches_config(session)?;
         let soql = format!("SELECT {} FROM {}", plan.projection(), plan.name);
+        let mut remaining_bytes = max_response_bytes;
         let rows = self
-            .query_records(session, &soql, max_response_bytes, max_rows)
+            .query_records(session, &soql, &mut remaining_bytes, max_rows)
             .await?;
         ensure!(
             rows.len() <= max_rows,
@@ -188,10 +190,9 @@ impl SalesforceRestClient {
         &self,
         session: &SalesforceSessionToken,
         soql: &str,
-        max_response_bytes: usize,
+        remaining_bytes: &mut usize,
         max_rows: usize,
     ) -> Result<Vec<Value>> {
-        let mut total_bytes = 0usize;
         let mut records = Vec::new();
         let mut next_url = Some(self.api_url("query", &session.instance_url));
         let mut query = Some(vec![("q", soql.to_string())]);
@@ -217,12 +218,8 @@ impl SalesforceRestClient {
                 }
                 return Err(error.into());
             }
-            let body = read_bounded(response, max_response_bytes - total_bytes).await?;
-            total_bytes = total_bytes.saturating_add(body.len());
-            ensure!(
-                total_bytes <= max_response_bytes,
-                "Salesforce query response exceeded configured byte limit ({max_response_bytes})"
-            );
+            let body = read_bounded(response, *remaining_bytes).await?;
+            *remaining_bytes -= body.len();
 
             let page: QueryPage = serde_json::from_slice(&body)
                 .context("failed to parse Salesforce query page JSON")?;

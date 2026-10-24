@@ -177,6 +177,12 @@ from Describe cannot be enumerated or advertised as loaded.
 
 ## Observation and convergence
 
+Pub/Sub endpoints must use HTTPS. Plain HTTP is permitted only for loopback
+protocol fixtures, and invalid endpoints are rejected during configuration
+validation and before connecting. Resolved OAuth client secrets are redacted in
+`Debug` output, including enclosing source configurations; serialization still
+preserves the configuration.
+
 Each object's native Pub/Sub feed invalidates record IDs; REST fetches complete
 current values. Periodic complete scans repair missed hints and offline changes.
 Scans continue while native Subscribe response headers are pending.
@@ -254,7 +260,7 @@ different source identity; ordinary discovered-field changes do not.
 | `maxRows` | 100,000 across the source; also the shared dirty-ID budget |
 | `maxEvents` / `retentionHours` | 1,000,000 / 96 |
 | `maxProjectedRowBytes` | 1 MiB including owned edges |
-| `maxScanBytes` | 8 MiB per bounded object fetch |
+| `maxScanBytes` | 8 MiB total response bytes per object fetch, across all ID batches and pages |
 | `maxSpoolBytes` | 8 GiB aggregate journal/mirror/export budget |
 | `maxReplayPageEvents` / `maxReplayPageBytes` | 100 / 1 MiB |
 | `maxSubscribers` / `maxSnapshotLeases` | 16 / 16 |

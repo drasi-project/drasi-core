@@ -104,6 +104,7 @@ pub struct SalesforceSourceConfig {
 impl SalesforceSourceConfig {
     pub fn validate(&self) -> Result<()> {
         self.connection.validate()?;
+        drasi_salesforce_common::SalesforcePubSubClient::validate_endpoint(&self.pubsub_endpoint)?;
         ensure!(
             !self.objects.is_empty() && self.objects.len() <= MAX_OBJECTS,
             "objects must contain between 1 and {MAX_OBJECTS} Salesforce object names"
@@ -214,6 +215,43 @@ mod tests {
             "spoolRoot": "fixture"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn source_config_debug_redacts_resolved_client_secret() {
+        let mut config = config();
+        let drasi_salesforce_common::SalesforceAuthConfig::ClientCredentials {
+            client_secret, ..
+        } = &mut config.connection.auth;
+        *client_secret = "resolved-fixture-secret".into();
+        for output in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(!output.contains("resolved-fixture-secret"), "{output}");
+            assert!(output.contains("<redacted>"), "{output}");
+        }
+    }
+
+    #[test]
+    fn pubsub_endpoint_requires_https_except_for_loopback() {
+        let mut config = config();
+        for endpoint in [
+            "http://api.pubsub.salesforce.com:7443",
+            "http://localhost.example.com:7443",
+            "http://192.0.2.1:7443",
+            "ftp://127.0.0.1:7443",
+        ] {
+            config.pubsub_endpoint = endpoint.into();
+            let error = config.validate().expect_err(endpoint);
+            assert!(error.to_string().contains("HTTPS"), "{error:#}");
+        }
+        for endpoint in [
+            "https://api.pubsub.salesforce.com:7443",
+            "http://localhost:7443",
+            "http://127.0.0.1:7443",
+            "http://[::1]:7443",
+        ] {
+            config.pubsub_endpoint = endpoint.into();
+            config.validate().expect(endpoint);
+        }
     }
 
     #[test]

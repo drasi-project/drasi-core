@@ -169,6 +169,75 @@ async fn query_errors_identify_only_schema_invalidations_and_bound_the_body() ->
 }
 
 #[tokio::test]
+async fn id_fetch_budget_spans_batches_and_pages() -> Result<()> {
+    let server = MockServer::start().await;
+    let config = auth_connection(&server);
+    let session = SalesforceSessionToken {
+        access_token: "fixture".into(),
+        instance_url: server.uri(),
+        org_id: config.expected_org_id.clone(),
+    };
+    let rest = SalesforceRestClient::new(config)?;
+    let ids: Vec<_> = (0..101).map(|index| format!("001{index:012}AAA")).collect();
+    let record = |index: usize| {
+        json!({
+            "Id": ids[index],
+            "Name": "x".repeat(256),
+            "Phone": null,
+            "Description": null,
+            "LastModifiedDate": "2023-11-14T22:13:20.000+0000"
+        })
+    };
+    let pages = [
+        json!({
+            "records": [record(0)],
+            "done": false,
+            "nextRecordsUrl": "/services/data/v68.0/query/page-2"
+        }),
+        json!({"records": [record(1)], "done": true}),
+        json!({"records": [record(100)], "done": true}),
+    ]
+    .map(|page| serde_json::to_vec(&page).unwrap());
+    for (index, page) in [(0, &pages[0]), (100, &pages[2])] {
+        let quoted_id = format!("'{}'", ids[index]);
+        Mock::given(method("GET"))
+            .and(path("/services/data/v68.0/query"))
+            .and(move |request: &wiremock::Request| {
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(name, value)| name == "q" && value.contains(&quoted_id))
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(page.clone()))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/services/data/v68.0/query/page-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(pages[1].clone()))
+        .mount(&server)
+        .await;
+
+    let total_bytes: usize = pages.iter().map(Vec::len).sum();
+    let error = rest
+        .fetch_records_by_ids(&session, &ObjectPlan::account(), &ids, total_bytes - 1)
+        .await
+        .expect_err("all batches and pages must share one response-byte budget");
+    assert!(format!("{error:#}").contains("byte limit"), "{error:#}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    let rows = rest
+        .fetch_records_by_ids(&session, &ObjectPlan::account(), &ids, total_bytes)
+        .await?;
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec![ids[0].as_str(), ids[1].as_str(), ids[100].as_str()]
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    Ok(())
+}
+
+#[tokio::test]
 async fn response_budget_is_enforced_on_chunked_bodies() -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -285,6 +354,19 @@ fn local_session(instance_url: String) -> SalesforceSessionToken {
         instance_url,
         org_id: "test-org".into(),
     }
+}
+
+#[tokio::test]
+async fn pubsub_rejects_remote_http_before_connecting() -> Result<()> {
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        SalesforcePubSubClient::connect("http://192.0.2.1:7443"),
+    )
+    .await
+    .expect("unsafe transport must be rejected before attempting a connection");
+    let error = result.err().expect("remote HTTP must be rejected");
+    assert!(error.to_string().contains("HTTPS"), "{error:#}");
+    Ok(())
 }
 
 #[tokio::test]

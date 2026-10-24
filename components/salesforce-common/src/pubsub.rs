@@ -5,6 +5,7 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::Request;
 
 use crate::auth::SalesforceSessionToken;
+use crate::config::is_loopback_host;
 use crate::projection::ObjectPlan;
 use crate::proto::{self, pub_sub_client::PubSubClient, FetchRequest, FetchResponse, ReplayPreset};
 
@@ -67,13 +68,24 @@ impl Feed {
 }
 
 impl SalesforcePubSubClient {
+    pub fn validate_endpoint(endpoint: &str) -> Result<reqwest::Url> {
+        let url =
+            reqwest::Url::parse(endpoint).context("invalid Salesforce Pub/Sub endpoint URL")?;
+        ensure!(
+            url.scheme() == "https" || (url.scheme() == "http" && is_loopback_host(&url)),
+            "Salesforce Pub/Sub endpoint must use HTTPS except for loopback HTTP fixtures"
+        );
+        Ok(url)
+    }
+
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
         let endpoint = endpoint.into();
-        let mut builder = Endpoint::from_shared(endpoint.clone())
+        let url = Self::validate_endpoint(&endpoint)?;
+        let mut builder = Endpoint::from_shared(url.to_string())
             .context("invalid Salesforce Pub/Sub endpoint URL")?
             .connect_timeout(std::time::Duration::from_secs(20));
 
-        if endpoint.starts_with("https://") {
+        if url.scheme() == "https" {
             builder = builder
                 .tls_config(ClientTlsConfig::new().with_native_roots())
                 .context("failed to configure TLS for Salesforce Pub/Sub client")?;

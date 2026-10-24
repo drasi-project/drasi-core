@@ -60,7 +60,7 @@ impl SalesforceConnectionConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -76,6 +76,23 @@ pub enum SalesforceAuthConfig {
         #[serde(rename = "clientSecret", alias = "client_secret")]
         client_secret: String,
     },
+}
+
+impl std::fmt::Debug for SalesforceAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClientCredentials {
+                token_url,
+                client_id,
+                ..
+            } => f
+                .debug_struct("ClientCredentials")
+                .field("token_url", token_url)
+                .field("client_id", client_id)
+                .field("client_secret", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl SalesforceAuthConfig {
@@ -135,9 +152,14 @@ pub enum InitialCursorBehavior {
     Earliest,
 }
 
-fn is_loopback_host(url: &reqwest::Url) -> bool {
+pub(crate) fn is_loopback_host(url: &reqwest::Url) -> bool {
     url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
     })
 }
 
@@ -152,6 +174,31 @@ mod tests {
             client_id: "client-id".to_string(),
             client_secret: "client-secret".to_string(),
         }
+    }
+
+    #[test]
+    fn resolved_auth_debug_redacts_client_secret() {
+        let config = SalesforceConnectionConfig {
+            instance_url: "https://example.salesforce.com".into(),
+            expected_org_id: "00D000000000001AAA".into(),
+            api_version: "68.0".into(),
+            auth: auth("https://example.salesforce.com/oauth/token"),
+        };
+        for output in [
+            format!("{:?}", config.auth),
+            format!("{:#?}", config.auth),
+            format!("{config:?}"),
+            format!("{config:#?}"),
+        ] {
+            assert!(!output.contains("client-secret"), "{output}");
+            assert!(output.contains("<redacted>"), "{output}");
+            assert!(output.contains("client-id"), "{output}");
+        }
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["auth"]["clientSecret"],
+            "client-secret",
+            "Debug redaction must not alter persisted configuration"
+        );
     }
 
     #[test]
