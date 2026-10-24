@@ -34,3 +34,4 @@ jobs:
         cargo run -p xtask -- check-publish-dependency-cycles
         cargo test --workspace --exclude drasi-host-sdk
         make test-host-sdk
+        make test-salesforce-ffi
