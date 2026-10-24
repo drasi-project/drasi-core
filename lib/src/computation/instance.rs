@@ -256,17 +256,26 @@ async fn finish_driver(
     if control.observed().deployment.is_some() {
         // The existing driver owns and polls this drain even if a shutdown
         // waiter disappears. Keep real input owners live until producers stop.
-        let stop =
-            control.stop_components(control.desired_snapshot().revision, GraphSelection::All);
-        tokio::pin!(stop);
-        let report = tokio::select! {
-            result = &mut stop => result,
-            result = &mut run => return driver_result(result),
-        };
-        match report {
-            Ok(report) if report.summary == OperationSummary::Completed => {}
-            Ok(report) => failures.push(super::v1::LifecycleReportError::Stop(report).into()),
-            Err(error) => failures.push(error.into()),
+        loop {
+            let stop =
+                control.stop_components(control.desired_snapshot().revision, GraphSelection::All);
+            tokio::pin!(stop);
+            let report = tokio::select! {
+                result = &mut stop => result,
+                result = &mut run => return driver_result(result),
+            };
+            match report {
+                // A previously accepted edit may advance the revision before
+                // Stop is admitted. This rejection occurs before stop effects.
+                Err(GraphError::StaleRevision { expected, actual }) => {
+                    log::debug!("Refreshing rejected shutdown revision {expected:?} to {actual:?}");
+                    continue;
+                }
+                Ok(report) if report.summary == OperationSummary::Completed => {}
+                Ok(report) => failures.push(super::v1::LifecycleReportError::Stop(report).into()),
+                Err(error) => failures.push(error.into()),
+            }
+            break;
         }
     }
     // Deployment may still own an unfinished constructor. Preserve the
@@ -831,6 +840,83 @@ impl Drop for PendingComponents {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computation::v1::{
+        ComponentDescriptor, ComponentId, ComputationComponent, ComputationService, LifecyclePolicy,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    struct IdleService {
+        descriptor: ComponentDescriptor,
+        stops: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ComputationComponent for IdleService {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ComputationService for IdleService {
+        async fn run(&mut self) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    async fn shutdown_after_accepted_revision_change() -> anyhow::Result<()> {
+        let id = ComponentId::try_new("idle")?;
+        let stops = Arc::new(AtomicUsize::new(0));
+        let mut graph = ComputationGraph::builder("shutdown-revision")
+            .service(Box::new(IdleService {
+                descriptor: ComponentDescriptor::try_new(id.clone(), vec![])?,
+                stops: stops.clone(),
+            }))
+            .build()?;
+        let run = graph.start()?;
+        let control = run.control();
+        tokio::pin!(run);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                report = control.startup_report() => {
+                    assert_eq!(report?.summary, OperationSummary::Completed);
+                    Ok(())
+                }
+                result = &mut run => anyhow::bail!("driver ended during startup: {result:?}"),
+            }
+        })
+        .await??;
+        let revision = control.desired_snapshot().revision;
+        let change =
+            control.set_lifecycle_policy(revision, id, LifecyclePolicy { auto_start: false });
+        tokio::pin!(change);
+        assert!(futures::poll!(&mut change).is_pending());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            finish_driver(&control, run.as_mut()),
+        )
+        .await??;
+        assert!(change.await?.0 > revision.0);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_retries_only_rejected_revision_on_current_thread() -> anyhow::Result<()> {
+        shutdown_after_accepted_revision_change().await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_retries_only_rejected_revision_on_multiple_threads() -> anyhow::Result<()> {
+        shutdown_after_accepted_revision_change().await
+    }
 
     #[test]
     fn driver_watch_retains_graph_and_provider_causes_across_clones() {
