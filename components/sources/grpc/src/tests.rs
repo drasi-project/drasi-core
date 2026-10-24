@@ -16,19 +16,150 @@
 
 use super::*;
 
+async fn restored_log_waits_for_the_slow_subscriber() -> anyhow::Result<()> {
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+    use drasi_lib::{DurabilityConfig, WalProvider};
+    use std::sync::atomic::Ordering;
+
+    let directory = tempfile::tempdir()?;
+    let id = "startup-wal";
+    let durability = DurabilityConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    {
+        let seed = drasi_wal_redb::RedbWalProvider::new(directory.path());
+        seed.register(id, durability.to_wal_config()).await?;
+        for sequence in 1..=100 {
+            seed.append(
+                id,
+                &SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(id, &sequence.to_string()),
+                            labels: Arc::from([Arc::from("Item")]),
+                            effective_from: sequence,
+                        },
+                        properties: ElementPropertyMap::new(),
+                    },
+                },
+            )
+            .await?;
+        }
+    }
+    let wal = Arc::new(drasi_wal_redb::RedbWalProvider::new(directory.path()));
+    let source = GrpcSource::new(
+        id,
+        GrpcSourceConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            durability: Some(durability),
+            ..Default::default()
+        },
+    )?;
+    let (updates, _observer) = tokio::sync::mpsc::channel(16);
+    let mut context = drasi_lib::SourceRuntimeContext::new("fixture", id, None, updates, None);
+    context.wal_provider = Some(wal.clone());
+    source.initialize(context).await;
+    source.start().await?;
+    let settings = |query: &str, sequence| drasi_lib::config::SourceSubscriptionSettings {
+        source_id: id.into(),
+        query_id: query.into(),
+        nodes: Default::default(),
+        relations: Default::default(),
+        enable_bootstrap: false,
+        resume_from: None,
+        resume_sequence: Some(sequence),
+        request_position_handle: true,
+    };
+    let fast = source.subscribe(settings("fast", 100)).await?;
+    source.base.prune_confirmed_wal(wal.as_ref()).await?;
+    assert_eq!(
+        wal.event_count(id).await?,
+        100,
+        "unregistered recovery consumer was pruned"
+    );
+    let mut slow = source.subscribe(settings("slow", 80)).await?;
+    source.on_subscriptions_complete().await;
+    source.base.prune_confirmed_wal(wal.as_ref()).await?;
+    assert_eq!(wal.event_count(id).await?, 20);
+    for sequence in 81..=100 {
+        let event = tokio::time::timeout(Duration::from_secs(2), slow.receiver.recv()).await??;
+        assert_eq!(event.sequence, sequence);
+        assert_eq!(event.source_id, id);
+    }
+    slow.position_handle
+        .as_ref()
+        .unwrap()
+        .store(100, Ordering::Release);
+    source.base.prune_confirmed_wal(wal.as_ref()).await?;
+    assert_eq!(wal.event_count(id).await?, 0);
+    assert!(matches!(
+        wal.read_from(id, 81).await,
+        Err(drasi_lib::WalError::PositionUnavailable {
+            oldest_available: None,
+            ..
+        })
+    ));
+    drop((fast, slow));
+    source.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wal_restart_preserves_late_subscriber_current_thread() -> anyhow::Result<()> {
+    restored_log_waits_for_the_slow_subscriber().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_restart_preserves_late_subscriber_multiple_threads() -> anyhow::Result<()> {
+    restored_log_waits_for_the_slow_subscriber().await
+}
+
 #[tokio::test]
 async fn stop_joins_the_wal_pruner() {
     let source = GrpcSource::new("pruner", GrpcSourceConfig::default()).unwrap();
     let (started, ready) = tokio::sync::oneshot::channel();
+    let mut stopping = source.base.subscribe_wal_pruning_stop();
     let task = tokio::spawn(async move {
         started.send(()).unwrap();
-        std::future::pending::<()>().await;
+        stopping.wait_for(|stopping| *stopping).await.unwrap();
     });
     let worker = task.abort_handle();
     *source.prune_task.write().await = Some(task);
     ready.await.unwrap();
     source.stop().await.unwrap();
     assert!(worker.is_finished());
+    assert!(source.prune_task.read().await.is_none());
+}
+
+#[tokio::test]
+async fn cancelled_stop_retains_submitted_pruning_and_rejects_restart() {
+    let source = GrpcSource::new("pruner", GrpcSourceConfig::default()).unwrap();
+    let (submitted, submission) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *source.prune_task.write().await = Some(tokio::spawn({
+        let completed = completed.clone();
+        async move {
+            submitted.send(()).unwrap();
+            released.await.unwrap();
+            completed.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }));
+    submission.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), source.stop())
+            .await
+            .is_err()
+    );
+    assert!(source.prune_task.read().await.is_some());
+    assert!(source.start().await.is_err());
+    release.send(()).unwrap();
+    source.stop().await.unwrap();
+    assert!(completed.load(std::sync::atomic::Ordering::Acquire));
     assert!(source.prune_task.read().await.is_none());
 }
 

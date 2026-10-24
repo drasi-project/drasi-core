@@ -1624,6 +1624,19 @@ measurements identify processing progress, not completed external effects or a
 finished future queue. Recovery checks still need actual receiver records and a
 known final input boundary; a retained collector sample is not fresh proof.
 
+Ordinary HTTP/gRPC WAL cleanup must not use the first restored subscriber as the
+whole recovery group. `SourceBase::begin_wal_subscriptions` holds cleanup for a
+retained log until actual required subscriptions exist. The runtime checks
+subscription readiness and notifies each completed subscription batch once,
+including late binding, without requiring ordinary configuration from opaque
+native query roles. Direct plugin hosts own the equivalent completion signal.
+
+Replay registration and pruning share the position-handle lock. Register the
+resume position before reading history and retain pruning ownership through the
+actual storage operation; cancellation of a stop waiter must not abandon a prune.
+WAL heads describe committed storage, not an allocated-but-uncommitted sequence.
+A positive head with no requested history is a gap, never successful empty replay.
+
 ## Making and validating a change
 
 ### Keep the change in its owning layer

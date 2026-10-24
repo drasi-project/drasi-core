@@ -79,6 +79,12 @@ messages still in persistent input queues. Saved consumer progress alone does
 not describe every queued message or its transport number. Extend source-history
 and initial-loading checks to the remaining required connectors.
 
+**Implemented repair:** Ordinary HTTP/gRPC WAL cleanup waits for the actual
+startup subscription batch, protects replay registration against pruning, and
+retains submitted cleanup through cancellation. Missing retained history fails
+explicitly. This closes the discovered fast-subscriber/slow-subscriber startup
+race; it does not qualify every native persistent-input-pipe restart profile.
+
 **Finish when:** A fresh process restores the exact outstanding work without
 missing or repeating effects, inventing progress, or deleting queued messages.
 

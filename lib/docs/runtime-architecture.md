@@ -320,7 +320,7 @@ The fingerprint covers parsed Rust sources and all four scoped crate manifests.
 
 ## Alphabetical type inventory
 
-Generated from **365 source files**; **1214 named types**. Source fingerprint: `fnv1a64:f27af90110d70a57`.
+Generated from **365 source files**; **1216 named types**. Source fingerprint: `fnv1a64:4f37d65860c2041b`.
 
 Names below are definition-site paths, not duplicate public re-export paths. Block-local declarations use an explicit `<local@line>` lexical identifier because Rust provides no importable path for them. Traits and aliases are included, but are not extra runtime objects.
 
@@ -886,8 +886,9 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::runtime::native_query::QueryResultReader` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L1152).
 - `drasi_lib::computation::runtime::reaction::ReactionInstance` — struct; [source](../../lib/src/computation/runtime/reaction.rs#L28).
 - `drasi_lib::computation::runtime::snapshot::ProviderProjection` — struct; [source](../../lib/src/computation/runtime/snapshot.rs#L18).
-- `drasi_lib::computation::runtime::source::Life` — struct; [source](../../lib/src/computation/runtime/source.rs#L28).
-- `drasi_lib::computation::runtime::source::SourceInstance` — struct; [source](../../lib/src/computation/runtime/source.rs#L36).
+- `drasi_lib::computation::runtime::source::Life` — struct; [source](../../lib/src/computation/runtime/source.rs#L31).
+- `drasi_lib::computation::runtime::source::SourceInstance` — struct; [source](../../lib/src/computation/runtime/source.rs#L58).
+- `drasi_lib::computation::runtime::source::SubscriptionObserver` — struct; [source](../../lib/src/computation/runtime/source.rs#L39).
 - `drasi_lib::computation::v1::bounded_pipe::BoundedPipe` — struct; [source](../../lib/src/computation/v1/bounded_pipe.rs#L431).
 - `drasi_lib::computation::v1::bounded_pipe::BoundedPipeConfig` — struct; [source](../../lib/src/computation/v1/bounded_pipe.rs#L135).
 - `drasi_lib::computation::v1::bounded_pipe::ByteBoundedPipeConfig` — struct; [source](../../lib/src/computation/v1/bounded_pipe.rs#L166).
@@ -1222,17 +1223,18 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::plugin_services::PluginObservations` — struct; [source](../../lib/src/computation/v1/plugin_services.rs#L47).
 - `drasi_lib::computation::v1::plugin_services::ScopedStateStore` — struct; [source](../../lib/src/computation/v1/plugin_services.rs#L547).
 - `drasi_lib::computation::v1::plugin_services::ScopedWal` — struct; [source](../../lib/src/computation/v1/plugin_services.rs#L604).
-- `drasi_lib::computation::v1::plugin_source::LegacySourceBootstrap` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L880).
-- `drasi_lib::computation::v1::plugin_source::LegacySourceSubscription` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L394).
+- `drasi_lib::computation::v1::plugin_source::LegacySourceBootstrap` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L904).
+- `drasi_lib::computation::v1::plugin_source::LegacySourceSubscription` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L415).
 - `drasi_lib::computation::v1::plugin_source::SharedBootstrap` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L54).
 - `drasi_lib::computation::v1::plugin_source::SourceLife` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L36).
-- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapter` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L746).
-- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapterFactory` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L1006).
+- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapter` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L770).
+- `drasi_lib::computation::v1::plugin_source::SourcePluginAdapterFactory` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L1030).
 - `drasi_lib::computation::v1::plugin_source::SourcePluginConstructor` — trait; [source](../../lib/src/computation/v1/plugin_source.rs#L49).
-- `drasi_lib::computation::v1::plugin_source::SourcePluginHost` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L68).
-- `drasi_lib::computation::v1::plugin_source::SourceSubscriptionOptions` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L341).
-- `drasi_lib::computation::v1::plugin_source::SubscriptionPhase` — enum; [source](../../lib/src/computation/v1/plugin_source.rs#L377).
-- `drasi_lib::computation::v1::plugin_source::SubscriptionState` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L386).
+- `drasi_lib::computation::v1::plugin_source::SourcePluginHost` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L76).
+- `drasi_lib::computation::v1::plugin_source::SourceSubscriptionObserver` — trait; [source](../../lib/src/computation/v1/plugin_source.rs#L68).
+- `drasi_lib::computation::v1::plugin_source::SourceSubscriptionOptions` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L362).
+- `drasi_lib::computation::v1::plugin_source::SubscriptionPhase` — enum; [source](../../lib/src/computation/v1/plugin_source.rs#L398).
+- `drasi_lib::computation::v1::plugin_source::SubscriptionState` — struct; [source](../../lib/src/computation/v1/plugin_source.rs#L407).
 - `drasi_lib::computation::v1::producer_progress::GraphInputProgress` — struct; [source](../../lib/src/computation/v1/producer_progress.rs#L54).
 - `drasi_lib::computation::v1::producer_progress::PositionedInput` — struct; [source](../../lib/src/computation/v1/producer_progress.rs#L66).
 - `drasi_lib::computation::v1::producer_progress::QueryInputOwner` — struct; [source](../../lib/src/computation/v1/producer_progress.rs#L31).
@@ -1748,7 +1750,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::instance_ops` | 402 | 1 |
 | `drasi_lib::computation::internal` | 1 | 0 |
 | `drasi_lib::computation::internal::query_state` | 213 | 4 |
-| `drasi_lib::computation::runtime` | 1990 | 7 |
+| `drasi_lib::computation::runtime` | 2035 | 7 |
 | `drasi_lib::computation::runtime::component` | 318 | 4 |
 | `drasi_lib::computation::runtime::events` | 153 | 1 |
 | `drasi_lib::computation::runtime::inspection` | 786 | 0 |
@@ -1756,7 +1758,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::runtime::query_assembly` | 631 | 0 |
 | `drasi_lib::computation::runtime::reaction` | 257 | 1 |
 | `drasi_lib::computation::runtime::snapshot` | 217 | 1 |
-| `drasi_lib::computation::runtime::source` | 180 | 2 |
+| `drasi_lib::computation::runtime::source` | 222 | 3 |
 | `drasi_lib::computation::v1` | 122 | 0 |
 | `drasi_lib::computation::v1::binary_codec` | 1 | 0 |
 | `drasi_lib::computation::v1::bounded_pipe` | 420 | 14 |
@@ -1809,7 +1811,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::v1::pipeline` | 1173 | 5 |
 | `drasi_lib::computation::v1::plugin_reaction` | 1336 | 11 |
 | `drasi_lib::computation::v1::plugin_services` | 503 | 10 |
-| `drasi_lib::computation::v1::plugin_source` | 1177 | 11 |
+| `drasi_lib::computation::v1::plugin_source` | 1200 | 12 |
 | `drasi_lib::computation::v1::ports` | 1 | 0 |
 | `drasi_lib::computation::v1::producer_progress` | 457 | 3 |
 | `drasi_lib::computation::v1::qos_pipe` | 1820 | 21 |
@@ -1899,7 +1901,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::schema` | 1 | 0 |
 | `drasi_lib::secret_store` | 55 | 2 |
 | `drasi_lib::sources` | 27 | 1 |
-| `drasi_lib::sources::base` | 996 | 2 |
+| `drasi_lib::sources::base` | 1066 | 2 |
 | `drasi_lib::sources::component_graph_source` | 336 | 1 |
 | `drasi_lib::sources::durability_config` | 1 | 0 |
 | `drasi_lib::sources::future_queue_source` | 169 | 2 |

@@ -1,7 +1,7 @@
 # The drasi-lib developer guide
 
-**Development API snapshot: 21 October 2026.** This guide describes the current
-checkout, including the native MySQL/SQLite and shared Host additions. Use
+**Development API snapshot: 24 October 2026.** This guide describes the current
+checkout, including native MySQL/SQLite, shared Host and query-progress additions. Use
 matching Core/Server sources and rebuilt plugin libraries; an older published
 commit or registry binary does not contain all of these interfaces.
 

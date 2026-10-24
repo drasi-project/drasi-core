@@ -899,6 +899,7 @@ impl Runtime {
             self.services.clone(),
             self.changed.clone(),
             self.control()?,
+            Arc::downgrade(self),
         );
         let handle = self
             .register(
@@ -1563,6 +1564,7 @@ impl Runtime {
             self.services.clone(),
             self.changed.clone(),
             self.control()?,
+            Arc::downgrade(self),
         );
         let replacement = self
             .replace_record(
@@ -1811,18 +1813,61 @@ impl Runtime {
         }
         Ok(())
     }
-    pub(crate) async fn subscriptions_complete(&self) -> anyhow::Result<()> {
+    pub(crate) async fn subscriptions_complete(self: &Arc<Self>) -> anyhow::Result<()> {
+        let publication = self.control()?.registry_snapshot();
+        let ordinary = self.ordinary_queries_at(&publication)?;
+        let mut queries = ordinary
+            .keys()
+            .map(|id| self.native_query_configuration_at(&publication, id.as_str()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for node in publication.desired.nodes.iter() {
+            let id = node.descriptor.id();
+            if !ordinary.contains_key(id) {
+                if let Some(api) = publication.query_api(id) {
+                    queries.push(api.config.clone());
+                }
+            }
+        }
         let sources: Vec<_> = self
             .current_records()
             .await?
             .values()
             .filter_map(|record| match &record.value {
-                Value::Source(source) => Some(source.source.clone()),
+                Value::Source(source) => Some(source.clone()),
                 _ => None,
             })
             .collect();
         for source in sources {
-            source.on_subscriptions_complete().await;
+            let mut complete = true;
+            for query in queries.iter().filter(|query| {
+                query
+                    .sources
+                    .iter()
+                    .any(|input| input.source_id == source.source.id())
+            }) {
+                let id = ComponentId::try_new(query.id.as_str())?;
+                let requested = query.auto_start
+                    || publication
+                        .observed
+                        .components
+                        .get(&id)
+                        .is_some_and(|state| state.started || state.lifecycle_requested);
+                if requested {
+                    let expected = query
+                        .sources
+                        .iter()
+                        .map(|input| &input.source_id)
+                        .collect::<BTreeSet<_>>()
+                        .len();
+                    if self.query(&query.id).await?.subscription_count().await != expected {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                source.notify_subscriptions_complete().await;
+            }
         }
         Ok(())
     }

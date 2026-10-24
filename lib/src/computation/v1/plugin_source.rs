@@ -67,6 +67,12 @@ impl crate::bootstrap::BootstrapProvider for SharedBootstrap {
 
 /// One lifecycle owner for a legacy source, shared by native subscription nodes.
 /// Borrowed hosts never initialize, start, stop, or deprovision the legacy source.
+#[async_trait]
+pub(crate) trait SourceSubscriptionObserver: Send + Sync {
+    fn begin_subscriptions(&self);
+    async fn subscriptions_changed(&self) -> anyhow::Result<()>;
+}
+
 pub struct SourcePluginHost {
     id: String,
     source: Mutex<Arc<dyn Source>>,
@@ -77,6 +83,7 @@ pub struct SourcePluginHost {
     life: tokio::sync::Mutex<SourceLife>,
     observations: PluginObservations,
     expected_subscriptions: AtomicUsize,
+    subscription_observer: Option<Arc<dyn SourceSubscriptionObserver>>,
 }
 
 impl SourcePluginHost {
@@ -85,6 +92,16 @@ impl SourcePluginHost {
     }
     pub fn borrowed(source: Arc<dyn Source>) -> Arc<Self> {
         Self::new(source, LegacyPluginServices::empty("borrowed"), false)
+    }
+    pub(crate) fn borrowed_with_subscription_observer(
+        source: Arc<dyn Source>,
+        observer: Arc<dyn SourceSubscriptionObserver>,
+    ) -> Arc<Self> {
+        let mut host = Self::borrowed(source);
+        Arc::get_mut(&mut host)
+            .expect("new source host")
+            .subscription_observer = Some(observer);
+        host
     }
     pub async fn recreatable(
         constructor: Arc<dyn SourcePluginConstructor>,
@@ -118,6 +135,7 @@ impl SourcePluginHost {
             life: tokio::sync::Mutex::new(SourceLife::default()),
             observations,
             expected_subscriptions: AtomicUsize::new(1),
+            subscription_observer: None,
         })
     }
     pub fn id(&self) -> &str {
@@ -282,6 +300,9 @@ impl SourcePluginHost {
         };
         if notify {
             self.source()?.on_subscriptions_complete().await;
+        }
+        if let Some(observer) = &self.subscription_observer {
+            observer.subscriptions_changed().await?;
         }
         Ok(())
     }
@@ -529,6 +550,9 @@ impl LegacySourceSubscription {
         Ok(())
     }
     async fn subscribe(&self) -> anyhow::Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
+        if let Some(observer) = &self.host.subscription_observer {
+            observer.begin_subscriptions();
+        }
         self.phase.send_replace(SubscriptionPhase::Waiting);
         let result = async {
             loop {

@@ -2695,6 +2695,68 @@ async fn query_start_does_not_wait_for_the_instance_subscription_fence() {
     core.shutdown().await.unwrap();
 }
 
+async fn late_subscriptions_release_the_fence_once_when_actually_bound() {
+    let (source, control) = ControlledSource::new("source");
+    control.auto_start.store(true, Ordering::Release);
+    let mut fast = config("fast", Some("source"));
+    fast.auto_start = true;
+    let core = Arc::new(
+        builder()
+            .with_source(source)
+            .with_query(fast)
+            .build()
+            .await
+            .unwrap(),
+    );
+    core.start().await.unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 1);
+    control.pending_subscription.store(true, Ordering::Release);
+    let mut slow = config("slow", Some("source"));
+    slow.auto_start = true;
+    let adding = tokio::spawn({
+        let core = core.clone();
+        async move { core.add_query(slow).await }
+    });
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        control.subscription_entered.notified(),
+    )
+    .await
+    .unwrap();
+    core.source_manager()
+        .subscriptions_complete()
+        .await
+        .unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 1);
+    control.pending_subscription.store(false, Ordering::Release);
+    control.subscription_release.notify_one();
+    adding.await.unwrap().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        core.computation_component("slow").unwrap().wait_started(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 2);
+    core.source_manager()
+        .subscriptions_complete()
+        .await
+        .unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 2);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_subscription_fence_current_thread() {
+    late_subscriptions_release_the_fence_once_when_actually_bound().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_subscription_fence_multiple_threads() {
+    late_subscriptions_release_the_fence_once_when_actually_bound().await;
+}
+
 #[tokio::test]
 async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failure() {
     for fail in [false, true] {

@@ -1,5 +1,12 @@
 # HTTP Source
 
+**Restart retention:** automatic WAL cleanup waits for the hosting lifecycle's
+initial subscription-completion signal before using the minimum acknowledged
+position. A fast restored query cannot release input still needed by a later
+subscriber. Direct source hosts must call `on_subscriptions_complete()` after
+establishing all required subscriptions. Missing retained history is an error,
+not a successful empty replay.
+
 A Drasi source plugin that exposes HTTP endpoints for receiving data change events. It supports two mutually exclusive modes: **Standard Mode** for structured events and **Webhook Mode** for receiving arbitrary payloads from external services like GitHub, Shopify, or custom applications.
 
 ## Overview

@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "source_fingerprint": "fnv1a64:f27af90110d70a57",
+  "source_fingerprint": "fnv1a64:4f37d65860c2041b",
   "source_files": [
     "components/computation-contracts/src/a2_bridge.rs",
     "components/computation-contracts/src/admission_messages.rs",
@@ -14650,35 +14650,35 @@
       "name": "drasi_lib::computation::runtime::source::Life",
       "kind": "struct",
       "file": "lib/src/computation/runtime/source.rs",
-      "line": 28,
+      "line": 31,
       "condition": "",
       "fields": [
         {
           "name": "initialized",
           "declaration": "bool",
           "variant": "",
-          "line": 30,
+          "line": 33,
           "condition": ""
         },
         {
           "name": "initialized_complete",
           "declaration": "bool",
           "variant": "",
-          "line": 31,
+          "line": 34,
           "condition": ""
         },
         {
           "name": "needs_stop",
           "declaration": "bool",
           "variant": "",
-          "line": 32,
+          "line": 35,
           "condition": ""
         },
         {
           "name": "closed",
           "declaration": "bool",
           "variant": "",
-          "line": 33,
+          "line": 36,
           "condition": ""
         }
       ]
@@ -14687,56 +14687,93 @@
       "name": "drasi_lib::computation::runtime::source::SourceInstance",
       "kind": "struct",
       "file": "lib/src/computation/runtime/source.rs",
-      "line": 36,
+      "line": 58,
       "condition": "",
       "fields": [
         {
           "name": "source",
           "declaration": "Arc < dyn Source >",
           "variant": "",
-          "line": 37,
+          "line": 59,
           "condition": ""
         },
         {
           "name": "borrowed",
           "declaration": "Arc < SourcePluginHost >",
           "variant": "",
-          "line": 38,
+          "line": 60,
           "condition": ""
         },
         {
           "name": "services",
           "declaration": "LegacyPluginServices",
           "variant": "",
-          "line": 39,
+          "line": 61,
           "condition": ""
         },
         {
           "name": "parent_control",
           "declaration": "GraphControl",
           "variant": "",
-          "line": 40,
+          "line": 62,
           "condition": ""
         },
         {
           "name": "observations",
           "declaration": "PluginObservations",
           "variant": "",
-          "line": 41,
+          "line": 63,
           "condition": ""
         },
         {
           "name": "life",
           "declaration": "Mutex < Life >",
           "variant": "",
-          "line": 42,
+          "line": 64,
           "condition": ""
         },
         {
           "name": "changed",
           "declaration": "watch :: Sender < u64 >",
           "variant": "",
-          "line": 43,
+          "line": 65,
+          "condition": ""
+        },
+        {
+          "name": "subscriptions",
+          "declaration": "Arc < SubscriptionObserver >",
+          "variant": "",
+          "line": 66,
+          "condition": ""
+        },
+        {
+          "name": "subscriptions_notified",
+          "declaration": "Mutex < Option < u64 > >",
+          "variant": "",
+          "line": 67,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::computation::runtime::source::SubscriptionObserver",
+      "kind": "struct",
+      "file": "lib/src/computation/runtime/source.rs",
+      "line": 39,
+      "condition": "",
+      "fields": [
+        {
+          "name": "owner",
+          "declaration": "Weak < super :: Runtime >",
+          "variant": "",
+          "line": 40,
+          "condition": ""
+        },
+        {
+          "name": "revision",
+          "declaration": "AtomicU64",
+          "variant": "",
+          "line": 41,
           "condition": ""
         }
       ]
@@ -26740,14 +26777,14 @@
       "name": "drasi_lib::computation::v1::plugin_source::LegacySourceBootstrap",
       "kind": "struct",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 880,
+      "line": 904,
       "condition": "",
       "fields": [
         {
           "name": "subscriptions",
           "declaration": "Vec < Arc < LegacySourceSubscription > >",
           "variant": "",
-          "line": 882,
+          "line": 906,
           "condition": ""
         }
       ]
@@ -26756,56 +26793,56 @@
       "name": "drasi_lib::computation::v1::plugin_source::LegacySourceSubscription",
       "kind": "struct",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 394,
+      "line": 415,
       "condition": "",
       "fields": [
         {
           "name": "host",
           "declaration": "Arc < SourcePluginHost >",
           "variant": "",
-          "line": 395,
+          "line": 416,
           "condition": ""
         },
         {
           "name": "options",
           "declaration": "SourceSubscriptionOptions",
           "variant": "",
-          "line": 396,
+          "line": 417,
           "condition": ""
         },
         {
           "name": "stream",
           "declaration": "StreamId",
           "variant": "",
-          "line": 397,
+          "line": 418,
           "condition": ""
         },
         {
           "name": "id",
           "declaration": "String",
           "variant": "",
-          "line": 398,
+          "line": 419,
           "condition": ""
         },
         {
           "name": "progress",
           "declaration": "Option < Arc < QuerySourceProgress > >",
           "variant": "",
-          "line": 399,
+          "line": 420,
           "condition": ""
         },
         {
           "name": "phase",
           "declaration": "watch :: Sender < SubscriptionPhase >",
           "variant": "",
-          "line": 400,
+          "line": 421,
           "condition": ""
         },
         {
           "name": "state",
           "declaration": "Mutex < SubscriptionState >",
           "variant": "",
-          "line": 401,
+          "line": 422,
           "condition": ""
         }
       ]
@@ -26902,42 +26939,42 @@
       "name": "drasi_lib::computation::v1::plugin_source::SourcePluginAdapter",
       "kind": "struct",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 746,
+      "line": 770,
       "condition": "",
       "fields": [
         {
           "name": "descriptor",
           "declaration": "ComponentDescriptor",
           "variant": "",
-          "line": 747,
+          "line": 771,
           "condition": ""
         },
         {
           "name": "subscription",
           "declaration": "Arc < LegacySourceSubscription >",
           "variant": "",
-          "line": 748,
+          "line": 772,
           "condition": ""
         },
         {
           "name": "live",
           "declaration": "Option < Box < dyn ChangeReceiver < SourceEventWrapper > > >",
           "variant": "",
-          "line": 749,
+          "line": 773,
           "condition": ""
         },
         {
           "name": "sequence",
           "declaration": "Arc < AtomicU64 >",
           "variant": "",
-          "line": 750,
+          "line": 774,
           "condition": ""
         },
         {
           "name": "buffer_before_ready",
           "declaration": "bool",
           "variant": "",
-          "line": 751,
+          "line": 775,
           "condition": ""
         }
       ]
@@ -26946,14 +26983,14 @@
       "name": "drasi_lib::computation::v1::plugin_source::SourcePluginAdapterFactory",
       "kind": "struct",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 1006,
+      "line": 1030,
       "condition": "",
       "fields": [
         {
           "name": "descriptor",
           "declaration": "FactoryDescriptor",
           "variant": "",
-          "line": 1007,
+          "line": 1031,
           "condition": ""
         }
       ]
@@ -26970,121 +27007,136 @@
       "name": "drasi_lib::computation::v1::plugin_source::SourcePluginHost",
       "kind": "struct",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 68,
+      "line": 76,
       "condition": "",
       "fields": [
         {
           "name": "id",
           "declaration": "String",
           "variant": "",
-          "line": 71,
+          "line": 77,
           "condition": ""
         },
         {
           "name": "source",
           "declaration": "Mutex < Arc < dyn Source > >",
           "variant": "",
-          "line": 72,
+          "line": 78,
           "condition": ""
         },
         {
           "name": "constructor",
           "declaration": "Option < Arc < dyn SourcePluginConstructor > >",
           "variant": "",
-          "line": 73,
+          "line": 79,
           "condition": ""
         },
         {
           "name": "bootstrap",
           "declaration": "Mutex < Option < Arc < dyn crate :: bootstrap :: BootstrapProvider > > >",
           "variant": "",
-          "line": 74,
+          "line": 80,
           "condition": ""
         },
         {
           "name": "services",
           "declaration": "LegacyPluginServices",
           "variant": "",
-          "line": 75,
+          "line": 81,
           "condition": ""
         },
         {
           "name": "owned",
           "declaration": "bool",
           "variant": "",
-          "line": 76,
+          "line": 82,
           "condition": ""
         },
         {
           "name": "life",
           "declaration": "tokio :: sync :: Mutex < SourceLife >",
           "variant": "",
-          "line": 77,
+          "line": 83,
           "condition": ""
         },
         {
           "name": "observations",
           "declaration": "PluginObservations",
           "variant": "",
-          "line": 78,
+          "line": 84,
           "condition": ""
         },
         {
           "name": "expected_subscriptions",
           "declaration": "AtomicUsize",
           "variant": "",
-          "line": 79,
+          "line": 85,
+          "condition": ""
+        },
+        {
+          "name": "subscription_observer",
+          "declaration": "Option < Arc < dyn SourceSubscriptionObserver > >",
+          "variant": "",
+          "line": 86,
           "condition": ""
         }
       ]
     },
     {
+      "name": "drasi_lib::computation::v1::plugin_source::SourceSubscriptionObserver",
+      "kind": "trait",
+      "file": "lib/src/computation/v1/plugin_source.rs",
+      "line": 68,
+      "condition": "",
+      "fields": []
+    },
+    {
       "name": "drasi_lib::computation::v1::plugin_source::SourceSubscriptionOptions",
       "kind": "struct",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 341,
+      "line": 362,
       "condition": "",
       "fields": [
         {
           "name": "enable_bootstrap",
           "declaration": "bool",
           "variant": "",
-          "line": 343,
+          "line": 364,
           "condition": ""
         },
         {
           "name": "nodes",
           "declaration": "HashSet < String >",
           "variant": "",
-          "line": 345,
+          "line": 366,
           "condition": ""
         },
         {
           "name": "relations",
           "declaration": "HashSet < String >",
           "variant": "",
-          "line": 347,
+          "line": 368,
           "condition": ""
         },
         {
           "name": "borrowed_recovery",
           "declaration": "bool",
           "variant": "",
-          "line": 349,
+          "line": 370,
           "condition": ""
         },
         {
           "name": "allow_broadcast_loss",
           "declaration": "bool",
           "variant": "",
-          "line": 353,
+          "line": 374,
           "condition": ""
         },
         {
           "name": "bootstrap_timeout_secs",
           "declaration": "u64",
           "variant": "",
-          "line": 358,
+          "line": 379,
           "condition": ""
         }
       ]
@@ -27093,28 +27145,28 @@
       "name": "drasi_lib::computation::v1::plugin_source::SubscriptionPhase",
       "kind": "enum",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 377,
+      "line": 398,
       "condition": "",
       "fields": [
         {
           "name": "generation",
           "declaration": "u64",
           "variant": "Reset",
-          "line": 381,
+          "line": 402,
           "condition": ""
         },
         {
           "name": "volatile",
           "declaration": "bool",
           "variant": "Reset",
-          "line": 381,
+          "line": 402,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "Arc < str >",
           "variant": "Failed",
-          "line": 383,
+          "line": 404,
           "condition": ""
         }
       ]
@@ -27123,42 +27175,42 @@
       "name": "drasi_lib::computation::v1::plugin_source::SubscriptionState",
       "kind": "struct",
       "file": "lib/src/computation/v1/plugin_source.rs",
-      "line": 386,
+      "line": 407,
       "condition": "",
       "fields": [
         {
           "name": "bootstrap",
           "declaration": "Option < BootstrapEventReceiver >",
           "variant": "",
-          "line": 387,
+          "line": 408,
           "condition": ""
         },
         {
           "name": "result",
           "declaration": "Option < tokio :: sync :: oneshot :: Receiver < anyhow :: Result < BootstrapResult > > >",
           "variant": "",
-          "line": 388,
+          "line": 409,
           "condition": ""
         },
         {
           "name": "position",
           "declaration": "Option < Arc < AtomicU64 > >",
           "variant": "",
-          "line": 389,
+          "line": 410,
           "condition": ""
         },
         {
           "name": "requested_position",
           "declaration": "bool",
           "variant": "",
-          "line": 390,
+          "line": 411,
           "condition": ""
         },
         {
           "name": "generation",
           "declaration": "u64",
           "variant": "",
-          "line": 391,
+          "line": 412,
           "condition": ""
         }
       ]
@@ -36910,73 +36962,87 @@
           "condition": ""
         },
         {
+          "name": "wal_subscriptions_complete",
+          "declaration": "Arc < AtomicBool >",
+          "variant": "",
+          "line": 217,
+          "condition": ""
+        },
+        {
+          "name": "wal_pruning_stop",
+          "declaration": "tokio :: sync :: watch :: Sender < bool >",
+          "variant": "",
+          "line": 218,
+          "condition": ""
+        },
+        {
           "name": "next_sequence",
           "declaration": "Arc < AtomicU64 >",
           "variant": "",
-          "line": 217,
+          "line": 219,
           "condition": ""
         },
         {
           "name": "dispatch_order",
           "declaration": "Arc < Mutex < chrono :: DateTime < chrono :: Utc > > >",
           "variant": "",
-          "line": 220,
+          "line": 222,
           "condition": ""
         },
         {
           "name": "raw_config",
           "declaration": "Option < serde_json :: Value >",
           "variant": "",
-          "line": 232,
+          "line": 234,
           "condition": ""
         },
         {
           "name": "subscriber_notify",
           "declaration": "Arc < Notify >",
           "variant": "",
-          "line": 235,
+          "line": 237,
           "condition": ""
         },
         {
           "name": "subscriber_resume_positions",
           "declaration": "Arc < RwLock < HashMap < usize , Bytes > > >",
           "variant": "",
-          "line": 239,
+          "line": 241,
           "condition": ""
         },
         {
           "name": "position_comparator",
           "declaration": "Arc < RwLock < Option < Arc < dyn PositionComparator > > > >",
           "variant": "",
-          "line": 248,
+          "line": 250,
           "condition": ""
         },
         {
           "name": "sequence_position_map",
           "declaration": "Arc < RwLock < BTreeMap < u64 , Bytes > > >",
           "variant": "",
-          "line": 253,
+          "line": 255,
           "condition": ""
         },
         {
           "name": "bootstrap_boundary",
           "declaration": "Arc < tokio :: sync :: watch :: Sender < Option < Bytes > > >",
           "variant": "",
-          "line": 265,
+          "line": 267,
           "condition": ""
         },
         {
           "name": "has_bootstrap_provider",
           "declaration": "Arc < AtomicBool >",
           "variant": "",
-          "line": 286,
+          "line": 288,
           "condition": ""
         },
         {
           "name": "pending_initial_bootstrap",
           "declaration": "Arc < AtomicBool >",
           "variant": "",
-          "line": 291,
+          "line": 293,
           "condition": ""
         }
       ]
@@ -47137,7 +47203,17 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "Mutex",
-      "line": 42,
+      "line": 64,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::runtime::source::SourceInstance",
+      "to": "drasi_lib::computation::runtime::source::SubscriptionObserver",
+      "field": "subscriptions",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "shared strong",
+      "line": 66,
       "condition": ""
     },
     {
@@ -47147,7 +47223,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 40,
+      "line": 62,
       "condition": ""
     },
     {
@@ -47157,7 +47233,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 39,
+      "line": 61,
       "condition": ""
     },
     {
@@ -47167,7 +47243,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 41,
+      "line": 63,
       "condition": ""
     },
     {
@@ -47177,7 +47253,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 38,
+      "line": 60,
       "condition": ""
     },
     {
@@ -47187,7 +47263,27 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong / trait object; concrete implementation erased",
-      "line": 37,
+      "line": 59,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::runtime::source::SubscriptionObserver",
+      "to": "drasi_lib::computation::runtime::Runtime",
+      "field": "owner",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "weak live target",
+      "line": 40,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::runtime::source::SubscriptionObserver",
+      "to": "std::sync::atomic::AtomicU64",
+      "field": "revision",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 41,
       "condition": ""
     },
     {
@@ -58857,7 +58953,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries / shared strong",
-      "line": 882,
+      "line": 906,
       "condition": ""
     },
     {
@@ -58867,7 +58963,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 397,
+      "line": 418,
       "condition": ""
     },
     {
@@ -58877,7 +58973,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 395,
+      "line": 416,
       "condition": ""
     },
     {
@@ -58887,7 +58983,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 396,
+      "line": 417,
       "condition": ""
     },
     {
@@ -58897,7 +58993,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "watch latest value",
-      "line": 400,
+      "line": 421,
       "condition": ""
     },
     {
@@ -58907,7 +59003,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "Mutex",
-      "line": 401,
+      "line": 422,
       "condition": ""
     },
     {
@@ -58917,7 +59013,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 399,
+      "line": 420,
       "condition": ""
     },
     {
@@ -58927,7 +59023,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 398,
+      "line": 419,
       "condition": ""
     },
     {
@@ -58967,7 +59063,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 747,
+      "line": 771,
       "condition": ""
     },
     {
@@ -58977,7 +59073,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / owned box / trait object; concrete implementation erased",
-      "line": 749,
+      "line": 773,
       "condition": ""
     },
     {
@@ -58987,7 +59083,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 748,
+      "line": 772,
       "condition": ""
     },
     {
@@ -58997,7 +59093,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 750,
+      "line": 774,
       "condition": ""
     },
     {
@@ -59007,7 +59103,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1007,
+      "line": 1031,
       "condition": ""
     },
     {
@@ -59017,7 +59113,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Mutex / Option / shared strong / trait object; concrete implementation erased",
-      "line": 74,
+      "line": 80,
       "condition": ""
     },
     {
@@ -59027,7 +59123,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 75,
+      "line": 81,
       "condition": ""
     },
     {
@@ -59037,7 +59133,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 78,
+      "line": 84,
       "condition": ""
     },
     {
@@ -59047,7 +59143,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "Mutex",
-      "line": 77,
+      "line": 83,
       "condition": ""
     },
     {
@@ -59057,7 +59153,17 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong / trait object; concrete implementation erased",
-      "line": 73,
+      "line": 79,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::v1::plugin_source::SourcePluginHost",
+      "to": "drasi_lib::computation::v1::plugin_source::SourceSubscriptionObserver",
+      "field": "subscription_observer",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option / shared strong / trait object; concrete implementation erased",
+      "line": 86,
       "condition": ""
     },
     {
@@ -59067,7 +59173,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "Mutex / shared strong / trait object; concrete implementation erased",
-      "line": 72,
+      "line": 78,
       "condition": ""
     },
     {
@@ -59077,7 +59183,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 71,
+      "line": 77,
       "condition": ""
     },
     {
@@ -59087,7 +59193,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 79,
+      "line": 85,
       "condition": ""
     },
     {
@@ -59097,7 +59203,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashSet entries",
-      "line": 345,
+      "line": 366,
       "condition": ""
     },
     {
@@ -59107,7 +59213,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashSet entries",
-      "line": 347,
+      "line": 368,
       "condition": ""
     },
     {
@@ -59117,7 +59223,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / channel payload access (not exclusive ownership) / Result alternative",
-      "line": 388,
+      "line": 409,
       "condition": ""
     },
     {
@@ -59127,7 +59233,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Option / alias drasi_lib::channels::events::BootstrapEventReceiver / channel payload access (not exclusive ownership)",
-      "line": 387,
+      "line": 408,
       "condition": ""
     },
     {
@@ -59137,7 +59243,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 389,
+      "line": 410,
       "condition": ""
     },
     {
@@ -67227,7 +67333,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "shared strong / watch latest value / Option",
-      "line": 265,
+      "line": 267,
       "condition": ""
     },
     {
@@ -67237,7 +67343,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "shared strong / RwLock / BTreeMap entries",
-      "line": 253,
+      "line": 255,
       "condition": ""
     },
     {
@@ -67247,7 +67353,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "shared strong / RwLock / HashMap entries",
-      "line": 239,
+      "line": 241,
       "condition": ""
     },
     {
@@ -67257,7 +67363,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong / Mutex",
-      "line": 220,
+      "line": 222,
       "condition": ""
     },
     {
@@ -67327,7 +67433,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "shared strong / RwLock / Option / shared strong / trait object; concrete implementation erased",
-      "line": 248,
+      "line": 250,
       "condition": ""
     },
     {
@@ -67347,7 +67453,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 232,
+      "line": 234,
       "condition": ""
     },
     {
@@ -67377,7 +67483,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 286,
+      "line": 288,
       "condition": ""
     },
     {
@@ -67387,7 +67493,17 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 291,
+      "line": 293,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::sources::base::SourceBase",
+      "to": "std::sync::atomic::AtomicBool",
+      "field": "wal_subscriptions_complete",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "shared strong",
+      "line": 217,
       "condition": ""
     },
     {
@@ -67397,7 +67513,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 217,
+      "line": 219,
       "condition": ""
     },
     {
@@ -67417,7 +67533,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 235,
+      "line": 237,
       "condition": ""
     },
     {
@@ -69418,7 +69534,7 @@
     },
     {
       "name": "drasi_lib::computation::runtime",
-      "code_lines": 1990,
+      "code_lines": 2035,
       "types": 7,
       "files": [
         "lib/src/computation/runtime/mod.rs"
@@ -69482,8 +69598,8 @@
     },
     {
       "name": "drasi_lib::computation::runtime::source",
-      "code_lines": 180,
-      "types": 2,
+      "code_lines": 222,
+      "types": 3,
       "files": [
         "lib/src/computation/runtime/source.rs"
       ]
@@ -69906,8 +70022,8 @@
     },
     {
       "name": "drasi_lib::computation::v1::plugin_source",
-      "code_lines": 1177,
-      "types": 11,
+      "code_lines": 1200,
+      "types": 12,
       "files": [
         "lib/src/computation/v1/plugin_source.rs"
       ]
@@ -70626,7 +70742,7 @@
     },
     {
       "name": "drasi_lib::sources::base",
-      "code_lines": 996,
+      "code_lines": 1066,
       "types": 2,
       "files": [
         "lib/src/sources/base.rs"

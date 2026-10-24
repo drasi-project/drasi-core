@@ -1529,7 +1529,8 @@ if self.config.durable {
         .ok_or_else(|| anyhow::anyhow!("durable source requires a WAL provider on DrasiLib"))?;
     wal.register(self.base.get_id(), WriteAheadLogConfig::default()).await?;
 
-    let head = wal.head_sequence(self.base.get_id()).await.unwrap_or(0);
+    let head = wal.head_sequence(self.base.get_id()).await?;
+    self.base.begin_wal_subscriptions(head);
     self.base.set_next_sequence(head);     // resume monotonic sequencing
     *self.wal.write().await = Some(wal);   // keep a handle for ingest + replay
 }
@@ -1579,6 +1580,15 @@ Rules:
 - `WriteAheadLogConfig::default()` is a fine start; size `max_events` and choose a
   capacity policy for your throughput.
 - On restart, `head_sequence()` + `set_next_sequence(head)` resumes sequencing.
+- Read the committed WAL head without replacing errors with zero. Call
+  `SourceBase::begin_wal_subscriptions(head)` on every start and use
+  `prune_confirmed_wal()` for automatic cleanup. For a retained log, cleanup
+  must wait for the initial subscription batch: implement
+  `on_subscriptions_complete()` by calling `complete_wal_subscriptions()`.
+  A timer or the first fast subscriber cannot release that fence. Hosts using
+  the source directly must issue the completion callback themselves.
+  Stop the pruning worker cooperatively and await any submitted storage operation;
+  do not abort it while replay registration is excluded by the pruning lock.
 - Use `subscribe_with_replay()` when `resume_from` is present; fall back to
   `subscribe_with_bootstrap()` otherwise.
 - Return `true` from `supports_replay()` only when durability is enabled.
@@ -1626,6 +1636,8 @@ policy:
 
 Do not silently start from "now" when a checkpoint requested an older position.
 That creates an undetected data gap.
+An empty retained log with a positive committed head can also represent a gap:
+it is not an empty replay when the requested position is behind that head.
 
 ### Replay safety rules at a glance
 
@@ -1928,7 +1940,8 @@ impl Source for FeedSource {
             wal.register(self.base.get_id(), WriteAheadLogConfig::default())
                 .await
                 .map_err(|e| anyhow!("WAL register failed: {e}"))?;
-            let head = wal.head_sequence(self.base.get_id()).await.unwrap_or(0);
+            let head = wal.head_sequence(self.base.get_id()).await?;
+            self.base.begin_wal_subscriptions(head);
             self.base.set_next_sequence(head);
             *self.wal.write().await = Some(wal);
         }
