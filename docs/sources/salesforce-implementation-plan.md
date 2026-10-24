@@ -5,6 +5,12 @@ scope preserves the existing FFI, SDK version, public interfaces, and index
 storage formats. Historical verification receipts below describe earlier
 revisions and do not replace verification of the contract-preserving revision.
 
+The query-engine changes have been removed: `core/src` matches baseline
+`207ef6f3`. Salesforce generates relationship labels as `REL_` plus the described
+relationship name. The prefix gains underscores if needed to avoid selected
+object names, so relationships cannot collide with node labels. Source schema,
+snapshots, live events and example queries use that same naming rule.
+
 **Decision:** Current-state convergence with durable local replay and persistent
 query recovery in the first release. Durability is not a later phase. This
 document replaces the earlier nonpersistent-only proposal.
@@ -23,7 +29,42 @@ The default bootstrap provider now runs inside the Salesforce source rather
 than in a separate plugin. Query recovery uses existing checkpoint, result
 sequence and live-results operations; there is no new completion-marker format.
 
-Current verification includes 132 common/source tests, 223 query-runtime tests,
+The completed-snapshot check permits input checkpoints to advance while the
+result sequence stays zero. An event excluded by the query can advance the input
+checkpoint without changing the snapshot or creating outbox output. The
+`test_e2e_bootstrap_snapshot_reopens_after_filtered_event` regression reproduced
+the erroneous Strict-policy rejection before the correction and passes after it.
+Incomplete-bootstrap and corrupt-output checks remain in place.
+
+Current relationship-label revision verification:
+
+- `cargo test -p drasi-salesforce-common -p drasi-source-salesforce`: passed,
+  135 tests, including collision avoidance and legacy-edge reprojection.
+- `make test-salesforce-ffi`: passed, two tests, zero ignored.
+- `cargo test -p drasi-lib queries::`: passed, 224 tests, including the restart
+  regression and incomplete-bootstrap recovery cases.
+- `cargo test -p drasi-lib --test bootstrap_failure_e2e --test query_output_wipe_e2e`:
+  passed, 15 tests.
+- `cargo test --manifest-path lib-integration-tests/Cargo.toml --test query_output_atomicity`:
+  passed, 11 tests.
+- `cargo test -p drasi-core --features parallel_solver`: passed, 796 unit tests
+  and one doctest; one pre-existing doctest remains ignored.
+- `JQ_LIB_DIR=/opt/homebrew/opt/jq/lib make clippy` and `cargo fmt -- --check`:
+  passed.
+- Standalone example tests, Clippy, formatting, offline create/update/delete/repair,
+  and opt-in real-endpoint schema discovery: passed. Schema labels now include
+  `REL_Account`, `REL_MasterRecord`, `REL_Parent` and `REL_ReportsTo`.
+
+Read-only live demo acceptance also passed against independent Salesforce SOQL:
+fresh startup, clean restart, upgrade of a copy of existing unprefixed-label
+state, and restart of that upgraded copy. All four queries matched on each run;
+both restarts resumed all four queries. Original saved state and old query
+namespace files were unchanged, temporary state was removed, and no Salesforce
+records or settings were changed. The full workspace and host SDK suites were
+not rerun for this revision; their earlier receipts follow.
+
+Earlier contract-restoration verification, before the relationship-label change,
+included 132 common/source tests, 223 query-runtime tests,
 bootstrap-failure cleanup and output-atomicity regressions, and the parallel
 solver tests. The two source-plugin FFI cases exercise the unchanged ABI,
 including populated/empty snapshots, schema discovery, invalid positions and
@@ -55,7 +96,7 @@ select objects, not fields or joins:
 ```
 
 ```cypher
-MATCH (c:Contact)-[:Account]->(a:Account)
+MATCH (c:Contact)-[:REL_Account]->(a:Account)
 RETURN c.Name AS contact, a.Name AS account
 ```
 
@@ -101,8 +142,8 @@ Historical schema-discovery verification, before contract restoration:
   tests ran, including positive schema discovery.
 - `cargo fmt -- --check` and `git diff --check` — passed.
 
-Real-endpoint follow-up: with `SF_BIN` and `SALESFORCE_TEST_ORG` set to the saved
-developer-org login,
+Historical real-endpoint follow-up, before relationship-label generation:
+with `SF_BIN` and `SALESFORCE_TEST_ORG` set to the saved developer-org login,
 `cargo test --manifest-path examples/lib/salesforce-getting-started/Cargo.toml live_schema_discovery -- --ignored --nocapture`
 passed (one live test executed, zero ignored). Both public inspection APIs
 matched independent live Describe requests: Account had 68 properties, Contact
@@ -172,10 +213,13 @@ DurableMirrorStore::commit_mutations(Vec<RecordMutation>)
 
 Node IDs remain `sf:<org>:<object>:<id18>`. Edge IDs are
 `sfrel:<org>:<object>:<owner-id18>:<lookup-field>`, directed from referring node
-to referenced node. Labels come only from Describe `relationshipName`.
+to referenced node. Labels are `REL_` followed by Describe `relationshipName`.
 Missing names, unsupported fields and unselected targets are reported; raw
 foreign-key properties remain available. Selected polymorphic targets resolve
 only through unambiguous metadata key prefixes. No placeholder nodes are made.
+Legacy unprefixed v2 edges are replaced by normal catalog reprojection without
+changing their element IDs. Explicit node labels are required for record-only
+queries; unlabelled single-node patterns retain the existing engine limitation.
 
 Null lookups remove edges; reparenting deletes the old edge and inserts the new
 one; deleting a record removes its owned edges before its node. Relations may
@@ -252,9 +296,10 @@ change, explicit field clearing in joined results, journal advancement and
 completed reprojection. Store tests compare snapshots and journal replay at
 every graph-event prefix and reject stale schema mutations atomically.
 
-Two runtime defects exposed by graph acceptance were fixed: match slots now
-distinguish nodes from relations even when labels collide, and permanent
-`DrasiLib.shutdown()` releases component ownership cycles that kept redb locked.
+Initial graph acceptance exposed node/relationship label collisions and component
+ownership cycles. The match-slot changes have since been removed; generated
+Salesforce relationship labels now avoid those collisions without changing core.
+Permanent `DrasiLib.shutdown()` releases the cycles that kept redb locked.
 Shutdown owns its task across caller cancellation, propagates stop failures and
 allows retry; ordinary `stop()` remains restartable. Snapshot export cancellation
 and stop-timeout tests verify that restart/deprovision cannot race retained work.
@@ -349,7 +394,7 @@ let source = SalesforceSource::builder("crm")
     .with_config(config)
     .build()?;
 let query = Query::cypher("account-contacts")
-    .query("MATCH (c:Contact)-[:Account]->(a:Account)
+    .query("MATCH (c:Contact)-[:REL_Account]->(a:Account)
             RETURN c.Name AS contact, a.Name AS account")
     .from_source("crm")
     .enable_bootstrap(true)

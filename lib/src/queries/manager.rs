@@ -1136,7 +1136,8 @@ async fn load_durable_output(
     };
 
     // Bootstrap commits its snapshot, result sequence zero, and handover
-    // checkpoints together without an outbox entry.
+    // checkpoints together without an outbox entry. Events with no result
+    // changes may then advance input checkpoints while output stays at zero.
     let completed_snapshot = if stored_sequence == Some(0) && outbox_sequences.is_empty() {
         let checkpoints = stores
             .checkpoint_store
@@ -1148,7 +1149,7 @@ async fn load_durable_output(
         !checkpoints.is_empty()
             && checkpoints
                 .values()
-                .all(|checkpoint| checkpoint.sequence == 0 && checkpoint.source_position.is_some())
+                .all(|checkpoint| checkpoint.source_position.is_some())
     } else {
         false
     };

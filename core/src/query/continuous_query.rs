@@ -510,17 +510,6 @@ impl ContinuousQuery {
         let mut affinity_slots = Vec::new();
 
         for (slot_num, slot) in self.match_path.slots.iter().enumerate() {
-            use crate::path_solver::match_path::SlotKind;
-            if !matches!(
-                (
-                    self.match_path.slot_kinds[slot_num],
-                    anchor_element.as_ref()
-                ),
-                (SlotKind::Node, Element::Node { .. })
-                    | (SlotKind::Relation, Element::Relation { .. })
-            ) {
-                continue;
-            }
             if self
                 .match_element_to_slot(&context, &slot.spec, anchor_element.clone())
                 .await?

@@ -65,7 +65,7 @@ fn settings(query_id: &str, resume_from: Option<Bytes>) -> SourceSubscriptionSet
         query_id: query_id.into(),
         enable_bootstrap: true,
         nodes: ["Account".into(), "Contact".into()].into(),
-        relations: ["Account".into()].into(),
+        relations: ["REL_Account".into()].into(),
         resume_sequence: resume_from.as_ref().map(|_| 0),
         resume_from,
         request_position_handle: true,
@@ -221,7 +221,7 @@ async fn salesforce_schema_snapshot_and_replay_use_existing_ffi() -> Result<()> 
         let relation = expected
             .relations
             .iter()
-            .find(|relation| relation.label == "Account")
+            .find(|relation| relation.label == "REL_Account")
             .unwrap();
         assert_eq!(relation.from.as_deref(), Some("Contact"));
         assert_eq!(relation.to.as_deref(), Some("Account"));
@@ -229,7 +229,7 @@ async fn salesforce_schema_snapshot_and_replay_use_existing_ffi() -> Result<()> 
             expected
                 .relations
                 .iter()
-                .find(|relation| relation.label == "Related")
+                .find(|relation| relation.label == "REL_Related")
                 .unwrap()
                 .to,
             None
@@ -268,7 +268,7 @@ async fn salesforce_schema_snapshot_and_replay_use_existing_ffi() -> Result<()> 
         }
         assert!(
             matches!(&elements[2], Element::Relation { in_node, out_node, metadata, .. }
-            if metadata.labels[0].as_ref() == "Account"
+            if metadata.labels[0].as_ref() == "REL_Account"
                 && in_node.element_id.as_ref() == "sf:00D000000000001:Contact:003000000000001AAA"
                 && out_node.element_id.as_ref() == "sf:00D000000000001:Account:001000000000001AAA")
         );

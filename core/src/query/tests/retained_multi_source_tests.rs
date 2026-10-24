@@ -56,57 +56,6 @@ const READY_QUERY: &str = "
     RETURN taskNumber, statusName, runCount
 ";
 
-#[tokio::test]
-async fn node_patterns_do_not_match_relations_with_shared_or_unrestricted_labels() {
-    for query in [
-        "MATCH (a:Account) RETURN a.Name AS name",
-        "MATCH (a) RETURN a.Name AS name",
-    ] {
-        let mut query = MaterializedQuery::new(query).await;
-        query
-            .process(SourceChange::Insert {
-                element: node(
-                    GRAPH_SOURCE,
-                    "account",
-                    "Account",
-                    1,
-                    json!({"Name": "Acme"}),
-                ),
-            })
-            .await;
-        assert_eq!(query.rows.len(), 1);
-        let relation = Element::Relation {
-            metadata: ElementMetadata {
-                reference: ElementReference::new(GRAPH_SOURCE, "lookup"),
-                labels: Arc::from([Arc::from("Account")]),
-                effective_from: 2,
-            },
-            in_node: ElementReference::new(GRAPH_SOURCE, "contact"),
-            out_node: ElementReference::new(GRAPH_SOURCE, "account"),
-            properties: ElementPropertyMap::from(json!({"Name": "not a node"})),
-        };
-        assert!(query
-            .process(SourceChange::Insert {
-                element: relation.clone()
-            })
-            .await
-            .is_empty());
-        assert!(query
-            .process(SourceChange::Update {
-                element: relation.clone()
-            })
-            .await
-            .is_empty());
-        assert!(query
-            .process(SourceChange::Delete {
-                metadata: relation.get_metadata().clone()
-            })
-            .await
-            .is_empty());
-        assert_eq!(query.rows.len(), 1);
-    }
-}
-
 struct MaterializedQuery {
     query: ContinuousQuery,
     rows: HashMap<u64, QueryVariables>,

@@ -232,6 +232,13 @@ impl Catalog {
         let mut plans = Vec::new();
         let mut plans_by_object = HashMap::new();
         let mut schema_objects = Vec::new();
+        let mut relationship_prefix = "REL_".to_string();
+        while describe_by_object
+            .keys()
+            .any(|object| object.starts_with(&relationship_prefix))
+        {
+            relationship_prefix.push('_');
+        }
 
         for (object, describe) in &describe_by_object {
             let mut selected_fields = Vec::new();
@@ -334,6 +341,7 @@ impl Catalog {
                         object, field.name, label
                     )
                 })?;
+                let label = format!("{relationship_prefix}{label}");
 
                 let mut seen_targets = BTreeSet::new();
                 let mut selected_targets = Vec::new();
@@ -1131,25 +1139,25 @@ mod tests {
         let catalog = Catalog::from_describes(describes.clone())?;
         let schema = catalog.source_schema();
         let relation = |label| schema.relations.iter().find(|r| r.label == label).unwrap();
-        assert_eq!(relation("Account").from.as_deref(), Some("Contact"));
-        assert_eq!(relation("Account").to.as_deref(), Some("Account"));
-        assert_eq!(relation("Shared").from, None);
-        assert_eq!(relation("Shared").to.as_deref(), Some("Account"));
-        assert_eq!(relation("Related").from.as_deref(), Some("Contact"));
-        assert_eq!(relation("Related").to, None);
-        assert!(!schema.relations.iter().any(|r| r.label == "What"));
+        assert_eq!(relation("REL_Account").from.as_deref(), Some("Contact"));
+        assert_eq!(relation("REL_Account").to.as_deref(), Some("Account"));
+        assert_eq!(relation("REL_Shared").from, None);
+        assert_eq!(relation("REL_Shared").to.as_deref(), Some("Account"));
+        assert_eq!(relation("REL_Related").from.as_deref(), Some("Contact"));
+        assert_eq!(relation("REL_Related").to, None);
+        assert!(!schema.relations.iter().any(|r| r.label == "REL_What"));
         assert_eq!(
             schema
                 .relations
                 .iter()
-                .filter(|r| r.label == "Account")
+                .filter(|r| r.label == "REL_Account")
                 .count(),
             1
         );
         let mut merged = drasi_lib::schema::GraphSchema::default();
         merged.merge_source_schema("sf", &schema);
-        assert_eq!(merged.relations["Related"].to, None);
-        assert_eq!(merged.relations["Shared"].from, None);
+        assert_eq!(merged.relations["REL_Related"].to, None);
+        assert_eq!(merged.relations["REL_Shared"].from, None);
 
         let record = catalog.record(
             "Contact",
@@ -1166,8 +1174,8 @@ mod tests {
         let Element::Relation { properties, .. } = &edges[0] else {
             panic!("expected relation");
         };
-        assert_eq!(relation("Account").properties.len(), 3);
-        for property in &relation("Account").properties {
+        assert_eq!(relation("REL_Account").properties.len(), 3);
+        for property in &relation("REL_Account").properties {
             assert_eq!(property.data_type, Some(PropertyType::String));
             assert!(matches!(
                 properties.get(&property.name),
@@ -1235,7 +1243,7 @@ mod tests {
         assert_eq!(contact.object, "Contact");
         assert_eq!(contact.relationships.len(), 1);
         assert_eq!(contact.relationships[0].field, "AccountId");
-        assert_eq!(contact.relationships[0].label, "Account");
+        assert_eq!(contact.relationships[0].label, "REL_Account");
         assert_eq!(contact.relationships[0].target_object, "Account");
         assert_eq!(contact.relationships[0].target_id, "001000000000001AAA");
 
@@ -1255,6 +1263,123 @@ mod tests {
             .iter()
             .any(|omission| omission.field == "MailingAddress"
                 && omission.reason == "unsupportedCompoundParentType"));
+        Ok(())
+    }
+
+    #[test]
+    fn generated_relationship_labels_are_disjoint_from_object_labels() -> Result<()> {
+        for name in ["Account", "Parent", "Related__r", "SF_Account"] {
+            let mut contact = contact_describe();
+            contact.fields.retain(|field| field.name == "Id");
+            contact.fields.push(
+                describe_field("TargetId", "reference", true)
+                    .with_relationship(name)
+                    .with_reference_to(vec!["Account"]),
+            );
+            let catalog = Catalog::from_describes(vec![account_describe(), contact])?;
+            let record = catalog.record(
+                "Contact",
+                Record {
+                    id: "003000000000001AAA".into(),
+                    properties: BTreeMap::from([(
+                        "TargetId".into(),
+                        ElementValue::String("001000000000001AAA".into()),
+                    )]),
+                    timestamp: 1,
+                },
+            )?;
+            let label = format!("REL_{name}");
+            assert_eq!(record.relationships[0].label, label);
+            let schema = catalog.source_schema();
+            assert!(schema
+                .relations
+                .iter()
+                .any(|relation| relation.label == label));
+            for relation in &schema.relations {
+                assert!(!schema.nodes.iter().any(|node| node.label == relation.label));
+                validate_identifier(&relation.label)?;
+            }
+            assert_eq!(
+                record.relations("sf", "00D000000000001AAA")?[0]
+                    .get_metadata()
+                    .labels[0]
+                    .as_ref(),
+                label
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_prefix_avoids_selected_object_names_without_merging_lookups() -> Result<()> {
+        let mut contact = contact_describe();
+        contact.fields.push(
+            describe_field("OtherAccountId", "reference", true)
+                .with_relationship("REL_Account")
+                .with_reference_to(vec!["Account"]),
+        );
+        let mut describes = vec![account_describe(), contact];
+        for (index, name) in ["REL_Account", "REL__Account"].into_iter().enumerate() {
+            describes.push(Describe {
+                name: name.into(),
+                queryable: true,
+                key_prefix: format!("x{index:02}"),
+                fields: vec![describe_field("Id", "id", false)],
+            });
+        }
+        let schema = Catalog::from_describes(describes.clone())?.source_schema();
+        for label in ["REL___Account", "REL___REL_Account"] {
+            assert!(schema
+                .relations
+                .iter()
+                .any(|relation| relation.label == label));
+        }
+        for relation in &schema.relations {
+            assert!(!schema.nodes.iter().any(|node| node.label == relation.label));
+        }
+        describes.reverse();
+        assert_eq!(Catalog::from_describes(describes)?.source_schema(), schema);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_relationship_labels_reproject_without_changing_element_identity() -> Result<()> {
+        let catalog = Catalog::from_describes(vec![account_describe(), contact_describe()])?;
+        let mut legacy_schema = catalog.schema.clone();
+        for object in &mut legacy_schema.objects {
+            for lookup in &mut object.lookups {
+                lookup.label = lookup.label.strip_prefix("REL_").unwrap().to_string();
+            }
+        }
+        let legacy_revision = schema_fingerprint(&legacy_schema)?;
+        assert_ne!(legacy_revision, catalog.schema.fingerprint);
+        let next = catalog.record(
+            "Contact",
+            Record {
+                id: "003000000000001AAA".into(),
+                properties: BTreeMap::from([(
+                    "AccountId".into(),
+                    ElementValue::String("001000000000001AAA".into()),
+                )]),
+                timestamp: 2,
+            },
+        )?;
+        let mut previous = next.clone();
+        previous.relationships[0].label = "Account".into();
+        previous.schema_revision = legacy_revision;
+        previous.observed_at_ms = 1;
+        previous.validate()?;
+        let changes = graph_changes("sf", "00D000000000001AAA", Some(&previous), Some(&next), 2)?;
+        assert_eq!(changes.len(), 2);
+        let SourceChange::Delete { metadata: old } = &changes[0] else {
+            panic!("old relationship must be deleted first");
+        };
+        let SourceChange::Insert { element: new } = &changes[1] else {
+            panic!("new relationship must be inserted");
+        };
+        assert_eq!(old.labels[0].as_ref(), "Account");
+        assert_eq!(new.get_metadata().labels[0].as_ref(), "REL_Account");
+        assert_eq!(old.reference, new.get_metadata().reference);
         Ok(())
     }
 

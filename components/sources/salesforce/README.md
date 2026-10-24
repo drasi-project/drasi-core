@@ -31,7 +31,7 @@ let source = SalesforceSource::builder("crm")
     .with_config(config)
     .build()?;
 let query = Query::cypher("contacts-with-accounts")
-    .query("MATCH (c:Contact)-[:Account]->(a:Account)
+    .query("MATCH (c:Contact)-[:REL_Account]->(a:Account)
             RETURN c.Name AS contact, a.Name AS account")
     .from_source("crm")
     .enable_bootstrap(true)
@@ -53,8 +53,10 @@ Describe metadata supplies the schema visible to the integration identity:
 - Supported visible fields become properties with their exact API names.
   `Id` is always present. Formula and REST-only fields are included.
 - Lookup fields remain scalar ID properties and also create directed relations
-  to selected target objects. Relation labels are Salesforce `relationshipName`
-  values, not invented names.
+  to selected target objects. Relation labels are `REL_` followed by Salesforce's
+  `relationshipName`. If a selected object name already starts with `REL_`,
+  underscores are appended to the prefix until no selected object starts with it.
+  This keeps all relationship labels distinct from node labels.
 - Unsupported fields and references to unselected targets are reported
   explicitly. Selecting objects does not recursively ingest their targets.
 
@@ -120,14 +122,24 @@ changed field types may need corresponding query changes.
 With `objects: ["Account", "Contact"]`:
 
 ```cypher
-MATCH (c:Contact)-[:Account]->(a:Account)
+MATCH (c:Contact)-[:REL_Account]->(a:Account)
 RETURN c.Id AS contactId, c.Name AS contact, a.Id AS accountId, a.Name AS account
 ```
 
-`Contact.AccountId` supplies the edge, and Describe supplies its `Account` label.
-Likewise, `Account.ParentId` produces `:Parent` and `Contact.ReportsToId` produces
-`:ReportsTo` when those targets are selected and metadata exposes the lookup.
-Custom lookups use their own described relationship names.
+`Contact.AccountId` supplies the edge, and its described relationship name
+`Account` produces `:REL_Account`. Likewise, `Account.ParentId` produces
+`:REL_Parent` and `Contact.ReportsToId` produces `:REL_ReportsTo` when those
+targets are selected. Custom lookups use the same prefix with their described
+relationship names.
+
+Use explicit node labels for record-only queries. The unchanged engine can
+include relationships in an unlabelled single-node pattern such as `MATCH (n)`.
+The source does not change that engine behavior.
+
+Earlier v2 spools remain readable. The label change updates the catalog
+fingerprint and schedules normal per-record reprojection, deleting old edges
+before inserting their namespaced replacements with the same element IDs.
+Update existing relationship patterns to the names shown by schema inspection.
 
 A null lookup removes the edge. Reparenting deletes the old edge before inserting
 its replacement. Deleting a referring record removes its outgoing edges.

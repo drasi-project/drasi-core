@@ -56,7 +56,7 @@ const ID_1: &str = "001000000000001AAA";
 const ID_2: &str = "001000000000002AAA";
 const CONTACT_1: &str = "003000000000001AAA";
 const CONTACT_2: &str = "003000000000002AAA";
-const JOIN_QUERY: &str = "MATCH (c:Contact)-[:Account]->(a:Account) RETURN c.Id AS id, c.Name AS contact, a.Name AS account";
+const JOIN_QUERY: &str = "MATCH (c:Contact)-[:REL_Account]->(a:Account) RETURN c.Id AS id, c.Name AS contact, a.Name AS account";
 
 #[derive(Clone, Default)]
 struct RestHarness {

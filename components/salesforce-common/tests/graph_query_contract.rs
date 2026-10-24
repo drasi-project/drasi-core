@@ -26,7 +26,7 @@ async fn graph_changes_match_core_relation_contract() -> Result<()> {
     )?;
     let query = Query::cypher(QUERY_ID)
         .query(
-            "MATCH (c:Contact)-[:Account]->(a:Account) RETURN c.Name AS contact, a.Name AS account",
+            "MATCH (c:Contact)-[:REL_Account]->(a:Account) RETURN c.Name AS contact, a.Name AS account",
         )
         .from_source(SOURCE_ID)
         .auto_start(true)
@@ -298,7 +298,7 @@ async fn owner_property_update_with_retained_relation_does_not_duplicate_join_ro
     )?;
     let query = Query::cypher(QUERY_ID)
         .query(
-            "MATCH (c:Contact)-[:Account]->(a:Account) RETURN c.Name AS contact, a.Name AS account",
+            "MATCH (c:Contact)-[:REL_Account]->(a:Account) RETURN c.Name AS contact, a.Name AS account",
         )
         .from_source(SOURCE_ID)
         .auto_start(true)

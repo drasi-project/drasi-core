@@ -57,12 +57,12 @@ The default queries show Accounts, an Account count, Contacts, and Contacts join
 to their Accounts:
 
 ```cypher
-MATCH (c:Contact)-[:Account]->(a:Account)
+MATCH (c:Contact)-[:REL_Account]->(a:Account)
 RETURN c.Id AS contactId, c.Name AS contact, a.Id AS accountId, a.Name AS account
 ```
 
 The source discovers fields and relationships automatically. `Contact.AccountId`
-becomes the `:Account` relationship; no second source or manual join is needed.
+becomes the `:REL_Account` relationship; no second source or manual join is needed.
 Clearing that field removes the joined row, but not the Contact.
 
 The `support/` directory contains CLI/authentication plumbing, diagnostics and
@@ -91,6 +91,11 @@ State lives under `.state/<org-id>/graph-v2/`. Different object selections or
 query definitions get separate namespaces, so experiments do not overwrite each
 other. Use `--state-dir /absolute/path` to choose another root. Do not run two
 copies against the same namespace or delete just the source or query half.
+
+The `REL_` relationship prefix gives the updated default queries a new namespace;
+older query state is preserved. Existing source data is reprojected to the new
+labels during reconciliation. Custom queries must use the updated relationship
+labels shown by `--schema`.
 
 <details>
 <summary>Diagnostics, advanced settings, and offline checks</summary>

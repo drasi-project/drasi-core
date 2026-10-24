@@ -31,7 +31,7 @@ const CONTACTS_QUERY: &str = concat!(
     "RETURN c.Id AS id, c.Name AS name, c.Email AS email, c.AccountId AS accountId"
 );
 const JOIN_QUERY: &str = concat!(
-    "MATCH (c:Contact)-[:Account]->(a:Account) ",
+    "MATCH (c:Contact)-[:REL_Account]->(a:Account) ",
     "RETURN c.Id AS contactId, c.Name AS contact, a.Id AS accountId, a.Name AS account"
 );
 

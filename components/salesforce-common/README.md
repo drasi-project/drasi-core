@@ -29,6 +29,13 @@ Public API:
 `DiscoveredSchema` exposes deterministic `fingerprint` and object-level schema details,
 including explicit lookup and omission reporting.
 
+Relationship labels are `REL_` plus the described `relationshipName`; node labels
+remain Salesforce object API names. If a selected object starts with that prefix,
+underscores are appended until the prefix is disjoint from all selected objects.
+The same prefix applies to every lookup, so distinct relationship names stay
+distinct. Legacy unprefixed labels remain readable so catalog reprojection can
+replace persisted edges without changing their IDs.
+
 `GraphRecord` carries node properties plus owned outgoing lookup relationships.
 `graph_changes` enforces:
 

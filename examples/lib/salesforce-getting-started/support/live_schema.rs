@@ -112,7 +112,7 @@ async fn live_schema_discovery() -> Result<()> {
     }
     ensure!(
         expected.relations.iter().any(|relation| {
-            relation.label == "Account"
+            relation.label == "REL_Account"
                 && relation.from.as_deref() == Some("Contact")
                 && relation.to.as_deref() == Some("Account")
         }),

@@ -966,6 +966,99 @@ async fn test_e2e_bootstrap_snapshot_reopens_without_live_events(
 
 #[tokio::test]
 #[serial]
+async fn test_e2e_bootstrap_snapshot_reopens_after_filtered_event() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    for restart in [false, true] {
+        let core = build_e2e_lib(
+            "bootstrap-filtered",
+            &directory,
+            Some(RecoveryPolicy::Strict),
+        )
+        .await
+        .unwrap();
+        let mut source = E2eTestSource::new("source", true).unwrap();
+        source.bootstrap = true;
+        let resumed_cursor = source.last_resume_from();
+        let resumed_sequence = source.last_resume_sequence();
+        let events = source.event_sender();
+        core.add_source(source).await.unwrap();
+        core.add_query(
+            Query::cypher("filtered")
+                .query("MATCH (n:Node) WHERE n.value = 42 RETURN n.id AS id, n.value AS value")
+                .from_source("source")
+                .enable_bootstrap(true)
+                .auto_start(false)
+                .with_storage_backend(StorageBackendRef::Named("persistent".into()))
+                .build(),
+        )
+        .await
+        .unwrap();
+        core.start().await.unwrap();
+        core.start_source("source").await.unwrap();
+        core.start_query("filtered").await.unwrap();
+        assert_eq!(
+            *resumed_cursor.read().await,
+            restart.then(|| Bytes::from_static(b"filtered-1"))
+        );
+        assert_eq!(*resumed_sequence.read().await, restart.then_some(1));
+        let query = core
+            .query_manager()
+            .get_query_instance("filtered")
+            .await
+            .unwrap();
+        let store = query
+            .as_any()
+            .downcast_ref::<super::manager::DrasiQuery>()
+            .unwrap()
+            .get_checkpoint_store()
+            .await
+            .unwrap();
+        if !restart {
+            send_event(&events, "source", 1, b"filtered-1").await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let checkpoint = store.read_checkpoint("source").await.unwrap();
+                    if checkpoint.is_some_and(|checkpoint| {
+                        checkpoint.sequence == 1
+                            && checkpoint.source_position == Some(Bytes::from_static(b"filtered-1"))
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("filtered event must advance the durable input checkpoint");
+        }
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snapshot.as_of_sequence, 0);
+        assert_eq!(snapshot.output_generation, 0);
+        assert_eq!(
+            snapshot.to_vec(),
+            vec![serde_json::json!({"id": "source", "value": 42})]
+        );
+        assert_eq!(
+            store.read_result_sequence("filtered").await.unwrap(),
+            Some(0)
+        );
+        assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
+        if restart {
+            send_event(&events, "source", 42, b"matching-42").await;
+            let outbox = wait_for_outbox_sequence(&core, "filtered", 1).await;
+            assert_eq!(outbox.latest_sequence, 1);
+            let snapshot = query.fetch_snapshot().await.unwrap();
+            assert_eq!(snapshot.as_of_sequence, 1);
+            let rows = snapshot.to_vec();
+            assert_eq!(rows.len(), 2);
+            assert!(rows.contains(&serde_json::json!({"id": "source", "value": 42})));
+            assert!(rows.contains(&serde_json::json!({"id": "node-42", "value": 42})));
+        }
+        core.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[serial]
 async fn bootstrap_and_live_sequences_remain_independent_of_source_cursor_on_restart() {
     let directory = tempfile::tempdir_in(".").unwrap();
     const BOOTSTRAP_SEQUENCE: u64 = 1_000_000;

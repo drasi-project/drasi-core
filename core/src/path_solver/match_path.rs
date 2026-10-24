@@ -28,20 +28,12 @@ use drasi_query_ast::ast;
 #[derive(Debug)]
 pub struct MatchPath {
     pub slots: Vec<MatchPathSlot>,
-    pub(crate) slot_kinds: Vec<SlotKind>,
     pub(crate) optional_paths: HashSet<usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SlotKind {
-    Node,
-    Relation,
 }
 
 impl MatchPath {
     pub fn from_query(query_part: &ast::QueryPart) -> Result<Self, EvaluationError> {
         let mut slots = Vec::new();
-        let mut slot_kinds = Vec::new();
 
         let mut alias_map = HashMap::new();
         let mut optional_paths = HashSet::new();
@@ -57,7 +49,6 @@ impl MatchPath {
                 path_index,
                 mc.optional,
             )?;
-            Self::record_slot_kind(&mut slot_kinds, slot_num, SlotKind::Node)?;
             let mut prev_slot_num = slot_num;
 
             for p in &mc.path {
@@ -68,10 +59,8 @@ impl MatchPath {
                     path_index,
                     mc.optional,
                 )?;
-                Self::record_slot_kind(&mut slot_kinds, rel_slot_num, SlotKind::Relation)?;
                 let node_slot_num =
                     merge_node_match(&p.1, &mut slots, &mut alias_map, path_index, mc.optional)?;
-                Self::record_slot_kind(&mut slot_kinds, node_slot_num, SlotKind::Node)?;
 
                 match p.0.direction {
                     ast::Direction::Right => {
@@ -107,26 +96,8 @@ impl MatchPath {
 
         Ok(MatchPath {
             slots,
-            slot_kinds,
             optional_paths,
         })
-    }
-
-    fn record_slot_kind(
-        kinds: &mut Vec<SlotKind>,
-        slot: usize,
-        kind: SlotKind,
-    ) -> Result<(), EvaluationError> {
-        if slot == kinds.len() {
-            kinds.push(kind);
-        } else if kinds[slot] != kind {
-            return Err(EvaluationError::InvalidType {
-                expected: format!(
-                    "{kind:?} variable; the same alias cannot bind a node and a relation"
-                ),
-            });
-        }
-        Ok(())
     }
 
     pub fn get_optional_slots_on_common_paths(

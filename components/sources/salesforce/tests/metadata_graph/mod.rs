@@ -225,11 +225,11 @@ async fn public_schema_inspection_tracks_complete_metadata_refreshes_without_io(
         let relation = before
             .relations
             .iter()
-            .find(|r| r.label == "Account")
+            .find(|r| r.label == "REL_Account")
             .unwrap();
         assert_eq!(relation.from.as_deref(), Some("Contact"));
         assert_eq!(relation.to.as_deref(), Some("Account"));
-        assert!(!before.relations.iter().any(|r| r.label == "Owner"));
+        assert!(!before.relations.iter().any(|r| r.label == "REL_Owner"));
         let calls = fixture.rest.describe_calls.load(Ordering::Relaxed);
         for _ in 0..20 {
             let mut owned = drasi.get_source_schema(SOURCE_ID).await?.unwrap();
@@ -292,14 +292,17 @@ async fn public_schema_inspection_tracks_complete_metadata_refreshes_without_io(
             Some(PropertyType::Boolean)
         );
         assert!(!contact.properties.iter().any(|p| p.name == "Email"));
-        assert!(!after.relations.iter().any(|r| r.label == "Account"));
+        assert!(!after.relations.iter().any(|r| r.label == "REL_Account"));
         let graph = drasi.get_graph_schema().await?;
         assert_eq!(
-            graph.relations["LinkedAccount"].to.as_deref(),
+            graph.relations["REL_LinkedAccount"].to.as_deref(),
             Some("Account")
         );
-        assert_eq!(graph.relations["Related"].from.as_deref(), Some("Contact"));
-        assert_eq!(graph.relations["Related"].to, None);
+        assert_eq!(
+            graph.relations["REL_Related"].from.as_deref(),
+            Some("Contact")
+        );
+        assert_eq!(graph.relations["REL_Related"].to, None);
 
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(301)).await;
@@ -773,7 +776,7 @@ async fn metadata_graph_bootstrap_matches_live_for_labelled_unlabelled_and_mixed
         JOIN_QUERY,
         "MATCH (c)-[r]->(a) RETURN c.Id AS id, c.Name AS contact, a.Name AS account",
         "MATCH (c:Contact)-[r]->(a) RETURN c.Id AS id, c.Name AS contact, a.Name AS account",
-        "MATCH (c)-[:Account]->(a:Account) RETURN c.Id AS id, c.Name AS contact, a.Name AS account",
+        "MATCH (c)-[:REL_Account]->(a:Account) RETURN c.Id AS id, c.Name AS contact, a.Name AS account",
     ];
     let live_ids = [
         "live-labelled",
@@ -840,7 +843,7 @@ async fn metadata_graph_retained_edge_metadata_updates_emit_no_unrelated_result_
         .with_query(persistent_query(JOINED, JOIN_QUERY))
         .with_query(persistent_query(
             "email",
-            "MATCH (c:Contact)-[:Account]->(a:Account) RETURN c.Email AS email, a.Name AS account",
+            "MATCH (c:Contact)-[:REL_Account]->(a:Account) RETURN c.Email AS email, a.Name AS account",
         ))
         .build()
         .await?;
@@ -1081,7 +1084,7 @@ async fn metadata_graph_schema_discovers_scalars_and_reports_omissions_durably()
             .iter()
             .find(|lookup| lookup.field == "AccountId")
             .context("metadata-derived Account lookup")?;
-        assert_eq!(account_lookup.label, "Account");
+        assert_eq!(account_lookup.label, "REL_Account");
         assert_eq!(account_lookup.selected_targets, vec!["Account"]);
         let queries = fixture.rest.queries.read().await;
         ensure!(queries
@@ -1244,7 +1247,7 @@ async fn metadata_graph_refresh_clears_removed_field_without_record_changes() ->
             temp.path(),
             &[(
                 JOINED,
-                "MATCH (c:Contact)-[:Account]->(a:Account) RETURN c.Name AS contact, a.Name AS account, a.Phone AS phone",
+                "MATCH (c:Contact)-[:REL_Account]->(a:Account) RETURN c.Name AS contact, a.Name AS account, a.Phone AS phone",
             )],
             3600,
         )

@@ -463,11 +463,11 @@ mod tests {
     }
 
     #[test]
-    fn default_queries_preserve_saved_state_namespace() {
+    fn default_queries_use_stable_namespaced_relationship_state() {
         let queries = demo_queries(&["Account".into(), "Contact".into()], &[]).unwrap();
         assert_eq!(
             sha256_hex(&serde_json::to_vec(&queries).unwrap()),
-            "7cf35a97df3bc9236c35fb74d3dfea2e41906f3d9867642a18fd8b35249e6978"
+            "f5fba8405f01596adb730bf66e5442e85872923cb0d806158bb0d4006ae91f0c"
         );
     }
 
