@@ -1,0 +1,15 @@
+# Preserve the library lint policy for the shared implementations moved here.
+avoid-breaking-exported-api = true
+msrv = "1.70.0"
+cognitive-complexity-threshold = 25
+type-complexity-threshold = 100
+missing-docs-in-crate-items = true
+enum-variant-name-threshold = 3
+max-struct-bools = 3
+max-fn-params-bools = 3
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+too-many-arguments-threshold = 8
+trivial-copy-size-limit = 64
+pass-by-value-size-limit = 128
+warn-on-all-wildcard-imports = true

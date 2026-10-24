@@ -75,12 +75,13 @@ impl StateGuard {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// pub async fn some_operation(&self) -> crate::error::Result<()> {
-    ///     self.state_guard.require_initialized()?;
-    ///     // ... perform operation ...
-    ///     Ok(())
-    /// }
+    /// ```rust
+    /// use drasi_lib::state_guard::StateGuard;
+    ///
+    /// let guard = StateGuard::new();
+    /// assert!(guard.require_initialized().is_err());
+    /// guard.mark_initialized();
+    /// assert!(guard.require_initialized().is_ok());
     /// ```
     pub fn require_initialized(&self) -> crate::error::Result<()> {
         if !self.initialized.load(Ordering::Acquire) {

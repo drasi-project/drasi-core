@@ -1,0 +1,76 @@
+syntax = "proto3";
+package drasi.admission.v1;
+
+import "drasi/v1/common.proto";
+
+// Success means committed graph admission, not completed consumer effects.
+// After transport loss, retry the same session/sequence and unchanged event.
+service AdmissionService {
+  rpc RegisterProducer(RegisterRequest) returns (RegisterResponse);
+  rpc ProducerStatus(SessionRequest) returns (StatusResponse);
+  rpc RetireProducer(SessionRequest) returns (RetireResponse);
+  rpc AdmissionReceipt(ReceiptRequest) returns (ReceiptResponse);
+  rpc Admit(AdmitRequest) returns (AdmitResponse);
+  rpc StreamEvents(stream AdmitRequest) returns (stream AdmitResponse);
+}
+
+message ProducerSession {
+  string incarnation = 1;
+  string producer = 2;
+  uint64 epoch = 3;
+}
+message Receipt {
+  ProducerSession session = 1;
+  uint64 sequence = 2;
+  uint64 position = 3;
+}
+message ProducerStatus {
+  ProducerSession session = 1;
+  optional uint64 next_sequence = 2;
+  optional uint64 earliest_receipt = 3;
+}
+enum ErrorKind {
+  ERROR_KIND_UNKNOWN = 0;
+  ERROR_KIND_NOT_ENABLED = 1;
+  ERROR_KIND_BUSY = 2;
+  ERROR_KIND_CLOSED = 3;
+  ERROR_KIND_CAPACITY_EXHAUSTED = 4;
+  ERROR_KIND_SESSION_EXPIRED = 5;
+  ERROR_KIND_SEQUENCE = 6;
+  ERROR_KIND_RECEIPT_EXPIRED = 7;
+  ERROR_KIND_PAYLOAD_CONFLICT = 8;
+  ERROR_KIND_PENDING_OBLIGATIONS = 9;
+  ERROR_KIND_IDENTIFIER_TOO_LONG = 10;
+  ERROR_KIND_ACCEPTANCE_UNKNOWN = 11;
+  ERROR_KIND_METADATA_UNKNOWN = 12;
+  ERROR_KIND_INVALID = 13;
+}
+message AdmissionError {
+  ErrorKind kind = 1;
+  string message = 2;
+}
+message RegisterRequest { string source_id = 1; string producer = 2; }
+message SessionRequest { string source_id = 1; ProducerSession session = 2; }
+message ReceiptRequest { string source_id = 1; ProducerSession session = 2; uint64 sequence = 3; }
+message AdmitRequest {
+  string source_id = 1;
+  ProducerSession session = 2;
+  uint64 sequence = 3;
+  drasi.v1.SourceChange event = 4;
+}
+message RegisterResponse {
+  oneof result { ProducerSession session = 1; AdmissionError error = 2; }
+}
+message StatusResponse {
+  oneof result { ProducerStatus status = 1; AdmissionError error = 2; }
+}
+message RetireResponse {
+  oneof result { bool retired = 1; AdmissionError error = 2; }
+}
+message ReceiptResponse {
+  // not_accepted=true is valid only for the next unaccepted sequence.
+  oneof result { Receipt receipt = 1; bool not_accepted = 2; AdmissionError error = 3; }
+}
+message AdmitResponse {
+  oneof result { Receipt receipt = 1; AdmissionError error = 2; }
+}

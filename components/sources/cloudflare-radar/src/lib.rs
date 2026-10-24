@@ -21,11 +21,14 @@ mod state;
 
 pub use config::{CategoryConfig, CloudflareRadarConfig, StartBehavior};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
+use drasi_lib::context::workers::{
+    join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned, WorkerCompletion,
+};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
@@ -40,7 +43,8 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
 use crate::api::{
@@ -57,6 +61,8 @@ pub struct CloudflareRadarSource {
     config: CloudflareRadarConfig,
     client: Client,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    cleanup_required: Mutex<bool>,
+    polling_task: RwLock<Option<JoinHandle<Result<()>>>>,
 }
 
 impl CloudflareRadarSource {
@@ -71,6 +77,8 @@ impl CloudflareRadarSource {
             config,
             client,
             state_store: Arc::new(RwLock::new(state_store)),
+            cleanup_required: Mutex::new(false),
+            polling_task: RwLock::new(None),
         })
     }
 
@@ -112,6 +120,11 @@ impl Source for CloudflareRadarSource {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.polling_task.read().await.is_some() {
+            return Err(WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         info!("[{}] Starting Cloudflare Radar source", self.base.id);
 
         self.base
@@ -130,27 +143,34 @@ impl Source for CloudflareRadarSource {
         let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
 
-        let task = tokio::spawn(async move {
-            if let Err(err) =
-                polling_loop(&source_id, config, client, base, state_store, shutdown_rx).await
-            {
-                error!("[{source_id}] Polling loop exited with error: {err}");
-            }
-        });
-
-        self.base.set_task_handle(task).await;
-
         self.base
             .set_status(
                 ComponentStatus::Running,
                 Some("Cloudflare Radar source running".to_string()),
             )
             .await;
+        let status = self.base.status_handle();
+        spawn_owned_worker(&self.polling_task, async move {
+            let result =
+                polling_loop(&source_id, config, client, base, state_store, shutdown_rx).await;
+            if let Err(error) = &result {
+                error!("[{source_id}] Polling loop exited with error: {error}");
+                status
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Polling loop failed: {error}")),
+                    )
+                    .await;
+            }
+            result
+        })
+        .await?;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
         info!("[{}] Stopping Cloudflare Radar source", self.base.id);
 
         self.base
@@ -164,23 +184,18 @@ impl Source for CloudflareRadarSource {
             let _ = tx.send(());
         }
 
-        if let Some(mut handle) = self.base.task_handle.write().await.take() {
-            tokio::select! {
-                _ = &mut handle => {},
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    warn!("[{}] Polling task did not stop within 5s, aborting", self.base.id);
-                    handle.abort();
-                }
-            }
+        if let WorkerCompletion::Completed(result) = join_owned_worker_gracefully(
+            &mut *self.polling_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Cloudflare Radar '{}' polling cleanup", self.base.id))?
+        {
+            result
+                .with_context(|| format!("Cloudflare Radar '{}' polling failed", self.base.id))?;
         }
-
-        self.base
-            .set_status(
-                ComponentStatus::Stopped,
-                Some("Cloudflare Radar source stopped".to_string()),
-            )
-            .await;
-
+        self.base.stop_common().await?;
+        *cleanup_required = false;
         Ok(())
     }
 
@@ -424,6 +439,11 @@ async fn polling_loop(
 
     loop {
         tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                info!("[{source_id}] Shutdown signal received");
+                break;
+            }
             _ = interval.tick() => {
                 let emit_changes = state.initialized || matches!(config.start_behavior, StartFromBeginning | StartFromTimestamp(_));
                 let min_timestamp = match config.start_behavior {
@@ -481,10 +501,6 @@ async fn polling_loop(
                         warn!("[{source_id}] Failed to persist polling state: {err}");
                     }
                 }
-            }
-            _ = &mut shutdown_rx => {
-                info!("[{source_id}] Shutdown signal received");
-                break;
             }
         }
     }
@@ -1265,7 +1281,143 @@ mod tests {
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
+    use drasi_lib::context::workers::WorkerCleanupError;
+    use drasi_lib::state_store::MemoryStateStoreProvider;
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Notify;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn polling_http_work_is_retained_and_restarts_clear_dispatchers() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let server = tokio::spawn({
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                for _ in 0..3 {
+                    let (mut socket, _) = listener.accept().await?;
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let mut buffer = [0; 1024];
+                        let read = socket.read(&mut buffer).await?;
+                        anyhow::ensure!(
+                            read > 0 && request.len() < 16384,
+                            "invalid test HTTP request"
+                        );
+                        request.extend_from_slice(&buffer[..read]);
+                    }
+                    entered.notify_one();
+                    release.notified().await;
+                    let body = r#"{"success":true,"errors":[],"result":{"events":[]}}"#;
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+                    socket.shutdown().await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+        });
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        let source = CloudflareRadarSource::builder("lifecycle")
+            .with_api_token("test-token")
+            .with_api_base_url(format!("http://{address}/client/v4"))
+            .with_category("bgp_hijacks", true)
+            .with_poll_interval_secs(60)
+            .with_state_store(store.clone())
+            .build()?;
+        source.stop().await?;
+        for cycle in 0..3 {
+            let mut receiver = source.base.try_test_subscribe().await?;
+            source.start().await?;
+            tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+            if cycle == 0 {
+                let error = source.stop().await.unwrap_err();
+                assert!(
+                    matches!(error.downcast_ref(), Some(WorkerCleanupError::TimedOut { timeout }) if *timeout == Duration::from_secs(5))
+                );
+            } else {
+                let stop = source.stop();
+                tokio::pin!(stop);
+                tokio::select! {
+                    result = &mut stop => panic!("HTTP poll remains active: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+            assert!(!source
+                .polling_task
+                .read()
+                .await
+                .as_ref()
+                .expect("owned poll")
+                .is_finished());
+            assert!(source
+                .start()
+                .await
+                .unwrap_err()
+                .downcast_ref::<WorkerAlreadyOwned>()
+                .is_some());
+            release.notify_one();
+            source.stop().await?;
+            assert!(source.polling_task.read().await.is_none());
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await?
+                    .unwrap_err()
+                    .to_string(),
+                "Channel closed"
+            );
+            assert!(store.key_count(source.id()).await? > 0);
+        }
+        server.await??;
+        source.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn polling_errors_and_panics_retain_typed_causes_until_cleanup() -> Result<()> {
+        for panic in [false, true] {
+            let source = CloudflareRadarSource::builder("failed")
+                .with_api_token("test-token")
+                .with_api_base_url("http://127.0.0.1:1")
+                .with_category("bgp_hijacks", true)
+                .build()?;
+            *source.cleanup_required.lock().await = true;
+            spawn_owned_worker(&source.polling_task, async move {
+                assert!(!panic, "injected Cloudflare polling panic");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "injected poll failure",
+                )
+                .into())
+            })
+            .await?;
+            let error = source.stop().await.unwrap_err();
+            if panic {
+                assert!(
+                    matches!(error.downcast_ref(), Some(WorkerCleanupError::Join(error)) if error.is_panic())
+                );
+            } else {
+                assert_eq!(
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .expect("I/O cause")
+                        .kind(),
+                    std::io::ErrorKind::ConnectionReset
+                );
+            }
+            assert!(source.polling_task.read().await.is_none());
+            assert!(source
+                .start()
+                .await
+                .unwrap_err()
+                .downcast_ref::<WorkerAlreadyOwned>()
+                .is_some());
+            source.stop().await?;
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+        Ok(())
+    }
 
     fn insert_node(source_id: &str, id: &str) -> SourceChange {
         SourceChange::Insert {

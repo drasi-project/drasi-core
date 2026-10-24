@@ -30,6 +30,21 @@ ProfilerReaction is a specialized reaction plugin that captures profiling data f
 5. **SLA Validation** - Monitor P95/P99 latencies against service level objectives
 6. **System Optimization** - Measure impact of configuration changes on latency
 
+## Stop and Restart
+
+The processor and report timer share one owned worker. Shutdown takes priority
+over choosing another sample/report, without cancelling an update already in
+progress. Sample/report selection remains fair. Stop waits up to two seconds
+without aborting the processor; timeout or cancellation retains ownership and
+blocks replacement until a later stop completes. Cancelled startup and worker
+panics also require cleanup.
+
+Three restart cycles verify continued sample collection and prompt idle stops.
+A held statistics update proves that timeout/cancellation cannot abandon the
+sample already being processed. Statistics remain in-memory; this adds neither
+durable metrics nor exactly-once delivery, and successful cleanup still drains
+unprocessed queued results.
+
 ## Configuration
 
 ProfilerReaction supports two configuration approaches:

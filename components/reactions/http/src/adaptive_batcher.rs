@@ -235,10 +235,9 @@ impl<T> AdaptiveBatcher<T> {
 
     /// Collect the next batch of items.
     ///
-    /// Note on shutdown handling: Per the Developer Guide, reactions must not block shutdown.
-    /// This inner task safely omits a `tokio::select!` on the shutdown receiver because the
-    /// parent loop (`adaptive_loop.rs`) holds the `shutdown_rx`. When shutdown fires, the parent
-    /// loop drops the `Sender`, causing `self.receiver.recv()` to safely return `None` (channel closed).
+    /// The forwarding loop closes the sender on shutdown. The owned processor
+    /// keeps polling this batcher until buffered items and in-flight delivery
+    /// finish; a stop timeout retains that processor rather than aborting it.
     pub async fn next_batch(&mut self) -> Option<Vec<T>> {
         let mut batch = Vec::new();
 

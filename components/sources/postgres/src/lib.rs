@@ -175,14 +175,26 @@
 //! # }
 //! ```
 
-pub mod config;
-pub mod connection;
-pub mod decoder;
+pub use drasi_postgres_common::{config, connection, decoder, protocol, scram, types};
 pub mod descriptor;
-pub mod protocol;
-pub mod scram;
+pub mod native;
 pub mod stream;
-pub mod types;
+
+pub use native::PostgresTransactionSource as NativePostgresSource;
+
+#[cfg(test)]
+mod position_contract {
+    #[test]
+    fn snapshot_boundary_matches_commit_position_encoding() {
+        for lsn in [0u64, 1, 0x0152_00b0, u64::MAX] {
+            assert_eq!(
+                drasi_bootstrap_postgres::postgres::snapshot_position_bytes(lsn),
+                super::connection::commit_position_bytes(lsn, u64::MAX),
+                "bootstrap snapshot boundary diverged from CDC position encoding for lsn={lsn:#x}"
+            );
+        }
+    }
+}
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
@@ -410,20 +422,7 @@ pub(crate) async fn query_table_primary_keys(
 
     // pg_constraint-based lookup (matches the bootstrap provider) so that the CDC
     // and bootstrap element-id encodings agree.
-    let query = "SELECT \
-            n.nspname AS schema_name, \
-            c.relname AS table_name, \
-            a.attname AS column_name \
-         FROM pg_constraint con \
-         JOIN pg_class c ON con.conrelid = c.oid \
-         JOIN pg_namespace n ON c.relnamespace = n.oid \
-         JOIN pg_attribute a ON a.attrelid = c.oid \
-         WHERE con.contype = 'p' \
-             AND a.attnum = ANY(con.conkey) \
-             AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
-         ORDER BY n.nspname, c.relname, array_position(con.conkey, a.attnum)";
-
-    let rows = client.query(query, &[]).await?;
+    let rows = client.query(PRIMARY_KEY_QUERY, &[]).await?;
 
     Ok(build_primary_key_map(rows.iter().map(|row| {
         (
@@ -433,6 +432,8 @@ pub(crate) async fn query_table_primary_keys(
         )
     })))
 }
+
+pub(crate) use drasi_postgres_common::PRIMARY_KEY_QUERY;
 
 /// Build the table-name → primary-key-columns map from catalog rows of
 /// `(schema_name, table_name, column_name)`, ordered by primary-key position.
@@ -648,6 +649,12 @@ impl PostgresReplicationSource {
             start_lsn = ?start_lsn
         );
 
+        let mut owner = self.base.task_handle.write().await;
+        anyhow::ensure!(
+            owner.is_none(),
+            "PostgreSQL source '{}' must join its previous replication worker before starting",
+            self.base.id
+        );
         let task = tokio::spawn(
             async move {
                 info!("Starting replication for source {source_id}");
@@ -731,7 +738,8 @@ impl PostgresReplicationSource {
             .instrument(span),
         );
 
-        *self.base.task_handle.write().await = Some(task);
+        *owner = Some(task);
+        drop(owner);
 
         let startup_error = match startup_rx.await {
             Ok(Ok(())) => return Ok(()),
@@ -740,9 +748,12 @@ impl PostgresReplicationSource {
             }
             Err(_) => anyhow!("PostgreSQL replication task exited before confirming startup"),
         };
-        let error = match self.base.abort_and_join_task().await {
+        let error = match self.abort_replication_task().await {
             Ok(()) => startup_error,
-            Err(error) => error.context("PostgreSQL replication task failed during startup"),
+            Err(error) => anyhow::Error::new(drasi_lib::error::OperationFailures::new(
+                "PostgreSQL replication startup and cleanup failed",
+                vec![startup_error, error],
+            )),
         };
         error!("Replication startup failed for {}: {error:#}", self.base.id);
         // Joining can cancel the task before it reports its own failure.
@@ -753,6 +764,13 @@ impl PostgresReplicationSource {
             )
             .await;
         Err(error)
+    }
+
+    async fn abort_replication_task(&self) -> Result<()> {
+        self.base
+            .abort_and_join_task()
+            .await
+            .with_context(|| format!("PostgreSQL source '{}' replication cleanup", self.base.id))
     }
 
     async fn pause_replication_for_restart(&self, start_lsn: u64) -> Result<()> {
@@ -770,7 +788,7 @@ impl PostgresReplicationSource {
             )
             .await;
 
-        if let Err(error) = self.base.abort_and_join_task().await {
+        if let Err(error) = self.abort_replication_task().await {
             error!("{error:#}");
             self.base
                 .set_status(
@@ -938,16 +956,14 @@ impl Source for PostgresReplicationSource {
     }
 
     async fn stop(&self) -> Result<()> {
-        // Starting and Error can still own tasks and subscriptions.
-        if self.base.get_status().await == ComponentStatus::Stopped {
-            return Ok(());
-        }
-
         info!("Stopping PostgreSQL replication source: {}", self.base.id);
 
         self.base.set_status(ComponentStatus::Stopping, None).await;
 
-        let task_result = self.base.abort_and_join_task().await;
+        let task_result = self.abort_replication_task().await;
+        if self.base.task_handle.read().await.is_some() {
+            return task_result;
+        }
         // Per-subscriber resume filters live in SourceBase, unlike MySQL's
         // additional binlog-position cache. ReplayState holds stream-wide progress.
         self.base.clear_dispatchers().await;
@@ -1507,11 +1523,10 @@ mod tests {
                     .unwrap();
                 core.start().await.unwrap();
                 let graph = core.component_graph();
-                let runtime = graph
-                    .read()
+                let runtime = core
+                    .source_manager()
+                    .get_source_instance("managed-source")
                     .await
-                    .get_runtime::<Arc<dyn Source>>("managed-source")
-                    .cloned()
                     .unwrap();
                 let source = runtime
                     .as_any()
@@ -1579,7 +1594,7 @@ mod tests {
                         .is_err()
                 );
                 if action == "remove" {
-                    assert!(!graph.read().await.contains(source.id()));
+                    assert!(!graph.snapshot().await.unwrap().contains(source.id()));
                 } else {
                     wait_for_status(
                         &graph,
@@ -1597,6 +1612,7 @@ mod tests {
                 if action != "stop_all" {
                     core.stop().await.unwrap();
                 }
+                core.shutdown().await.unwrap();
             }
             server.abort();
             assert!(server.await.unwrap_err().is_cancelled());
@@ -1662,10 +1678,10 @@ mod tests {
                 .stop()
                 .await
                 .expect_err("task panic must be surfaced");
-            assert!(error
-                .downcast_ref::<tokio::task::JoinError>()
-                .unwrap()
-                .is_panic());
+            assert!(matches!(
+                error.downcast_ref(),
+                Some(drasi_lib::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+            ));
             assert_eq!(source.status().await, ComponentStatus::Error);
             assert!(source.base.task_handle.read().await.is_none());
             assert_eq!(source.replay_state.current_read_lsn(), 0);
@@ -1707,10 +1723,10 @@ mod tests {
             }
             source.base.set_task_handle(failed).await;
             let error = source.pause_replication_for_restart(42).await.unwrap_err();
-            assert!(error
-                .downcast_ref::<tokio::task::JoinError>()
-                .unwrap()
-                .is_panic());
+            assert!(matches!(
+                error.downcast_ref(),
+                Some(drasi_lib::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+            ));
             assert!(source.base.task_handle.read().await.is_none());
             assert_eq!(source.status().await, ComponentStatus::Error);
             source.stop().await.unwrap();
@@ -2198,6 +2214,50 @@ mod tests {
 
             assert!(source.base.task_handle.read().await.is_none());
             assert_eq!(source.status().await, ComponentStatus::Starting);
+        }
+
+        #[tokio::test]
+        async fn stop_joins_replication_even_when_starting_or_failed() {
+            for status in [ComponentStatus::Starting, ComponentStatus::Error] {
+                let source = PostgresSourceBuilder::new("cleanup")
+                    .with_database("db")
+                    .with_user("user")
+                    .build()
+                    .unwrap();
+                source.base.set_status(status, None).await;
+                let (started, ready) = oneshot::channel();
+                let task = tokio::spawn(async move {
+                    started.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                });
+                let worker = task.abort_handle();
+                *source.base.task_handle.write().await = Some(task);
+                ready.await.unwrap();
+                source.stop().await.unwrap();
+                assert!(worker.is_finished());
+                assert!(source.base.task_handle.read().await.is_none());
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+            }
+        }
+
+        #[tokio::test]
+        async fn replication_cannot_overwrite_an_unjoined_worker() {
+            let source = PostgresSourceBuilder::new("ownership")
+                .with_database("db")
+                .with_user("user")
+                .build()
+                .unwrap();
+            let task = tokio::spawn(std::future::pending::<()>());
+            let worker = task.abort_handle();
+            *source.base.task_handle.write().await = Some(task);
+            let error = source
+                .spawn_replication_task(None, false)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("must join its previous"));
+            assert!(!worker.is_finished());
+            source.stop().await.unwrap();
+            assert!(worker.is_finished());
         }
 
         #[test]

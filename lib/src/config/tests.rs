@@ -18,6 +18,24 @@ mod schema_tests {
     use serde_json::json;
 
     #[test]
+    fn removed_bootstrap_buffer_setting_is_rejected_and_actual_capacity_round_trips() {
+        let config = crate::Query::cypher("query")
+            .query("MATCH (n) RETURN n")
+            .with_priority_queue_capacity(17)
+            .build();
+        let value = serde_json::to_value(&config).unwrap();
+        let restored: QueryConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored.priority_queue_capacity, Some(17));
+        assert!(value.get("bootstrapBufferSize").is_none());
+        for field in ["bootstrapBufferSize", "bootstrap_buffer_size"] {
+            let mut invalid = value.clone();
+            invalid[field] = json!(1000);
+            let error = serde_json::from_value::<QueryConfig>(invalid).unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
+    }
+
+    #[test]
     fn test_config_defaults() {
         let config: DrasiLibConfig = serde_json::from_value(json!({
             "id": "default-server"
@@ -41,8 +59,7 @@ mod schema_tests {
                 {"source_id": "source1", "pipeline": []},
                 {"source_id": "source2", "pipeline": []}
             ],
-            "auto_start": false,
-            "properties": {}
+            "auto_start": false
         });
 
         let config: Result<QueryConfig, _> = serde_json::from_value(valid_json);
@@ -136,7 +153,6 @@ mod schema_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -177,7 +193,6 @@ mod persistence_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -252,7 +267,6 @@ mod persistence_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -300,7 +314,6 @@ mod runtime_tests {
             auto_start: false,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -345,7 +358,6 @@ mod runtime_tests {
                 ],
             }]),
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -570,7 +582,6 @@ mod runtime_tests {
                 auto_start: true,
                 joins: None,
                 enable_bootstrap: true,
-                bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
@@ -613,7 +624,6 @@ mod runtime_tests {
                     auto_start: true,
                     joins: None,
                     enable_bootstrap: true,
-                    bootstrap_buffer_size: 10000,
                     priority_queue_capacity: None,
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
@@ -631,7 +641,6 @@ mod runtime_tests {
                     auto_start: true,
                     joins: None,
                     enable_bootstrap: true,
-                    bootstrap_buffer_size: 10000,
                     priority_queue_capacity: Some(100000), // Override global
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
@@ -762,7 +771,7 @@ mod dispatch_mode_tests {
         let yaml = r#"
             id: test_query
             query: "RETURN 1"
-            source_subscriptions:
+            sources:
               - source_id: source1
                 pipeline: []
             dispatch_mode: broadcast
@@ -771,6 +780,7 @@ mod dispatch_mode_tests {
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.id, "test_query");
         assert_eq!(config.dispatch_mode, Some(DispatchMode::Broadcast));
+        assert_eq!(config.sources[0].source_id, "source1");
     }
 
     #[test]
@@ -778,7 +788,7 @@ mod dispatch_mode_tests {
         let yaml = r#"
             id: test_query
             query: "RETURN 1"
-            source_subscriptions:
+            sources:
               - source_id: source1
                 pipeline: []
         "#;
@@ -786,6 +796,7 @@ mod dispatch_mode_tests {
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.id, "test_query");
         assert_eq!(config.dispatch_mode, None);
+        assert_eq!(config.sources[0].source_id, "source1");
     }
 
     #[test]
@@ -793,7 +804,7 @@ mod dispatch_mode_tests {
         let yaml = r#"
             id: test_query
             query: "RETURN 1"
-            source_subscriptions:
+            sources:
               - source_id: source1
                 pipeline: []
             dispatch_mode: channel
@@ -802,6 +813,7 @@ mod dispatch_mode_tests {
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.id, "test_query");
         assert_eq!(config.dispatch_mode, Some(DispatchMode::Channel));
+        assert_eq!(config.sources[0].source_id, "source1");
     }
 
     #[test]
@@ -852,7 +864,6 @@ mod dispatch_mode_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Channel),
@@ -876,7 +887,6 @@ mod dispatch_mode_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Broadcast),
@@ -900,7 +910,6 @@ mod dispatch_mode_tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None, // Default

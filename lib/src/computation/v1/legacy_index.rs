@@ -1,0 +1,180 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::{QueryIndexProviderResource, ResourceCleanup, ResourceHandle, ResourceRole};
+use async_trait::async_trait;
+use drasi_core::{
+    computation::{
+        ComputationIndexProvider, ComputationIndexes, ComputationIoScope, ComputationResource,
+        ScopedIndex, TransactionDomain,
+    },
+    interface::{
+        CheckpointStore, IndexBackendPlugin, IndexError, IndexSet, LiveResultsWriter, OutboxWriter,
+        SessionControl,
+    },
+};
+use std::sync::Arc;
+
+/// Reuses an existing index plugin in an isolated computation namespace.
+/// Output writers participate atomically only when the provider explicitly
+/// guarantees their participation in the index session.
+pub struct LegacyIndexProviderAdapter {
+    provider: Arc<dyn IndexBackendPlugin>,
+    construction: Arc<ComputationIoScope>,
+    namespace: Option<Arc<str>>,
+}
+
+impl LegacyIndexProviderAdapter {
+    pub(crate) fn storage_key(namespace: Option<&str>, graph: &str, query: &str) -> String {
+        let encode = |value: &str| {
+            value
+                .bytes()
+                .map(|value| format!("{value:02x}"))
+                .collect::<String>()
+        };
+        match namespace {
+            Some(scope) => format!(
+                "computation-v2-{}-{}-{}",
+                encode(scope),
+                encode(graph),
+                encode(query)
+            ),
+            None => format!("computation-v1-{}-{}", encode(graph), encode(query)),
+        }
+    }
+    pub fn new(provider: Arc<dyn IndexBackendPlugin>) -> Arc<Self> {
+        Arc::new(Self {
+            provider,
+            construction: Arc::new(ComputationIoScope::default()),
+            namespace: None,
+        })
+    }
+    /// Isolate instances that deliberately share one underlying backend plugin.
+    pub fn scoped(
+        provider: Arc<dyn IndexBackendPlugin>,
+        namespace: impl Into<Arc<str>>,
+    ) -> super::Result<Arc<Self>> {
+        let namespace = namespace.into();
+        super::data::validate_identifier("index namespace", &namespace)?;
+        Ok(Arc::new(Self {
+            provider,
+            construction: Arc::new(ComputationIoScope::default()),
+            namespace: Some(namespace),
+        }))
+    }
+    /// The adapter owns constructor work; register this handle as graph-owned.
+    /// The underlying instance-provided plugin/factory is only borrowed.
+    pub fn resource(self: &Arc<Self>) -> ResourceHandle {
+        let provider: Arc<dyn ComputationIndexProvider> = self.clone();
+        ResourceHandle::new(
+            ResourceRole::IndexBackend,
+            Arc::new(QueryIndexProviderResource(provider.clone())),
+        )
+        .with_shared_identity(provider)
+        .with_cleanup(self.clone())
+    }
+}
+
+#[async_trait]
+impl ResourceCleanup for LegacyIndexProviderAdapter {
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        self.construction.shutdown().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ComputationIndexProvider for LegacyIndexProviderAdapter {
+    async fn create_indexes(
+        &self,
+        graph: &str,
+        query: &str,
+    ) -> Result<ComputationIndexes, IndexError> {
+        super::data::validate_identifier("graph", graph).map_err(IndexError::other)?;
+        super::data::validate_identifier("query", query).map_err(IndexError::other)?;
+        let key = Self::storage_key(self.namespace.as_deref(), graph, query);
+        let query_id = query.to_owned();
+        let provider = self.provider.clone();
+        let original = self
+            .construction
+            .run_async(async move { provider.create_scoped_indexes(&key, &query_id).await })
+            .await?;
+        let work = Arc::new(ComputationIoScope::default());
+        let control: Arc<dyn SessionControl> = Arc::new(ScopedIndex::from_arc(
+            original.set.session_control,
+            work.clone(),
+        ));
+        let domain = TransactionDomain::new(control.clone());
+        let atomic_output = self.provider.supports_atomic_query_output();
+        let checkpoint = original.checkpoint_store.map(|value| {
+            ComputationResource::participating(
+                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn CheckpointStore>,
+                &domain,
+            )
+        });
+        let outbox = original.outbox_writer.map(|value| {
+            let writer =
+                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn OutboxWriter>;
+            if atomic_output {
+                ComputationResource::participating(writer, &domain)
+            } else {
+                ComputationResource::independent(writer)
+            }
+        });
+        let live = original.live_results_writer.map(|value| {
+            let writer =
+                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn LiveResultsWriter>;
+            if atomic_output {
+                ComputationResource::participating(writer, &domain)
+            } else {
+                ComputationResource::independent(writer)
+            }
+        });
+        let indexes = ComputationIndexes::try_new(
+            IndexSet {
+                element_index: Arc::new(ScopedIndex::from_arc(
+                    original.set.element_index,
+                    work.clone(),
+                )),
+                archive_index: Arc::new(ScopedIndex::from_arc(
+                    original.set.archive_index,
+                    work.clone(),
+                )),
+                result_index: Arc::new(ScopedIndex::from_arc(
+                    original.set.result_index,
+                    work.clone(),
+                )),
+                future_queue: Arc::new(ScopedIndex::from_arc(
+                    original.set.future_queue,
+                    work.clone(),
+                )),
+                session_control: control,
+            },
+            Some(domain),
+            checkpoint,
+            outbox,
+            live,
+        )
+        .map_err(IndexError::other)?;
+        Ok(indexes
+            .with_cleanup(work)
+            .with_durability(self.provider.durability()))
+    }
+    fn is_volatile(&self) -> bool {
+        self.provider.is_volatile()
+    }
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        self.provider.durability()
+    }
+}

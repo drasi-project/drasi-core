@@ -31,13 +31,9 @@ use rusqlite::{Connection, OpenFlags};
 use std::sync::Arc;
 
 pub mod descriptor;
+pub mod native;
 
-/// Per-table key configuration for stable element IDs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableKeyConfig {
-    pub table: String,
-    pub key_columns: Vec<String>,
-}
+pub use drasi_sqlite_common::TableKeyConfig;
 
 /// SQLite bootstrap provider.
 #[derive(Clone)]

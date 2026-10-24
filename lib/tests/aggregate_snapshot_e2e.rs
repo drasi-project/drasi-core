@@ -194,7 +194,7 @@ async fn assert_summary_snapshot(
     assert_eq!(
         core.get_query_results(SUMMARY_ID).await?,
         vec![expected.clone()],
-        "get_query_results must return exactly the current aggregate"
+        "get_query_results must return exactly the current aggregate (keyed snapshot: {rows:?})"
     );
     assert_eq!(
         rows.len(),
@@ -226,6 +226,68 @@ async fn assert_live_update(
             row_signature: signature,
         }]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn trading_bootstrap_reuses_the_same_solver_in_both_source_orders() -> Result<()> {
+    use drasi_core::{
+        evaluation::{context::QueryPartEvaluationContext, functions::FunctionRegistry},
+        query::QueryBuilder,
+    };
+    use drasi_functions_cypher::CypherFunctionSet;
+    use drasi_query_cypher::CypherParser;
+    for prices_first in [false, true] {
+        let functions = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let query = QueryBuilder::new(
+            PORTFOLIO_SUMMARY,
+            Arc::new(CypherParser::new(functions.clone())),
+        )
+        .with_function_registry(functions)
+        .with_joins(
+            portfolio_config()
+                .joins
+                .unwrap()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+        .try_build()
+        .await?;
+        let prices = vec![price("AAPL", 110, 1), price("MSFT", 180, 1)];
+        let changes = if prices_first {
+            prices
+                .into_iter()
+                .chain(portfolio_rows())
+                .collect::<Vec<_>>()
+        } else {
+            portfolio_rows()
+                .into_iter()
+                .chain(prices)
+                .collect::<Vec<_>>()
+        };
+        let mut last = None;
+        for element in changes {
+            for diff in query
+                .process_source_change(SourceChange::Insert { element })
+                .await?
+            {
+                match diff {
+                    QueryPartEvaluationContext::Adding { after, .. }
+                    | QueryPartEvaluationContext::Updating { after, .. }
+                    | QueryPartEvaluationContext::Aggregation { after, .. } => {
+                        last = Some(serde_json::to_value(after)?);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            last,
+            Some(summary(2000.0, 1800.0, 2)),
+            "prices_first={prices_first}"
+        );
+    }
     Ok(())
 }
 

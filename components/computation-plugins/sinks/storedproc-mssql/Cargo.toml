@@ -1,0 +1,41 @@
+[package]
+name = "drasi-computation-sink-storedproc-mssql"
+description = "Native awaited SQL Server stored-procedure sink"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = ["native-tls"]
+native-tls = ["drasi-mssql-common/native-tls"]
+rustls = ["drasi-mssql-common/rustls"]
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "1.0.0"
+kind = "sink-storedproc-mssql"
+
+[dependencies]
+drasi-computation-contracts.workspace = true
+drasi-computation-plugin-sdk.workspace = true
+drasi-core-types.workspace = true
+drasi-mssql-common = { workspace = true, features = ["native", "sql"] }
+drasi-reaction-common.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+futures-util = "0.3"
+tiberius = { version = "0.12", default-features = false, features = ["tds73"] }
+
+[lints]
+workspace = true

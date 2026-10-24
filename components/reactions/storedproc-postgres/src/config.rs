@@ -15,7 +15,7 @@
 //! Configuration for the PostgreSQL Stored Procedure reaction.
 
 use drasi_lib::identity::IdentityProvider;
-use drasi_lib::reactions::common::{self, TemplateRouting};
+use drasi_reaction_common::{self as common, TemplateRouting};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -197,28 +197,12 @@ impl TemplateRouting for PostgresStoredProcReactionConfig {
         query_id: &str,
         operation: common::OperationType,
     ) -> Option<&TemplateSpec> {
-        if let Some(spec) = self
-            .routes
-            .get(query_id)
-            .and_then(|qc| Self::get_spec_from_config(qc, operation))
-        {
-            return Some(spec);
-        }
-
-        let segment = last_segment(query_id);
-        if segment != query_id {
-            if let Some(spec) = self
-                .routes
-                .get(segment)
-                .and_then(|qc| Self::get_spec_from_config(qc, operation))
-            {
-                return Some(spec);
-            }
-        }
-
-        self.default_template
-            .as_ref()
-            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+        drasi_postgres_common::sql::resolve_template(
+            &self.routes,
+            self.default_template.as_ref(),
+            query_id,
+            operation,
+        )
     }
 }
 

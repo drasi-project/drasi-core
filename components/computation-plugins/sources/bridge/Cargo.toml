@@ -1,0 +1,20 @@
+[package]
+name = "drasi-computation-source-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Statically hosted native inter-instance ComputationGraph bridge source"
+readme = "README.md"
+
+[dependencies]
+drasi-computation-bridge-common = { workspace = true }
+drasi-core = { workspace = true }
+drasi-lib = { workspace = true }
+anyhow = "1"
+async-trait = "0.1"
+futures-util = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt"] }
+
+[lints]
+workspace = true

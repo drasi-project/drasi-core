@@ -1,0 +1,10 @@
+[package]
+name = "drasi-computation-plugin-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Independent C ABI for native Drasi ComputationGraph plugins"
+readme = "README.md"
+
+[lints]
+workspace = true

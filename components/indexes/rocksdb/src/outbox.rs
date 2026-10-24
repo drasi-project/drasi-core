@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::{IndexDb, RocksDbSessionState};
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, OutboxWriter};
+use drasi_core::interface::{IndexError, OutboxPageLimits, OutboxWriter};
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode};
 use tokio::task;
 
@@ -66,6 +66,43 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
     prefix.extend_from_slice(query_id.as_bytes());
     prefix.push(0x00);
     prefix
+}
+
+pub(crate) fn read_page(
+    db: &IndexDb,
+    query_id: &str,
+    after: u64,
+    limits: OutboxPageLimits,
+) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    let cf = db.cf_handle(OUTBOX_CF).ok_or(IndexError::CorruptedData)?;
+    let prefix = make_prefix(query_id);
+    let mut iterator = db.raw_iterator_cf(&cf);
+    // Seek to the last exact key, not the next integer: malformed suffixes
+    // between consecutive sequence keys must not disappear at a page boundary.
+    iterator.seek(make_key(query_id, after));
+    let mut entries = Vec::new();
+    let mut bytes = 0;
+    while iterator.valid() {
+        let key = iterator.key().ok_or(IndexError::CorruptedData)?;
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        if key.len() != prefix.len() + 8 {
+            return Err(IndexError::CorruptedData);
+        }
+        let sequence = sequence_from_key(key, prefix.len()).ok_or(IndexError::CorruptedData)?;
+        if sequence > after {
+            let value = iterator.value().ok_or(IndexError::CorruptedData)?;
+            if !limits.admits(entries.len(), bytes, value.len()) {
+                break;
+            }
+            bytes += value.len();
+            entries.push((sequence, value.to_vec()));
+        }
+        iterator.next();
+    }
+    iterator.status().map_err(IndexError::other)?;
+    Ok(entries)
 }
 
 /// RocksDB-backed outbox writer.
@@ -163,6 +200,19 @@ fn collect_keys_for_trim(
 
 #[async_trait]
 impl OutboxWriter for RocksDbOutboxWriter {
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_sequence: u64,
+        limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let db = self.db.clone();
+        let query = query_id.to_owned();
+        task::spawn_blocking(move || read_page(&db, &query, after_sequence, limits))
+            .await
+            .map_err(IndexError::other)?
+    }
+
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
@@ -191,9 +241,12 @@ impl OutboxWriter for RocksDbOutboxWriter {
         query_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let Some(first_sequence) = after_sequence.checked_add(1) else {
+            return Ok(Vec::new());
+        };
         let db = self.db.clone();
         let prefix = make_prefix(query_id);
-        let start_key = make_key(query_id, after_sequence.saturating_add(1));
+        let start_key = make_key(query_id, first_sequence);
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
@@ -258,31 +311,8 @@ impl OutboxWriter for RocksDbOutboxWriter {
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        let db = self.db.clone();
-        let prefix = make_prefix(query_id);
-
-        task::spawn_blocking(move || {
-            let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            let iter = db.iterator_cf(
-                &cf,
-                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        db.delete_cf(&cf, &key).map_err(IndexError::other)?;
-                    }
-                    Err(e) => return Err(IndexError::other(e)),
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(IndexError::other)?
+        self.trim_to_capacity(query_id, 0).await?;
+        Ok(())
     }
 
     async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {

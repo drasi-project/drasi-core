@@ -15,7 +15,7 @@
 //! Canonical PostgreSQL value representation and ElementValue conversion.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use drasi_core::models::ElementValue;
+use drasi_core_types::models::ElementValue;
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;

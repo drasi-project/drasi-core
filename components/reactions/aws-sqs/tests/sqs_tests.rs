@@ -207,7 +207,12 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         .build()
         .await?;
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        core.computation_component("sqs-test-reaction")?
+            .wait_started(),
+    )
+    .await??;
 
     source_handle
         .send_node_insert(
@@ -272,7 +277,7 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
     );
     assert_eq!(delete_attrs.get("sensor-id"), Some(&"sensor-1".to_string()));
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -336,7 +341,12 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
         .build()
         .await?;
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        core.computation_component("sqs-agg-reaction")?
+            .wait_started(),
+    )
+    .await??;
 
     // Insert first sensor — aggregation should fire with total=1, total_value=10
     source_handle
@@ -410,6 +420,6 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
         "aggregation after delete should route as UPDATE"
     );
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }

@@ -23,7 +23,7 @@
 //! use crate::test_helpers::wait_for_component_status;
 //!
 //! // Subscribe BEFORE triggering the action
-//! let mut event_rx = graph.read().await.subscribe();
+//! let mut event_rx = graph.subscribe().unwrap();
 //!
 //! manager.start_source("my-source").await.unwrap();
 //!
@@ -41,6 +41,40 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
+pub(crate) mod checkpoints;
+pub(crate) mod managers;
+mod runtime_behavior;
+
+pub(crate) fn native_query_value(
+    value: &drasi_core::evaluation::variable_value::VariableValue,
+) -> serde_json::Value {
+    use crate::computation::v1::*;
+    use drasi_core::evaluation::context::QueryPartEvaluationContext;
+    let query = ComponentId::try_new("codec-parity").unwrap();
+    let envelope = QueryChangeCodec::encode_evaluation(
+        None,
+        &query,
+        SystemMetadata::new(StreamId::try_new("codec-parity/out").unwrap(), 1),
+        &[QueryPartEvaluationContext::Adding {
+            after: [("value".into(), value.clone())].into_iter().collect(),
+            row_signature: 1,
+        }],
+        QueryOutputMetadata {
+            query_id: query.to_string(),
+            source_id: None,
+            timestamp: chrono::Utc::now(),
+            metadata: Default::default(),
+            profiling: None,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let result = QueryChangeCodec::to_legacy_result(&envelope).unwrap();
+    let crate::channels::ResultDiff::Add { data, .. } = &result.results[0] else {
+        panic!("expected a projected query row");
+    };
+    data["value"].clone()
+}
 
 /// Wait for a specific component to reach a target status via the broadcast channel.
 ///

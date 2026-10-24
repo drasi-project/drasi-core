@@ -28,6 +28,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
+drasi-mssql-common = { workspace = true, features = ["sql"] }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
@@ -46,7 +47,6 @@ tokio-util = { version = "0.7", features = ["compat"] }
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-handlebars = "5.1"
 log = "0.4"
 anyhow = "1.0"
 drasi-plugin-sdk = { workspace = true }
@@ -72,8 +72,8 @@ workspace = true
 # handshake, such as macOS Secure Transport against SQL Server 2022), build with
 # `--no-default-features --features rustls`.
 default = ["native-tls"]
-native-tls = ["tiberius/native-tls"]
-rustls = ["tiberius/rustls"]
+native-tls = ["tiberius/native-tls", "drasi-mssql-common/native-tls"]
+rustls = ["tiberius/rustls", "drasi-mssql-common/rustls"]
 dynamic-plugin = []
 
 [target.'cfg(target_os = "linux")'.dependencies]

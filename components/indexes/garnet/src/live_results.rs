@@ -18,6 +18,9 @@
 //! - Key: `live:{<query_id>}` (hash-tagged for cluster compatibility)
 //! - Field: `{row_signature}` (u64 as string)
 //! - Value: serialized row data (raw bytes)
+//!
+//! Logical query bindings preserve the primary key. Other query IDs receive
+//! encoded suffixes within the same storage scope and Redis Cluster hash tag.
 
 use std::sync::Arc;
 
@@ -26,13 +29,13 @@ use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
 
-use crate::session_state::GarnetSessionState;
+use crate::{output_scope::OutputScope, session_state::GarnetSessionState};
 
 /// Garnet/Redis-backed live results writer.
 ///
 /// Stores serialized row data in a Redis hash keyed by row signature.
 pub struct GarnetLiveResultsWriter {
-    query_id: String,
+    scope: OutputScope,
     connection: MultiplexedConnection,
     session_state: Option<Arc<GarnetSessionState>>,
 }
@@ -40,10 +43,17 @@ pub struct GarnetLiveResultsWriter {
 impl GarnetLiveResultsWriter {
     pub fn new(query_id: &str, connection: MultiplexedConnection) -> Self {
         Self {
-            query_id: query_id.to_string(),
+            scope: OutputScope::new(query_id),
             connection,
             session_state: None,
         }
+    }
+
+    /// Bind the primary logical query ID to the constructor's storage scope.
+    /// Other IDs use isolated namespaces without changing the primary keys.
+    pub fn with_query_id(mut self, query_id: &str) -> Self {
+        self.scope.bind_query_id(query_id);
+        self
     }
 
     /// Attach shared session state so `apply_mutations` stages into the active
@@ -56,8 +66,8 @@ impl GarnetLiveResultsWriter {
     }
 
     /// Redis key for the live results hash (hash-tagged for cluster).
-    fn live_key(&self) -> String {
-        format!("live:{{{}}}", self.query_id)
+    fn live_key(&self, query_id: &str) -> String {
+        self.scope.key("live", query_id)
     }
 }
 
@@ -68,8 +78,7 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         query_id: &str,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
-        let _ = query_id;
-        let live_key = self.live_key();
+        let live_key = self.live_key(query_id);
 
         if let Some(session_state) = &self.session_state {
             session_state.with_active_buffer_required(|buffer| {
@@ -88,6 +97,7 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
 
         // Use a pipeline for atomic batch operations
         let mut pipe = redis::pipe();
+        pipe.atomic();
         for m in mutations {
             let field = m.row_signature.to_string();
             match m.data {
@@ -108,9 +118,8 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
     }
 
     async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-        let _ = query_id;
         let mut con = self.connection.clone();
-        let live_key = self.live_key();
+        let live_key = self.live_key(query_id);
 
         // HGETALL returns alternating field/value pairs
         let result: Vec<(String, Vec<u8>)> = cmd("HGETALL")
@@ -133,9 +142,16 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        let _ = query_id;
+        let live_key = self.live_key(query_id);
+        if let Some(session) = &self.session_state {
+            if session
+                .with_active_buffer(|buffer| buffer.del(live_key.clone()))?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
         let mut con = self.connection.clone();
-        let live_key = self.live_key();
 
         con.del::<&str, ()>(&live_key)
             .await
@@ -145,9 +161,8 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
     }
 
     async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
-        let _ = query_id;
         let mut con = self.connection.clone();
-        let live_key = self.live_key();
+        let live_key = self.live_key(query_id);
 
         let count: usize = con
             .hlen::<&str, usize>(&live_key)

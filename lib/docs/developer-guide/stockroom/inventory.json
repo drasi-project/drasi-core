@@ -1,0 +1,8 @@
+[
+  {
+    "sku": "bolts",
+    "quantity": 8,
+    "minimum": 5,
+    "warehouse": "west"
+  }
+]

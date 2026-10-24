@@ -38,6 +38,7 @@ struct McpTestClient {
     token: String,
     client: reqwest::Client,
     rx: mpsc::UnboundedReceiver<Value>,
+    reader: tokio::task::JoinHandle<()>,
 }
 
 impl McpTestClient {
@@ -90,7 +91,7 @@ impl McpTestClient {
         }
 
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let mut stream = sse_response.bytes_stream().eventsource();
             while let Some(event) = stream.next().await {
                 match event {
@@ -110,6 +111,7 @@ impl McpTestClient {
             token: token.to_string(),
             client,
             rx,
+            reader,
         })
     }
 
@@ -156,7 +158,6 @@ async fn wait_for_port(handle: &Arc<AtomicU16>) -> Result<u16> {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_mcp_reaction_end_to_end() -> Result<()> {
     let (source, source_handle) = ApplicationSource::new(
         "test-source",
@@ -295,7 +296,8 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
     let items: Vec<Value> = serde_json::from_str(text)?;
     assert!(items.iter().any(|item| item["id"] == 2));
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
+    tokio::time::timeout(Duration::from_secs(2), client.reader).await??;
 
     Ok(())
 }

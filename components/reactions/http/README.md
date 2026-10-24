@@ -743,6 +743,30 @@ cargo build -p drasi-reaction-http --features dynamic-plugin
 cargo test -p drasi-reaction-http
 ```
 
+### Stop and restart
+
+Lifecycle calls are serialized and the processor is registered before it starts.
+Duplicate start, cancelled startup and incomplete cleanup reject replacement.
+Stop cancels subscription forwarders and waits up to two seconds for the
+processor without aborting its current delivery or checkpoint write. A timeout
+means cleanup is incomplete: the worker stays owned, and a later stop must finish
+joining it before restart.
+
+Adaptive forwarding and batch delivery run concurrently inside that processor,
+not in a detached child task. Shutdown closes the batch input and drains its
+already-forwarded items; it no longer abandons delivery after 1.5 seconds.
+Undequeued priority-queue entries are still discarded by successful base cleanup.
+Configured request/retry limits and explicit poison/skip policies are unchanged.
+
+These are lifecycle guarantees, not remote-effect atomicity. The legacy graph
+adapter still acknowledges acceptance, and a process failure or lost remote reply
+can leave the external outcome uncertain.
+
+Current-thread lifecycle cases hold real HTTP replies and checkpoint writes
+beyond the actual two-second stop bound, then verify completion. They also cover
+cancelled startup/cleanup, typed processor panics, exact payloads and three
+restarts in both modes.
+
 Unit tests cover config defaults and validation, builder and full `Reaction`-trait
 semantics, template routing and rendering, lifecycle, and adaptive runtime conversion.
 Integration tests use [`wiremock`](https://crates.io/crates/wiremock) as the receiving

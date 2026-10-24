@@ -16,10 +16,85 @@
 //!
 //! Embedded library for running Drasi continuous queries with sources, queries, and reactions.
 //!
+//! ## Choosing an interface
+//!
+//! | Task | Start here |
+//! |---|---|
+//! | Embed Drasi and configure ordinary queries | [`DrasiLib`], [`DrasiLibBuilder`], [`Query`], [`config`] |
+//! | Assemble in-process native components | [`computation::v1`]: component traits, factories, ports, resources and graph control |
+//! | Read component state, logs or events | [`component_graph::ComponentGraphView`], [`observability`], [`metrics`] |
+//! | Supply host-owned storage or configuration services | [`indexes`], [`management`], [`state_store`], [`wal`] |
+//! | Maintain an ordinary Source/Reaction plugin | [`sources`], [`reactions`], [`bootstrap`], [`channels`], [`context`] |
+//!
+//! A dynamically loaded **native plugin** implements the traits in the
+//! [native plugin SDK](https://docs.rs/drasi-computation-plugin-sdk), not this
+//! crate's graph-owning traits. Its shared messages and codecs come from
+//! [`drasi_computation_contracts`]; values come from `drasi-core-types`.
+//! The Host SDK connects those plugin operations to this runtime. Do not pass
+//! Rust trait objects, resource owners or graph handles across a library boundary.
+//!
+//! The graph and shared-contract imports refer to the same types:
+//!
+//! ```
+//! use drasi_computation_contracts::ComponentId;
+//! use drasi_lib::computation::v1::ComponentId as GraphComponentId;
+//!
+//! let id: GraphComponentId = ComponentId::try_new("processor")?;
+//! assert_eq!(id.as_str(), "processor");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ### Existing ordinary plugin interfaces
+//!
+//! Ordinary [`Source`], [`Reaction`] and [`BootstrapProvider`] contracts remain
+//! available while native migration proceeds. Their base helpers and contexts
+//! are documented in the corresponding modules; they are not the native
+//! dynamic-plugin interface. The old import paths and root exports are identical:
+//!
+//! ```
+//! use drasi_lib::{BootstrapProvider, Reaction, Source};
+//!
+//! fn source_api<T: Source + ?Sized>(value: &T) {
+//!     fn same_trait<T: drasi_lib::sources::Source + ?Sized>(_: &T) {}
+//!     same_trait(value);
+//! }
+//! fn reaction_api<T: Reaction + ?Sized>(value: &T) {
+//!     fn same_trait<T: drasi_lib::reactions::Reaction + ?Sized>(_: &T) {}
+//!     same_trait(value);
+//! }
+//! fn bootstrap_api<T: BootstrapProvider + ?Sized>(value: &T) {
+//!     fn same_trait<T: drasi_lib::bootstrap::BootstrapProvider + ?Sized>(_: &T) {}
+//!     same_trait(value);
+//! }
+//! ```
+//!
+//! Use [`QueryConfigurationSnapshot`] for saved settings and
+//! [`computation::v1::QueryResultSnapshot`] for result rows. Logging and event
+//! history use [`observability`]. Retired query helpers and old import aliases
+//! are not part of this breaking release.
+//!
+//! Some public implementation modules remain hidden from the main documentation
+//! index. They are **not crate-private**: existing callers may depend on their
+//! imports, so hiding them is not permission to remove them. Prefer the supported
+//! entry points above rather than adding dependencies on internal manager or
+//! state-guard implementations.
+//!
+//! ### Ownership and lifetime
+//!
+//! The graph owns component lifecycle and declared resources. A borrowed service
+//! does not grant permission to commit unrelated state or retain it after
+//! replacement. Components must retain and join their own background work;
+//! cancelling a wait is not completed cleanup. See [`context::workers`],
+//! [`management::ConfigurationSession`] and [`computation::v1::GraphRun`].
+//! Query readers observe an existing component; they do not own another evaluator.
+//!
 //! ## Error Handling
 //!
-//! All public API methods return [`error::Result<T>`], which uses [`DrasiError`] —
-//! a structured enum that supports pattern matching on failure modes.
+//! Ordinary [`DrasiLib`] operations use [`error::Result`], which carries
+//! [`DrasiError`]. Use [`DrasiError::classification`] for the public category and
+//! [`DrasiError::downcast_ref`] for retained typed causes. Graph APIs expose
+//! [`computation::v1::GraphError`] and plugin/provider traits use their documented
+//! result types.
 //!
 //! Internal modules and plugin trait implementations use `anyhow::Result` for flexibility.
 //! The [`DrasiError::Internal`] variant (with `#[from] anyhow::Error`) auto-converts
@@ -31,7 +106,7 @@
 // Core Public Modules
 // ============================================================================
 
-/// Component dependency graph — the single source of truth for configuration
+/// Read-only component inspection.
 pub mod component_graph;
 
 /// Fluent builders for DrasiLib and components
@@ -52,6 +127,11 @@ pub mod wal;
 /// Error types for drasi-lib
 pub mod error;
 
+/// Computation contracts and the authoritative DAG runtime.
+pub mod computation;
+/// Optional desired-configuration management and host-supplied storage contracts.
+pub mod management;
+
 /// Identity providers for authentication credentials
 pub mod identity;
 
@@ -59,34 +139,32 @@ pub mod identity;
 pub mod recovery;
 
 // ============================================================================
-// Internal Modules (crate-private, but visible to integration tests)
+// Public ordinary integration modules
 // ============================================================================
 
-// These modules are doc(hidden) but public: plugin crates and the host SDK
-// import them directly in production, so treat their contents as external API.
-#[cfg_attr(not(test), doc(hidden))]
+/// Ordinary bootstrap providers and their snapshot request/context types.
 pub mod bootstrap;
-#[cfg_attr(not(test), doc(hidden))]
+/// Ordinary source/reaction messages, status and dispatch contracts.
 pub mod channels;
+/// Public implementation helpers retained for existing callers; prefer `DrasiLib`.
 #[cfg_attr(not(test), doc(hidden))]
 pub mod component_ops;
+/// Compatibility inspection implementation; prefer `DrasiLib` and `ComponentGraphView`.
 #[cfg_attr(not(test), doc(hidden))]
 pub mod inspection;
+/// Implementation of the root-exported `DrasiLib`; prefer the root import.
 #[cfg_attr(not(test), doc(hidden))]
 pub mod lib_core;
-#[cfg_attr(not(test), doc(hidden))]
-pub mod lifecycle;
-#[cfg_attr(not(test), doc(hidden))]
+/// Query read contracts, snapshot/outbox exchange types and ordinary API facades.
 pub mod queries;
-#[cfg_attr(not(test), doc(hidden))]
+/// Ordinary reaction traits, base helpers and result-snapshot interfaces.
 pub mod reactions;
-#[cfg_attr(not(test), doc(hidden))]
+/// Ordinary source traits, base helpers and subscription interfaces.
 pub mod sources;
 
 // Sub-modules for lib_core operations (split for maintainability)
 mod lib_core_ops;
-#[cfg_attr(not(test), doc(hidden))]
-pub mod managers;
+/// Public initialization helper retained for existing callers, not a native service.
 #[cfg_attr(not(test), doc(hidden))]
 pub mod state_guard;
 
@@ -99,12 +177,14 @@ pub mod schema;
 // Indexes module for storage backend configuration
 pub mod indexes;
 
-// Profiling module for performance monitoring
-#[cfg_attr(not(test), doc(hidden))]
+/// Optional processing-time metadata and profiling interfaces.
 pub mod profiling;
 
 // Observability metrics for the Resumable Reactions pipeline
 pub mod metrics;
+
+/// Component logs, tracing integration and lifecycle-event history.
+pub mod observability;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
@@ -153,20 +233,16 @@ pub use channels::SubscriptionResponse;
 pub use channels::DispatchMode;
 
 /// Log level and log message types for component log streaming
-pub use managers::{LogLevel, LogMessage};
+pub use observability::{ComponentLogType, LogLevel, LogMessage};
 
 /// Tracing initialization function - call to set up component log routing
-pub use managers::get_or_init_global_registry;
-
-/// Deprecated tracing initialization functions — use `get_or_init_global_registry()` instead.
-#[allow(deprecated)]
-pub use managers::{init_tracing, try_init_tracing};
+pub use observability::get_or_init_global_registry;
 
 // ============================================================================
 // Configuration Types
 // ============================================================================
 
-pub use config::snapshot::QuerySnapshot;
+pub use config::snapshot::QueryConfigurationSnapshot;
 /// Configuration types
 pub use config::{
     BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
@@ -174,7 +250,7 @@ pub use config::{
     SourceSubscriptionSettings,
 };
 
-/// Schema discovery types (also available via `config::` for backward compatibility)
+/// Schema discovery types.
 pub use schema::{
     normalize_table_label, GraphNodeSchema, GraphRelationSchema, GraphSchema, NodeSchema,
     PropertySchema, PropertyType, RelationSchema, SourceSchema,
@@ -184,7 +260,7 @@ pub use schema::{
 pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 
 // ============================================================================
-// Plugin Traits (for plugin development)
+// Ordinary plugin and host-provider traits (not the native dynamic SDK)
 // ============================================================================
 
 /// Source trait for implementing source plugins
@@ -245,15 +321,5 @@ pub use builder::Query;
 pub use component_graph::wait_for_status;
 /// Component graph types for dependency tracking and configuration queries
 pub use component_graph::{
-    ComponentGraph, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot, RelationshipKind,
+    ComponentGraphView, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot, RelationshipKind,
 };
-
-// ============================================================================
-// API Module (backward compatibility alias)
-// ============================================================================
-
-/// Re-export builders as `api` module for backward compatibility with tests.
-/// This allows `use crate::api::{Query};` to work.
-pub mod api {
-    pub use crate::builder::Query;
-}

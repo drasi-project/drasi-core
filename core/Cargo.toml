@@ -17,8 +17,10 @@ workspace = true
 [features]
 default = []
 parallel_solver = []
+computation = []
 
 [dependencies]
+drasi-core-types = { workspace = true }
 async-trait = "0.1.68"
 bytes = "1"
 drasi-query-ast.workspace = true

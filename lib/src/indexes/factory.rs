@@ -100,6 +100,35 @@ impl fmt::Debug for IndexFactory {
 }
 
 impl IndexFactory {
+    /// Distinct configured instances, using their lexically first name as the
+    /// canonical graph binding when several names share the same provider.
+    pub(crate) fn configured_providers(&self) -> Vec<(String, Arc<dyn IndexBackendPlugin>)> {
+        let mut providers: Vec<_> = self.providers.iter().collect();
+        providers.sort_by_key(|(name, _)| *name);
+        let mut distinct: Vec<(String, Arc<dyn IndexBackendPlugin>)> = Vec::new();
+        for (name, provider) in providers {
+            if !distinct
+                .iter()
+                .any(|(_, existing)| Arc::ptr_eq(existing, provider))
+            {
+                distinct.push((name.clone(), provider.clone()));
+            }
+        }
+        distinct
+    }
+
+    pub(crate) fn configured_provider(
+        &self,
+        requested: Option<&StorageBackendRef>,
+    ) -> Option<(String, Arc<dyn IndexBackendPlugin>)> {
+        let StorageBackendRef::Named(name) = requested.or(self.default_backend.as_ref())? else {
+            return None;
+        };
+        let selected = self.providers.get(name)?;
+        self.configured_providers()
+            .into_iter()
+            .find(|(_, provider)| Arc::ptr_eq(provider, selected))
+    }
     /// Create a new IndexFactory from declared backends and injected providers.
     ///
     /// # Arguments
@@ -175,6 +204,44 @@ impl IndexFactory {
         self.default_backend.as_ref()
     }
 
+    pub(crate) fn computation_backend(
+        &self,
+        requested: Option<&StorageBackendRef>,
+    ) -> Result<
+        (
+            StorageBackendRef,
+            bool,
+            drasi_core::interface::StorageDurability,
+        ),
+        IndexError,
+    > {
+        use drasi_core::interface::StorageDurability;
+        let backend = requested
+            .cloned()
+            .or_else(|| self.default_backend.clone())
+            .unwrap_or(StorageBackendRef::Inline(StorageBackendSpec::Memory {
+                enable_archive: false,
+            }));
+        let (volatile, durability) = match &backend {
+            StorageBackendRef::Named(name) => {
+                if let Some(provider) = self.providers.get(name) {
+                    (provider.is_volatile(), provider.durability())
+                } else if self.memory_backends.contains_key(name) {
+                    (true, StorageDurability::VOLATILE)
+                } else {
+                    return Err(IndexError::UnknownStore(name.clone()));
+                }
+            }
+            StorageBackendRef::Inline(StorageBackendSpec::Memory { .. }) => {
+                (true, StorageDurability::VOLATILE)
+            }
+            StorageBackendRef::Inline(StorageBackendSpec::Plugin { .. }) => {
+                return Err(IndexError::NotSupported)
+            }
+        };
+        Ok((backend, volatile, durability))
+    }
+
     /// Whether a query using `query_backend` (or the factory default) is volatile.
     ///
     /// `None` with no default backend is treated as volatile (native in-memory).
@@ -230,6 +297,23 @@ impl IndexFactory {
         }
     }
 
+    pub(crate) async fn build_scoped(
+        &self,
+        backend_ref: &StorageBackendRef,
+        storage_scope: &str,
+        query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
+        if let StorageBackendRef::Named(name) = backend_ref {
+            if let Some(provider) = self.providers.get(name) {
+                return provider
+                    .create_scoped_indexes(storage_scope, query_id)
+                    .await
+                    .map_err(|error| Self::initialization_error(query_id, error));
+            }
+        }
+        self.build(backend_ref, storage_scope).await
+    }
+
     /// Build in-memory indexes (returns checkpoint_store: None — caller provides InMemoryCheckpointStore)
     fn build_memory_indexes(&self, enable_archive: bool) -> Result<CreatedIndexes, IndexError> {
         let mut element_index = InMemoryElementIndex::new();
@@ -260,12 +344,20 @@ impl IndexFactory {
         plugin: &Arc<dyn IndexBackendPlugin>,
         query_id: &str,
     ) -> Result<CreatedIndexes, IndexError> {
-        plugin.create_indexes(query_id).await.map_err(|e| {
-            log::error!("Failed to create indexes for query '{query_id}': {e}");
-            IndexError::InitializationFailed(format!(
-                "Failed to create indexes for query '{query_id}': {e}"
-            ))
-        })
+        plugin
+            .create_indexes(query_id)
+            .await
+            .map_err(|error| Self::initialization_error(query_id, error))
+    }
+
+    fn initialization_error(
+        query_id: &str,
+        error: drasi_core::interface::IndexError,
+    ) -> IndexError {
+        log::error!("Failed to create indexes for query '{query_id}': {error}");
+        IndexError::InitializationFailed(format!(
+            "Failed to create indexes for query '{query_id}': {error}"
+        ))
     }
 
     /// Check if a storage backend is volatile (requires re-bootstrap after restart)
@@ -333,6 +425,124 @@ mod tests {
         let mut m: HashMap<String, Arc<dyn IndexBackendPlugin>> = HashMap::new();
         m.insert(name.to_string(), Arc::new(MockPlugin { volatile }));
         m
+    }
+
+    #[test]
+    fn computation_durability_comes_from_the_selected_provider_not_its_name() {
+        use drasi_core::interface::StorageDurability;
+
+        struct DeclaredProvider;
+        #[async_trait]
+        impl IndexBackendPlugin for DeclaredProvider {
+            async fn create_indexes(
+                &self,
+                _query_id: &str,
+            ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
+                Err(drasi_core::interface::IndexError::NotSupported)
+            }
+            fn is_volatile(&self) -> bool {
+                false
+            }
+            fn durability(&self) -> StorageDurability {
+                StorageDurability::LOCAL_POWER_LOSS
+            }
+        }
+        let mut providers = providers_with("persistent-looking", false);
+        providers.insert("declared".into(), Arc::new(DeclaredProvider));
+        let factory = IndexFactory::new_with_default(
+            vec![StorageBackendConfig {
+                id: "memory".into(),
+                spec: StorageBackendSpec::Memory {
+                    enable_archive: true,
+                },
+            }],
+            providers,
+            Some(StorageBackendRef::Named("declared".into())),
+        );
+        for (name, volatile, durability) in [
+            ("persistent-looking", false, StorageDurability::UNKNOWN),
+            ("declared", false, StorageDurability::LOCAL_POWER_LOSS),
+            ("memory", true, StorageDurability::VOLATILE),
+        ] {
+            let backend = StorageBackendRef::Named(name.into());
+            assert_eq!(
+                factory
+                    .computation_backend(Some(&backend))
+                    .expect("backend"),
+                (backend, volatile, durability)
+            );
+        }
+        assert_eq!(
+            factory.computation_backend(None).expect("default").2,
+            StorageDurability::LOCAL_POWER_LOSS
+        );
+        assert!(factory
+            .computation_backend(Some(&StorageBackendRef::Named("missing".into())))
+            .is_err());
+        let memory = IndexFactory::new(vec![], HashMap::new());
+        assert_eq!(
+            memory.computation_backend(None).expect("memory").2,
+            StorageDurability::VOLATILE
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_provider_receives_separate_storage_and_logical_query_ids() {
+        struct ScopedProvider(std::sync::Mutex<Vec<(String, String)>>);
+
+        #[async_trait]
+        impl IndexBackendPlugin for ScopedProvider {
+            async fn create_indexes(
+                &self,
+                query_id: &str,
+            ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((query_id.to_owned(), query_id.to_owned()));
+                MockPlugin { volatile: true }.create_indexes(query_id).await
+            }
+
+            async fn create_scoped_indexes(
+                &self,
+                storage_scope: &str,
+                query_id: &str,
+            ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((storage_scope.to_owned(), query_id.to_owned()));
+                MockPlugin { volatile: true }
+                    .create_indexes(storage_scope)
+                    .await
+            }
+
+            fn is_volatile(&self) -> bool {
+                true
+            }
+        }
+
+        let provider = Arc::new(ScopedProvider(std::sync::Mutex::new(Vec::new())));
+        let factory = IndexFactory::new(
+            vec![],
+            HashMap::from([(
+                "scoped".to_owned(),
+                provider.clone() as Arc<dyn IndexBackendPlugin>,
+            )]),
+        );
+        let backend = StorageBackendRef::Named("scoped".to_owned());
+        factory.build(&backend, "ordinary").await.unwrap();
+        factory
+            .build_scoped(&backend, "isolated-storage", "logical-query")
+            .await
+            .unwrap();
+        assert_eq!(
+            *provider.0.lock().unwrap(),
+            vec![
+                ("ordinary".to_owned(), "ordinary".to_owned()),
+                ("isolated-storage".to_owned(), "logical-query".to_owned()),
+            ]
+        );
     }
 
     #[test]

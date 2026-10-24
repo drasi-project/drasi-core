@@ -415,14 +415,9 @@ mod tests {
             id,
             vec!["q1".to_string(), "q2".to_string()],
         ));
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
-        let ctx = crate::context::ReactionRuntimeContext::new(
-            "inst",
-            id,
-            Some(store),
-            graph.update_sender(),
-            None,
-        );
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
+        let ctx =
+            crate::context::ReactionRuntimeContext::new("inst", id, Some(store), update_tx, None);
         base.initialize(ctx).await;
         base
     }

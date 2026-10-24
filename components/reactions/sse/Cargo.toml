@@ -31,6 +31,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
+drasi-reaction-common = { workspace = true, features = ["sse"] }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"

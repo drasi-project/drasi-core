@@ -17,19 +17,21 @@
 //! This module provides all query-related operations including creating, removing,
 //! starting, and stopping queries.
 
-use anyhow::Result as AnyhowResult;
-use futures::stream::Stream;
-use std::collections::HashMap;
-use std::sync::Arc;
+use futures::{stream::Stream, StreamExt};
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
 use crate::config::{QueryConfig, QueryRuntime};
-use crate::error::{DrasiError, Result};
+use crate::error::Result;
 use crate::lib_core::DrasiLib;
+use crate::queries::QueryResultSubscription;
 
 impl DrasiLib {
     /// Create a query in a running server
+    ///
+    /// Success confirms node declaration. Parsing, dependency
+    /// validation, construction and activation run afterward; failures remain on
+    /// the node. Use `add_query_with_handle` to await those outcomes explicitly.
     ///
     /// # Example
     /// ```no_run
@@ -47,13 +49,32 @@ impl DrasiLib {
     /// ```
     pub async fn add_query(&self, query: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
+        self.add_query_with_handle(query).await.map(|_| ())
+    }
 
-        let query_id = query.id.clone();
-        self.add_query_with_options(query, true)
+    /// Declare a query and return its generation-bound computation handle.
+    ///
+    /// The original configuration is retained even when parsing or construction fails.
+    /// A missing source is a visible dependency wait. Supplying it resumes the
+    /// existing declaration without re-adding the query.
+    /// Await `wait_created()` for validation and construction, or `wait_started()`
+    /// for activation. Auto-start is requested only when the instance is running.
+    /// `wait_started()` includes query bootstrap and actual `Running` readiness;
+    /// ordinary `start_query()` retains subscription-ready completion.
+    /// The handle also exposes restricted `control()` notifications and
+    /// `set_control_handler()` for receiving them independently of query data.
+    /// Ownership-bearing native rejections retain their `GraphError` through
+    /// `DrasiError::Internal`, including the rejected addition's recovery handle.
+    pub async fn add_query_with_handle(
+        &self,
+        query: QueryConfig,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let id = query.id.clone();
+        self.computation_runtime
+            .add_query(query, self.is_running().await)
             .await
-            .map_err(|e| DrasiError::operation_failed("query", &query_id, "add", format!("{e}")))?;
-
-        Ok(())
+            .map_err(|error| crate::computation::runtime::map_addition_error("query", &id, error))
     }
 
     /// Remove a query from a running server
@@ -70,54 +91,14 @@ impl DrasiLib {
     /// ```
     pub async fn remove_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Step 1: Validate no dependents
-        {
-            let graph = self.component_graph.read().await;
-            if let Err(dependent_ids) = graph.can_remove(id) {
-                return Err(DrasiError::operation_failed(
-                    "query",
-                    id,
-                    "remove",
-                    format!("Depended on by: {}", dependent_ids.join(", ")),
-                ));
-            }
-        }
-
-        // Step 2: Teardown runtime (stop, remove from runtime map, wipe output).
-        let teardown_result = self.query_manager.teardown_query(id.to_string()).await;
-
-        // Step 3: Deregister from graph if the runtime is gone. Wipe failure after
-        // teardown_component must not leave an unremovable graph node; the caller
-        // still sees the cleanup error so leftover disk state is not silent.
-        {
-            let mut graph = self.component_graph.write().await;
-            let is_query = graph
-                .get_component(id)
-                .is_some_and(|node| node.kind == crate::component_graph::ComponentKind::Query);
-            let runtime_gone = graph
-                .get_runtime::<Arc<dyn crate::queries::Query>>(id)
-                .is_none();
-            if is_query && runtime_gone {
-                if let Err(e) = graph.deregister(id) {
-                    log::error!(
-                        "Query '{id}' runtime was torn down but graph deregister failed: {e}. \
-                         Setting component to Error state."
-                    );
-                    let _ = graph.validate_and_transition(
-                        id,
-                        ComponentStatus::Error,
-                        Some(format!("Orphaned: deregister failed after teardown: {e}")),
-                    );
-                }
-            }
-        }
-
-        teardown_result.map_err(|e| {
-            DrasiError::operation_failed("query", id, "remove", format!("Teardown failed: {e}"))
-        })?;
-
-        Ok(())
+        map_component_error(
+            self.computation_runtime
+                .remove_component(id, "query", true)
+                .await,
+            "query",
+            id,
+            "remove",
+        )
     }
 
     /// Start a stopped query
@@ -134,17 +115,8 @@ impl DrasiLib {
     /// ```
     pub async fn start_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Verify query exists
-        let _config = self
-            .query_manager
-            .get_query_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("query", id))?;
-
-        // Query will subscribe directly to sources when started
         map_component_error(
-            self.query_manager.start_query(id.to_string()).await,
+            self.computation_runtime.start_component(id, "query").await,
             "query",
             id,
             "start",
@@ -154,11 +126,12 @@ impl DrasiLib {
     /// Stop a running, starting, or failed query.
     ///
     /// Queries in `Error` may still own subscriptions and processing tasks. This
-    /// performs their normal cleanup before reporting `Stopped`; it does not
-    /// remove the query or discard its persisted state. Stopping an already
-    /// stopped query returns an error through the component graph's command
-    /// validation, unlike calling the underlying query runtime's `stop()` directly,
-    /// which is idempotent.
+    /// performs their normal cleanup and acknowledges the failure before
+    /// reporting `Stopped`; it does not remove the query or discard its persisted
+    /// state. A terminal construction failure stays in `Error` until the query is
+    /// updated or removed. Stopping an already stopped query returns an error,
+    /// unlike calling the underlying query runtime's `stop()` directly, which is
+    /// idempotent.
     ///
     /// # Example
     /// ```no_run
@@ -170,16 +143,12 @@ impl DrasiLib {
     /// ```
     pub async fn stop_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Stop the query (it unsubscribes from sources automatically)
         map_component_error(
-            self.query_manager.stop_query(id.to_string()).await,
+            self.computation_runtime.stop_component(id, "query").await,
             "query",
             id,
             "stop",
-        )?;
-
-        Ok(())
+        )
     }
 
     /// Update a query by replacing it with a new configuration.
@@ -195,13 +164,12 @@ impl DrasiLib {
     /// references non-existent sources, or if provisioning fails.
     pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Delegate to QueryManager which uses the Reconfiguring transition,
-        // preserving the graph node, edges, and event history.
-        self.query_manager
-            .update_query(id.to_string(), config)
-            .await
-            .map_err(|e| DrasiError::operation_failed("query", id, "update", e.to_string()))
+        map_component_error(
+            self.computation_runtime.update_query(id, config).await,
+            "query",
+            id,
+            "update",
+        )
     }
 
     /// List all queries with their current status
@@ -266,6 +234,37 @@ impl DrasiLib {
     /// ```
     pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
         self.inspection.get_query_results(id).await
+    }
+
+    /// Read a consistent snapshot followed by changes, without a reaction or worker.
+    ///
+    /// Registers the live reader before capturing the snapshot, then delivers
+    /// only changes after that snapshot's sequence. Apply `snapshot` first and
+    /// then consume `stream`; reconnecting creates a fresh snapshot/stream pair.
+    /// The query's configured delivery mode and capacity apply. Broadcast gaps
+    /// replay from retained output, or return an error if history is gone.
+    ///
+    /// This is a connection-local reader, not a durable consumer checkpoint.
+    /// Replacement, output reset and owner shutdown invalidate it. Dropping the
+    /// stream unregisters it synchronously, even if it was never polled.
+    pub async fn subscribe_query_results(&self, id: &str) -> Result<QueryResultSubscription> {
+        self.state_guard.require_initialized()?;
+        let result = async {
+            self.computation_runtime
+                .query(id)
+                .await?
+                .subscribe_results()
+                .await
+        }
+        .await;
+        let (snapshot, stream) = map_component_error(result, "query", id, "subscribe")?;
+        let id = id.to_owned();
+        Ok(QueryResultSubscription {
+            snapshot,
+            stream: stream
+                .map(move |result| map_component_error(result, "query", &id, "receive"))
+                .boxed(),
+        })
     }
 
     /// Get the full configuration for a specific query
@@ -354,8 +353,8 @@ impl DrasiLib {
         &self,
         id: &str,
     ) -> Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.inspection.subscribe_query_logs(id).await
     }
@@ -373,41 +372,6 @@ impl DrasiLib {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         self.inspection.subscribe_query_events(id).await
-    }
-
-    /// Internal helper for creating queries with auto-start control
-    pub(crate) async fn add_query_with_options(
-        &self,
-        config: QueryConfig,
-        allow_auto_start: bool,
-    ) -> AnyhowResult<()> {
-        let query_id = config.id.clone();
-        let should_auto_start = config.auto_start;
-
-        // Step 1: Register in the component graph (validates sources exist, creates node + edges)
-        {
-            let mut graph = self.component_graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            graph.register_query(&config.id, metadata, &source_ids)?;
-        }
-
-        // Step 2: Provision runtime (create DrasiQuery, initialize, store)
-        if let Err(e) = self.query_manager.provision_query(config).await {
-            // Compensating rollback: remove from graph on runtime failure
-            let mut graph = self.component_graph.write().await;
-            let _ = graph.deregister(&query_id);
-            return Err(e);
-        }
-
-        // Step 3: Start if auto-start is enabled and allowed
-        if should_auto_start && allow_auto_start {
-            self.query_manager.start_query(query_id).await?;
-        }
-
-        Ok(())
     }
 }
 
@@ -453,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_query_missing_source_returns_error() {
+    async fn add_query_missing_source_is_retained_as_waiting() {
         let core = build_core_with_source().await;
 
         let config = Query::cypher("q-bad")
@@ -462,13 +426,19 @@ mod tests {
             .auto_start(false)
             .build();
 
-        let result = core.add_query(config).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
-            "expected OperationFailed, got: {err:?}"
+        let handle = core.add_query_with_handle(config).await.unwrap();
+        let observed = handle.observed().unwrap();
+        assert_eq!(
+            observed.realization,
+            crate::computation::v1::RealizationState::Blocked
         );
+        assert!(observed.failure.is_none());
+        assert!(observed
+            .waiting_reason()
+            .unwrap()
+            .contains("nonexistent-source"));
+        core.remove_query("q-bad").await.unwrap();
+        core.shutdown().await.unwrap();
     }
 
     // ========================================================================

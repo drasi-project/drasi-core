@@ -18,7 +18,7 @@
 //! from spawned tasks) are properly routed to the component log streaming
 //! infrastructure and accessible via the DrasiLib public API.
 
-use drasi_lib::{DrasiLib, LogLevel};
+use drasi_lib::{ComponentStatus, DrasiLib, LogLevel};
 use drasi_source_postgres::PostgresReplicationSource;
 use serial_test::serial;
 use std::time::Duration;
@@ -104,15 +104,33 @@ async fn test_postgres_source_logs_captured_on_success() {
         .expect("Failed to build DrasiLib");
 
     drasi.start().await.expect("Failed to start DrasiLib");
-
-    // Give the source time to start, connect, and emit debug logs
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    timeout(
+        Duration::from_secs(10),
+        drasi
+            .computation_component("test-pg-source")
+            .expect("source handle")
+            .wait_started(),
+    )
+    .await
+    .expect("PostgreSQL source startup timed out")
+    .expect("PostgreSQL source startup failed");
 
     // Use the DrasiLib public API to get logs
-    let (history, _receiver) = drasi
+    let (mut history, mut receiver) = drasi
         .subscribe_source_logs("test-pg-source")
         .await
         .expect("Failed to subscribe to source logs");
+    timeout(Duration::from_secs(5), async {
+        while history.len() < 2
+            || !history
+                .iter()
+                .any(|log| log.message.contains("replication") || log.message.contains("Starting"))
+        {
+            history.push(receiver.recv().await.expect("source log stream closed"));
+        }
+    })
+    .await
+    .expect("PostgreSQL lifecycle logs were not observed");
 
     assert!(
         !history.is_empty(),
@@ -175,22 +193,40 @@ async fn test_postgres_source_logs_captured_on_connection_failure() {
         .await
         .expect("Failed to build DrasiLib");
 
-    // start() will return an error because the source cannot connect.
-    // We still expect logs to have been captured during the failed attempt.
-    let start_result = drasi.start().await;
+    let _ = drasi.start().await;
+    let source = drasi
+        .computation_component("failing-pg-source")
+        .expect("source handle");
+    let start_result = timeout(Duration::from_secs(5), source.wait_started())
+        .await
+        .expect("connection failure did not complete");
     assert!(
         start_result.is_err(),
         "Expected start to fail with connection error"
     );
 
-    // Give time for logs to propagate
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        drasi.get_source_status("failing-pg-source").await.unwrap(),
+        ComponentStatus::Error
+    );
 
     // Use the DrasiLib public API to get logs
-    let (history, _receiver) = drasi
+    let (mut history, mut receiver) = drasi
         .subscribe_source_logs("failing-pg-source")
         .await
         .expect("Failed to subscribe to source logs");
+    timeout(Duration::from_secs(5), async {
+        while !history.iter().any(|log| {
+            log.level == LogLevel::Error
+                || log.message.to_lowercase().contains("error")
+                || log.message.to_lowercase().contains("failed")
+                || log.message.to_lowercase().contains("connection")
+        }) {
+            history.push(receiver.recv().await.expect("source log stream closed"));
+        }
+    })
+    .await
+    .expect("connection failure logs were not observed");
 
     // Should have at least lifecycle logs
     assert!(

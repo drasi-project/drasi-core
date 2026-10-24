@@ -53,9 +53,10 @@ versions.
 After a fatal watch error, calling `start()` (or managed `start_source()`) retries
 without requiring a prior stop. Recovery cancels and joins the previous worker,
 clears its shutdown handle, and repeats initialization before reporting `Running`.
-Existing subscriptions are retained so consumers can receive changes after
-recovery. Unexpected task panics are reported by that recovery attempt; once the
-failed worker has been joined, a subsequent start can retry. Managed
+Direct source recovery retains subscriptions. Graph-managed recovery performs
+its stop/repair boundary, so raw receivers obtained before that boundary close
+and must be recreated after restart. Unexpected task panics are reported by that
+recovery attempt; once the failed worker has been joined, a subsequent start can retry. Managed
 `stop_source()` also supports cleanup from `Error`.
 
 Label and field selectors are trusted operator configuration. They are forwarded
@@ -69,8 +70,10 @@ set `namespaces`, and grant the mounted ServiceAccount `list` and `watch` on
 `pods` in that namespace. Omitting `namespaces` requests cluster-wide access.
 
 `stop()` signals graceful shutdown and joins the source task, aborting and awaiting
-its termination if it has not exited within five seconds. It clears stale
-dispatcher state on every call, including after failures, and is safe to repeat.
+its termination if it has not exited within five seconds. Cancelling the stop
+wait retains the unjoined worker and prevents a replacement from starting.
+After the task has been joined, stop clears stale dispatcher state, including
+after failures, and is safe to repeat.
 
 ## Query examples
 

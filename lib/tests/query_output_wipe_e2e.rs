@@ -19,7 +19,7 @@ mod mock_source;
 use anyhow::Result;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::queries::Query as QueryInstance;
+use drasi_lib::queries::{FetchError, Query as QueryInstance};
 use drasi_lib::{DrasiLib, IndexBackendPlugin, Query, StorageBackendRef};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::sync::Arc;
@@ -137,30 +137,34 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
-    assert_eq!(snapshot.as_of_sequence, 0);
+    assert_eq!(snapshot.as_of_sequence, 3);
     assert!(
         snapshot.is_empty(),
         "snapshot must not contain old-config rows: {:?}",
         snapshot.to_vec()
     );
     assert_ne!(snapshot.config_hash, hash_v1);
-    let outbox = query.fetch_outbox(0).await?;
+    assert!(matches!(
+        query.fetch_outbox(0).await,
+        Err(FetchError::OutboxGap(_))
+    ));
+    let outbox = query.fetch_outbox(3).await?;
     assert!(
         outbox.results.is_empty(),
-        "fetch_outbox(0) must not return old-config QueryResults"
+        "the new generation must not return old-config QueryResults"
     );
-    assert_eq!(outbox.latest_sequence, 0);
+    assert_eq!(outbox.latest_sequence, 3);
 
     insert_person(&handle, "p4", "Dana", 22).await?;
-    assert_eq!(wait_for_seq(&core, 1).await?, 1);
-    let after = query.fetch_outbox(0).await?;
+    assert_eq!(wait_for_seq(&core, 4).await?, 4);
+    let after = query.fetch_outbox(3).await?;
     assert_eq!(
         after.results.iter().map(|r| r.sequence).collect::<Vec<_>>(),
-        vec![1]
+        vec![4]
     );
     assert_eq!(after.config_hash, snapshot.config_hash);
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -192,7 +196,7 @@ async fn delete_and_recreate_same_query_id_starts_at_sequence_zero() -> Result<(
     insert_person(&handle, "p3", "Carol", 40).await?;
     assert_eq!(wait_for_seq(&core, 1).await?, 1);
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -228,7 +232,7 @@ async fn delete_and_recreate_advances_output_generation() -> Result<()> {
         snapshot.output_generation
     );
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -267,7 +271,7 @@ async fn stop_query_same_config_preserves_output() -> Result<()> {
     insert_person(&handle, "p3", "Carol", 40).await?;
     assert_eq!(wait_for_seq(&core, 3).await?, 3);
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -287,9 +291,9 @@ async fn update_query_twice_in_quick_succession_does_not_lock() -> Result<()> {
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
 
     insert_person(&handle, "p2", "Bob", 25).await?;
-    assert_eq!(wait_for_seq(&core, 1).await?, 1);
+    assert_eq!(wait_for_seq(&core, 2).await?, 2);
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -337,6 +341,6 @@ async fn volatile_reconfigure_and_remove_succeed() -> Result<()> {
     insert_person(&handle, "p3", "Carol", 40).await?;
     assert_eq!(wait_for_seq(&core, 1).await?, 1);
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }

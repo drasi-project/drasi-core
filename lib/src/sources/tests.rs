@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// A simple test mock source for unit testing.
 ///
@@ -40,9 +40,7 @@ pub struct TestMockSource {
     status_handle: crate::component_graph::ComponentStatusHandle,
     /// Dispatchers for sending events to subscribed queries
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
-    /// Monotonic sequence counter — this mock dispatches directly (bypassing
-    /// SourceBase), so it stamps its own increasing sequences.
-    next_sequence: Arc<std::sync::atomic::AtomicU64>,
+    next_sequence: Mutex<u64>,
 }
 
 impl TestMockSource {
@@ -53,7 +51,7 @@ impl TestMockSource {
             auto_start: true,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
-            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            next_sequence: Mutex::new(1),
         })
     }
 
@@ -65,21 +63,25 @@ impl TestMockSource {
             auto_start,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
-            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            next_sequence: Mutex::new(1),
         })
     }
 
     /// Inject an event into all subscribed queries.
     pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
+        // Keep assignment and fanout serialized so every subscriber sees the
+        // same source-owned sequence, including concurrent injections.
+        let mut next_sequence = self.next_sequence.lock().await;
+        let sequence = *next_sequence;
+        *next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("mock source sequence exhausted"))?;
         let dispatchers = self.dispatchers.read().await;
-        let seq = self
-            .next_sequence
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let wrapper = SourceEventWrapper::new(
             self.id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
-            seq,
+            sequence,
         );
         let arc_wrapper = Arc::new(wrapper);
         for dispatcher in dispatchers.iter() {
@@ -141,6 +143,13 @@ impl Source for TestMockSource {
         &self,
         settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        let mut next_sequence = self.next_sequence.lock().await;
+        if let Some(resume_sequence) = settings.resume_sequence {
+            let resume_next = resume_sequence
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("mock source sequence exhausted"))?;
+            *next_sequence = (*next_sequence).max(resume_next);
+        }
         let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
         let receiver = dispatcher.create_receiver().await?;
 
@@ -286,13 +295,17 @@ pub fn create_test_bootstrap_mock_source(
 /// This source uses the full SourceBase infrastructure including logger support.
 pub struct LoggingTestSource {
     base: crate::sources::SourceBase,
+    fail_start: bool,
 }
 
 impl LoggingTestSource {
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let params = crate::sources::SourceBaseParams::new(id);
         let base = crate::sources::SourceBase::new(params)?;
-        Ok(Self { base })
+        Ok(Self {
+            base,
+            fail_start: false,
+        })
     }
 
     /// Log a message at info level (for testing)
@@ -329,6 +342,10 @@ impl Source for LoggingTestSource {
     }
 
     async fn start(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.fail_start,
+            "injected failed start without local status change"
+        );
         self.base
             .set_status(ComponentStatus::Running, Some("Started".to_string()))
             .await;
@@ -364,6 +381,66 @@ impl Source for LoggingTestSource {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn injected_sequence_is_source_owned_across_fanout_restart_and_resume() {
+        use crate::config::SourceSubscriptionSettings;
+        use drasi_core::models::{ElementMetadata, ElementReference};
+
+        let source = create_test_mock_source("sequenced".into());
+        let settings = |query: &str, resume_sequence| SourceSubscriptionSettings {
+            source_id: "sequenced".into(),
+            query_id: query.into(),
+            enable_bootstrap: false,
+            nodes: Default::default(),
+            relations: Default::default(),
+            resume_from: None,
+            resume_sequence,
+            request_position_handle: false,
+        };
+        let mut first = source
+            .subscribe(settings("first", None))
+            .await
+            .unwrap()
+            .receiver;
+        let mut second = source
+            .subscribe(settings("second", None))
+            .await
+            .unwrap()
+            .receiver;
+        let change = SourceChange::Delete {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("sequenced", "node"),
+                labels: Default::default(),
+                effective_from: 1_000,
+            },
+        };
+        source.start().await.unwrap();
+        for expected in 1..=3 {
+            if expected == 3 {
+                source.stop().await.unwrap();
+                source.start().await.unwrap();
+            }
+            source.inject_event(change.clone()).await.unwrap();
+            let one = first.recv().await.unwrap();
+            let two = second.recv().await.unwrap();
+            assert_eq!(one.sequence, expected);
+            assert_eq!(one.source_id, "sequenced");
+            assert_eq!(one.event, SourceEvent::Change(change.clone()));
+            assert!(Arc::ptr_eq(&one, &two));
+        }
+
+        let mut resumed = source
+            .subscribe(settings("resumed", Some(500)))
+            .await
+            .unwrap()
+            .receiver;
+        source.inject_event(change).await.unwrap();
+        for receiver in [&mut first, &mut second, &mut resumed] {
+            assert_eq!(receiver.recv().await.unwrap().sequence, 501);
+        }
+        source.stop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_mock_source_sequences_start_at_one() {
@@ -472,7 +549,7 @@ mod contract_tests {
 #[cfg(test)]
 mod manager_tests {
     use super::*;
-    use crate::sources::SourceManager;
+    use crate::test_helpers::managers::SourceManager;
     use crate::test_helpers::wait_for_component_status;
 
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -488,40 +565,19 @@ mod manager_tests {
 
     async fn create_test_manager() -> (
         Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
-        // Use the global shared log registry since tracing subscriber is global
-        let log_registry = crate::managers::get_or_init_global_registry();
-
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        // Spawn a mini graph update loop for tests (consumes mpsc updates and applies to graph)
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let manager = Arc::new(SourceManager::new(
-            "test-instance",
-            log_registry,
-            graph.clone(),
-            update_tx,
-        ));
-        (manager, graph)
+        let core = crate::test_helpers::managers::empty_core().await;
+        (
+            Arc::new(SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
     async fn create_test_manager_with_graph() -> (
         Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
         create_test_manager().await
     }
@@ -529,33 +585,20 @@ mod manager_tests {
     /// Helper: register a source in the graph, then provision it in the manager.
     async fn add_source(
         manager: &SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-        let auto_start = source.auto_start();
-        {
-            let mut g = graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), auto_start.to_string());
-            g.register_source(&source_id, metadata)?;
-        }
-        manager.provision_source(source).await
+        manager.add(source).await
     }
 
     /// Helper: teardown a source in the manager, then deregister from the graph.
     async fn delete_source(
         manager: &SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
-        manager.teardown_source(id.to_string(), cleanup).await?;
-        let mut g = graph.write().await;
-        g.deregister(id)?;
-        Ok(())
+        manager.delete(id, cleanup).await
     }
 
     #[tokio::test]
@@ -586,7 +629,30 @@ mod manager_tests {
         // Try to add same source again
         let result = add_source(&manager, &graph, source2).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists"));
+        let error = result.unwrap_err();
+        {
+            use crate::computation::v1::GraphError;
+
+            let crate::DrasiError::Internal(error) = error
+                .downcast_ref::<crate::DrasiError>()
+                .expect("public API error")
+            else {
+                panic!("native rejection must retain its ownership-bearing cause: {error:?}");
+            };
+            let GraphError::AdditionRejected { cause, addition } = error
+                .downcast_ref::<GraphError>()
+                .expect("native graph error")
+            else {
+                panic!("expected a rejected addition: {error:?}");
+            };
+            assert!(
+                matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component test-source"),
+                "unexpected rejection cause: {cause:?}"
+            );
+            let rejected = addition.take().await.expect("retained rejected source");
+            assert_eq!(rejected.definition.descriptor.id().as_str(), "test-source");
+        }
     }
 
     #[tokio::test]
@@ -619,7 +685,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = create_test_mock_source("test-source".to_string());
         add_source(&manager, &graph, source).await.unwrap();
@@ -657,7 +723,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = create_test_mock_source("test-source".to_string());
         add_source(&manager, &graph, source).await.unwrap();
@@ -744,22 +810,18 @@ mod manager_tests {
     #[tokio::test]
     async fn test_stop_failed_source_with_already_stopped_runtime() {
         let (manager, graph) = create_test_manager().await;
-        add_source(
-            &manager,
+        let mut source = LoggingTestSource::new("failed-start").unwrap();
+        source.fail_start = true;
+        add_source(&manager, &graph, source).await.unwrap();
+        assert!(manager.start_source("failed-start".into()).await.is_err());
+        crate::component_graph::wait_for_status(
             &graph,
-            LoggingTestSource::new("failed-start").unwrap(),
+            "failed-start",
+            &[ComponentStatus::Error],
+            std::time::Duration::from_secs(3),
         )
         .await
         .unwrap();
-        {
-            let mut graph = graph.write().await;
-            graph
-                .validate_and_transition("failed-start", ComponentStatus::Starting, None)
-                .unwrap();
-            graph
-                .validate_and_transition("failed-start", ComponentStatus::Error, None)
-                .unwrap();
-        }
         assert_eq!(
             manager
                 .get_source_instance("failed-start")
@@ -800,7 +862,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add multiple sources
         let source1 = create_test_mock_source("source1".to_string());
@@ -921,7 +983,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=true
         let source1 =
@@ -971,7 +1033,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Create source using default constructor (should have auto_start=true)
         let source = create_test_mock_source("default-source".to_string());
@@ -1009,7 +1071,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=false
         let source = TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap();
@@ -1137,7 +1199,7 @@ mod manager_tests {
             received.message
         );
         assert_eq!(received.component_id, source_id);
-        assert_eq!(received.level, crate::managers::LogLevel::Info);
+        assert_eq!(received.level, crate::observability::LogLevel::Info);
     }
 
     #[tokio::test]
@@ -1320,16 +1382,7 @@ mod manager_tests {
         let source = LoggingTestSource::new(&source_id).unwrap();
         add_source(&manager, &graph, source).await.unwrap();
 
-        // Record an event manually to simulate lifecycle
-        manager
-            .record_event(ComponentEvent {
-                component_id: source_id.clone(),
-                component_type: crate::ComponentType::Source,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some("Test event".to_string()),
-            })
-            .await;
+        manager.start_source(source_id.clone()).await.unwrap();
 
         // Verify events exist
         let events = manager.get_source_events(&source_id).await;
@@ -1559,7 +1612,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DeprovisionTestSource::new_simple("reconfig-running-source");
         add_source(&manager, &graph, source).await.unwrap();
@@ -1666,7 +1719,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager_with_graph().await;
 
         // Subscribe to graph events BEFORE adding source
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DeprovisionTestSource::new_simple("reconfig-event-source");
         add_source(&manager, &graph, source).await.unwrap();

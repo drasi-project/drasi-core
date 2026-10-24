@@ -19,40 +19,7 @@ use drasi_lib::sources::base::SourceBaseParams;
 
 use crate::SqliteSource;
 
-/// Element ID key configuration for a SQLite table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableKeyConfig {
-    /// Table name.
-    pub table: String,
-    /// Ordered key column names used to build element IDs.
-    pub key_columns: Vec<String>,
-}
-
-/// Runtime configuration for the optional REST API.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RestApiConfig {
-    /// Address to bind.
-    pub host: String,
-    /// Port to bind.
-    pub port: u16,
-}
-
-impl Default for RestApiConfig {
-    fn default() -> Self {
-        Self {
-            host: default_rest_host(),
-            port: default_rest_port(),
-        }
-    }
-}
-
-fn default_rest_host() -> String {
-    "127.0.0.1".to_string()
-}
-
-fn default_rest_port() -> u16 {
-    8080
-}
+pub use drasi_sqlite_common::{RestApiConfig, TableKeyConfig};
 
 /// Initial start behavior. SQLite source does not use persisted cursors, but this
 /// is exposed for API consistency with other source plugins.

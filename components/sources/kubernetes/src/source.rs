@@ -248,8 +248,9 @@ impl Source for KubernetesSource {
         }
 
         let mut task_error = None;
-        if let Some(mut task) = task_handle.take() {
-            let result = match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+        // Keep ownership in the slot if the caller cancels while waiting.
+        if let Some(task) = task_handle.as_mut() {
+            let result = match tokio::time::timeout(Duration::from_secs(5), &mut *task).await {
                 Ok(result) => result,
                 Err(_) => {
                     warn!(
@@ -265,6 +266,7 @@ impl Source for KubernetesSource {
                     task_error = Some(anyhow::Error::new(error));
                 }
             }
+            *task_handle = None;
         }
         self.base.clear_dispatchers().await;
 

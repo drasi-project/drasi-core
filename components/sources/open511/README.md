@@ -286,18 +286,34 @@ For the full property reference, see [GRAPH_SCHEMA.md](GRAPH_SCHEMA.md).
 - **Area deduplication is in-memory** — if the source restarts, previously emitted
   `Area` nodes may be re-emitted as inserts (harmless but redundant).
 
+## Stop and Restart
+
+The polling worker is registered before it runs. Stop waits up to five seconds
+without aborting an in-flight HTTP request or state write. Timeout/cancellation
+retains the worker and blocks restart until a later stop finishes cleanup.
+Successful cleanup clears old channel subscribers and their position filters.
+A duplicate start is still harmless while the existing worker is healthy, but
+cannot replace a finished, unjoined worker or interrupt pending cleanup.
+
+This does not provide transactional checkpoint-to-query delivery or historical
+replay. Existing cursor, retry and state fallback policies remain unchanged.
+
 ## Testing
 
 ```bash
 # Unit tests
 cargo test -p drasi-source-open511
 
-# Integration test (requires network access to API or mock server)
-cargo test -p drasi-source-open511 -- --ignored --nocapture
+# Integration test (owned local mock server; no external API)
+cargo test -p drasi-source-open511 --test integration_test
 
 # Lint
 cargo clippy -p drasi-source-open511 --all-targets -- -D warnings
 ```
+
+The default suite includes held-request timeout/cancellation, typed failures,
+three restart cycles and full source/query delivery. The integration shuts down
+the library and joins its mock server.
 
 ## Related
 

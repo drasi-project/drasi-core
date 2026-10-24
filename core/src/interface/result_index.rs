@@ -96,6 +96,10 @@ pub enum ResultOwner {
     Function(usize),
     PartCurrent(usize),
     PartDefault(usize),
+    PartTransactionTime(usize),
+    PartRealtime(usize),
+    /// Source-time deletion frontier; append variants to preserve existing key hashes.
+    ElementTombstone,
 }
 
 #[derive(Debug, Clone)]

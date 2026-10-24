@@ -19,6 +19,7 @@ use std::{
 
 use crate::IndexDb;
 use async_trait::async_trait;
+use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
@@ -26,7 +27,6 @@ use drasi_core::{
         ResultSequence, ResultSequenceCounter,
     },
 };
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use ordered_float::OrderedFloat;
 use prost::{
     bytes::{Bytes, BytesMut},
@@ -46,7 +46,8 @@ use crate::{RocksDbSessionState, RocksIndexOptions};
 pub struct RocksDbResultIndex {
     db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
-    options: RocksIndexOptions,
+    // Retain the shared memory-budget/monitor lease for the index lifetime.
+    _options: RocksIndexOptions,
 }
 
 const VALUES_CF: &str = "values";
@@ -66,7 +67,7 @@ impl RocksDbResultIndex {
         RocksDbResultIndex {
             db,
             session_state,
-            options,
+            _options: options,
         }
     }
 }
@@ -146,32 +147,10 @@ impl AccumulatorIndex for RocksDbResultIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        let db = self.db.clone();
-        let options = self.options.clone();
+        let session_state = self.session_state.clone();
+        let require_session = session_state.has_active_session()?;
         let task = task::spawn_blocking(move || {
-            let block_cache = options.memory_budget().block_cache();
-            if let Err(err) = db.drop_cf(VALUES_CF) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = db.create_cf(
-                VALUES_CF,
-                &crate::sizing::sized(VALUES_CF, get_value_cf_options(block_cache), &options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = db.drop_cf(SETS_CF) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = db.create_cf(
-                SETS_CF,
-                &crate::sizing::sized(SETS_CF, get_lss_cf_options(block_cache), &options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-            Ok(())
+            session_state.clear_column_families(&[VALUES_CF, SETS_CF], require_session)
         });
 
         match task.await {

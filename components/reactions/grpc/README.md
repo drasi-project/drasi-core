@@ -4,9 +4,14 @@
 runtime ([`drasi-lib`](../../../lib)). It streams the result changes produced by Drasi
 continuous queries to a downstream gRPC service via the
 `drasi.v1.ReactionService.ProcessResults` RPC defined in
-[`proto/drasi/v1/reaction.proto`](proto/drasi/v1/reaction.proto). The proto file is
+[`reaction.proto`](../../grpc-common/proto/reaction/drasi/v1/reaction.proto). The proto file is
 intentionally narrow — it carries only the reaction's wire contract; no source,
 bootstrap, streaming, or subscription types.
+
+The message definitions and JSON/protobuf conversions are maintained in
+`drasi-grpc-common`. Existing `drasi_reaction_grpc::proto` and `helpers` imports
+remain available as re-exports; native components share the protocol without
+depending on this reaction implementation.
 
 **When to use it.** Reach for this reaction when a downstream consumer should
 receive Drasi continuous-query changes over gRPC — for example to drive a
@@ -182,6 +187,15 @@ serialize and deserialize in `camelCase` when supplied via descriptor configurat
 | `batching` | `BatchingConfig` | `Fixed { batchSize: 100, batchFlushTimeoutMs: 1000 }` | `with_fixed_batching`, `with_adaptive_batching`, or the per-field adaptive setters | Batching strategy — see [Adaptive batching](#adaptive-batching). |
 | `outputFormat` | `OutputFormat` | `canonicalJson` | `with_output_format` | Controls default `payload` behavior when no body template applies: `canonicalJson` emits the canonical JSON item in `payload`; `proto` omits `payload` unless a template applies. |
 | `outputTemplates` | `Option<OutputTemplates>` | `None` | `with_output_templates` | Optional Handlebars body templates and per-template metadata extensions — see [Output templates and per-query routing](#output-templates-and-per-query-routing). When present but containing neither a `defaultTemplate` nor any `routes` entry, a warning is logged at startup (the configuration is a no-op). |
+
+The receiver must return `success: true` **and** `items_processed` equal to the
+number of items in that request. A missing/zero, partial or excessive count does
+not acknowledge a nonempty batch. Under `strict`, an inconsistent success reply
+stops the reaction without advancing its checkpoint; fixing the receiver and
+restarting replays the complete unacknowledged query result. Any already completed
+prefix can therefore repeat: receivers needing duplicate-free effects must make
+their actions idempotent. An HTTP/gRPC transport success alone does not prove
+that every business action finished.
 
 Builder-only settings (not stored on `GrpcReactionConfig`):
 
@@ -432,9 +446,9 @@ This shape favours single-query throughput (one RPC per (query, time-window)). F
 low-latency single-query workloads, prefer fixed batching with `batchSize: 1` and a
 small `batchFlushTimeoutMs`.
 
-On shutdown the runner drains the in-flight batch through the batcher on a
-best-effort basis within the reaction stop window. A warning is logged if the drain
-does not complete in time and the in-flight batch is abandoned.
+Forwarding and batch delivery run concurrently inside one owned processor.
+Shutdown closes the batch input and drains already-forwarded items; a stop timeout
+retains the processor instead of abandoning its in-flight batch.
 
 ---
 
@@ -647,6 +661,29 @@ The produced `cdylib` exports the standard Drasi plugin entry point.
 cargo test -p drasi-reaction-grpc
 ```
 
+### Stop and restart
+
+Lifecycle calls are serialized and the processor is registered before it starts.
+Duplicate start, cancelled startup and incomplete cleanup reject replacement.
+Stop cancels subscription forwarders and waits up to two seconds without aborting
+the processor. A timeout means cleanup is incomplete; call stop again to join the
+retained request/checkpoint work before restarting.
+
+The fixed runner flushes its final partial batch using the ordinary configured
+request/retry policy, not the previous shortened 1.5-second retry allowance.
+Adaptive batching has no separately spawned child to abandon. Workers use the
+shutdown signal, not a status read that could discard an already-dequeued result
+while the status changes to Stopping. Successful base cleanup still discards
+undequeued priority-queue entries. Explicit Strict/AutoSkipGap behavior is
+unchanged.
+
+Current-thread lifecycle cases hold actual RPC replies and checkpoint writes
+beyond the two-second stop bound, then verify their completion. They also cover
+final fixed-batch flushing, cancelled startup/cleanup, typed panics, status/signal
+races and three exact-sequence restart cycles in both modes. The legacy graph
+adapter remains acceptance-only; these changes do not make remote effects atomic
+or resolve uncertainty after a process failure or lost acknowledgement.
+
 Unit tests cover config defaults, builder semantics (including per-field adaptive
 setters), endpoint/batching validation, template validation at construction, route
 resolution (exact, dotted-suffix, default), template render success/failure,
@@ -678,7 +715,7 @@ Integration tests in `tests/integration_tests.rs` use an in-process tonic mock
 - Adaptive batching steady-state delivery with `row_signature` round-trip.
 - End-to-end through `DrasiLib` (mock source → query → reaction), and a
   descriptor-created reaction honoring camelCase `batchSize`.
-- Bounded shutdown drain (the 1.5 s `tokio::time::timeout` wrap on the batcher join).
+- Prompt shutdown when there is no held request or checkpoint operation.
 
 ---
 

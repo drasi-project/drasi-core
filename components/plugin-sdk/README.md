@@ -253,11 +253,14 @@ Each plugin gets its own tokio runtime (created by the `export_plugin!` macro). 
 
 All high-throughput data paths use a push model where a forwarder task is spawned on one side and events are pushed via a callback into a channel on the other side:
 
-- **Source change events**: The host calls `start_push_fn` with a callback. The plugin spawns a forwarder task on its runtime that reads from the underlying change channel and invokes the callback for each event. This avoids per-event `dispatch_to_runtime` overhead (~0.3µs vs ~5-20µs for rendezvous dispatch).
-- **Bootstrap events**: Same push pattern — the plugin spawns a forwarder that pushes bootstrap events (a finite stream) into a host-side channel via a callback.
+- **Source change events**: The host calls `start_push_fn` with a callback. The plugin's forwarder reads from the change channel and awaits each callback on the blocking pool. A full host queue still applies backpressure without blocking the plugin's async workers or preventing status/lifecycle operations.
+- **Bootstrap events**: The same blocking-pool callback pattern delivers the finite bootstrap stream. Each forwarder awaits one callback at a time, preserving event order.
 - **Reaction query results**: Reversed direction — `start_result_push_fn` lets the host push query results into a channel. The plugin's forwarder drains them via a blocking callback (`spawn_blocking` + `std::sync::mpsc::Receiver::recv`).
 
-Typical FFI overhead through the full push pipeline is ~1-2µs per change event.
+Source and bootstrap forwarders retain callback-context ownership until any
+in-flight callback returns, including during runtime shutdown. Their final null
+sentinel is sent exactly once after the last callback, so the host cannot reclaim
+the context while a blocking worker still uses it.
 
 ### Cross-cdylib Channel Safety
 

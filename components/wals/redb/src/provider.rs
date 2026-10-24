@@ -36,6 +36,30 @@ const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metad
 /// Key under which the last-assigned sequence number is persisted.
 const COUNTER_KEY: &str = "counter";
 
+fn committed_counter(transaction: &redb::ReadTransaction) -> Result<u64, WalError> {
+    let table = match transaction.open_table(METADATA_TABLE) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+        Err(error) => {
+            return Err(WalError::StorageError(format!(
+                "open WAL metadata: {error}"
+            )))
+        }
+    };
+    let value = table
+        .get(COUNTER_KEY)
+        .map_err(|error| WalError::StorageError(format!("read WAL counter: {error}")))?;
+    match value {
+        Some(value) => {
+            let bytes: [u8; 8] = value.value().try_into().map_err(|_| {
+                WalError::StorageError("WAL counter metadata corrupt: expected 8 bytes".into())
+            })?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+        None => Ok(0),
+    }
+}
+
 /// Redb-backed Write-Ahead Log provider.
 ///
 /// Manages one redb database file per registered source at
@@ -287,9 +311,17 @@ impl WalProvider for RedbWalProvider {
             let read_txn = db.begin_read().map_err(|e| {
                 WalError::StorageError(format!("begin_read failed: {e}"))
             })?;
+            let head = committed_counter(&read_txn)?;
 
             let table = match read_txn.open_table(EVENTS_TABLE) {
                 Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) if head > 0 && sequence <= head => {
+                    return Err(WalError::PositionUnavailable {
+                        source_id: source_id_owned,
+                        requested: sequence,
+                        oldest_available: None,
+                    });
+                }
                 Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
                 Err(e) => {
                     return Err(WalError::StorageError(format!(
@@ -301,6 +333,13 @@ impl WalProvider for RedbWalProvider {
             let len = table
                 .len()
                 .map_err(|e| WalError::StorageError(format!("read event count failed: {e}")))?;
+            if len == 0 && head > 0 && sequence <= head {
+                return Err(WalError::PositionUnavailable {
+                    source_id: source_id_owned,
+                    requested: sequence,
+                    oldest_available: None,
+                });
+            }
             if len > 0 {
                 let first = table.first().map_err(|e| {
                     WalError::StorageError(format!("read first entry failed: {e}"))
@@ -398,8 +437,15 @@ impl WalProvider for RedbWalProvider {
     }
 
     async fn head_sequence(&self, source_id: &str) -> Result<u64, WalError> {
-        let state = self.get_state(source_id).await?;
-        Ok(state.counter.load(Ordering::SeqCst))
+        let db = self.get_state(source_id).await?.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let transaction = db.begin_read().map_err(|error| {
+                WalError::StorageError(format!("read committed WAL head: {error}"))
+            })?;
+            committed_counter(&transaction)
+        })
+        .await
+        .map_err(|error| WalError::StorageError(format!("WAL head reader failed: {error}")))?
     }
 
     async fn oldest_sequence(&self, source_id: &str) -> Result<Option<u64>, WalError> {
@@ -492,38 +538,29 @@ async fn open_or_create_db(path: PathBuf) -> Result<(Database, u64), WalError> {
                 .begin_read()
                 .map_err(|e| WalError::StorageError(format!("begin_read failed: {e}")))?;
 
-            match read_txn.open_table(METADATA_TABLE) {
-                Ok(table) => match table.get(COUNTER_KEY) {
-                    Ok(Some(value)) => {
-                        let bytes = value.value();
-                        // Persisted counter must be exactly 8 bytes (little-endian u64).
-                        // A different length means the metadata table is corrupt —
-                        // silently zeroing would let the next append reuse sequence
-                        // numbers that already exist in the events table.
-                        let arr: [u8; 8] = bytes.try_into().map_err(|_| {
-                            WalError::StorageError(format!(
-                                "WAL counter metadata corrupt for {path:?}: expected 8 bytes, got {}",
-                                bytes.len()
-                            ))
-                        })?;
-                        u64::from_le_bytes(arr)
-                    }
-                    Ok(None) => 0,
-                    Err(e) => {
-                        return Err(WalError::StorageError(format!("read counter failed: {e}")));
-                    }
-                },
-                Err(redb::TableError::TableDoesNotExist(_)) => 0,
-                Err(e) => {
-                    return Err(WalError::StorageError(format!(
-                        "open metadata table failed: {e}"
-                    )));
-                }
-            }
+            committed_counter(&read_txn)?
         };
 
         Ok((db, counter_value))
     })
     .await
     .map_err(|e| WalError::StorageError(format!("spawn_blocking join error: {e}")))?
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_uncommitted_sequence_reservation_is_not_the_replay_head() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = RedbWalProvider::new(directory.path());
+        provider
+            .register("source", WriteAheadLogConfig::default())
+            .await
+            .unwrap();
+        let state = provider.get_state("source").await.unwrap();
+        state.counter.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(provider.head_sequence("source").await.unwrap(), 0);
+    }
 }

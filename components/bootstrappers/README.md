@@ -2,6 +2,14 @@
 
 This guide explains how to create custom bootstrap provider plugins for Drasi. Bootstrap providers handle initial data delivery when queries first subscribe to sources, providing the current state before streaming changes begin.
 
+The application provider has moved to the native `ComputationBootstrapProvider`
+interface and is a host-linked Rust helper, not a Source-plugin callback or
+configuration factory. See its [native usage guide](application/README.md).
+The callback instructions below apply to the provider family still awaiting
+replacement.
+SQLite file snapshots also have a native SDK library and direct Rust graph
+binding; see [native SQLite bootstrap](sqlite/README.md#native-file-snapshots).
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -42,7 +50,7 @@ Bootstrap providers are responsible for:
 | `drasi-bootstrap-noop` | Returns no data (default) | `noop/` |
 | `drasi-bootstrap-scriptfile` | Reads JSONL script files | `scriptfile/` |
 | `drasi-bootstrap-postgres` | PostgreSQL snapshot using COPY | `postgres/` |
-| `drasi-bootstrap-application` | Replays in-memory insert events | `application/` |
+| `drasi-bootstrap-application` | Native snapshots of application-owned in-memory data | `application/` |
 | `drasi-bootstrap-platform` | HTTP streaming from remote Drasi | `platform/` |
 | `drasi-bootstrap-sui-deepbook` | Loads historical DeepBook events from Sui JSON-RPC | `sui-deepbook/` |
 | `drasi-bootstrap-here-traffic` | HERE Traffic API snapshot | `here-traffic/` |

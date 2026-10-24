@@ -176,7 +176,6 @@ mod tests {
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,

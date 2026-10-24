@@ -1,5 +1,367 @@
 # Drasi Host SDK
 
+## Native activation identity
+
+Factories negotiating `activation_credentials_v1` accept an optional `identity`
+dependency with `ResourceRole::Identity` and concrete type
+`computation::NativeIdentityResource`. Static callers supply the actual existing
+`Arc<dyn drasi_lib::identity::IdentityProvider>` with
+`NativeIdentityResource::new(provider)` and `Arc::new(resource).resource()`, or use
+`NativeFactory::create_component_with_identity(id, configuration, resource)`.
+No provider object, trait, Arc or Rust string layout crosses the native ABI.
+
+Host and Server share this reconstructible resource recipe:
+
+```yaml
+kind: nativeIdentity
+provider:
+  kind: your-loaded-identity-provider
+  config_version: "1"
+  config:
+    password:
+      kind: Secret
+      name: database-password
+```
+
+Declare it as an `Identity` resource without resource dependencies, and bind its
+ID to the component's `identity` slot. The recipe uses the already loaded ordinary
+identity-provider catalogue, its `PluginConfiguration`/descriptor schema checks,
+and existing instance-scoped secret resolution. Provider configuration references
+remain references in persistence. Provider construction and credential I/O occur
+on **each START**, never in a native component or resource constructor.
+An injected provider (`with_injected_provider`) takes precedence over a configured
+provider. Without an identity binding, literal-only startup is unchanged.
+Ordinary native `ConfigurationValue` references remain construction-scoped;
+credential rotation requires the explicit identity resource path above, not a
+password reference resolved once by the component constructor.
+
+Each activation supplies exactly the configured hostname/port in the ordinary
+`CredentialContext`. Failed providers, oversized credentials and certificates
+fail before native START, without literal or stale-credential fallback. Provider
+errors are sanitized. Cancellation drops the caller-owned resolution future;
+there is no cached credential or unrestricted fetch callback that can later
+apply old credentials to a replacement.
+
+For a coordinated source, declare the same optional Identity resource as a
+dependency of its `nativeSourceBootstrap` resource. The Host validates exact
+resource identity and passes only the construction marker to the coordinator;
+the live source still receives credentials through its normal START. This does
+not independently add authentication to a connector's bootstrap implementation.
+Consumer-wrapper factories currently reject identity dependencies rather than
+silently ignoring them.
+
+## Native consumer completion
+
+Native consumer-v1 factories use the Host's existing `DeliveryRunner`, not a
+plugin-owned progress store. Programmatic construction uses
+`NativeFactory::create_consumer`; graph factory specifications require exactly
+one `consumer` dependency, an `IndexBackend` resource whose handle contains
+`NativeConsumerResource { provider, options }`. Scope comes from the graph.
+External completion and transactional state/completion are distinct persisted
+modes; neither upgrades acceptance-only sinks or promises external exactly-once
+effects. Ordinary factories require no delivery resource and acquire no ledger.
+See the [native consumer contract](../computation-plugin-sdk/README.md#optional-host-owned-consumer-completion)
+for lifecycle, storage, retry and handler restrictions.
+
+Managed construction uses a graph-owned `IndexBackend` recipe:
+`{"kind":"nativeConsumer","failureScope":"processRestart","maxStreams":16,
+"receiptsPerStream":64}`. Its `resource_dependencies` must name exactly one actual
+index-provider resource. Optional `retry` uses `DeliveryRetryPolicy`; omitted
+retry means its existing default, not unlimited attempts. The recipe reuses the
+declared provider while isolating delivery storage by instance and graph. It
+cannot substitute a producer's shared transaction group for the consumer's
+own per-operation transaction. Component specifications bind this resource
+under `consumer`. Actual constructed storage must meet the requested guarantee.
+
+## Native producer consumer progress
+
+Native standalone transformers and ordinary **Handled** sinks may
+additionally bind an optional `input_progress` dependency. It is a `Checkpoint`
+resource containing `QuerySourceProgressResource` for that exact graph/component.
+The Host attaches `ComponentRecovery::with_volatile_input_progress`; the graph,
+not the proxy or plugin, publishes completed input after handling and output
+completion. The owner remains volatile (`persistent=false`) and implies neither
+restart durability nor a remote transaction. Accepted sinks, sources, services,
+transaction participants and consumer-wrapper factories cannot opt into this
+tracker. A transformer factory may also support transaction participation; that
+capability does not prevent tracking its separately constructed standalone
+instances. An instance with this tracker cannot be converted into a transaction
+participant. Omitting it preserves the ordinary fast path.
+
+`NativeFactory::create_component_with_input_progress(id, configuration, scope,
+input_owner, optional_consumer_set)` provides programmatic construction.
+An upstream-facing input owner and downstream `consumer_progress` readers are
+different resources and may coexist on a transformer. Only the latter crosses
+the native interface; `input_progress` never reaches the plugin.
+
+Native source/transformer factories advertising `consumer_progress_v1` require
+one `consumer_progress` dependency: a `Checkpoint` resource containing the actual
+`Arc<ConsumerProgressSet>`, not names, a synthetic aggregate or a single-owner
+wrapper. Programmatic construction uses
+`NativeFactory::create_component_with_consumer_progress(id, configuration, scope, set)`.
+Graph/producer identity and exact plugin-side reader binding are checked.
+Single-owner progress and source admission cannot be supplied alongside this
+binding. Non-opt-in factories keep their existing construction and processing.
+
+The Host attaches the actual set with `ComponentRecovery::with_consumer_progress`.
+An optional immutable native cursor comparator is captured separately and attached
+with `with_consumer_positions`. It interprets bounded source positions, not a
+generic minimum scalar, and can run while source/transformer processing is pending.
+Its opaque handle remains producer-owned; no Rust comparator or storage pointer
+crosses the ABI. Explicit upstream retention is preserved independently and is
+not proof of every consumer's durability or of an external effect.
+
+Snapshots retain every member's own state and enforce whole-set limits (256
+members, 4,096 entries, 1 MiB). Independent subscriptions are bounded to 16; failed
+encoding and cancelled waits consume no observations. Stop/drop wakes and fences
+old subscriptions, and cancelled/failed cleanup cannot become a successful restart.
+Only successful stop/start allows fresh subscriptions. These services use the
+hosting graph's actual resources; they neither create a graph nor independently
+establish graph-wide fan-out/recovery guarantees.
+
+Managed construction uses the `consumerProgress` resource recipe:
+
+```yaml
+kind: consumerProgress
+producer: input
+consumers:
+  left: left-progress
+  right: right-progress
+```
+
+Declare it as a `Checkpoint` resource, with exactly `left-progress` and
+`right-progress` as `Checkpoint` resource dependencies. Each member is a
+`sourceProgress` recipe for the corresponding actual component. Bind the set to
+the producer's `consumer_progress` slot. A query binds its own member resource to
+`source_progress`; an eligible native transformer/handled sink binds it to
+`input_progress`. Matching names alone do not establish ownership. A transformer's
+own input owner is separate from the set observing its downstream consumers.
+
+Secret-bearing native configuration uses canonical component specifications with
+`ConfigurationValue` references to declared configuration resources. Server's
+readable graph `config` object contains literal values; embedding a reference-like
+object there does not turn it into a reference or bypass secret validation.
+
+## Native source data inspection
+
+The Host negotiates the optional `source_schema_v1` extension and exposes its
+actual `SourceSchemaReader` through the component's read capability. Schema reads
+do not occupy `next()`'s operation slot and cannot retain a removed component
+through an inspection handle. The SDK fences activation changes and the Host
+fences proxy retirement; neither substitutes configuration metadata or an empty
+schema for a failed read. Older binaries without the extension remain supported.
+No application SQL read/write API is added to DrasiLib or the native ABI.
+
+## Managed native bootstrap
+
+`nativeBootstrap` recipes create one graph-owned `Bootstrap` resource for the
+named query `component`. Supply the negotiated `implementation`,
+`configurationVersion` and an unresolved `configuration` map using the same
+`ConfigurationValue` format as component specifications. `PluginRegistry` exposes
+`computation_bootstrap_factories()` and `computation_bootstrap_metadata()` from
+the already loaded libraries; no provider is cached in a second runtime registry.
+
+If the factory requires progress, `sourceProgress` names the actual checkpoint
+resource also bound to the query's `source_progress` slot. Declare that resource
+as a `Checkpoint` dependency of the bootstrap resource. Configuration references
+likewise declare their `SecretStore` dependencies. Missing, extra, wrongly typed
+or foreign-owner bindings fail; secret fields cannot be persisted as literals.
+The query binds the bootstrap resource under `bootstrap`. One recipe/provider
+cannot be shared between different queries or instances. Snapshot generations
+are owned by bootstrap-v1, not invented component generations for resources.
+
+Query stop joins bootstrap work before releasing query storage. Graph resource
+retirement also stops the provider and revokes its progress binding; a retained
+old handle cannot restart it. Recipes preserve references through persistence
+and reconstruction. These contracts are qualified with test-only native
+libraries; production bootstrap/consumer plugin migrations remain separate.
+
+## Internal native source/bootstrap coordination
+
+Sources negotiating `bootstrap_coordination_v1` may share their actual engine
+with a separately loaded paired bootstrap factory. This is not a SQL or general
+service API. The graph owns one `Bootstrap` resource with the distinct concrete
+type `NativeSourceBootstrapResource`; it is not a query's `QueryBootstrapResource`.
+There is no path-based component lookup, global coordinator registry, copied
+worker, or forwarding task.
+
+The `nativeSourceBootstrap` recipe names the **source** component and its actual
+source factory's `implementation`, `configurationVersion`, and unresolved
+`configuration`. Exactly one of `sourceProgress` or `consumerProgress` names
+its actual checkpoint dependency. Configuration references declare their exact
+`SecretStore` dependencies and remain references in persisted definitions.
+For example, a shared source uses:
+
+```yaml
+kind: nativeSourceBootstrap
+component: source
+implementation: # the registered native source implementation identity
+  name: example/source
+  version: "1"
+configurationVersion: 1
+configuration: {} # same ConfigurationValue map as the source specification
+consumerProgress: consumers
+```
+
+Use the implementation identity from loaded metadata, including plugin provenance;
+the abbreviated identity above illustrates only the recipe shape.
+Bind that resource to the source's `source_bootstrap` slot **and** bind the
+actual progress resource to its ordinary `source_progress` or `consumer_progress`
+slot. A paired `nativeBootstrap` recipe names the **query**, its bootstrap factory,
+`sourceBootstrap: <coordinator-resource>`, and
+`sourceProgress: <query-progress-resource>`. Declare both as resource dependencies,
+with roles `Bootstrap` and `Checkpoint`, respectively. Bind the resulting query
+bootstrap resource under the query's existing `bootstrap` slot and the same actual
+query progress under `source_progress`.
+
+The coordinator captures the real single owner or complete consumer set, including
+all actual member owners. Pairing requires Arc identity, not matching IDs, paths,
+configuration, or an equal reconstructed member map. Source construction also
+checks source ID, implementation, resolved configuration, instance, and graph.
+Component generation may change without changing its coordinator. Live source
+leases prevent overlapping reconstruction; resource retirement fences old opens.
+
+Coordinator-owned group/member read capabilities activate when the resource is
+constructed, without snapshot, subscription, or network I/O. The source still
+receives its separate normal live binding, activated by source lifecycle.
+Cleanup retains an accepted STOP operation and readers across cancelled/timed-out
+awaits and failed cleanup. Successful final resource cleanup revokes every reader.
+Paired query providers retain the real query recovery reader and use the existing
+bounded bootstrap operations and retirement behavior. Standalone file bootstrap
+and ordinary source construction are unchanged.
+
+A successfully stopped paired provider may be replaced even while its old handle
+is retained. The old lease cannot resume, cancel, or stop the replacement. Active
+providers and incomplete, cancelled, or failed cleanup remain fenced until the
+actual cleanup operation succeeds; dropping their handles does not erase that
+obligation. A rejected replacement open, reader, or scope leaves the stopped
+original usable. Dropping a never-started source permits reconstruction, but
+dropping after failed or cancelled START/STOP does not bypass cleanup.
+Retained subscriptions remain usable through
+failed or cancelled coordinator cleanup and are revoked only at final retirement.
+
+`PluginRegistry::computation_source_bootstrap_factories()` snapshots immutable
+native source factories from loaded plugins. Programmatic graph assembly uses
+`NativeFactory::create_source_bootstrap(...)`,
+`create_component_with_source_bootstrap(...)`, and
+`NativeBootstrapFactory::create_paired_query_provider(...)`.
+`NativeSourceBootstrapProgress::{Single, Shared}` supplies actual owners; retain
+the coordinator as a graph resource with its cleanup and dependency edges.
+
+The focused Host coordination tests cover both progress modes, both Tokio runtime
+flavors, real malformed/partial library discovery, constructor callback counters,
+exactly-once release of transferred owners, actual owner identity,
+retained-provider replacement, dropped cleanup obligations, and subscription retirement.
+Build the discovery fixtures before running this suite:
+
+```sh
+cargo build -p drasi-host-sdk --example native_bootstrap_coordination_metadata \
+  --example native_bootstrap_coordination_partial
+cargo test -p drasi-host-sdk --lib bootstrap_coordination
+```
+
+## Integrated desired-state management
+
+Managed graphs support shared QoS channels as well as component factories.
+`HostManagementResources::with_index_provider` registers external processing
+storage for `qos` recipes. Native factories expose their executable record
+schemas so persistent channels use the same validators when replaying data.
+See [pipe QoS](../../lib/docs/computation-graph-qos.md) for profiles, subscription
+retirement and the difference between durable acceptance and completed effects.
+
+QoS recipes optionally select `recovery` through the shared
+`management::QosRecoveryConfig`. `kind: admission` names the actual source
+`component`, `failureScope`, `maxProducers` and `receiptsPerProducer`;
+`kind: replay` selects `failureScope` and `receiptCapacity` for retained
+producer output. The host supplies the actual instance/graph identity, not
+configuration-provided identity claims. Both modes require a durable,
+backpressured channel and evidence that its storage survives the requested
+failure. They cannot be combined. Omission is explicitly disabled: reopening
+a tracked journal without the matching mode fails rather than silently
+disabling or restoring an unrequested service. Plain volatile recipes retain
+their ordinary path without receipt machinery.
+
+Shared transactions use `{"kind":"sharedStorage","provider":"disk","component":"query"}`
+for the producer's graph-owned `IndexBackend`, and `{"kind":"sharedQos",
+"definition":{...},"recovery":{"kind":"replay","failureScope":"processRestart",
+"receiptCapacity":64}}` for each graph-owned journal. The latter has exactly one
+`IndexBackend` entry in `DesiredTopology.resource_dependencies`. The graph passes
+the actual group handle into its constructor and releases journals before storage.
+Its pipe also names the group in `shared_storage`. Same-named independent providers
+cannot substitute for that group. The resolver protects persistent recovery
+domains before acceptance, including when their live resources are unavailable.
+Shared domains can change after successful instance stop and a graph-held proof
+that producer output, required journal cursors and scheduled work have drained.
+Storage gates and restart protection remain held through durable acceptance.
+Initialized standalone query/transaction owners, persistent QoS journals and
+native consumers also support verified drain. Consumers use completed-ledger
+evidence only after successful storage cleanup; bootstrap providers hold their
+own stopped lifecycle. Unsupported owners and unresolved obligations still
+reject ordinary changes. Explicit revision-bound loss authorization only permits
+complete domain removal, never data deletion, in-place reset or migration; see
+[managed retirement](../../lib/docs/managed-configuration.md#explicit-loss-authorized-removal).
+Resolver wrappers
+must forward `validate_transition` and `resolve_with_dependencies`.
+
+Load and verify libraries with the existing loader/lifecycle APIs, register
+them in `PluginRegistry`, and supply `computation_factory_registry()` to
+`DrasiLib::builder().with_component_factories(...)`. The registry includes
+standard graph factories and the loaded native implementations. DrasiLib does
+not load library paths from stored definitions.
+
+`management::HostManagementResources` provides standard resource recipes for
+memory indexes, query-result catalogs, source progress, middleware, transactional
+factories and configuration references.
+The `{"kind":"sourceProgress","component":"query"}` recipe creates a checkpoint
+resource for the named consumer in the current graph. Bind that same resource ID
+to the consumer and its replayable source using `source_progress`. The consumer
+publishes its actual recovered state; the recipe cannot supply checkpoints,
+readiness or durability claims. Resolution creates a separate owner per instance,
+not a global cache keyed by component names. Sources across the native boundary
+must explicitly negotiate recovery-v1; ordinary ABI 1.0 compatibility is not
+recovery support. `{"kind":"queryCatalog"}` creates a catalog shared by queries
+and a result outlet through their `catalog` dependencies.
+Its `configuration` recipe can include local `secrets`, or use an externally
+supplied `SecretStoreProvider`. These values are privileged configuration; use
+an encrypted `ConfigurationStore` when persisting them. `HostConfigurationResolver`
+is shared with Server rather than duplicating its secret/environment resolution.
+
+Persistence is a separate opt-in provider, such as
+`drasi-state-store-redb` with its `configuration` feature. Share one provider
+across multiple instance IDs, and register the required factories on each
+restart. Missing factories remain visible as failed declarations, not silently
+removed components. See [managed configuration](../../lib/docs/managed-configuration.md)
+for acceptance, reconstruction, snapshots and mutation-boundary contracts.
+
+## Native fast-path measurement
+
+`examples/native_fast_path.rs` runs a graph with bounded host input/output and a
+separately loaded standard arithmetic transformer, on Tokio current-thread.
+No admission, progress, transactions, durable pipes or consumer recovery are
+enabled. Each output is checked; 2,048 warmup events precede measurement.
+
+```sh
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3
+cargo build --offline -p drasi-host-sdk --example native_fast_path --release
+cargo build --offline -p drasi-computation-transformer-arithmetic --features dynamic-plugin --release
+DRASI_NATIVE_ARITHMETIC_PLUGIN="$PWD/target/release/libdrasi_computation_transformer_arithmetic.dylib" \
+  target/release/examples/native_fast_path 300000 32
+```
+
+Use `.so` or `.dll` as appropriate. The System-backed allocation counter measures
+**host allocations only**, not the library's separate allocator. CPU, latency,
+throughput and process RSS include native calls and plugin work. For interleaved
+baseline/current runs with separately built matching plugins:
+
+```sh
+python3 lib/tests/measure-fast-path.py BASELINE_HOST CURRENT_HOST OUTPUT.json \
+  --baseline-plugin BASELINE_PLUGIN --current-plugin CURRENT_PLUGIN --events 300000
+```
+
+Keep the benchmark source, compiler, release profile and shared dependency
+versions identical. The report retains binary/plugin hashes and every run; this
+small arithmetic workload is not a production capacity benchmark.
+
 The Drasi Host SDK provides the host-side counterpart to the [Drasi Plugin SDK](../plugin-sdk/README.md). While the Plugin SDK helps authors **build** cdylib plugins, the Host SDK helps the server **load, validate, and interact** with them at runtime.
 
 ## Overview
@@ -61,6 +423,88 @@ The result is that the rest of the server code works with normal Rust trait obje
 | `identity_bridge` | `IdentityProviderVtableBuilder` — wraps a host `Arc<dyn IdentityProvider>` into an `IdentityProviderVtable` for plugin consumption |
 
 ## Usage
+
+### Native ComputationGraph plugins
+
+Plugin-side `NativeComponent` interfaces and shared messages no longer depend on
+the runtime. This host package is where those operations become graph-owned
+components, runtime configuration schemas and actual storage/progress bindings.
+The base ABI and wire formats are unchanged; older native binaries remain valid.
+
+Optional recovery-v1 source progress binds only an actual
+`QuerySourceProgressResource` under `source_progress`; it is mutually exclusive
+with the source's optional `admission` binding. The proxy retains the real local
+owner for recovery assertions while the plugin receives a bounded, revocable
+read-only capability. Old native binaries remain available for their existing
+fast behavior. See the [native progress contract](../computation-plugin-sdk/README.md#optional-read-only-source-progress).
+
+Host unit tests also load a separately built, test-only SQLite replay plugin.
+`make build-test-plugins` builds it, or use
+`CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo build -p drasi-host-sdk --example native_recovery`.
+Set `DRASI_NATIVE_RECOVERY_PLUGIN` to select an explicit fixture path.
+
+The independent `computation` module loads native graph factories without changing
+the legacy ABI 0.15:
+
+```rust,ignore
+use drasi_host_sdk::computation;
+use drasi_lib::computation::v1::FactoryRegistry;
+
+let mut factories = FactoryRegistry::standard();
+if let Some(plugin) = computation::try_load(path)? {
+    plugin.register_factories(&mut factories)?;
+    // Serializable plugin/factory/schema/capability discovery.
+    let metadata = plugin.metadata();
+    // Optional explicit participants for a TransactionalTransformerRegistry:
+    let participants = plugin.transactional_factories();
+} else {
+    // Neither native symbol exists: legacy discovery may continue here.
+}
+```
+
+`try_load` returns an error, **not** `None`, for partial native entry points, bad
+headers, missing metadata, incompatible versions/targets/schemas or unsupported
+capabilities. Do not fall back to legacy registration after such an error.
+`load` requires this native family. Native libraries are pinned for process
+lifetime, including identified candidates whose initialization fails; hot
+unloading is unsupported.
+
+Native ABI 1.0 uses wire version 2: bounded MessagePack and bulk binary envelope
+buffers. Version-1 prototype native libraries must be rebuilt and are rejected
+before plugin entry. Native response buffers remain producer-owned while being
+decoded, then are released through their callback; graph envelopes contain
+fully owned local values. Legacy ABI 0.15 and persisted JSON envelopes are unchanged.
+
+`NativeFactory` implements the existing `ComponentFactory` and, for explicitly
+opted-in factories, `TransactionalTransformerFactory`. Its `specification(id,
+configuration)` helper builds an exact graph recipe with plugin provenance;
+`create_component` is configuration-only. Proxies implement the real native
+source/transformer/sink/service interfaces. `configuration()` reads the actual
+component, not a second mutable registry. The graph publishes configuration at
+construction boundaries rather than invoking getters during in-flight data;
+native ABI 1.0 does not support in-place reconfiguration. The graph retains
+submitted specifications for pending/failed construction.
+
+The graph polls all asynchronous operations and owns cancellation. Native control
+operations use separate callbacks rather than waiting behind mutable data calls.
+Step-scoped transaction requests are serviced inside the host's actual borrowed
+`TransactionContext`, through a revocable mailbox with no commit API. No Rust
+future, trait object, task-local, `Arc` or `Bytes` ownership crosses the C ABI.
+See the [native SDK](../computation-plugin-sdk/README.md) for authoring,
+ownership and explicitly unsupported query/recovery/resource capabilities.
+
+For a directory containing both families, use
+`PluginLoader::load_all_families` and match `LoadedPluginFamily::Legacy` or
+`LoadedPluginFamily::Computation`. It opens each candidate once, preserves
+reported loading failures, and never falls back after a malformed native
+declaration. Verification/allowlisting must happen before this call, as before.
+The existing `load_all`/`load_plugin_from_path` interfaces remain legacy-only.
+
+`PluginRegistry::register_computation_plugin` retains native factories under a
+family/version-qualified registration identity. The graph factory registry and
+optional transactional transformer registry can then be obtained from that
+same host registry. Native metadata exposes each factory's role, ports, schemas,
+configuration version and actual capabilities.
 
 ### Loading plugins
 
@@ -159,6 +603,19 @@ The `OciRegistryClient` supports downloading plugins from OCI registries and opt
 6. **Callback wiring** — calls `set_log_callback` and `set_lifecycle_callback` with host context pointers
 7. **Proxy extraction** — wraps each `SourcePluginVtable`, `ReactionPluginVtable`, and `BootstrapPluginVtable` in their corresponding proxy types
 8. **Library retention** — the `Arc<Library>` is stored in each proxy to keep the shared library loaded for as long as any proxy is alive
+
+### Package and configuration versions
+
+`LoadedPlugin::plugin_version()` reads the package version from the retained
+library's metadata export. Runtime registration preserves it per descriptor via
+the registry's `register_*_with_package_version` methods. This is separate from
+`config_version()`, which describes the accepted configuration format.
+
+Existing registration methods remain supported and leave the package version
+unknown. Replacing a descriptor also replaces its version metadata; registering
+another kind from the same plugin ID does not rewrite earlier registrations.
+Hosts must not substitute a configuration version when the package version is
+unknown. No plugin vtable or wire-layout change is required.
 
 ### Plugin File Naming
 

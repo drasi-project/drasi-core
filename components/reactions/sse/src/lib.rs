@@ -39,36 +39,6 @@ pub mod sse;
 pub use config::{QueryConfig, SseExtension, SseReactionConfig, TemplateSpec};
 pub use sse::SseReaction;
 
-/// Helper function to register the json helper in a Handlebars instance
-/// This helper serializes values to JSON format in templates
-fn register_json_helper(handlebars: &mut handlebars::Handlebars) {
-    handlebars.register_helper(
-        "json",
-        Box::new(
-            |h: &handlebars::Helper,
-             _: &handlebars::Handlebars,
-             _: &handlebars::Context,
-             _: &mut handlebars::RenderContext,
-             out: &mut dyn handlebars::Output|
-             -> handlebars::HelperResult {
-                if let Some(value) = h.param(0) {
-                    match serde_json::to_string(&value.value()) {
-                        Ok(json_str) => out.write(&json_str)?,
-                        Err(_) => {
-                            // On serialization error, output null
-                            out.write("null")?;
-                        }
-                    }
-                } else {
-                    // No parameter provided to json helper
-                    out.write("null")?;
-                }
-                Ok(())
-            },
-        ),
-    );
-}
-
 /// Builder for SSE reaction
 pub struct SseReactionBuilder {
     id: String,
@@ -171,90 +141,13 @@ impl SseReactionBuilder {
         self
     }
 
-    /// Validate a template by attempting to compile it with Handlebars
-    fn validate_template(
-        handlebars: &handlebars::Handlebars,
-        template: &str,
-    ) -> anyhow::Result<()> {
-        if template.is_empty() {
-            return Ok(());
-        }
-        // Validate the template by attempting to render it with empty data
-        handlebars
-            .render_template(template, &serde_json::json!({}))
-            .map_err(|e| anyhow::anyhow!("Invalid template: {e}"))?;
-        Ok(())
-    }
-
-    /// Validate all templates in a QueryConfig
-    fn validate_query_config(
-        handlebars: &handlebars::Handlebars,
-        config: &QueryConfig,
-    ) -> anyhow::Result<()> {
-        if let Some(added) = &config.added {
-            // Validate body template
-            Self::validate_template(handlebars, &added.template)?;
-            // Validate path template (if present)
-            if let Some(path) = &added.extension.path {
-                Self::validate_template(handlebars, path)?;
-            }
-        }
-        if let Some(updated) = &config.updated {
-            // Validate body template
-            Self::validate_template(handlebars, &updated.template)?;
-            // Validate path template (if present)
-            if let Some(path) = &updated.extension.path {
-                Self::validate_template(handlebars, path)?;
-            }
-        }
-        if let Some(deleted) = &config.deleted {
-            // Validate body template
-            Self::validate_template(handlebars, &deleted.template)?;
-            // Validate path template (if present)
-            if let Some(path) = &deleted.extension.path {
-                Self::validate_template(handlebars, path)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Build the SSE reaction
     pub fn build(self) -> anyhow::Result<SseReaction> {
-        // Create a single Handlebars instance for all validation with json helper
-        let mut handlebars = handlebars::Handlebars::new();
-
-        // Register the json helper for template validation
-        register_json_helper(&mut handlebars);
-
-        // Validate all templates in routes
-        for (query_id, config) in &self.routes {
-            Self::validate_query_config(&handlebars, config)
-                .map_err(|e| anyhow::anyhow!("Invalid template in route '{query_id}': {e}"))?;
-        }
-
-        // Validate default template if provided
-        if let Some(default_template) = &self.default_template {
-            Self::validate_query_config(&handlebars, default_template)
-                .map_err(|e| anyhow::anyhow!("Invalid default template: {e}"))?;
-        }
-
-        // Validate that all routes correspond to subscribed queries
-        if !self.routes.is_empty() && !self.queries.is_empty() {
-            for route_query in self.routes.keys() {
-                // Check exact match or if the query ends with the route (for dotted notation)
-                let matches = self
-                    .queries
-                    .iter()
-                    .any(|q| q == route_query || q.ends_with(&format!(".{route_query}")));
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{}' does not match any subscribed query. Subscribed queries: {:?}",
-                        route_query,
-                        self.queries
-                    ));
-                }
-            }
-        }
+        drasi_reaction_common::sse::SseRenderer::validate(
+            &self.routes,
+            self.default_template.as_ref(),
+            &self.queries,
+        )?;
 
         let config = SseReactionConfig {
             host: self.host,

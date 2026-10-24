@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::component_graph::ComponentGraph;
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{MemoryStateStoreProvider, Reaction};
@@ -61,14 +60,9 @@ impl Respond for OrderedResponses {
 }
 
 async fn initialize_with_store(reaction: &A2AReaction, store: Arc<MemoryStateStoreProvider>) {
-    let (graph, _rx) = ComponentGraph::new("a2a-it");
-    let context = ReactionRuntimeContext::new(
-        "a2a-it",
-        reaction.id(),
-        Some(store),
-        graph.update_sender(),
-        None,
-    );
+    let (update_tx, _rx) = tokio::sync::mpsc::channel(16);
+    let context =
+        ReactionRuntimeContext::new("a2a-it", reaction.id(), Some(store), update_tx, None);
     reaction.initialize(context).await;
 }
 

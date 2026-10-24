@@ -18,7 +18,7 @@ use crate::oid::{self, array_element_oid, is_array_oid};
 use crate::value::{parse_bytea_text, PostgresValue};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use drasi_core::models::ElementValue;
+use drasi_core_types::models::ElementValue;
 use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;

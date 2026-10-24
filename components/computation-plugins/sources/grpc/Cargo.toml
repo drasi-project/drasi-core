@@ -1,0 +1,43 @@
+[package]
+name = "drasi-computation-source-grpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native ComputationGraph gRPC graph-change source"
+readme = "README.md"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "1.0.0"
+kind = "source-grpc"
+
+[dependencies]
+drasi-computation-plugin-sdk = { workspace = true }
+drasi-grpc-common = { workspace = true, features = ["source"] }
+drasi-computation-network-common = { workspace = true, features = ["grpc-source"] }
+drasi-computation-contracts = { workspace = true }
+anyhow = "1"
+async-trait = "0.1"
+async-stream = "0.3"
+futures-util = "0.3"
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+drasi-grpc-common = { workspace = true }
+tonic-prost-build = "0.14"
+
+[lints]
+workspace = true

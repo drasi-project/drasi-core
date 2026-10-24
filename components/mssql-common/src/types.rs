@@ -19,7 +19,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
-use drasi_core::models::ElementValue;
+use drasi_core_types::models::ElementValue;
 use std::sync::Arc;
 use tiberius::Row;
 

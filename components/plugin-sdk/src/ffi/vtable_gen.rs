@@ -33,7 +33,7 @@ use drasi_lib::channels::events::{
     BootstrapEvent, BootstrapEventSender, SourceEvent, SourceEventWrapper,
 };
 use drasi_lib::channels::ChangeReceiver;
-use drasi_lib::component_graph::ComponentUpdateReceiver;
+use drasi_lib::channels::ComponentUpdateReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;
@@ -53,6 +53,109 @@ use crate::descriptor::{
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
 
+struct StatusTarget {
+    callback: Option<super::callbacks::LifecycleCallbackFn>,
+    context: SendPtr<c_void>,
+    fallback: LifecycleEmitterFn,
+    component_type: &'static str,
+}
+
+pub(crate) struct StatusForwarder {
+    target: Arc<std::sync::Mutex<Option<StatusTarget>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl StatusForwarder {
+    fn new(
+        mut receiver: ComponentUpdateReceiver,
+        context: &FfiRuntimeContext,
+        component_type: &'static str,
+        fallback: LifecycleEmitterFn,
+        runtime: &tokio::runtime::Handle,
+    ) -> Self {
+        let target = Arc::new(std::sync::Mutex::new(Some(StatusTarget {
+            callback: context.lifecycle_callback,
+            context: SendPtr(context.lifecycle_ctx),
+            fallback,
+            component_type,
+        })));
+        let shared = target.clone();
+        let task = runtime.spawn(async move {
+            while let Some(drasi_lib::channels::ComponentUpdate::Status {
+                component_id,
+                status,
+                message,
+            }) = receiver.recv().await
+            {
+                // Start/stop callbacks already report lifecycle operations. The
+                // status channel also carries errors raised by background work.
+                if status != ComponentStatus::Error {
+                    continue;
+                }
+                let target = match shared.lock() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        log::error!("Plugin status callback lock poisoned: {error}");
+                        break;
+                    }
+                };
+                let Some(target) = target.as_ref() else {
+                    break;
+                };
+                let message = message.as_deref().unwrap_or("");
+                if let Some(callback) = target.callback {
+                    let event = FfiLifecycleEvent {
+                        component_id: FfiStr::from_str(&component_id),
+                        component_type: FfiStr::from_str(target.component_type),
+                        event_type: FfiLifecycleEventType::Error,
+                        message: FfiStr::from_str(message),
+                        timestamp_us: super::now_us(),
+                    };
+                    callback(target.context.0.cast_mut(), &event);
+                } else {
+                    (target.fallback)(&component_id, FfiLifecycleEventType::Error, message);
+                }
+            }
+        });
+        Self { target, task }
+    }
+}
+
+impl Drop for StatusForwarder {
+    fn drop(&mut self) {
+        // Revoke and join any synchronous callback before its host context can
+        // be released. The cancelled task retains no usable foreign pointer.
+        self.target
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!("Revoking poisoned plugin status callback: {error}");
+                error.into_inner()
+            })
+            .take();
+        self.task.abort();
+    }
+}
+
+fn forward_status(
+    slot: &std::sync::Mutex<Option<StatusForwarder>>,
+    receiver: ComponentUpdateReceiver,
+    context: &FfiRuntimeContext,
+    component_type: &'static str,
+    fallback: LifecycleEmitterFn,
+    runtime: &tokio::runtime::Handle,
+) {
+    *slot.lock().unwrap_or_else(|error| {
+        log::error!("Replacing poisoned plugin status forwarder: {error}");
+        error.into_inner()
+    }) = Some(StatusForwarder::new(
+        receiver,
+        context,
+        component_type,
+        fallback,
+        runtime,
+    ));
+}
+
 /// Wraps a closure in `catch_unwind`, returning `default` on panic.
 ///
 /// Use this for `extern "C"` functions that don't return `FfiResult` (so
@@ -68,15 +171,10 @@ fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
     }
 }
 
-/// Decode the `resume_sequence` FFI parameter into `Option<u64>`.
-///
-/// `0` is the sentinel for "no checkpointed sequence" (real framework sequences
-/// start at 1), so it maps to `None`; any non-zero value is the checkpointed
-/// sequence and maps to `Some(n)`. Shared by both source vtable builders so the
-/// sentinel convention is defined in exactly one place.
+/// Preserve an explicit replay-from-zero request separately from no request.
 #[inline]
-fn decode_resume_sequence(resume_sequence: u64) -> Option<u64> {
-    (resume_sequence != 0).then_some(resume_sequence)
+fn decode_resume_sequence(resume_sequence: u64, has_resume_sequence: bool) -> Option<u64> {
+    has_resume_sequence.then_some(resume_sequence)
 }
 
 /// Serialize an FFI event payload (`SourceEventPayload` / `BootstrapEventPayload`)
@@ -185,6 +283,63 @@ fn dispatch_to_runtime<R: Send + 'static>(
         let _ = tx.send(result);
     });
     rx.recv().expect("plugin runtime task dropped unexpectedly")
+}
+
+#[derive(Default)]
+pub(crate) struct InitializationState {
+    failure: std::sync::OnceLock<String>,
+}
+
+impl InitializationState {
+    fn failure(&self) -> Option<&str> {
+        self.failure.get().map(String::as_str)
+    }
+
+    fn run<T>(
+        &self,
+        prepare: impl FnOnce() -> T,
+        initialize: impl FnOnce(T) -> FfiResult,
+    ) -> Result<(), &str> {
+        let result = catch_panic_ffi(std::panic::AssertUnwindSafe(|| {
+            // Take ownership of transferred resources even when rejecting reuse.
+            let context = prepare();
+            match self.failure() {
+                Some(error) => FfiResult::err(error.to_owned()),
+                None => initialize(context),
+            }
+        }));
+        if let Err(error) = unsafe { result.into_result() } {
+            self.failure.get_or_init(|| {
+                format!("{error}; initialization failed: cleanup and recreate this plugin instance")
+            });
+        }
+        match self.failure() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+fn dispatch_initialization(
+    handle: &tokio::runtime::Handle,
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+) -> FfiResult {
+    // Joining preserves the original panic and waits for the initializer's
+    // unwind before reporting failure across the synchronous C boundary.
+    let task = handle.spawn(future);
+    dispatch_to_runtime(handle, async move {
+        match task.await {
+            Ok(()) => FfiResult::ok(),
+            Err(error) if error.is_panic() => FfiResult::from_panic(error.into_panic()),
+            Err(error) => FfiResult::err(format!("plugin initialization interrupted: {error}")),
+        }
+    })
+}
+
+fn signal_result_push_exit(callback: FfiResultPushCallbackFn, context: *mut c_void) {
+    #[allow(clippy::manual_dangling_ptr)]
+    let sentinel = 1usize as *mut c_void;
+    callback(context, sentinel);
 }
 
 // ============================================================================
@@ -587,8 +742,8 @@ pub(crate) struct SourceWrapper<T: Source + 'static> {
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     /// Cached instance_id from FfiRuntimeContext (set during initialize).
     pub instance_id: std::sync::RwLock<String>,
-    /// Keeps the dummy status_rx alive so inner source's status_tx.send() doesn't error.
-    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+    pub status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+    pub initialization: InitializationState,
 }
 
 /// Build a SourceVtable from a concrete type implementing the DrasiLib Source trait.
@@ -694,6 +849,10 @@ pub fn build_source_vtable<T: Source + 'static>(
     extern "C" fn start_fn<T: Source + 'static>(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            if let Some(error) = w.initialization.failure() {
+                emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_instance_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -749,6 +908,9 @@ pub fn build_source_vtable<T: Source + 'static>(
 
     extern "C" fn status_fn<T: Source + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const SourceWrapper<T>);
         let status = dispatch_to_runtime(&handle, async move {
@@ -785,8 +947,13 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_len: u32,
         request_position_handle: bool,
         resume_sequence: u64,
+        has_resume_sequence: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        if let Some(error) = w.initialization.failure() {
+            emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+            return std::ptr::null_mut();
+        }
         let source_id_str = unsafe { source_id.to_string() };
         let qid = unsafe { query_id.to_string() };
         let nodes_str = unsafe { nodes_json.to_string() };
@@ -809,11 +976,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
-        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
-        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
-        // and a floor derived from 0 would be 1 (the default) anyway, so treating
-        // it as absent is a no-op — the sentinel is safe either way.
-        let resume_sequence = decode_resume_sequence(resume_sequence);
+        let resume_sequence = decode_resume_sequence(resume_sequence, has_resume_sequence);
 
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
@@ -870,17 +1033,28 @@ pub fn build_source_vtable<T: Source + 'static>(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        // Keep the receiver alive so inner source's status_tx.send() doesn't error
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
+        let result = w.initialization.run(
+            || build_source_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "source",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let ptr = SendPtr(state as *const SourceWrapper<T>);
+                dispatch_initialization(&handle, async move {
+                    let inner = unsafe { ptr.as_ref() };
+                    inner.inner.initialize(runtime_ctx).await
+                })
+            },
+        );
+        if let Err(error) = result {
+            emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
         }
-        let handle = (w.runtime_handle)().handle().clone();
-        let ptr = SendPtr(state as *const SourceWrapper<T>);
-        dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { ptr.as_ref() };
-            inner.inner.initialize(runtime_ctx).await
-        });
     }
 
     extern "C" fn set_bootstrap_provider_fn<T: Source + 'static>(
@@ -895,6 +1069,10 @@ pub fn build_source_vtable<T: Source + 'static>(
             vtable: std::sync::Mutex::new(*vtable),
         });
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        if let Some(error) = w.initialization.failure() {
+            emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+            return;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const SourceWrapper<T>);
         dispatch_to_runtime(&handle, async move {
@@ -948,7 +1126,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
 
     SourceVtable {
@@ -996,7 +1175,8 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+        status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+        initialization: InitializationState,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -1092,6 +1272,10 @@ pub fn build_source_vtable_from_boxed(
     extern "C" fn start_fn(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const DynSourceWrapper) };
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_dyn_source_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -1147,6 +1331,9 @@ pub fn build_source_vtable_from_boxed(
 
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let inner_ptr = SendPtr(state as *const DynSourceWrapper);
         let status = dispatch_to_runtime(&handle, async move {
@@ -1183,8 +1370,13 @@ pub fn build_source_vtable_from_boxed(
         resume_from_len: u32,
         request_position_handle: bool,
         resume_sequence: u64,
+        has_resume_sequence: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
+        if let Some(error) = w.initialization.failure() {
+            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
+            return std::ptr::null_mut();
+        }
         let source_id_str = unsafe { source_id.to_string() };
         let qid = unsafe { query_id.to_string() };
         let nodes_str = unsafe { nodes_json.to_string() };
@@ -1207,11 +1399,7 @@ pub fn build_source_vtable_from_boxed(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
-        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
-        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
-        // and a floor derived from 0 would be 1 (the default) anyway, so treating
-        // it as absent is a no-op — the sentinel is safe either way.
-        let resume_sequence = decode_resume_sequence(resume_sequence);
+        let resume_sequence = decode_resume_sequence(resume_sequence, has_resume_sequence);
 
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
@@ -1265,16 +1453,28 @@ pub fn build_source_vtable_from_boxed(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
+        let result = w.initialization.run(
+            || build_source_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "source",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+                dispatch_initialization(&handle, async move {
+                    let inner = unsafe { inner_ptr.as_ref() };
+                    inner.inner.initialize(runtime_ctx).await
+                })
+            },
+        );
+        if let Err(error) = result {
+            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
         }
-        let handle = (w.runtime_handle)().handle().clone();
-        let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-        dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { inner_ptr.as_ref() };
-            inner.inner.initialize(runtime_ctx).await
-        });
     }
 
     extern "C" fn set_bootstrap_provider_fn(
@@ -1289,6 +1489,10 @@ pub fn build_source_vtable_from_boxed(
             vtable: std::sync::Mutex::new(*vtable),
         });
         let w = unsafe { &*(state as *const DynSourceWrapper) };
+        if let Some(error) = w.initialization.failure() {
+            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
+            return;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let inner_ptr = SendPtr(state as *const DynSourceWrapper);
         dispatch_to_runtime(&handle, async move {
@@ -1339,7 +1543,8 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
 
     SourceVtable {
@@ -1380,7 +1585,8 @@ pub(crate) struct ReactionWrapper<T: Reaction + 'static> {
     pub instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     pub instance_id: std::sync::RwLock<String>,
-    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+    pub status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+    pub initialization: InitializationState,
 }
 
 /// Build a ReactionVtable from a concrete type implementing the DrasiLib Reaction trait.
@@ -1467,6 +1673,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     extern "C" fn start_fn<T: Reaction + 'static>(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            if let Some(error) = w.initialization.failure() {
+                emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -1522,6 +1732,9 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
 
     extern "C" fn status_fn<T: Reaction + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const ReactionWrapper<T>);
         let status = dispatch_to_runtime(&handle, async move {
@@ -1573,16 +1786,28 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
+        let result = w.initialization.run(
+            || build_reaction_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "reaction",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let ptr = SendPtr(state as *const ReactionWrapper<T>);
+                dispatch_initialization(&handle, async move {
+                    let inner = unsafe { ptr.as_ref() };
+                    inner.inner.initialize(runtime_ctx).await
+                })
+            },
+        );
+        if let Err(error) = result {
+            emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
         }
-        let handle = (w.runtime_handle)().handle().clone();
-        let ptr = SendPtr(state as *const ReactionWrapper<T>);
-        dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { ptr.as_ref() };
-            inner.inner.initialize(runtime_ctx).await
-        });
     }
 
     extern "C" fn start_result_push_fn<T: Reaction + 'static>(
@@ -1596,6 +1821,11 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         // spawn_blocking (to avoid starving async workers), then enqueues
         // each result into the reaction's priority queue.
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        if let Some(error) = w.initialization.failure() {
+            emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+            signal_result_push_exit(callback, callback_ctx);
+            return;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ctx_raw = callback_ctx as usize;
         let ptr = SendPtr(state as *const ReactionWrapper<T>);
@@ -1667,6 +1897,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     ) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            if let Some(error) = w.initialization.failure() {
+                emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             let ffi_ctx = unsafe { &*ctx };
 
             let query_id = unsafe { ffi_ctx.query_id.to_string() };
@@ -1717,7 +1951,8 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
 
     ReactionVtable {
@@ -1760,7 +1995,8 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+        status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+        initialization: InitializationState,
     }
 
     // The state pointer points to a heap-allocated `Arc<DynReactionWrapper>`.
@@ -1860,6 +2096,10 @@ pub fn build_reaction_vtable_from_boxed(
     extern "C" fn start_fn(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = wrapper_ref(state);
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_dyn_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -1913,6 +2153,9 @@ pub fn build_reaction_vtable_from_boxed(
 
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = wrapper_ref(state);
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let arc = wrapper_arc(state);
         let status = dispatch_to_runtime(&handle, async move { arc.inner.status().await });
@@ -1954,16 +2197,28 @@ pub fn build_reaction_vtable_from_boxed(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
-        }
-        let handle = (w.runtime_handle)().handle().clone();
-        let arc = wrapper_arc(state);
-        dispatch_to_runtime(
-            &handle,
-            async move { arc.inner.initialize(runtime_ctx).await },
+        let result = w.initialization.run(
+            || build_reaction_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "reaction",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let arc = wrapper_arc(state);
+                dispatch_initialization(
+                    &handle,
+                    async move { arc.inner.initialize(runtime_ctx).await },
+                )
+            },
         );
+        if let Err(error) = result {
+            emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+        }
     }
 
     extern "C" fn start_result_push_fn(
@@ -1973,6 +2228,11 @@ pub fn build_reaction_vtable_from_boxed(
     ) {
         ffi_guard((), || {
             let w = wrapper_ref(state);
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+                signal_result_push_exit(callback, callback_ctx);
+                return;
+            }
             let handle = (w.runtime_handle)().handle().clone();
             let ctx_raw = callback_ctx as usize;
             // Clone the Arc so the spawned forwarder task owns a strong reference
@@ -2062,6 +2322,10 @@ pub fn build_reaction_vtable_from_boxed(
     extern "C" fn bootstrap_fn(state: *mut c_void, ctx: *const FfiBootstrapContext) -> FfiResult {
         catch_panic_ffi(|| {
             let w = wrapper_ref(state);
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             let ffi_ctx = unsafe { &*ctx };
 
             let query_id = unsafe { ffi_ctx.query_id.to_string() };
@@ -2111,7 +2375,8 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
     // Heap-allocate the Arc handle and pass its raw pointer as the FFI
     // state. drop_fn reclaims the Box (and decrements the Arc); any
@@ -2398,6 +2663,8 @@ pub fn build_bootstrap_provider_vtable(
         request_id: FfiStr,
         server_id: FfiStr,
         source_id: FfiStr,
+        settings_json: FfiStr,
+        properties_json: FfiStr,
     ) -> *mut FfiBootstrapStream {
         ffi_guard(std::ptr::null_mut(), || {
             use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
@@ -2426,6 +2693,16 @@ pub fn build_bootstrap_provider_vtable(
             };
             let server_id_str = unsafe { server_id.to_string() };
             let source_id_str = unsafe { source_id.to_string() };
+            if settings_json.len > super::payload::MAX_FFI_PAYLOAD_BYTES
+                || properties_json.len > super::payload::MAX_FFI_PAYLOAD_BYTES
+                || settings_json.ptr.is_null()
+                || properties_json.ptr.is_null()
+            {
+                log::error!("Invalid bootstrap settings or properties buffer");
+                return std::ptr::null_mut();
+            }
+            let settings_json = unsafe { settings_json.to_string() };
+            let properties_json = unsafe { properties_json.to_string() };
 
             let provider = {
                 let wrapper = unsafe { &*(state as *const BootstrapProviderWrapper) };
@@ -2452,9 +2729,24 @@ pub fn build_bootstrap_provider_vtable(
                             return;
                         }
                     };
-                    let context = BootstrapContext::new_minimal(server_id_str, source_id_str);
-                    let outcome =
-                        rt.block_on(provider.bootstrap(request, &context, event_tx, None));
+                    let outcome = rt.block_on(async {
+                        let settings = serde_json::from_str::<
+                            Option<drasi_lib::config::SourceSubscriptionSettings>,
+                        >(&settings_json)
+                        .map_err(|error| anyhow::anyhow!("invalid bootstrap settings: {error}"))?;
+                        let properties =
+                            serde_json::from_str(&properties_json).map_err(|error| {
+                                anyhow::anyhow!("invalid bootstrap properties: {error}")
+                            })?;
+                        let context = BootstrapContext::with_properties(
+                            server_id_str,
+                            source_id_str,
+                            properties,
+                        );
+                        provider
+                            .bootstrap(request, &context, event_tx, settings.as_ref())
+                            .await
+                    });
                     let _ = result_tx.send(outcome.map_err(|e| format!("{e:#}")));
                 });
             if let Err(e) = spawned {
@@ -2925,8 +3217,8 @@ fn build_source_runtime_context(
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
-        Some(Arc::new(FfiStateStoreProxy {
-            vtable: ffi_ctx.state_store,
+        Some(Arc::new(unsafe {
+            FfiStateStoreProxy::new(ffi_ctx.state_store)
         }))
     };
     let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =
@@ -2937,10 +3229,8 @@ fn build_source_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
-    // Create a dummy mpsc channel pair.
-    // The update_tx is provided to satisfy the SourceRuntimeContext signature.
-    // In the plugin-side context, status updates flow through the FFI lifecycle callback,
-    // not through this channel. The receiver is returned so it stays alive.
+    // The wrapper drains status updates and forwards background errors through
+    // the lifecycle callback independently of source data processing.
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let wal_provider: Option<Arc<dyn drasi_lib::wal::WalProvider>> =
@@ -2955,10 +3245,11 @@ fn build_source_runtime_context(
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
-        update_tx,
+        update_tx: update_tx.into(),
         state_store,
         identity_provider,
         wal_provider,
+        resource_observer: None,
     };
     (ctx, status_rx)
 }
@@ -2971,8 +3262,8 @@ fn build_reaction_runtime_context(
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
-        Some(Arc::new(FfiStateStoreProxy {
-            vtable: ffi_ctx.state_store,
+        Some(Arc::new(unsafe {
+            FfiStateStoreProxy::new(ffi_ctx.state_store)
         }))
     };
     let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =
@@ -2998,10 +3289,11 @@ fn build_reaction_runtime_context(
     let ctx = drasi_lib::ReactionRuntimeContext {
         instance_id,
         reaction_id: component_id,
-        update_tx,
+        update_tx: update_tx.into(),
         state_store,
         identity_provider,
         snapshot_fetcher,
+        resource_observer: None,
     };
     (ctx, status_rx)
 }
@@ -3090,7 +3382,7 @@ fn wrap_subscription_response(
             }
 
             rt_handle.spawn(async move {
-                let _sentinel_guard = SourceSentinelOnDrop { ctx_raw, callback };
+                let sentinel_guard = Arc::new(SourceSentinelOnDrop { ctx_raw, callback });
                 let mut rx = receiver.inner.lock().await;
                 // Pin the Notified future so it persists across loop iterations.
                 // Recreating it each iteration is cancel-unsafe: if select! picks
@@ -3106,12 +3398,28 @@ fn wrap_subscription_response(
                         result = rx.recv() => {
                             match result {
                                 Ok(wrapper) => {
-                                    let ffi_event = wrap_source_event(wrapper);
-                                    let accepted = std::panic::catch_unwind(
-                                        std::panic::AssertUnwindSafe(|| {
-                                            callback(ctx_raw as *mut c_void, ffi_event)
-                                        })
-                                    ).unwrap_or(false);
+                                    // A full host queue can block the callback. Keep it off
+                                    // async workers, and retain its context until it returns.
+                                    let callback_guard = sentinel_guard.clone();
+                                    let accepted = tokio::task::spawn_blocking(move || {
+                                        let ffi_event = wrap_source_event(wrapper);
+                                        let accepted = std::panic::catch_unwind(
+                                            std::panic::AssertUnwindSafe(|| {
+                                                (callback_guard.callback)(
+                                                    callback_guard.ctx_raw as *mut c_void,
+                                                    ffi_event,
+                                                )
+                                            }),
+                                        )
+                                        .unwrap_or(false);
+                                        drop(callback_guard);
+                                        accepted
+                                    })
+                                    .await
+                                    .unwrap_or_else(|error| {
+                                        log::error!("Source push callback worker failed: {error}");
+                                        false
+                                    });
                                     if !accepted {
                                         break;
                                     }
@@ -3215,7 +3523,7 @@ fn wrap_subscription_response(
                 }
 
                 rt_handle.spawn(async move {
-                    let _sentinel_guard = BootstrapSentinelOnDrop { ctx_raw, callback };
+                    let sentinel_guard = Arc::new(BootstrapSentinelOnDrop { ctx_raw, callback });
                     let mut rx = receiver.inner.lock().await;
                     // Pin the Notified future for cancel-safe shutdown
                     // (same rationale as change receiver forwarder).
@@ -3229,12 +3537,28 @@ fn wrap_subscription_response(
                             result = rx.recv() => {
                                 match result {
                                     Some(record) => {
-                                        let ffi_event = wrap_bootstrap_event(record);
-                                        let accepted = std::panic::catch_unwind(
-                                            std::panic::AssertUnwindSafe(|| {
-                                                callback(ctx_raw as *mut c_void, ffi_event)
-                                            })
-                                        ).unwrap_or(false);
+                                        let callback_guard = sentinel_guard.clone();
+                                        let accepted = tokio::task::spawn_blocking(move || {
+                                            let ffi_event = wrap_bootstrap_event(record);
+                                            let accepted = std::panic::catch_unwind(
+                                                std::panic::AssertUnwindSafe(|| {
+                                                    (callback_guard.callback)(
+                                                        callback_guard.ctx_raw as *mut c_void,
+                                                        ffi_event,
+                                                    )
+                                                }),
+                                            )
+                                            .unwrap_or(false);
+                                            drop(callback_guard);
+                                            accepted
+                                        })
+                                        .await
+                                        .unwrap_or_else(|error| {
+                                            log::error!(
+                                                "Bootstrap push callback worker failed: {error}"
+                                            );
+                                            false
+                                        });
                                         if !accepted {
                                             break;
                                         }
@@ -3843,6 +4167,163 @@ pub fn build_secret_store_plugin_vtable<T: SecretStorePluginDescriptor + 'static
 }
 
 #[cfg(test)]
+#[path = "subscription_push_tests.rs"]
+mod subscription_push_tests;
+
+#[cfg(test)]
+mod status_forwarder_tests {
+    use super::*;
+    use drasi_lib::channels::ComponentStatusHandle;
+    use std::{sync::Mutex, time::Duration};
+
+    #[derive(Default)]
+    struct Capture {
+        errors: Mutex<Vec<(String, String, String)>>,
+        changed: tokio::sync::Notify,
+    }
+
+    extern "C" fn capture(context: *mut c_void, event: *const FfiLifecycleEvent) {
+        let capture = unsafe { &*context.cast::<Capture>() };
+        let event = unsafe { &*event };
+        capture.errors.lock().unwrap().push(unsafe {
+            (
+                event.component_id.to_string(),
+                event.component_type.to_string(),
+                event.message.to_string(),
+            )
+        });
+        capture.changed.notify_one();
+    }
+
+    fn unexpected_fallback(_: &str, _: FfiLifecycleEventType, _: &str) {
+        panic!("the instance callback must be selected");
+    }
+
+    async fn saturated_status_channels() {
+        for kind in ["source", "reaction"] {
+            let capture_state = Box::<Capture>::default();
+            let context = FfiRuntimeContext {
+                instance_id: FfiStr::from_str("status-instance"),
+                component_id: FfiStr::from_str("status-component"),
+                state_store: std::ptr::null(),
+                log_callback: None,
+                log_ctx: std::ptr::null_mut(),
+                lifecycle_callback: Some(capture),
+                lifecycle_ctx: std::ptr::from_ref(capture_state.as_ref()).cast_mut().cast(),
+                identity_provider: std::ptr::null(),
+                snapshot_fetcher: std::ptr::null(),
+                wal_provider: std::ptr::null(),
+            };
+            let (sender, receiver) = if kind == "source" {
+                let (context, receiver) = build_source_runtime_context(&context);
+                (context.update_tx, receiver)
+            } else {
+                let (context, receiver) = build_reaction_runtime_context(&context);
+                (context.update_tx, receiver)
+            };
+            let forwarder = StatusForwarder::new(
+                receiver,
+                &context,
+                kind,
+                unexpected_fallback,
+                &tokio::runtime::Handle::current(),
+            );
+            let handle = ComponentStatusHandle::new_wired("status-component", sender.clone());
+            tokio::time::timeout(Duration::from_secs(2), async {
+                for _ in 0..128 {
+                    handle.set_status(ComponentStatus::Running, None).await;
+                }
+                handle
+                    .set_status(ComponentStatus::Error, Some("background failure".into()))
+                    .await;
+                capture_state.changed.notified().await;
+            })
+            .await
+            .expect("status reporting must not block at the 17th update");
+            assert_eq!(
+                *capture_state.errors.lock().unwrap(),
+                vec![(
+                    "status-component".into(),
+                    kind.into(),
+                    "background failure".into()
+                )]
+            );
+            drop(forwarder);
+            drop(capture_state);
+            tokio::time::timeout(Duration::from_secs(2), sender.closed())
+                .await
+                .expect("forwarder releases receiver");
+            assert!(sender
+                .send(drasi_lib::channels::ComponentUpdate::Status {
+                    component_id: "late".into(),
+                    status: ComponentStatus::Error,
+                    message: None,
+                })
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn status_saturation_and_callback_revocation_current_thread() {
+        saturated_status_channels().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_saturation_and_callback_revocation_multi_thread() {
+        saturated_status_channels().await;
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn setup_panic_poisoning_preserves_the_first_failure_and_releases_rejected_resources() {
+        let state = InitializationState::default();
+        let first = state
+            .run(
+                || panic!("runtime setup failed"),
+                |()| panic!("initializer must not run after setup failure"),
+            )
+            .unwrap_err()
+            .to_owned();
+        assert!(first.contains("runtime setup failed"));
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let error = state
+            .run(
+                || resource,
+                |_| panic!("a failed instance cannot be initialized again"),
+            )
+            .unwrap_err();
+        assert_eq!(error, first);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn successful_initialization_preserves_existing_reinitialization_behavior() {
+        let state = InitializationState::default();
+        let calls = AtomicUsize::new(0);
+        for _ in 0..2 {
+            state
+                .run(
+                    || (),
+                    |()| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        FfiResult::ok()
+                    },
+                )
+                .unwrap();
+        }
+        assert!(state.failure().is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(test)]
 mod snapshot_stream_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3910,11 +4391,11 @@ mod snapshot_stream_tests {
     }
 
     #[test]
-    fn decode_resume_sequence_maps_zero_sentinel_to_none() {
-        // 0 is the "absent" sentinel; every non-zero value decodes to Some(n).
-        assert_eq!(decode_resume_sequence(0), None);
-        assert_eq!(decode_resume_sequence(1), Some(1));
-        assert_eq!(decode_resume_sequence(42), Some(42));
-        assert_eq!(decode_resume_sequence(u64::MAX), Some(u64::MAX));
+    fn decode_resume_sequence_preserves_replay_from_zero() {
+        assert_eq!(decode_resume_sequence(0, false), None);
+        assert_eq!(decode_resume_sequence(0, true), Some(0));
+        assert_eq!(decode_resume_sequence(1, true), Some(1));
+        assert_eq!(decode_resume_sequence(42, true), Some(42));
+        assert_eq!(decode_resume_sequence(u64::MAX, true), Some(u64::MAX));
     }
 }

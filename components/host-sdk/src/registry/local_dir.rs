@@ -34,6 +34,8 @@ pub struct LocalPluginInfo {
     pub version: String,
     /// SDK version from embedded metadata (empty if metadata unavailable).
     pub sdk_version: String,
+    pub abi_family: Option<String>,
+    pub abi_version: Option<String>,
     /// Full path to the plugin file.
     pub file_path: PathBuf,
 }
@@ -94,9 +96,15 @@ impl LocalDirRegistry {
             }
 
             // Try to read embedded metadata for version info
-            let (version, sdk_version) = match scan_plugin_metadata(&path) {
-                Some(meta) => (meta.version, meta.sdk_version),
-                None => (String::new(), String::new()),
+            let (version, sdk_version, abi_family, abi_version) = match scan_plugin_metadata(&path)
+            {
+                Some(meta) => (
+                    meta.version,
+                    meta.sdk_version,
+                    meta.abi_family,
+                    meta.abi_version,
+                ),
+                None => (String::new(), String::new(), None, None),
             };
 
             results.push(LocalPluginInfo {
@@ -104,6 +112,8 @@ impl LocalDirRegistry {
                 filename,
                 version,
                 sdk_version,
+                abi_family,
+                abi_version,
                 file_path: path,
             });
         }

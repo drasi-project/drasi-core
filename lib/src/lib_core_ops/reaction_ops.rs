@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
 use crate::config::ReactionRuntime;
-use crate::error::{DrasiError, Result};
+use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::reactions::Reaction;
 
@@ -35,6 +35,10 @@ impl DrasiLib {
     ///
     /// If the server is running and the reaction has `auto_start=true`, the reaction
     /// will be started immediately after being added.
+    ///
+    /// Success confirms node declaration, not initialization
+    /// or activation. Later failures remain visible on the node; use
+    /// `add_reaction_with_handle` to await readiness explicitly.
     ///
     /// # Example
     /// ```no_run
@@ -51,6 +55,40 @@ impl DrasiLib {
             .await
     }
 
+    /// Declare a reaction and return its generation-bound computation handle.
+    ///
+    /// Dependency and constructor validation happen after declaration. Await `wait_created()` or
+    /// `wait_started()` on the handle for initialization or activation outcomes.
+    /// `wait_started()` requires the reaction to report `Running`, not merely to
+    /// return successfully from its start hook.
+    /// Auto-start is requested only when the instance is running.
+    /// Use the handle's `control()` and `set_control_handler()` methods for
+    /// out-of-band notifications without changing the legacy reaction contract.
+    /// Ownership-bearing native rejections retain their `GraphError` through
+    /// `DrasiError::Internal`, including the rejected addition's recovery handle.
+    pub async fn add_reaction_with_handle(
+        &self,
+        reaction: impl Reaction + 'static,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.add_reaction_with_metadata_and_handle(reaction, HashMap::new())
+            .await
+    }
+
+    async fn add_reaction_with_metadata_and_handle(
+        &self,
+        reaction: impl Reaction + 'static,
+        metadata: HashMap<String, String>,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let id = reaction.id().to_owned();
+        self.computation_runtime
+            .add_reaction(Box::new(reaction), metadata, self.is_running().await)
+            .await
+            .map_err(|error| {
+                crate::computation::runtime::map_addition_error("reaction", &id, error)
+            })
+    }
+
     /// Add a reaction to a running server with additional metadata.
     ///
     /// Same as [`add_reaction`](Self::add_reaction) but merges `extra_metadata`
@@ -61,56 +99,9 @@ impl DrasiLib {
         extra_metadata: HashMap<String, String>,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Capture auto_start and id before transferring ownership
-        let should_auto_start = reaction.auto_start();
-        let reaction_id = reaction.id().to_string();
-        let reaction_type = reaction.type_name().to_string();
-        let query_ids = reaction.query_ids();
-
-        // Step 1: Register in the component graph (validates queries exist, creates node + edges)
-        {
-            let mut graph = self.component_graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), reaction_type);
-            metadata.insert("autoStart".to_string(), should_auto_start.to_string());
-            metadata.extend(extra_metadata);
-            graph
-                .register_reaction(&reaction_id, metadata, &query_ids)
-                .map_err(|e| {
-                    DrasiError::operation_failed(
-                        "reaction",
-                        &reaction_id,
-                        "add",
-                        format!("Failed to register: {e}"),
-                    )
-                })?;
-        }
-
-        // Step 2: Provision runtime (initialize + store)
-        if let Err(e) = self.reaction_manager.provision_reaction(reaction).await {
-            // Compensating rollback: remove from graph on runtime failure
-            let mut graph = self.component_graph.write().await;
-            let _ = graph.deregister(&reaction_id);
-            return Err(DrasiError::operation_failed(
-                "reaction",
-                &reaction_id,
-                "add",
-                format!("Failed to provision: {e}"),
-            ));
-        }
-
-        // Step 3: Auto-start if needed
-        if self.is_running().await && should_auto_start {
-            self.reaction_manager
-                .start_reaction(reaction_id.clone())
-                .await
-                .map_err(|e| {
-                    DrasiError::operation_failed("reaction", &reaction_id, "start", format!("{e}"))
-                })?;
-        }
-
-        Ok(())
+        self.add_reaction_with_metadata_and_handle(reaction, extra_metadata)
+            .await
+            .map(|_| ())
     }
 
     /// Remove a reaction from a running server
@@ -127,53 +118,14 @@ impl DrasiLib {
     /// ```
     pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Step 1: Validate no dependents
-        {
-            let graph = self.component_graph.read().await;
-            if let Err(dependent_ids) = graph.can_remove(id) {
-                return Err(DrasiError::operation_failed(
-                    "reaction",
-                    id,
-                    "remove",
-                    format!("Depended on by: {}", dependent_ids.join(", ")),
-                ));
-            }
-        }
-
-        // Step 2: Teardown runtime (stop, deprovision, remove from runtime map)
-        self.reaction_manager
-            .teardown_reaction(id.to_string(), cleanup)
-            .await
-            .map_err(|e| {
-                DrasiError::operation_failed(
-                    "reaction",
-                    id,
-                    "remove",
-                    format!("Teardown failed: {e}"),
-                )
-            })?;
-
-        // Step 3: Deregister from graph (remove node + edges, emit events)
-        // If this fails after teardown, the runtime is already gone. Rather than
-        // returning an error (which would leave an orphaned graph node with no
-        // runtime backing), set the component to Error state and log the failure.
-        {
-            let mut graph = self.component_graph.write().await;
-            if let Err(e) = graph.deregister(id) {
-                log::error!(
-                    "Reaction '{id}' runtime was torn down but graph deregister failed: {e}. \
-                     Setting component to Error state."
-                );
-                let _ = graph.validate_and_transition(
-                    id,
-                    ComponentStatus::Error,
-                    Some(format!("Orphaned: deregister failed after teardown: {e}")),
-                );
-            }
-        }
-
-        Ok(())
+        map_component_error(
+            self.computation_runtime
+                .remove_component(id, "reaction", cleanup)
+                .await,
+            "reaction",
+            id,
+            "remove",
+        )
     }
 
     /// Update a reaction by replacing it with a new instance.
@@ -204,27 +156,14 @@ impl DrasiLib {
         new_reaction: impl crate::reactions::Reaction + 'static,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Validate the new reaction has the same ID
-        if new_reaction.id() != id {
-            return Err(DrasiError::operation_failed(
-                "reaction",
-                id,
-                "update",
-                format!(
-                    "New reaction ID '{}' does not match existing reaction ID '{}'",
-                    new_reaction.id(),
-                    id
-                ),
-            ));
-        }
-
-        // Delegate to ReactionManager which uses the Reconfiguring transition,
-        // preserving the graph node, edges, and event history.
-        self.reaction_manager
-            .update_reaction(id.to_string(), new_reaction)
-            .await
-            .map_err(|e| DrasiError::operation_failed("reaction", id, "update", e.to_string()))
+        map_component_error(
+            self.computation_runtime
+                .update_reaction(id, Box::new(new_reaction))
+                .await,
+            "reaction",
+            id,
+            "update",
+        )
     }
 
     /// Start a stopped reaction
@@ -242,10 +181,10 @@ impl DrasiLib {
     /// ```
     pub async fn start_reaction(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Start the reaction (QueryProvider was injected when reaction was added)
         map_component_error(
-            self.reaction_manager.start_reaction(id.to_string()).await,
+            self.computation_runtime
+                .start_component(id, "reaction")
+                .await,
             "reaction",
             id,
             "start",
@@ -264,16 +203,14 @@ impl DrasiLib {
     /// ```
     pub async fn stop_reaction(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Stop the reaction (subscriptions managed by reaction itself)
         map_component_error(
-            self.reaction_manager.stop_reaction(id.to_string()).await,
+            self.computation_runtime
+                .stop_component(id, "reaction")
+                .await,
             "reaction",
             id,
             "stop",
-        )?;
-
-        Ok(())
+        )
     }
 
     /// List all reactions with their current status
@@ -416,8 +353,8 @@ impl DrasiLib {
         &self,
         id: &str,
     ) -> Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.inspection.subscribe_reaction_logs(id).await
     }
@@ -598,10 +535,26 @@ mod tests {
         let result = core.add_reaction(r2).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
-            "expected OperationFailed, got: {err:?}"
-        );
+        {
+            use crate::computation::v1::GraphError;
+
+            let DrasiError::Internal(error) = err else {
+                panic!("native rejection must retain its ownership-bearing cause: {err:?}");
+            };
+            let GraphError::AdditionRejected { cause, addition } = error
+                .downcast_ref::<GraphError>()
+                .expect("native graph error")
+            else {
+                panic!("expected a rejected addition: {error:?}");
+            };
+            assert!(
+                matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component r-dup"),
+                "unexpected rejection cause: {cause:?}"
+            );
+            let rejected = addition.take().await.expect("retained rejected reaction");
+            assert_eq!(rejected.definition.descriptor.id().as_str(), "r-dup");
+        }
     }
 
     // ========================================================================

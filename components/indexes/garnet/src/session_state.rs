@@ -91,6 +91,20 @@ pub struct WriteBuffer {
 }
 
 impl WriteBuffer {
+    pub(crate) fn hash_keys_with_field(&self, prefix: &str, field: &str) -> Vec<String> {
+        self.keys
+            .iter()
+            .filter_map(|(key, state)| match state {
+                KeyState::Hash { fields }
+                    if key.starts_with(prefix) && fields.contains_key(field) =>
+                {
+                    Some(key.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn new() -> Self {
         Self {
             keys: HashMap::new(),

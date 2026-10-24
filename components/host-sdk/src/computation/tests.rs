@@ -1,0 +1,906 @@
+// Copyright 2026 The Drasi Authors.
+// Licensed under the Apache License, Version 2.0.
+
+//! These tests call the exported C entry/vtables, not a Rust factory shortcut.
+//! Separately built cdylib conformance is exercised by the native plugin fixture.
+
+use super::*;
+use async_trait::async_trait;
+use drasi_computation_plugin_abi as abi;
+use drasi_computation_plugin_sdk as sdk;
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+};
+use drasi_lib::computation::v1::*;
+use serde_json::{json, Value};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+#[path = "../../tests/fixtures/native_bootstrap.rs"]
+mod bootstrap_fixture;
+#[path = "bootstrap_tests.rs"]
+mod bootstrap_tests;
+#[path = "configuration_tests.rs"]
+mod configuration_tests;
+#[path = "source_schema_tests.rs"]
+mod source_schema_tests;
+#[path = "../../tests/fixtures/native_consumer.rs"]
+mod consumer_fixture;
+#[path = "../../tests/fixtures/native_consumer_progress.rs"]
+pub(super) mod consumer_progress_fixture;
+#[path = "consumer_progress_tests.rs"]
+mod consumer_progress_tests;
+#[path = "consumer_tests.rs"]
+pub(super) mod consumer_tests;
+
+fn port(direction: PortDirection) -> PortDescriptor {
+    PortDescriptor::new(
+        PortId::try_new(if direction == PortDirection::Input {
+            "in"
+        } else {
+            "out"
+        })
+        .unwrap(),
+        direction,
+        GraphChangeCodec::schema().descriptor().clone(),
+        PipeRequirements::default(),
+    )
+}
+fn envelope(component: &ComponentId, sequence: u64) -> ChangeEnvelope {
+    let mut envelope = GraphChangeCodec::encode_change(
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("source", &sequence.to_string()),
+                    labels: Arc::from([Arc::from("Item")]),
+                    effective_from: sequence,
+                },
+                properties: ElementPropertyMap::from(json!({"value": sequence})),
+            },
+        },
+        StreamId::try_new(format!("{component}/out")).unwrap(),
+        sequence,
+        None,
+    )
+    .unwrap();
+    envelope
+        .append_annotation(
+            ContextEntry::try_new(
+                component.clone(),
+                "test.context",
+                ContextValue::Bytes(Arc::from([0u8, 255u8])),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    envelope
+}
+
+struct TestFactory {
+    role: ComponentRole,
+    name: &'static str,
+    controlled: bool,
+    transactional: bool,
+}
+impl sdk::Factory for TestFactory {
+    fn metadata(&self) -> FactoryMetadata {
+        let ports = match self.role {
+            ComponentRole::Source => vec![port(PortDirection::Output)],
+            ComponentRole::Transformer => {
+                vec![port(PortDirection::Input), port(PortDirection::Output)]
+            }
+            ComponentRole::Sink => vec![port(PortDirection::Input)],
+            ComponentRole::Service => vec![],
+            ComponentRole::Query => unreachable!(),
+        };
+        FactoryMetadata {
+            implementation: ImplementationIdentity::try_new(self.name, "1").unwrap(),
+            role: self.role,
+            configuration_version: 1,
+            configuration: ConfigSchema {
+                fields: BTreeMap::from([(
+                    "count".into(),
+                    ConfigField {
+                        value_type: ConfigType::Integer,
+                        required: false,
+                        secret: false,
+                    },
+                )]),
+                allow_additional: true,
+            },
+            ports,
+            completion: (self.role == ComponentRole::Sink).then_some(SinkCompletion::Handled),
+            capabilities: Capabilities {
+                control: self.controlled,
+                transactional: self.transactional,
+                ..Capabilities::default()
+            },
+        }
+    }
+    fn create(
+        &self,
+        request: &sdk::CreateRequest,
+        _: sdk::ControlSender,
+    ) -> anyhow::Result<sdk::CreatedComponent> {
+        anyhow::ensure!(
+            request.configuration["fail_create"] != true,
+            "requested constructor failure"
+        );
+        let notification = Arc::new(tokio::sync::Notify::new());
+        let mut ports = sdk::Factory::metadata(self).ports;
+        if request.configuration["wrong_descriptor"] == true {
+            ports.clear();
+        }
+        let component = Box::new(TestComponent {
+            descriptor: ComponentDescriptor::try_new(request.id.clone(), ports)?,
+            configuration: request.configuration.clone(),
+            seen: 0,
+            notification: notification.clone(),
+            controlled: self.controlled,
+        });
+        Ok(sdk::CreatedComponent {
+            component: match self.role {
+                ComponentRole::Source => sdk::Component::Source(component),
+                ComponentRole::Transformer if self.transactional => {
+                    sdk::Component::Transactional(component)
+                }
+                ComponentRole::Transformer => sdk::Component::Transformer(component),
+                ComponentRole::Sink => sdk::Component::Sink(component),
+                ComponentRole::Service => sdk::Component::Service(component),
+                _ => unreachable!(),
+            },
+            control_handler: self.controlled.then(|| {
+                Arc::new(ReleaseHandler(notification)) as Arc<dyn sdk::NativeControlHandler>
+            }),
+        })
+    }
+}
+struct TestComponent {
+    descriptor: ComponentDescriptor,
+    configuration: Value,
+    seen: u64,
+    notification: Arc<tokio::sync::Notify>,
+    controlled: bool,
+}
+#[async_trait]
+impl sdk::NativeComponent for TestComponent {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn configuration(&self) -> anyhow::Result<Value> {
+        if self.configuration["panic_configuration"] == true && self.seen > 0 {
+            panic!("requested configuration panic");
+        }
+        let mut configuration = self.configuration.clone();
+        configuration["seen"] = json!(self.seen);
+        Ok(configuration)
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        if self.configuration["panic_start"] == true {
+            panic!("requested start panic");
+        }
+        anyhow::ensure!(
+            self.configuration["fail_start"] != true,
+            "requested start failure"
+        );
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+#[async_trait]
+impl sdk::NativeSource for TestComponent {
+    async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        if self.configuration["panic_next"] == true {
+            self.seen += 1;
+            panic!("requested processing panic");
+        }
+        if self.configuration["blocked"] == true {
+            std::future::pending::<()>().await;
+        }
+        if self.seen >= self.configuration["count"].as_u64().unwrap_or(2) {
+            return Ok(None);
+        }
+        if self.controlled && self.seen > 0 {
+            self.notification.notified().await;
+        }
+        // Timer creation occurs while the native poll enters the plugin runtime.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        self.seen += 1;
+        Ok(Some(OutputEnvelope {
+            port: PortId::try_new("out")?,
+            envelope: envelope(self.descriptor.id(), self.seen),
+        }))
+    }
+}
+#[async_trait]
+impl sdk::NativeTransformer for TestComponent {
+    async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+        anyhow::ensure!(
+            self.configuration["fail_transform"] != true,
+            "requested transform failure"
+        );
+        self.seen += 1;
+        let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let output = GraphChangeCodec::derive_changes(
+            &input.envelope,
+            &changes,
+            StreamId::try_new(format!("{}/out", self.descriptor.id()))?,
+            self.seen,
+        )?;
+        Ok(vec![OutputEnvelope {
+            port: PortId::try_new("out")?,
+            envelope: output,
+        }])
+    }
+}
+#[async_trait]
+impl sdk::NativeSink for TestComponent {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        self.seen += GraphChangeCodec::decode_changes(&input.envelope)?.len() as u64;
+        Ok(())
+    }
+}
+#[async_trait]
+impl sdk::NativeService for TestComponent {
+    async fn run(&mut self) -> anyhow::Result<()> {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        self.seen += 1;
+        Ok(())
+    }
+}
+#[async_trait]
+impl sdk::TransactionalComponent for TestComponent {
+    fn transaction_input_schema(&self) -> Arc<Schema> {
+        GraphChangeCodec::schema()
+    }
+    fn transaction_output_schema(&self) -> Arc<Schema> {
+        GraphChangeCodec::schema()
+    }
+    async fn transform_in_transaction(
+        &self,
+        input: ChangeEnvelope,
+        context: &sdk::NativeTransactionContext<'_>,
+    ) -> anyhow::Result<ChangeEnvelope> {
+        use drasi_core::models::ElementValue;
+        context.put("seen", ElementValue::Integer(1)).await?;
+        anyhow::ensure!(
+            context.get("seen").await? == Some(ElementValue::Integer(1)),
+            "missing staged state"
+        );
+        context.derive(&input, input.changes().clone()).await
+    }
+}
+struct ReleaseHandler(Arc<tokio::sync::Notify>);
+#[async_trait]
+impl sdk::NativeControlHandler for ReleaseHandler {
+    async fn on_message(
+        &self,
+        message: sdk::ControlMessage,
+        _: sdk::ControlSender,
+    ) -> anyhow::Result<()> {
+        if matches!(message.notification, sdk::ControlNotification::Custom { ref kind, .. } if kind == "panic")
+        {
+            panic!("requested control panic");
+        }
+        self.0.notify_one();
+        Ok(())
+    }
+}
+fn definition() -> anyhow::Result<sdk::PluginDefinition> {
+    sdk::PluginDefinition::new(
+        "native-boundary-test",
+        "1",
+        vec![
+            Arc::new(TestFactory {
+                role: ComponentRole::Source,
+                name: "test/source",
+                controlled: false,
+                transactional: false,
+            }),
+            Arc::new(TestFactory {
+                role: ComponentRole::Transformer,
+                name: "test/transformer",
+                controlled: false,
+                transactional: false,
+            }),
+            Arc::new(TestFactory {
+                role: ComponentRole::Sink,
+                name: "test/sink",
+                controlled: false,
+                transactional: false,
+            }),
+            Arc::new(TestFactory {
+                role: ComponentRole::Service,
+                name: "test/service",
+                controlled: false,
+                transactional: false,
+            }),
+            Arc::new(TestFactory {
+                role: ComponentRole::Source,
+                name: "test/controlled",
+                controlled: true,
+                transactional: false,
+            }),
+            Arc::new(TestFactory {
+                role: ComponentRole::Transformer,
+                name: "test/transaction",
+                controlled: false,
+                transactional: true,
+            }),
+            Arc::new(consumer_fixture::Factory(sdk::ConsumerMode::External)),
+            Arc::new(consumer_fixture::Factory(sdk::ConsumerMode::Transactional)),
+        ],
+        vec![GraphChangeCodec::schema()],
+    )?
+    .with_bootstrap_factories(vec![
+        Arc::new(bootstrap_fixture::Factory { progress: false }),
+        Arc::new(bootstrap_fixture::Factory { progress: true }),
+    ])
+}
+sdk::export_computation_plugin!(definition());
+fn plugin() -> Arc<NativePlugin> {
+    unsafe {
+        NativePlugin::from_entry_points(
+            drasi_computation_plugin_metadata,
+            drasi_computation_plugin_entry,
+        )
+    }
+    .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn statically_linked_components_retain_their_definition_after_registration(
+) -> anyhow::Result<()> {
+    let plugin = NativePlugin::from_definition(definition()?)?;
+    assert_eq!(plugin.factories().len(), 8);
+    assert_eq!(plugin.bootstrap_factories().len(), 2);
+    let factory = plugin.factories()[0].clone();
+    drop(plugin);
+    let mut source =
+        factory.create_component(ComponentId::try_new("linked")?, json!({"count": 2}))?;
+    drop(factory);
+    source.start().await?;
+    for sequence in [1, 2] {
+        let output = source.next().await?.expect("configured source output");
+        assert_eq!(output.envelope.system().sequence(), sequence);
+    }
+    assert!(source.next().await?.is_none());
+    source.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn statically_linked_bootstrap_uses_the_existing_native_factory_contract(
+) -> anyhow::Result<()> {
+    use tokio_stream::StreamExt;
+
+    let plugin = NativePlugin::from_definition(definition()?)?;
+    let bootstrap = plugin.bootstrap_factories()[0].create_provider(
+        ComponentId::try_new("linked-bootstrap")?,
+        json!({"mode": "no-snapshot", "count": 2}),
+        None,
+        None,
+    )?;
+    drop(plugin);
+    bootstrap.prepare().await?;
+    let mut snapshot = bootstrap.snapshot().await?;
+    let mut count = 0;
+    while let Some(envelope) = snapshot.changes.next().await {
+        assert_eq!(envelope?.changes().operations().len(), 1);
+        count += 1;
+    }
+    assert_eq!(count, 2);
+    bootstrap.stop().await?;
+    Ok(())
+}
+
+fn panic_code(error: &anyhow::Error) -> u32 {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<sdk::transport::Failure>())
+        .expect("native failure retained in the cause chain")
+        .code
+}
+
+#[tokio::test]
+async fn native_start_data_and_configuration_panics_require_a_new_instance() {
+    let plugin = plugin();
+    for mode in ["panic_start", "panic_next", "panic_configuration"] {
+        let mut source = plugin.factories()[0]
+            .create_component(
+                ComponentId::try_new("quarantined").unwrap(),
+                json!({(mode): true}),
+            )
+            .unwrap();
+        let error = if mode == "panic_start" {
+            source.start().await.unwrap_err()
+        } else {
+            source.start().await.unwrap();
+            if mode == "panic_next" {
+                source.next().await.unwrap_err()
+            } else {
+                assert!(source.next().await.unwrap().is_some());
+                source.configuration().unwrap_err()
+            }
+        };
+        assert_eq!(
+            panic_code(&error),
+            abi::status::PANICKED,
+            "{mode}: {error:#}"
+        );
+        for _ in 0..2 {
+            source.stop().await.unwrap();
+            assert_eq!(
+                panic_code(&source.start().await.unwrap_err()),
+                abi::status::PANICKED
+            );
+            assert_eq!(
+                panic_code(&source.next().await.unwrap_err()),
+                abi::status::PANICKED
+            );
+            assert_eq!(
+                panic_code(&source.configuration().unwrap_err()),
+                abi::status::PANICKED
+            );
+        }
+        let mut replacement = plugin.factories()[0]
+            .create_component(ComponentId::try_new("quarantined").unwrap(), json!({}))
+            .unwrap();
+        replacement.start().await.unwrap();
+        assert!(replacement.next().await.unwrap().is_some());
+        replacement.stop().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_control_panic_wakes_pending_data_and_cannot_be_cleared_by_stop() {
+    let plugin = plugin();
+    let mut source = plugin.factories()[4]
+        .create_component(
+            ComponentId::try_new("controlled-panic").unwrap(),
+            json!({"count":3}),
+        )
+        .unwrap();
+    source.start().await.unwrap();
+    source.next().await.unwrap().unwrap();
+    let inner = source.inner.clone();
+    let mut pending = Box::pin(source.next());
+    std::future::poll_fn(|cx| {
+        use std::future::Future;
+        assert!(pending.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let request = sdk::wire::encode(&sdk::ControlMessage {
+        from: ComponentId::try_new("observer").unwrap(),
+        generation: 1,
+        direction: sdk::ControlDirection::Upstream,
+        notification: sdk::ControlNotification::Custom {
+            kind: "panic".into(),
+            payload: Value::Null,
+        },
+    })
+    .unwrap();
+    let error = inner
+        .unit(abi::operation::CONTROL, &request)
+        .await
+        .unwrap_err();
+    assert_eq!(panic_code(&error), abi::status::PANICKED);
+    let error = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(panic_code(&error), abi::status::PANICKED);
+    source.stop().await.unwrap();
+    assert_eq!(
+        panic_code(&source.start().await.unwrap_err()),
+        abi::status::PANICKED
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycle() {
+    let plugin = plugin();
+    assert_eq!(plugin.metadata().abi_version, abi::ABI_VERSION);
+    assert_eq!(plugin.transactional_factories().len(), 1);
+    let mut source = plugin.factories()[0]
+        .create_component(ComponentId::try_new("s").unwrap(), json!({"count":2}))
+        .unwrap();
+    let mut transformer = plugin.factories()[1]
+        .create_component(ComponentId::try_new("t").unwrap(), json!({}))
+        .unwrap();
+    let mut sink = plugin.factories()[2]
+        .create_component(ComponentId::try_new("k").unwrap(), json!({}))
+        .unwrap();
+    assert_eq!(source.configuration().unwrap()["seen"], 0);
+    assert!(
+        source.next().await.is_err(),
+        "data before successful start is not accepted"
+    );
+    source.start().await.unwrap();
+    transformer.start().await.unwrap();
+    sink.start().await.unwrap();
+    for sequence in 1..=2 {
+        let original = source.next().await.unwrap().unwrap();
+        let outputs = transformer
+            .transform(InputEnvelope {
+                port: PortId::try_new("in").unwrap(),
+                envelope: original.envelope.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(outputs[0].envelope.system().sequence(), sequence);
+        assert_eq!(
+            outputs[0].envelope.lineage().unwrap().envelope_id(),
+            original.envelope.id()
+        );
+        assert_eq!(outputs[0].envelope.annotations().entries().count(), 1);
+        sink.handle(InputEnvelope {
+            port: PortId::try_new("in").unwrap(),
+            envelope: outputs[0].envelope.clone(),
+        })
+        .await
+        .unwrap();
+        transformer.delivery_completed(&outputs).await.unwrap();
+    }
+    assert!(source.next().await.unwrap().is_none());
+    assert_eq!(source.configuration().unwrap()["seen"], 2);
+    assert_eq!(sink.configuration().unwrap()["seen"], 2);
+    source.stop().await.unwrap();
+    transformer.stop().await.unwrap();
+    sink.stop().await.unwrap();
+    let mut service = plugin.factories()[3]
+        .create_component(ComponentId::try_new("service").unwrap(), json!({}))
+        .unwrap();
+    service.start().await.unwrap();
+    service.run().await.unwrap();
+    service.quiesce().await.unwrap();
+    assert_eq!(service.configuration().unwrap()["seen"], 1);
+    service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_failures_cancellation_and_schema_validation_are_not_success() {
+    let plugin = plugin();
+    let source = &plugin.factories()[0];
+    for config in [
+        json!({"count":"bad"}),
+        json!({"fail_create":true}),
+        json!({"wrong_descriptor":true}),
+    ] {
+        assert!(source
+            .create_component(ComponentId::try_new("invalid").unwrap(), config)
+            .is_err());
+    }
+    let mut failing = source
+        .create_component(
+            ComponentId::try_new("failed").unwrap(),
+            json!({"fail_start":true}),
+        )
+        .unwrap();
+    assert!(failing.start().await.is_err());
+    assert!(failing.next().await.is_err());
+    let mut blocked = source
+        .create_component(
+            ComponentId::try_new("blocked").unwrap(),
+            json!({"blocked":true}),
+        )
+        .unwrap();
+    blocked.start().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), blocked.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(blocked.configuration().unwrap()["seen"], 0);
+    blocked.stop().await.unwrap();
+    let original = envelope(&ComponentId::try_new("input").unwrap(), 1);
+    let bytes = blocked.codec.encode(&original).unwrap();
+    assert_eq!(blocked.codec.decode(&bytes).unwrap().id(), original.id());
+    let ChangeOperation::Added { after, .. } = &original.changes().operations()[0] else {
+        unreachable!()
+    };
+    let payload = after.payload();
+    let position = bytes
+        .windows(payload.len())
+        .position(|window| window == payload.as_ref())
+        .unwrap();
+    let mut bad = bytes.clone();
+    bad[position..position + payload.len()].fill(255);
+    assert!(
+        blocked.codec.decode(&bad).is_err(),
+        "remote producer validator rejects malformed typed record bytes"
+    );
+    let definition = original.changes().schema().definition();
+    let position = bytes
+        .windows(definition.len())
+        .position(|window| window == definition.as_ref())
+        .unwrap();
+    let mut bad = bytes.clone();
+    bad[position..position + definition.len()].fill(255);
+    assert!(blocked.codec.decode(&bad).is_err());
+    let field = b"\xa6format";
+    let position = bytes
+        .windows(field.len())
+        .position(|window| window == field)
+        .unwrap();
+    let mut bad = bytes.clone();
+    bad[position + field.len()] = 123;
+    assert!(blocked.codec.decode(&bad).is_err());
+    let mut transformer = plugin.factories()[1]
+        .create_component(
+            ComponentId::try_new("t").unwrap(),
+            json!({"fail_transform":true}),
+        )
+        .unwrap();
+    transformer.start().await.unwrap();
+    assert!(transformer
+        .transform(InputEnvelope {
+            port: PortId::try_new("in").unwrap(),
+            envelope: original
+        })
+        .await
+        .is_err());
+    transformer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deferred_native_operation_owns_input_after_the_begin_call_returns() {
+    let plugin = plugin();
+    let mut sink = plugin.factories()[2]
+        .create_component(ComponentId::try_new("owned-input").unwrap(), json!({}))
+        .unwrap();
+    sink.start().await.unwrap();
+    let input = InputEnvelope {
+        port: PortId::try_new("in").unwrap(),
+        envelope: envelope(&ComponentId::try_new("input").unwrap(), 1),
+    };
+    let mut bytes =
+        sdk::wire::encode(&sdk::wire::Envelope::input(&input, &sink.codec).unwrap()).unwrap();
+    let operation = sink
+        .inner
+        .begin(abi::operation::HANDLE, &bytes, None)
+        .unwrap();
+    bytes.fill(255);
+    drop(bytes);
+    assert!(operation.await.unwrap().is_empty());
+    assert_eq!(sink.configuration().unwrap()["seen"], 1);
+    sink.stop().await.unwrap();
+}
+
+struct NotifyingSink {
+    descriptor: ComponentDescriptor,
+    control: Option<ComponentControl>,
+    seen: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl ComputationComponent for NotifyingSink {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn bind_control(&mut self, control: ComponentControl) {
+        self.control = Some(control);
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+#[async_trait]
+impl EnvelopeSink for NotifyingSink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, _: InputEnvelope) -> anyhow::Result<()> {
+        self.seen.fetch_add(1, Ordering::SeqCst);
+        self.control
+            .as_ref()
+            .unwrap()
+            .notify_upstream(ControlNotification::Available)?;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_graph_factories_and_control_progress_while_native_data_is_pending() {
+    let plugin = plugin();
+    let source = plugin.factories()[4].clone();
+    let spec = source
+        .specification(ComponentId::try_new("native").unwrap(), json!({"count":3}))
+        .unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let sink = NotifyingSink {
+        descriptor: ComponentDescriptor::try_new(
+            ComponentId::try_new("sink").unwrap(),
+            vec![port(PortDirection::Input)],
+        )
+        .unwrap(),
+        control: None,
+        seen: seen.clone(),
+    };
+    let mut registry = FactoryRegistry::default();
+    plugin.register_factories(&mut registry).unwrap();
+    assert!(plugin.register_factories(&mut registry).is_err());
+    let mut graph = ComputationGraph::builder("native-control-test")
+        .component(spec, source)
+        .sink(Box::new(sink))
+        .connect(
+            EdgeDefinition {
+                from: Endpoint::new(
+                    ComponentId::try_new("native").unwrap(),
+                    PortId::try_new("out").unwrap(),
+                ),
+                to: Endpoint::new(
+                    ComponentId::try_new("sink").unwrap(),
+                    PortId::try_new("in").unwrap(),
+                ),
+            },
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .bind_stream(
+            Endpoint::new(
+                ComponentId::try_new("native").unwrap(),
+                PortId::try_new("out").unwrap(),
+            ),
+            StreamId::try_new("native/out").unwrap(),
+        )
+        .build()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), graph.start().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn strict_metadata_roles_versions_schema_and_required_fields() {
+    let plugin = plugin();
+    let mut metadata = plugin.metadata().clone();
+    metadata.factories[0].role = ComponentRole::Query;
+    assert!(metadata.validate().is_err());
+    let mut metadata = plugin.metadata().clone();
+    metadata.factories[0].capabilities.transactional = true;
+    assert!(metadata.validate().is_err());
+    let mut metadata = plugin.metadata().clone();
+    metadata.factories[0].configuration_version = 0;
+    assert!(metadata.validate().is_err());
+    let mut metadata = plugin.metadata().clone();
+    metadata.schemas.clear();
+    assert!(metadata.validate().is_err());
+    let mut json = serde_json::to_value(plugin.metadata()).unwrap();
+    json.as_object_mut().unwrap().remove("factories");
+    assert!(serde_json::from_value::<PluginMetadata>(json).is_err());
+    let mut json = serde_json::to_value(plugin.metadata()).unwrap();
+    json["factories"][0]["capabilities"]["query_snapshot_outbox"] = json!(true);
+    assert!(serde_json::from_value::<PluginMetadata>(json).is_err());
+    let mut spec = plugin.factories()[0]
+        .specification(ComponentId::try_new("s").unwrap(), json!({}))
+        .unwrap();
+    spec.configuration_version += 1;
+    assert!(ComponentFactory::validate(plugin.factories()[0].as_ref(), &spec).is_err());
+    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
+}
+
+#[test]
+fn transaction_factory_opt_in_and_linear_schema_contract_are_enforced() {
+    let plugin = plugin();
+    let factory = plugin.transactional_factories().pop().unwrap();
+    let mut registry = TransactionalTransformerRegistry::default();
+    registry.register(factory.clone()).unwrap();
+    let mut definition = TransactionTransformerDefinition {
+        graph_id: "native-transaction-contract".into(),
+        id: ComponentId::try_new("container").unwrap(),
+        output_stream: StreamId::try_new("container/out").unwrap(),
+        steps: ["first", "second"]
+            .into_iter()
+            .map(|id| TransactionStepDefinition {
+                id: ComponentId::try_new(id).unwrap(),
+                implementation: factory.implementation(),
+                configuration_version: 1,
+                configuration: json!({}),
+            })
+            .collect(),
+        outbox_capacity: NonZeroUsize::new(2).unwrap(),
+    };
+    let descriptor = definition.descriptor(&registry).unwrap();
+    assert_eq!(descriptor.ports().len(), 2);
+    assert_eq!(
+        descriptor.ports()[0].schema(),
+        GraphChangeCodec::schema().descriptor()
+    );
+    let participant = factory.create(&definition.steps[0]).unwrap();
+    assert_eq!(participant.configuration().unwrap()["seen"], 0);
+    assert!(participant.wakeup_source().is_none());
+    assert!(!participant.has_pending_emissions());
+    definition.steps[0].configuration_version = 2;
+    assert!(definition.descriptor(&registry).is_err());
+    assert!(
+        TransactionalTransformerFactory::create(
+            plugin.factories()[1].as_ref(),
+            &definition.steps[1]
+        )
+        .is_err(),
+        "an ordinary transformer cannot opt in by merely claiming a capability"
+    );
+}
+
+#[test]
+fn rejects_missing_or_incompatible_native_metadata_before_entry() {
+    unsafe extern "C" fn no_metadata() -> *const abi::Metadata {
+        std::ptr::null()
+    }
+    unsafe extern "C" fn must_not_enter(_: *mut abi::PluginHandle) -> abi::Status {
+        // Returning an error lets this test fail, without unwinding through C.
+        sdk::transport::status_result(Err(sdk::transport::Failure::failed(
+            "entry must not execute",
+        )))
+    }
+    assert!(
+        unsafe { NativePlugin::from_entry_points(no_metadata, must_not_enter) }
+            .unwrap_err_string()
+            .contains("null")
+    );
+    #[repr(transparent)]
+    struct SharedMetadata(abi::Metadata);
+    unsafe impl Sync for SharedMetadata {}
+    static BAD: SharedMetadata = SharedMetadata(abi::Metadata {
+        header: abi::Header {
+            major: 0,
+            ..abi::Header::new::<abi::Metadata>()
+        },
+        target: abi::BorrowedBytes::empty(),
+        manifest: abi::BorrowedBytes::empty(),
+    });
+    unsafe extern "C" fn bad_metadata() -> *const abi::Metadata {
+        &BAD.0
+    }
+    let error = unsafe { NativePlugin::from_entry_points(bad_metadata, must_not_enter) }
+        .unwrap_err_string();
+    assert!(error.contains("incompatible native computation ABI header"));
+
+    const OLD_MANIFEST: &[u8] = br#"{"abi_version":"1.0.0","wire_version":1,"plugin":{"id":"old-native","version":"1"},"factories":[],"schemas":[]}"#;
+    static OLD_WIRE: SharedMetadata = SharedMetadata(abi::Metadata {
+        header: abi::Header::new::<abi::Metadata>(),
+        target: abi::BorrowedBytes {
+            data: sdk::metadata::TARGET.as_ptr(),
+            len: sdk::metadata::TARGET.len(),
+        },
+        manifest: abi::BorrowedBytes {
+            data: OLD_MANIFEST.as_ptr(),
+            len: OLD_MANIFEST.len(),
+        },
+    });
+    unsafe extern "C" fn old_wire_metadata() -> *const abi::Metadata {
+        &OLD_WIRE.0
+    }
+    let error = unsafe { NativePlugin::from_entry_points(old_wire_metadata, must_not_enter) }
+        .unwrap_err_string();
+    assert!(error.contains("unsupported native plugin ABI or wire format"));
+}
+
+trait ErrorString {
+    fn unwrap_err_string(self) -> String;
+}
+impl<T> ErrorString for anyhow::Result<T> {
+    fn unwrap_err_string(self) -> String {
+        match self {
+            Ok(_) => panic!("expected failure"),
+            Err(error) => error.to_string(),
+        }
+    }
+}

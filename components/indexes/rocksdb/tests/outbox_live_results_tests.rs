@@ -22,11 +22,12 @@
 use std::sync::Arc;
 
 use drasi_core::interface::{
-    LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SessionGuard,
+    IndexBackendPlugin, IndexError, LiveResultsWriter, OutboxPageLimits, OutboxWriter, RowMutation,
+    SessionControl, SessionGuard,
 };
 use drasi_index_rocksdb::{
-    open_unified_db, RocksDbLiveResultsWriter, RocksDbMemoryBudget, RocksDbOutboxWriter,
-    RocksDbSessionControl, RocksDbSessionState, RocksIndexOptions,
+    open_unified_db, RocksDbIndexProvider, RocksDbLiveResultsWriter, RocksDbMemoryBudget,
+    RocksDbOutboxWriter, RocksDbSessionControl, RocksDbSessionState, RocksIndexOptions,
 };
 use tempfile::TempDir;
 
@@ -47,6 +48,70 @@ fn live_writer(db: Arc<drasi_index_rocksdb::IndexDb>) -> RocksDbLiveResultsWrite
 }
 
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn outbox_pages_bound_stored_bytes_and_keep_namespace_boundaries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let writer = outbox_writer(db);
+    let limits = OutboxPageLimits {
+        max_records: std::num::NonZeroUsize::new(2).unwrap(),
+        max_bytes: std::num::NonZeroUsize::new(4).unwrap(),
+    };
+    for (position, value) in [
+        (1, &b"ab"[..]),
+        (2, b"cd"),
+        (3, b"oversized"),
+        (4, b""),
+        (u64::MAX, b"z"),
+    ] {
+        writer.append("q1", position, value).await.unwrap();
+    }
+    writer.append("q10", 1, b"another namespace").await.unwrap();
+    for (after, expected) in [
+        (0, vec![1, 2]),
+        (2, vec![3]),
+        (3, vec![4, u64::MAX]),
+        (u64::MAX, vec![]),
+    ] {
+        let page = writer.read_page("q1", after, limits).await.unwrap();
+        limits.validate_page(&page).unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|(position, _)| *position)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn outbox_paging_rejects_malformed_keys_even_at_resume_boundaries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let writer = outbox_writer(db.clone());
+    writer.append("q1", 1, b"first").await.unwrap();
+    writer.append("q1", 2, b"next").await.unwrap();
+    let limits = OutboxPageLimits {
+        max_records: std::num::NonZeroUsize::new(1).unwrap(),
+        max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
+    };
+    let mut key = b"q1\0".to_vec();
+    key.extend_from_slice(&1u64.to_be_bytes());
+    key.push(0);
+    db.put_cf(&db.cf_handle("outbox").unwrap(), &key, b"corrupt")
+        .unwrap();
+    assert!(matches!(
+        writer.read_page("q1", 1, limits).await,
+        Err(IndexError::CorruptedData)
+    ));
+    db.delete_cf(&db.cf_handle("outbox").unwrap(), &key)
+        .unwrap();
+    assert_eq!(
+        writer.read_page("q1", 1, limits).await.unwrap(),
+        vec![(2, b"next".to_vec())]
+    );
+}
 
 #[tokio::test]
 async fn test_outbox_append_and_read() {
@@ -89,6 +154,107 @@ async fn test_outbox_read_latest_sequence() {
     writer.append("q1", 15, b"data").await.unwrap();
     // Latest should still be 20 (ordered by key)
     assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), Some(20));
+}
+
+#[tokio::test]
+async fn test_outbox_read_after_maximum_sequence_is_empty() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let writer = outbox_writer(db);
+    writer.append("q1", u64::MAX, b"last").await.unwrap();
+    assert_eq!(
+        writer.read_from("q1", u64::MAX - 1).await.unwrap(),
+        [(u64::MAX, b"last".to_vec())]
+    );
+    assert!(writer.read_from("q1", u64::MAX).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_provider_atomic_output_and_clear_share_the_index_session() {
+    let tmp = TempDir::new().unwrap();
+    let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
+    assert!(provider.supports_atomic_query_output());
+    let resources = provider.create_indexes("q1").await.unwrap();
+    let checkpoint = resources.checkpoint_store.as_ref().unwrap();
+    let outbox = resources.outbox_writer.as_ref().unwrap();
+    let live = resources.live_results_writer.as_ref().unwrap();
+    {
+        let _guard = SessionGuard::begin(resources.set.session_control.clone())
+            .await
+            .unwrap();
+        checkpoint
+            .stage_checkpoint("source", 1, None)
+            .await
+            .unwrap();
+        checkpoint.stage_result_sequence("q1", 1).await.unwrap();
+        outbox.append_and_trim("q1", 1, b"one", 1).await.unwrap();
+        live.apply_mutations(
+            "q1",
+            &[RowMutation {
+                row_signature: 1,
+                data: Some(b"row"),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(checkpoint.read_result_sequence("q1").await.unwrap(), None);
+        assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
+        assert!(live.read_snapshot("q1").await.unwrap().is_empty());
+    }
+    assert!(checkpoint
+        .read_checkpoint("source")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(checkpoint.read_result_sequence("q1").await.unwrap(), None);
+    assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
+    assert!(live.read_snapshot("q1").await.unwrap().is_empty());
+    let guard = SessionGuard::begin(resources.set.session_control.clone())
+        .await
+        .unwrap();
+    checkpoint
+        .stage_checkpoint("source", 2, None)
+        .await
+        .unwrap();
+    checkpoint.stage_result_sequence("q1", 2).await.unwrap();
+    outbox.append_and_trim("q1", 2, b"two", 2).await.unwrap();
+    live.apply_mutations(
+        "q1",
+        &[RowMutation {
+            row_signature: 2,
+            data: Some(b"row"),
+        }],
+    )
+    .await
+    .unwrap();
+    guard.commit().await.unwrap();
+    {
+        let _guard = SessionGuard::begin(resources.set.session_control.clone())
+            .await
+            .unwrap();
+        outbox.clear("q1").await.unwrap();
+        live.clear("q1").await.unwrap();
+    }
+    assert_eq!(
+        checkpoint.read_result_sequence("q1").await.unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        outbox.read_from("q1", 0).await.unwrap(),
+        [(2, b"two".to_vec())]
+    );
+    assert_eq!(
+        live.read_snapshot("q1").await.unwrap(),
+        [(2, b"row".to_vec())]
+    );
+    let guard = SessionGuard::begin(resources.set.session_control.clone())
+        .await
+        .unwrap();
+    outbox.clear("q1").await.unwrap();
+    live.clear("q1").await.unwrap();
+    guard.commit().await.unwrap();
+    assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
+    assert!(live.read_snapshot("q1").await.unwrap().is_empty());
 }
 
 #[tokio::test]

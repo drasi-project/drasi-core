@@ -220,20 +220,17 @@ pub mod config;
 pub mod descriptor;
 pub use config::HttpSourceConfig;
 
-mod adaptive_batcher;
+use drasi_http_common::adaptive_batcher;
 mod models;
 mod time;
 
 // Webhook support modules
-pub mod auth;
-pub mod content_parser;
-pub mod route_matcher;
-pub mod template_engine;
+pub use drasi_http_common::webhook::{auth, content_parser, route_matcher, template_engine};
 
 // Export HTTP source models and conversion
 pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
@@ -1076,6 +1073,10 @@ impl Source for HttpSource {
     }
 
     async fn start(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.prune_task.read().await.is_none(),
+            "Previous WAL pruning cleanup must finish before restart"
+        );
         info!("[{}] Starting adaptive HTTP source", self.base.id);
 
         self.base
@@ -1118,7 +1119,11 @@ impl Source for HttpSource {
                 );
 
                 // Resume sequence counter from WAL head
-                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                let head = wal
+                    .head_sequence(&self.base.id)
+                    .await
+                    .context("Cannot restore the committed HTTP WAL head")?;
+                self.base.begin_wal_subscriptions(head);
                 if head > 0 {
                     self.base.set_next_sequence(head);
                     info!(
@@ -1252,7 +1257,8 @@ impl Source for HttpSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        let server_handle = tokio::spawn(
+        drasi_lib::context::workers::spawn_owned_worker(
+            &self.base.task_handle,
             async move {
                 let addr = format!("{host}:{port}");
                 info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
@@ -1281,9 +1287,9 @@ impl Source for HttpSource {
                 }
             }
             .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(server_handle);
+        )
+        .await
+        .with_context(|| format!("HTTP source '{}' listener registration", self.base.id))?;
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
 
         // Check for startup errors with a short timeout
@@ -1308,31 +1314,26 @@ impl Source for HttpSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            let prune_handle = tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
+                let mut stopping = base.subscribe_wal_pruning_stop();
                 loop {
-                    interval.tick().await;
-                    if let Some(confirmed) = base.compute_confirmed_position().await {
-                        if confirmed > 0 {
-                            match wal.prune_up_to(&source_id, confirmed).await {
-                                Ok(pruned) => {
-                                    if pruned > 0 {
-                                        let remaining =
-                                            wal.event_count(&source_id).await.unwrap_or(0);
-                                        debug!(
-                                            "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("[{source_id}] WAL prune failed: {e}");
-                                }
-                            }
+                    tokio::select! {
+                        biased;
+                        _ = stopping.wait_for(|stopping| *stopping) => break,
+                        _ = interval.tick() => {}
+                    }
+                    match base.prune_confirmed_wal(wal.as_ref()).await {
+                        Ok(pruned) if pruned > 0 => {
+                            debug!("[{source_id}] WAL pruned: count={pruned}");
                         }
+                        Ok(_) => {}
+                        Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
                     }
                 }
-            });
-            *self.prune_task.write().await = Some(prune_handle);
+            })
+            .await
+            .with_context(|| format!("HTTP source '{}' WAL pruner registration", self.base.id))?;
         }
 
         Ok(())
@@ -1348,26 +1349,36 @@ impl Source for HttpSource {
             )
             .await;
 
-        // Cancel WAL pruning task
-        if let Some(handle) = self.prune_task.write().await.take() {
-            handle.abort();
-        }
-
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
 
-        if let Some(handle) = self.base.task_handle.write().await.take() {
-            let _ = timeout(Duration::from_secs(5), handle).await;
-        }
-
+        self.base.stop_wal_pruning();
+        let pruning = drasi_lib::context::workers::join_owned_worker_gracefully(
+            &mut *self.prune_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("HTTP source '{}' WAL pruning cleanup", self.base.id))?;
+        anyhow::ensure!(
+            !matches!(
+                pruning,
+                drasi_lib::context::workers::WorkerCompletion::Cancelled
+            ),
+            "WAL pruning was cancelled before its operation completed"
+        );
+        drasi_lib::context::workers::join_owned_worker(
+            &mut *self.base.task_handle.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("HTTP source '{}' listener cleanup", self.base.id))?;
         self.base
             .set_status(
                 ComponentStatus::Stopped,
                 Some("Adaptive HTTP source stopped".to_string()),
             )
             .await;
-
         Ok(())
     }
 
@@ -1379,33 +1390,22 @@ impl Source for HttpSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        // If WAL is enabled and subscriber is resuming, use WAL replay
-        let wal_guard = self.wal.read().await;
-        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
-            // Decode resume_from as big-endian u64 sequence
-            if resume_from.len() >= 8 {
-                let resume_seq =
-                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
-                let wal_clone = wal.clone();
-                drop(wal_guard);
-                return self
-                    .base
-                    .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "HTTP")
-                    .await;
-            } else {
-                drop(wal_guard);
-                return Err(anyhow::anyhow!(
-                    "Invalid resume_from position: expected at least 8 bytes, got {}",
-                    resume_from.len()
-                ));
-            }
+        let wal = self.wal.read().await.clone();
+        if let Some(wal) = wal {
+            return self
+                .base
+                .subscribe_with_wal(&settings, wal.as_ref(), "HTTP")
+                .await;
         }
-        drop(wal_guard);
         self.base.subscribe_with_bootstrap(&settings, "HTTP").await
     }
 
     fn supports_replay(&self) -> bool {
         self.config.durability.as_ref().is_some_and(|d| d.enabled)
+    }
+
+    async fn on_subscriptions_complete(&self) {
+        self.base.complete_wal_subscriptions();
     }
 
     async fn deprovision(&self) -> Result<()> {
@@ -1885,6 +1885,23 @@ fn build_cors_layer(cors_config: &CorsConfig) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stop_joins_the_wal_pruner() {
+        let source = HttpSourceBuilder::new("pruner").build().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let mut stopping = source.base.subscribe_wal_pruning_stop();
+        let task = tokio::spawn(async move {
+            started.send(()).unwrap();
+            stopping.wait_for(|stopping| *stopping).await.unwrap();
+        });
+        let worker = task.abort_handle();
+        *source.prune_task.write().await = Some(task);
+        ready.await.unwrap();
+        source.stop().await.unwrap();
+        assert!(worker.is_finished());
+        assert!(source.prune_task.read().await.is_none());
+    }
 
     mod construction {
         use super::*;

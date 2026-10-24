@@ -291,8 +291,9 @@ pub struct FfiRuntimeContext {
     pub component_id: FfiStr,
     /// Nullable — not all plugins need state store.
     ///
-    /// **Lifetime: persistent.** The plugin retains this pointer and (via
-    /// `FfiStateStoreProxy`) frees the vtable struct and its inner state on `Drop`.
+    /// **Lifetime: transferred.** ABI 0.17 plugins own the host-allocated vtable
+    /// and release it and its state on the final proxy drop. ABI 0.16 plugins
+    /// retain the original persistent-pointer behavior.
     pub state_store: *const StateStoreVtable,
     /// Per-instance log callback (nullable — falls back to global if null).
     pub log_callback: Option<super::callbacks::LogCallbackFn>,
@@ -357,10 +358,10 @@ drasi_ffi_primitives::ffi_vtable! {
 
         // Subscriptions
         /// Subscribe with query_id, node_labels JSON, relation_labels JSON,
-        /// optional resume_from position bytes, and `resume_sequence` (the last
-        /// checkpointed framework sequence, or 0 when absent) so out-of-process
-        /// sources can raise their sequence counter for restart monotonicity.
-        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool, resume_sequence: u64) -> *mut FfiSubscriptionResponse,
+        /// optional resume_from position bytes and a sequence presence flag.
+        /// A present zero sequence requests replay from the beginning; it is
+        /// distinct from no resume request.
+        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool, resume_sequence: u64, has_resume_sequence: bool) -> *mut FfiSubscriptionResponse,
 
         /// Host calls this to inject an external bootstrap provider (from another plugin).
         fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),
@@ -541,7 +542,7 @@ drasi_ffi_primitives::ffi_vtable! {
         /// Returns a heap-allocated FfiBootstrapStream (caller must free via
         /// Box::from_raw and consume both receivers), or null if the bootstrap
         /// could not be started.
-        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr) -> *mut FfiBootstrapStream,
+        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr, settings_json: FfiStr, properties_json: FfiStr) -> *mut FfiBootstrapStream,
     }
 }
 
@@ -663,12 +664,24 @@ pub struct StateStoreVtable {
     ) -> i64,
     // Store-level operations
     pub clear_store_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> i64,
-    pub list_keys_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiStringArray,
+    /// On success initializes `out_keys`; on failure leaves it untouched.
+    /// The caller owns the returned strings and array only after success.
+    pub list_keys_fn: extern "C" fn(
+        state: *mut c_void,
+        store_id: FfiStr,
+        out_keys: *mut FfiStringArray,
+    ) -> FfiResult,
     pub store_exists_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiResult,
     pub key_count_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> i64,
     pub sync_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
     // Cleanup
     pub drop_fn: extern "C" fn(state: *mut c_void),
+    /// ABI 0.17 suffix; the preceding ABI 0.16 layout is unchanged.
+    /// Initializes `out` only on success. Called only when durability is requested.
+    pub durability_fn: extern "C" fn(
+        state: *mut c_void,
+        out: *mut super::durability::FfiStorageDurability,
+    ) -> FfiResult,
 }
 
 unsafe impl Send for StateStoreVtable {}

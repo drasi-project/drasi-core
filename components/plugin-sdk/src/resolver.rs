@@ -209,6 +209,10 @@ pub fn register_secret_resolver(resolver: Arc<dyn ValueResolver>) {
 
 /// Returns the globally registered secret resolver, if one has been registered.
 pub(crate) fn get_secret_resolver() -> Option<Arc<dyn ValueResolver>> {
+    #[cfg(feature = "computation")]
+    if let Some(resolver) = crate::computation::scoped_secret_resolver() {
+        return Some(resolver);
+    }
     let guard = SECRET_RESOLVER.read().expect("SECRET_RESOLVER poisoned");
     guard.clone()
 }

@@ -32,6 +32,7 @@ workspace = true
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-http-common = { workspace = true, features = ["webhook", "adaptive"] }
 drasi-plugin-sdk = { workspace = true }
 drasi-source-mapping.workspace = true
 utoipa = { workspace = true }

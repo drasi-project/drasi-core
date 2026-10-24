@@ -20,9 +20,9 @@ use std::{
     sync::Arc,
 };
 
+use crate::hashing::SpookyHasher;
 use async_stream::stream;
 use async_trait::async_trait;
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -261,6 +261,7 @@ impl InMemoryElementIndex {
                                                     let in_out = Element::Relation {
                                                         metadata: ElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 new_element.get_reference(),
                                                                 other,
                                                             ),
@@ -280,6 +281,7 @@ impl InMemoryElementIndex {
                                                     let out_in = Element::Relation {
                                                         metadata: ElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 other,
                                                                 new_element.get_reference(),
                                                             ),
@@ -428,8 +430,8 @@ impl InMemoryElementIndex {
 
                 if let Some(others) = partial_joins.get(qjk2) {
                     for other in others {
-                        let in_out = get_join_virtual_ref(old_element, other);
-                        let out_in = get_join_virtual_ref(other, old_element);
+                        let in_out = get_join_virtual_ref(query_join, old_element, other);
+                        let out_in = get_join_virtual_ref(query_join, other, old_element);
 
                         elements_to_delete.push(in_out);
                         elements_to_delete.push(out_in);
@@ -455,6 +457,23 @@ impl InMemoryElementIndex {
 
 #[async_trait]
 impl ElementIndex for InMemoryElementIndex {
+    async fn get_slot_elements(&self, slot: usize) -> Result<ElementStream, IndexError> {
+        let references: Vec<_> = self
+            .slot_affinity
+            .read()
+            .await
+            .iter()
+            .filter(|(_, slots)| slots.contains(&slot))
+            .map(|(reference, _)| reference.clone())
+            .collect();
+        let elements = self.elements.read().await;
+        let result: Vec<_> = references
+            .iter()
+            .filter_map(|reference| elements.get(reference).cloned())
+            .collect();
+        Ok(Box::pin(futures::stream::iter(result.into_iter().map(Ok))))
+    }
+
     async fn get_slot_element_by_ref(
         &self,
         slot: usize,
@@ -648,10 +667,6 @@ impl ElementArchiveIndex for InMemoryElementIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        if !self.archive_enabled {
-            return Err(IndexError::NotSupported);
-        }
-
         let mut guard = self.element_archive.write().await;
         guard.clear();
         Ok(())
@@ -740,8 +755,17 @@ fn extract_join_spec_by_label(
     result
 }
 
-fn get_join_virtual_ref(ref1: &ElementReference, ref2: &ElementReference) -> ElementReference {
-    let new_id = format!("{}:{}", ref1.element_id, ref2.element_id);
+fn get_join_virtual_ref(
+    join: &QueryJoin,
+    ref1: &ElementReference,
+    ref2: &ElementReference,
+) -> ElementReference {
+    let new_id = join.relationship_id(
+        &ref1.source_id,
+        &ref1.element_id,
+        &ref2.source_id,
+        &ref2.element_id,
+    );
     ElementReference::new("&join", new_id.as_str())
 }
 
@@ -1472,10 +1496,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clear_archive_disabled_returns_not_supported() {
-        let index = InMemoryElementIndex::new();
-        let result = ElementArchiveIndex::clear(&index).await;
-        assert!(matches!(result, Err(IndexError::NotSupported)));
+    async fn test_clear_archive_is_independent_of_read_enablement() {
+        let mut index = InMemoryElementIndex::new();
+        index.enable_archive();
+        let element = create_test_node("source1", "node1", "Person");
+        index.set_element(&element, &vec![0]).await.unwrap();
+        index.archive_enabled = false;
+
+        ElementArchiveIndex::clear(&index).await.unwrap();
+        assert_eq!(
+            index
+                .get_element(element.get_reference())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(&element)
+        );
+        assert!(matches!(
+            index.get_element_as_at(element.get_reference(), 10).await,
+            Err(IndexError::ArchiveNotEnabled)
+        ));
+        index.enable_archive();
+        assert!(index
+            .get_element_as_at(element.get_reference(), 10)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

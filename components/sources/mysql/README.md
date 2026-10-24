@@ -26,12 +26,6 @@ let source = MySqlReplicationSource::builder("mysql-source")
     .build()?;
 ```
 
-The builder defaults to auto-start enabled. Use `.with_auto_start(false)` to
-require an explicit start through the runtime. When constructing a source through
-`MySqlSourceDescriptor`, the descriptor preserves its `auto_start` argument.
-Construction itself never starts replication: the source remains `Stopped` for
-either value until it is started.
-
 ## Configuration Options
 
 | Property | Type | Default | Description |
@@ -119,22 +113,331 @@ still delivered if MySQL logs them in a transaction ending with `ROLLBACK`.
 Rows lost with an older source are not reconstructed automatically, and older
 source binaries cannot safely resume the new partial-row tokens.
 
-## Lifecycle
+## Lifecycle and reliability boundary
 
-`stop()` cleans up running, starting, and failed sources. It aborts and joins the
-replication task, closes stale streaming subscriptions, and clears their resume
-positions before reporting `Stopped`. Repeated direct stops are safe; new
-subscriptions are required after a restart to supply fresh resume positions.
-Both database sources use `SourceBase::abort_and_join_task()`: expected task
-cancellation succeeds, while an unexpected task failure is logged and returned
-after cleanup, leaving status `Error`. A subsequent stop can then reach `Stopped`.
-Task joining is not timed out, so an old task cannot outlive cleanup or overlap a
-restart; replication tasks must remain cooperative async tasks.
+The source serializes start/stop and owns its replication task before spawning
+it. Stop wakes subscriber, initial-boundary, idle-binlog and reconnect waits,
+then joins the worker before clearing subscriptions. Submitted connection,
+dispatch and state work is not aborted. A cancelled stop or five-second cleanup
+timeout retains ownership and prevents replacement; retry stop after the pending
+operation finishes. Worker errors and panics remain observable during cleanup.
+Cleanup also runs for starting or failed sources. Once a failed worker has been
+joined, stop still clears its subscriptions and resume filters before returning
+the failure with status `Error`. Retry stop to acknowledge that failure and reach
+`Stopped`; a failed stop never authorizes a replacement worker.
+
+This repairs the Drasi-owned worker, not every driver-owned resource.
+`mysql_async` 0.37.1 can detach connection cleanup on some failed connection or
+binlog-registration paths, and its `BinlogStream::close` discards underlying
+close failures. Awaiting the source worker therefore does **not** yet prove
+complete driver cleanup. Full MySQL lifecycle qualification remains incomplete.
+
+These lifecycle guarantees are separate from the checkpoint-position changes
+described above. The legacy row stream does not provide whole-transaction query
+visibility or exactly-once delivery.
+
+## Native ComputationGraph source
+
+The independently hosted native SDK library is
+[`drasi-computation-source-mysql`](../../computation-plugins/sources/mysql/README.md).
+It shares the directly owned protocol, decoder, snapshot and replay engine in
+`drasi-mysql-common` with the Rust interface below. Both static and separately
+built dynamic libraries run in the caller's ComputationGraph; they do not wrap
+the legacy source in another runtime.
+
+The independent library has distinct untracked, single-owner transaction,
+shared-transaction and shared-row factories. Shared rows support actual memory
+query owners as well as persistent owners, with a separate row cursor carrying
+the physical transaction, row offset/count and allocation counter. Their
+minimum and duplicate filtering use physical coverage, not the largest or
+smallest allocation counter. A partial row resumes at its transaction start;
+the last row covers the completed boundary. Row streaming can deliver logged
+MyISAM changes at `ROLLBACK`; coordinated snapshots and whole-transaction modes
+remain InnoDB-only. These additions do not reinterpret legacy tokens or the
+existing native transaction handover.
+
+The independent library also offers `drasi.mysql/positional-changes` and
+`drasi.mysql/shared-positional-changes` for MySQL 5.7/limited-metadata streams.
+They explicitly project `@N` fields and require positional keys, preserve native
+partial-row and persistent consumer recovery, and fence mismatched historical
+catalog hints before admitting rows. They do not fabricate FULL metadata,
+coordinated bootstrap state or a server commit clock. See the native guide for
+the matching-schema history requirement and the separate binding namespace.
+
+The existing Rust factory identity and transaction-recovery contract below
+remain unchanged. Direct Rust callers can opt into ordinary tracked rows with
+`native::MySqlSource::shared_rows` and query-scoped
+`native::MySqlSnapshot::for_row_consumer`, using the same actual
+`ConsumerProgressSet` and explicit `persistent` requirement.
+
+`native::MySqlSource` and `native::MySqlSourceFactory` are separate from
+`MySqlReplicationSource`. They own their TCP/TLS connections directly; they do
+not create `mysql_async` connections, pools or detached driver cleanup tasks.
+The legacy source retains the separate row/checkpoint contract described above;
+native modes use their own identities and recovery formats.
+
+Construct the native source with a component ID, stream ID, `MySqlConfig` and
+optional actual `Arc<QuerySourceProgress>`. Its `out` port advertises the schema
+for the selected output mode. The factory identity is `drasi/mysql-native`, version
+`1`; its `stream` and secret-backed `settings` configuration use the same types.
+Recovery additionally requires either the `source_progress` checkpoint resource
+of one actual consuming query, or a `consumer_progress` resource containing its
+actual `ConsumerProgressSet`. The two modes are exclusive. Matching names or
+resources from another graph are not ownership proof.
+
+| Setting | Behavior |
+|---------|----------|
+| `output: changes`, `replay: null` | Fast ordinary graph changes, without whole-transaction assembly, hashing, journal writes or persistent progress. No atomic visibility or replay guarantee. |
+| `output: transactions`, `replay: null` | One complete committed upstream transaction per envelope, without persistent replay ownership. |
+| `replay: server` | Transactions resume from the required consumers' durable checkpoints while MySQL retains the required history. Missing history fails explicitly; this does not advertise guaranteed retention. |
+| `replay: until_processed` | Requires automatic binlog expiry disabled and advertises replay to the actual bound atomic consumers. Operators must maintain safe retention. |
+| `transactions` | Explicit change-count, encoded-byte and assembly-duration limits. An oversized/incomplete transaction publishes no prefix and advances no checkpoint; retry after increasing limits. |
+| `max_protocol_bytes` | Independently bounds each logical wire packet, retained catalog results, table-map cache, decoded fast-output batch and initial-load row, including charged per-envelope overhead. Initial/live JSON expansion and depth are also bounded. |
+| `io_timeout_ms` | Bounds connection/setup, partial packet I/O and awaited cleanup. An otherwise idle stream does not expire. |
+
+Neither retention mode changes MySQL retention settings or purges files. Strict retention
+checks both the seconds setting and the older `expire_logs_days` setting; where
+available, `binlog_expire_logs_auto_purge=OFF` also disables automatic expiry.
+Operators must keep expiry disabled for `until_processed` while replay is needed.
+Transaction replay requires transaction output and either a fixed initial
+file/position or the explicit coordinated snapshot mode below; shared-row
+factories use their own actual row progress contract. `start: end` is only for
+non-replay operation. A fixed initial position must be a real transaction boundary.
+Resume binds to the server UUID, database, selected column definitions,
+source/stream and consumer scope (the producer's graph scope in shared mode).
+It rereads and verifies the last committed
+transaction's content before skipping it, rejecting replaced/reused history.
+**Retain the file containing that checkpoint transaction as well as all later
+files**, even though the checkpoint transaction itself is already processed.
+The declared survival scope is Drasi process restart, not arbitrary upstream
+data loss or storage power failure.
+
+The FULL-metadata native paths require MySQL 8.0.20 or newer (not MariaDB),
+`ROW` binlogs, `FULL` row images and metadata, `CRC32` checksums,
+non-null deterministic graph key values, and UTF-8/ASCII/binary columns.
+Snapshots and transaction output require InnoDB; ordinary row streaming also
+supports MyISAM and MEMORY. This InnoDB restriction applies to coordinated
+snapshots, not the separate native standalone scan.
+Use a distinct nonzero replication `server_id` for each active source. In
+addition to replication permissions, the user needs selected-table/catalog read
+access. Native row IDs use the shared typed `mysql:v1:` format, including binary
+and composite keys; key-changing updates emit delete plus insert. These IDs are
+not interchangeable with legacy bootstrap IDs.
+Binary and BIT values preserve their bytes as integer lists; other values retain
+the shared MySQL formatting. Unsupported selected column types are rejected
+during startup, not deferred until the first changed row.
+
+An empty native `tables` list selects the current database catalog. Only
+untracked ordinary-row mode discovers new tables during live replication;
+tracked and whole-transaction modes reject changes to database-wide selection.
+`table_keys: [{table, key_columns}]` overrides the physical primary key; an
+otherwise keyless table can use its `id` column. Nullable declarations are
+accepted, but an actual null graph key is an error. Explicit key overrides add
+their own binding material without changing existing default binding bytes.
+Untracked starts also support `{mode: start}` and `{mode: gtid, set: "..."}`.
+GTID selection does not make file-bound checkpoints or partial-row cursors
+portable across failover.
+
+Native source schema inspection returns the worker's captured database catalog,
+including validated live table additions, without taking the pending stream's
+mutable lock. Construction performs no database I/O, stop clears the catalog,
+and retired readers are fenced. This is separate from factory configuration
+schema inspection.
+
+TLS is directly owned too. `require_verify_full` verifies the trusted CA and
+hostname; `require_verify_ca` verifies the CA only. `require` and `if_available`
+provide encryption without server identity verification. Native `if_available`
+uses plaintext only when TLS is not advertised; an advertised TLS handshake
+failure is an error, not a plaintext retry. `tls_ca_pem` accepts a single bounded
+CA certificate. Authentication supports `mysql_native_password` and
+`caching_sha2_password`, including TLS and bounded RSA full authentication.
+
+Stop cancels waits and joins the owned worker/socket cleanup; cancellation or
+timeout retains the cleanup obligation and prevents replacement. Failures keep
+their original causes. There is no silent reconnect/reset-to-end fallback.
+
+`new_with_progress_reader` also accepts an optional `SourceProgressReader`;
+paired constructors accept either a local progress owner or that reader.
+Local readers preserve actual-owner checks. External readers provide reads only,
+not local ownership proof; pairing requires the same reader handle. Fast mode
+does not construct a reader or subscription. The independent SDK factories use
+the host-validated read-only capabilities over the native boundary.
+
+### Shared consumer recovery
+
+`MySqlSource::new_with_consumer_progress` accepts an actual
+`Arc<ConsumerProgressSet>` for fixed-position replay. The source still owns one
+live replication worker. Each required member must independently be recovered,
+ready, admitting, persistent and unfenced. Its actual cursor and reset generation
+are retained; no aggregate `SourceProgressSnapshot` is constructed. A stopped,
+failed or reset member fences live replication until awaited source cleanup and
+a coordinated restart.
+
+Replay selects the earliest required physical binlog boundary, not a query-local
+counter or the largest transport number. The original transport counter is
+restored above every member's recorded transport. A fresh member without a
+checkpoint requires replay from the configured initial position; it is not
+skipped in favor of the already advanced members. Every stored member's history
+is checked, including non-minimum transaction hashes and snapshot file prefixes.
+The immutable source cursor policy lets faster consumers reject already included
+transactions while advancing transport observations.
+
+Shared source and snapshot bindings are distinct from the existing single-owner
+identities. They do not include the current member list, so an explicitly replaced
+group can retain existing owners and add a correctly initialized new one without
+reinterpreting single-owner state. The graph validates actual owners and paths,
+and membership changes must await the source's real stop.
+
+For snapshot initialization, use the existing query-owned bootstrap mechanism:
+
+```rust
+use drasi_lib::computation::v1::ConsumerProgressSet;
+use std::{collections::BTreeMap, sync::Arc};
+
+let consumers = Arc::new(ConsumerProgressSet::new(
+    "graph",
+    source_id.clone(),
+    [left_progress.clone(), right_progress.clone()],
+)?);
+let (source, snapshots) = MySqlSource::coordinated_consumers(
+    source_id, stream_id, config, consumers,
+)?;
+let snapshots: BTreeMap<_, _> = snapshots.into_iter()
+    .map(|snapshot| (snapshot.consumer_id().clone(), snapshot))
+    .collect();
+let left_query = left_query.with_bootstrap(snapshots[&left_id].clone());
+let right_query = right_query.with_bootstrap(snapshots[&right_id].clone());
+```
+
+`config.start` must explicitly select `Snapshot`. Each provider retains its actual
+query reader and validates it at the query boundary. `for_consumer_group` and
+`with_consumer_snapshots` also allow explicit composition with retained providers
+for unchanged members. The factory uses `consumer_progress` (`Checkpoint`,
+`ConsumerProgressSet`) and, in snapshot mode, `consumer_snapshots` (one typed
+`Bootstrap`/`MySqlSnapshot` resource per member). Missing, duplicate, substituted,
+wrong-scope or mixed single/shared bindings fail before live operation. These
+resources do not make a memory-only query eligible for persistent replay.
+
+Snapshot and shared preflight history readers use finite, unregistered
+server-ID-zero binlog requests, like
+[mysqlbinlog's finite remote reads](https://docs.oracle.com/cd/E17952_01/mysql-8.0-en/mysqlbinlog-server-id.html).
+They do not reuse the live source's nonzero replication ID or disconnect another
+snapshot. All connections remain explicitly owned and closed.
+
+The independent native libraries and canonical Server resource recipes use the
+factory identities linked above; the existing Rust factory remains available.
+Starting an unpaired source does not initialize existing rows. Destructive or
+shape-changing DDL affecting selected data,
+statement-based changes, XA, compressed/tagged transactions, partial JSON updates,
+spatial/vector columns and opaque binary JSON extensions in live events are not
+supported and fail explicitly. Initial JSON uses MySQL's textual representation;
+that does not add support for opaque binary JSON replay.
+
+### Opt-in coordinated initial loading
+
+`native::MySqlSnapshot` is a separate native bootstrap provider, not a change to
+the legacy MySQL bootstrapper. The transaction-coordinated constructors require
+a persistent atomic query, transaction output, one of the replay policies above,
+and explicit permission to use
+`FLUSH TABLES WITH READ LOCK`. Ordinary streaming never acquires this lock.
+The separate row-consumer constructor and native shared-row bootstrap factory
+also support ordinary memory queries without fabricated persistence.
+
+Given a native configuration, query and its actual progress resource:
+
+```rust
+use drasi_source_mysql::native::{MySqlOutput, MySqlRetention, MySqlSource, MySqlStartPosition};
+use std::num::NonZeroU64;
+
+config.output = MySqlOutput::Transactions;
+config.replay = Some(MySqlRetention::UntilProcessed);
+config.start = MySqlStartPosition::Snapshot {
+    lock_timeout_ms: NonZeroU64::new(2000).unwrap(),
+};
+let (source, snapshot) =
+    MySqlSource::coordinated(source_id, stream_id, config, progress.clone())?;
+let query = query.with_bootstrap(snapshot);
+```
+
+The serialized start setting is
+`{"mode":"snapshot","lock_timeout_ms":2000}`. The native factory also accepts a
+typed `snapshot` bootstrap resource, paired with its `source_progress` resource.
+Direct and factory construction require the same source settings and actual
+progress object, not merely matching identifiers. Besides selected-table reads
+and replication privileges, the account needs `RELOAD`; cleanup kills only its
+own sessions and does not require permission to kill other users' connections.
+
+The provider saves initialization intent in query-owned storage, samples the
+server clock before acquiring the snapshot, opens a
+repeatable-read view under the global lock, pins selected table definitions,
+captures the binlog boundary, and **releases the global lock before scanning**.
+Owned binary server-side cursors read one row at a time through a bounded channel.
+Initial rows and live changes share types and typed identities. Client buffering
+is bounded; MySQL may materialize server cursors internally. Ordinary writes can
+continue during scanning, but selected-table DDL waits until the read transaction
+ends.
+
+Snapshot rows use that captured server time, not their later scan time. Live
+rows and transaction envelopes use MySQL's precise `immediate_commit_timestamp`
+when supplied, rather than the binlog event header's coarse statement time.
+Snapshot handover requires this commit clock and fails explicitly if it is
+missing. This preserves updates committed in the same second as a snapshot, or
+while a slow initial scan is still running. Fixed-position/non-snapshot modes
+retain header-time handling for older history without a commit timestamp.
+
+`lock_timeout_ms` bounds Drasi's lock-establishment attempt and sets a server
+lock-wait timeout. It is **not an unconditional application-pause bound**:
+cancelling a waiting `FLUSH TABLES` can leave that table waiting for a pre-existing
+reader to finish, even after every Drasi snapshot session is gone. Drasi never
+kills that unrelated reader. Hard process loss also relies on MySQL's session
+cleanup; the deadline is not an independent server-side lease.
+
+After scanning and server-observed session retirement, the query atomically saves
+the completed marker, handover metadata and source boundary. Initial loading is
+row-wise, not one upstream transaction. Partial loading cannot be mistaken for
+completion: strict recovery rejects it; an explicit `QueryRecoveryPolicy::AutoReset`
+reloads a new view. Completed initialization resumes without rescanning.
+Cancellation, timeout and connection failures retain the worker until awaited
+cleanup finishes; replacement is blocked and earlier cleanup errors remain visible.
+
+The boundary is verified against a bounded-memory hash of its binlog file prefix,
+both at initialization and before admitting the first live transaction. Retain
+that **entire anchor file and all later history** until an ordinary transaction
+checkpoint replaces it. Large files can require a higher `io_timeout_ms`.
+The lock timeout and byte limits may be raised for explicit retry without changing
+data identity. Reused positions with different contents fail rather than silently
+skip changes.
 
 ## Testing
 
-Integration test uses testcontainers:
+Current-thread unit cases cover cancelled registration, subscriber waits,
+failure/panic cleanup and a real TCP handshake blocked across cancelled and
+timed-out stops:
 
 ```bash
-cargo test -p drasi-source-mysql -- --ignored --nocapture
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-source-mysql --lib
 ```
+
+The existing integration tests use testcontainers:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-source-mysql --test integration_test -- --ignored --test-threads=1
+```
+
+Native current-thread tests include direct and factory graph pipes, actual
+RocksDB query reconstruction, process exits before/after query commit, whole
+transaction limits, history loss/reuse, strict schema/value checks, malformed
+packets and cancelled startup. Coordinated bootstrap cases include concurrent
+writes, DDL exclusion, least-privileged factory construction, empty initialization,
+snapshot-only restart after rotation, actual process exits during/after loading,
+oversized rows, lock cancellation/timeouts, and retained cleanup while a real
+server is paused. TLS tests generate short-lived certificates for real
+CA/hostname acceptance and rejection:
+
+```bash
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-source-mysql --lib native -- --include-ignored --test-threads=1
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-mysql-common --lib
+```
+
+The process-exit helper is driven by its parent test; a standalone no-op helper
+execution is not crash-recovery evidence.

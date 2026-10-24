@@ -28,7 +28,9 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::callbacks::{self, CallbackContext};
-use crate::loader::{load_plugin_from_path, plugin_kind_from_filename, LoadedPlugin};
+use crate::loader::{
+    load_plugin_family_from_path, plugin_kind_from_filename, LoadedPlugin, LoadedPluginFamily,
+};
 use crate::plugin_registry::PluginRegistry;
 use crate::plugin_types::{PluginCategory, PluginEvent, PluginKindEntry, PluginStatus};
 
@@ -91,6 +93,10 @@ impl PluginLifecycleManager {
         mut loaded: LoadedPlugin,
     ) -> Vec<PluginKindEntry> {
         let mut kinds = Vec::new();
+        let package_version = loaded.plugin_version();
+        if package_version.is_none() {
+            log::warn!("Loaded plugin '{plugin_id}' has no package version metadata");
+        }
         let metadata_info = loaded.metadata_info.take();
 
         // Take ownership of proxy vecs via mem::take, so Drop finds them empty.
@@ -109,7 +115,11 @@ impl PluginLifecycleManager {
                 config_version: SourcePluginDescriptor::config_version(&source).to_string(),
                 config_schema_name: SourcePluginDescriptor::config_schema_name(&source).to_string(),
             });
-            reg.register_source_with_metadata(Arc::new(source), plugin_id);
+            reg.register_source_with_package_version(
+                Arc::new(source),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for reaction in reactions {
@@ -120,7 +130,11 @@ impl PluginLifecycleManager {
                 config_schema_name: ReactionPluginDescriptor::config_schema_name(&reaction)
                     .to_string(),
             });
-            reg.register_reaction_with_metadata(Arc::new(reaction), plugin_id);
+            reg.register_reaction_with_package_version(
+                Arc::new(reaction),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for bootstrap in bootstraps {
@@ -131,7 +145,11 @@ impl PluginLifecycleManager {
                 config_schema_name: BootstrapPluginDescriptor::config_schema_name(&bootstrap)
                     .to_string(),
             });
-            reg.register_bootstrapper_with_metadata(Arc::new(bootstrap), plugin_id);
+            reg.register_bootstrapper_with_package_version(
+                Arc::new(bootstrap),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for identity_provider in identity_providers {
@@ -147,7 +165,11 @@ impl PluginLifecycleManager {
                 )
                 .to_string(),
             });
-            reg.register_identity_provider_with_metadata(Arc::new(identity_provider), plugin_id);
+            reg.register_identity_provider_with_package_version(
+                Arc::new(identity_provider),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for secret_store in secret_stores {
@@ -159,7 +181,11 @@ impl PluginLifecycleManager {
                 config_schema_name: SecretStorePluginDescriptor::config_schema_name(&secret_store)
                     .to_string(),
             });
-            reg.register_secret_store_with_metadata(Arc::new(secret_store), plugin_id);
+            reg.register_secret_store_with_package_version(
+                Arc::new(secret_store),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         drop(reg);
@@ -180,7 +206,7 @@ impl PluginLifecycleManager {
         // Emit event
         let _ = self.event_tx.send(PluginEvent::Loaded {
             plugin_id: plugin_id.to_string(),
-            version: String::new(),
+            version: package_version.unwrap_or_default(),
             kinds: kinds.clone(),
         });
 
@@ -230,11 +256,41 @@ impl PluginLifecycleManager {
             ),
         };
 
-        let loaded = load_plugin_from_path(path, log_ctx, log_cb, lifecycle_ctx, lifecycle_cb)?;
-
-        let kinds = self.register_loaded_plugin(&plugin_id, loaded).await;
-
-        Ok((plugin_id, kinds))
+        match load_plugin_family_from_path(path, log_ctx, log_cb, lifecycle_ctx, lifecycle_cb)? {
+            LoadedPluginFamily::Legacy(loaded) => {
+                let kinds = self.register_loaded_plugin(&plugin_id, loaded).await;
+                Ok((plugin_id, kinds))
+            }
+            LoadedPluginFamily::Computation { plugin, .. } => {
+                let plugin_id = crate::plugin_registry::computation_plugin_id(plugin.metadata());
+                let version = plugin.metadata().plugin.version.to_string();
+                let metadata_info = format!(
+                    "family=computation sdk={} plugin={}",
+                    plugin.metadata().abi_version,
+                    version
+                );
+                let kinds = self
+                    .registry
+                    .write()
+                    .await
+                    .register_computation_plugin(plugin)?;
+                self.loaded_plugins.write().await.insert(
+                    plugin_id.clone(),
+                    LoadedPluginState {
+                        plugin_id: plugin_id.clone(),
+                        status: PluginStatus::Loaded,
+                        kinds: kinds.clone(),
+                        metadata_info: Some(metadata_info),
+                    },
+                );
+                let _ = self.event_tx.send(PluginEvent::Loaded {
+                    plugin_id: plugin_id.clone(),
+                    version,
+                    kinds: kinds.clone(),
+                });
+                Ok((plugin_id, kinds))
+            }
+        }
     }
 
     /// Update a plugin's status (for use by the orchestrator layer).

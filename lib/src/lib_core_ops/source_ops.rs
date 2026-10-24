@@ -23,12 +23,19 @@ use std::collections::HashMap;
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
 use crate::config::SourceRuntime;
-use crate::error::{DrasiError, Result};
+use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::schema::{GraphSchema, SourceSchema};
 use crate::sources::Source;
 
 impl DrasiLib {
+    pub(crate) async fn source_instance(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<std::sync::Arc<dyn Source>> {
+        self.computation_runtime.source(id).await
+    }
+
     /// Add a source instance to a running server, taking ownership.
     ///
     /// The source instance is wrapped in an Arc internally - callers transfer
@@ -36,6 +43,10 @@ impl DrasiLib {
     ///
     /// If the server is running and the source has `auto_start=true`, the source
     /// will be started immediately after being added.
+    ///
+    /// This returns once the node is declared. Initialization
+    /// and activation failures remain visible on that node; use
+    /// `add_source_with_handle` to await readiness.
     ///
     /// # Example
     /// ```no_run
@@ -51,6 +62,38 @@ impl DrasiLib {
         self.add_source_with_metadata(source, HashMap::new()).await
     }
 
+    /// Declare a source and return its generation-bound computation handle.
+    ///
+    /// A successful return confirms graph addition, not initialization or activation. Await
+    /// `wait_created()` or `wait_started()` on the handle for those outcomes.
+    /// `wait_started()` requires the source to report `Running`, not merely to
+    /// return successfully from its start hook.
+    /// Auto-start is requested only when the instance is running.
+    /// Use the handle's `control()` and `set_control_handler()` methods for
+    /// out-of-band notifications without changing the legacy source contract.
+    /// Ownership-bearing native rejections retain their `GraphError` through
+    /// `DrasiError::Internal`, including the rejected addition's recovery handle.
+    pub async fn add_source_with_handle(
+        &self,
+        source: impl Source + 'static,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.add_source_with_metadata_and_handle(source, HashMap::new())
+            .await
+    }
+
+    async fn add_source_with_metadata_and_handle(
+        &self,
+        source: impl Source + 'static,
+        metadata: HashMap<String, String>,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let id = source.id().to_owned();
+        self.computation_runtime
+            .add_source(Box::new(source), metadata, self.is_running().await)
+            .await
+            .map_err(|error| crate::computation::runtime::map_addition_error("source", &id, error))
+    }
+
     /// Add a source to a running server with additional metadata.
     ///
     /// Same as [`add_source`](Self::add_source) but merges `extra_metadata`
@@ -61,53 +104,9 @@ impl DrasiLib {
         extra_metadata: HashMap<String, String>,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Capture auto_start and id before transferring ownership
-        let should_auto_start = source.auto_start();
-        let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-
-        // Step 1: Register in the component graph (validates uniqueness, creates node + edges)
-        {
-            let mut graph = self.component_graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), should_auto_start.to_string());
-            metadata.extend(extra_metadata);
-            graph.register_source(&source_id, metadata).map_err(|e| {
-                DrasiError::operation_failed(
-                    "source",
-                    &source_id,
-                    "add",
-                    format!("Failed to register: {e}"),
-                )
-            })?;
-        }
-
-        // Step 2: Provision runtime (initialize + store)
-        if let Err(e) = self.source_manager.provision_source(source).await {
-            // Compensating rollback: remove from graph on runtime failure
-            let mut graph = self.component_graph.write().await;
-            let _ = graph.deregister(&source_id);
-            return Err(DrasiError::operation_failed(
-                "source",
-                &source_id,
-                "add",
-                format!("Failed to provision: {e}"),
-            ));
-        }
-
-        // Step 3: Auto-start if needed
-        if self.is_running().await && should_auto_start {
-            self.source_manager
-                .start_source(source_id.clone())
-                .await
-                .map_err(|e| {
-                    DrasiError::operation_failed("source", &source_id, "start", format!("{e}"))
-                })?;
-        }
-
-        Ok(())
+        self.add_source_with_metadata_and_handle(source, extra_metadata)
+            .await
+            .map(|_| ())
     }
 
     /// Remove a source from a running server
@@ -124,53 +123,14 @@ impl DrasiLib {
     /// ```
     pub async fn remove_source(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Step 1: Validate no dependents
-        {
-            let graph = self.component_graph.read().await;
-            if let Err(dependent_ids) = graph.can_remove(id) {
-                return Err(DrasiError::operation_failed(
-                    "source",
-                    id,
-                    "remove",
-                    format!("Depended on by: {}", dependent_ids.join(", ")),
-                ));
-            }
-        }
-
-        // Step 2: Teardown runtime (stop, deprovision, remove from runtime map)
-        self.source_manager
-            .teardown_source(id.to_string(), cleanup)
-            .await
-            .map_err(|e| {
-                DrasiError::operation_failed(
-                    "source",
-                    id,
-                    "remove",
-                    format!("Teardown failed: {e}"),
-                )
-            })?;
-
-        // Step 3: Deregister from graph (remove node + edges, emit events)
-        // If this fails after teardown, the runtime is already gone. Rather than
-        // returning an error (which would leave an orphaned graph node with no
-        // runtime backing), set the component to Error state and log the failure.
-        {
-            let mut graph = self.component_graph.write().await;
-            if let Err(e) = graph.deregister(id) {
-                log::error!(
-                    "Source '{id}' runtime was torn down but graph deregister failed: {e}. \
-                     Setting component to Error state."
-                );
-                let _ = graph.validate_and_transition(
-                    id,
-                    ComponentStatus::Error,
-                    Some(format!("Orphaned: deregister failed after teardown: {e}")),
-                );
-            }
-        }
-
-        Ok(())
+        map_component_error(
+            self.computation_runtime
+                .remove_component(id, "source", cleanup)
+                .await,
+            "source",
+            id,
+            "remove",
+        )
     }
 
     /// Update a source by replacing it with a new instance.
@@ -201,27 +161,14 @@ impl DrasiLib {
         new_source: impl crate::sources::Source + 'static,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
-
-        // Validate the new source has the same ID
-        if new_source.id() != id {
-            return Err(DrasiError::operation_failed(
-                "source",
-                id,
-                "update",
-                format!(
-                    "New source ID '{}' does not match existing source ID '{}'",
-                    new_source.id(),
-                    id
-                ),
-            ));
-        }
-
-        // Delegate to SourceManager which uses the Reconfiguring transition,
-        // preserving the graph node, edges, and event history.
-        self.source_manager
-            .update_source(id.to_string(), new_source)
-            .await
-            .map_err(|e| DrasiError::operation_failed("source", id, "update", e.to_string()))
+        map_component_error(
+            self.computation_runtime
+                .update_source(id, Box::new(new_source))
+                .await,
+            "source",
+            id,
+            "update",
+        )
     }
 
     /// Start a stopped source
@@ -236,9 +183,8 @@ impl DrasiLib {
     /// ```
     pub async fn start_source(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-
         map_component_error(
-            self.source_manager.start_source(id.to_string()).await,
+            self.computation_runtime.start_component(id, "source").await,
             "source",
             id,
             "start",
@@ -257,9 +203,8 @@ impl DrasiLib {
     /// ```
     pub async fn stop_source(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-
         map_component_error(
-            self.source_manager.stop_source(id.to_string()).await,
+            self.computation_runtime.stop_component(id, "source").await,
             "source",
             id,
             "stop",
@@ -392,8 +337,8 @@ impl DrasiLib {
         &self,
         id: &str,
     ) -> Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.inspection.subscribe_source_logs(id).await
     }
@@ -406,7 +351,8 @@ impl DrasiLib {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
     /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
     ///
@@ -598,10 +544,26 @@ mod tests {
         core.add_source(s1).await.unwrap();
         let err = core.add_source(s2).await.unwrap_err();
 
-        assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
-            "Duplicate add should return OperationFailed, got: {err:?}"
-        );
+        {
+            use crate::computation::v1::GraphError;
+
+            let DrasiError::Internal(error) = err else {
+                panic!("native rejection must retain its ownership-bearing cause: {err:?}");
+            };
+            let GraphError::AdditionRejected { cause, addition } = error
+                .downcast_ref::<GraphError>()
+                .expect("native graph error")
+            else {
+                panic!("expected a rejected addition: {error:?}");
+            };
+            assert!(
+                matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component dup-src"),
+                "unexpected rejection cause: {cause:?}"
+            );
+            let rejected = addition.take().await.expect("retained rejected source");
+            assert_eq!(rejected.definition.descriptor.id().as_str(), "dup-src");
+        }
     }
 
     // ========================================================================
@@ -642,7 +604,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
+            matches!(err.classification(), DrasiError::OperationFailed { .. }),
             "Removing nonexistent source should fail, got: {err:?}"
         );
     }
@@ -716,7 +678,7 @@ mod tests {
         let core = build_and_start().await;
 
         // Subscribe BEFORE adding so we catch all events
-        let mut event_rx = core.component_graph.read().await.subscribe();
+        let mut event_rx = core.subscribe_all_component_events();
 
         let source = TestMockSource::with_auto_start("lifecycle-src".to_string(), false).unwrap();
         core.add_source(source).await.unwrap();

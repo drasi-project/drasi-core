@@ -54,10 +54,12 @@ impl ReactionPluginDescriptor for SnapshotTestReactionDescriptor {
         &self,
         id: &str,
         query_ids: Vec<String>,
-        _config_json: &serde_json::Value,
+        config_json: &serde_json::Value,
         _auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
-        let (reaction, _report) = SnapshotTestReaction::new(id, query_ids);
+        let config: SnapshotTestConfig = serde_json::from_value(config_json.clone())?;
+        let (mut reaction, _report) = SnapshotTestReaction::new(id, query_ids);
+        reaction.panic_on_initialize = config.panic_on_initialize;
         Ok(Box::new(reaction))
     }
 }

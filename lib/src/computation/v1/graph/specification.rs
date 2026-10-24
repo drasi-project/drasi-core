@@ -1,0 +1,734 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::{
+    any::{Any, TypeId},
+    collections::BTreeMap,
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+
+use super::{Component, ComponentRole, GraphError, GraphResult};
+use crate::computation::v1::{
+    data::validate_identifier, ComponentDescriptor, ComponentGeneration, ComponentId, EnvelopeSink,
+    EnvelopeSource, FailureDisposition, ResourceId, SinkCompletion, Transformer,
+};
+
+pub use drasi_computation_contracts::{ImplementationIdentity, PluginIdentity};
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ConfigurationValue {
+    Literal(serde_json::Value),
+    Reference {
+        resource: ResourceId,
+        key: Arc<str>,
+        secret: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationType {
+    Boolean,
+    Integer,
+    String,
+    Object,
+    Array,
+    Json,
+}
+
+impl ConfigurationType {
+    fn accepts(self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Boolean => value.is_boolean(),
+            Self::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
+            Self::String => value.is_string(),
+            Self::Object => value.is_object(),
+            Self::Array => value.is_array(),
+            Self::Json => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigurationField {
+    pub value_type: ConfigurationType,
+    pub required: bool,
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConfigurationSchema {
+    pub fields: BTreeMap<Arc<str>, ConfigurationField>,
+    pub allow_additional: bool,
+}
+
+impl ConfigurationSchema {
+    /// Validate unresolved values without fetching configuration or secrets.
+    /// Missing resources remain dependencies; supplied declarations and handles
+    /// must have the expected role and interface.
+    pub fn validate_values(
+        &self,
+        configuration: &BTreeMap<Arc<str>, ConfigurationValue>,
+        declarations: &BTreeMap<ResourceId, ResourceRole>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> GraphResult<()> {
+        for (key, field) in &self.fields {
+            if field.required && !configuration.contains_key(key) {
+                return Err(super::topology(format!(
+                    "missing configuration field {key}"
+                )));
+            }
+        }
+        for (key, value) in configuration {
+            validate_identifier("configuration field", key)?;
+            let field = self.fields.get(key);
+            if field.is_none() && !self.allow_additional {
+                return Err(super::topology(format!(
+                    "unknown configuration field {key}"
+                )));
+            }
+            match value {
+                ConfigurationValue::Literal(value) => {
+                    if field.is_some_and(|field| field.secret || !field.value_type.accepts(value)) {
+                        return Err(super::topology(format!("configuration field {key} requires a compatible value or unresolved secret reference")));
+                    }
+                }
+                ConfigurationValue::Reference {
+                    resource,
+                    key: reference,
+                    secret,
+                } => {
+                    validate_identifier("configuration reference", reference)?;
+                    if *secret
+                        && declarations
+                            .get(resource)
+                            .is_some_and(|role| *role != ResourceRole::SecretStore)
+                    {
+                        return Err(super::topology(
+                            "secret references require a secret-store resource",
+                        ));
+                    }
+                    if field.is_some_and(|field| field.secret) && !secret {
+                        return Err(super::topology("secret fields require secret references"));
+                    }
+                    if let Some(handle) = resources.get(resource) {
+                        handle
+                            .get::<ConfigurationResolverResource>()?
+                            .0
+                            .validate_reference(reference)
+                            .map_err(|error| {
+                                super::topology(format!(
+                                    "invalid configuration reference: {error:#}"
+                                ))
+                            })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve already validated values using only the supplied resource owners.
+    pub async fn resolve_values(
+        &self,
+        values: &BTreeMap<Arc<str>, ConfigurationValue>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<BTreeMap<Arc<str>, serde_json::Value>, ComponentCreationError> {
+        let mut configuration = BTreeMap::new();
+        for (key, value) in values {
+            let value = match value {
+                ConfigurationValue::Literal(value) => value.clone(),
+                ConfigurationValue::Reference { resource, key, .. } => {
+                    let resolver = resources
+                        .get(resource)
+                        .ok_or_else(|| {
+                            ComponentCreationError::retryable(anyhow::anyhow!(
+                                "resource {resource} is not realized"
+                            ))
+                        })?
+                        .get::<ConfigurationResolverResource>()
+                        .map_err(ComponentCreationError::terminal)?;
+                    resolver
+                        .0
+                        .resolve(key)
+                        .await
+                        .map_err(ComponentCreationError::retryable)?
+                }
+            };
+            if self
+                .fields
+                .get(key)
+                .is_some_and(|field| !field.value_type.accepts(&value))
+            {
+                return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                    "resolved configuration field {key} has an incompatible type"
+                )));
+            }
+            configuration.insert(key.clone(), value);
+        }
+        Ok(configuration)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ResourceRole {
+    Bootstrap,
+    Middleware,
+    Inspection,
+    Identity,
+    IndexBackend,
+    SecretStore,
+    StateStore,
+    Wal,
+    Pipe,
+    Checkpoint,
+    Outbox,
+    LiveResults,
+    FutureQueue,
+    LegacySource,
+    SourceSubscription,
+    QueryCatalog,
+    LegacyReaction,
+    Component,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ResourceOwnership {
+    Graph,
+    Borrowed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceSpecification {
+    pub id: ResourceId,
+    pub role: ResourceRole,
+    pub ownership: ResourceOwnership,
+    /// An unresolved external binding, never a live handle or credentials.
+    pub binding: Arc<str>,
+}
+
+#[async_trait]
+pub trait ResourceCleanup: Send + Sync {
+    async fn shutdown(&self) -> anyhow::Result<()>;
+}
+
+/// Constructs a resource after reconciliation has retired its previous owner.
+/// Construction has a 30-second deadline. Implementations must clean
+/// up partially acquired resources if construction fails or is cancelled.
+#[async_trait]
+pub trait ResourceConstructor: Send + Sync {
+    async fn construct(&self) -> anyhow::Result<ResourceHandle>;
+
+    /// Only declared dependencies are supplied, after successful construction.
+    /// Dependency-aware providers must opt in instead of silently ignoring them.
+    async fn construct_with_dependencies(
+        &self,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<ResourceHandle> {
+        anyhow::ensure!(
+            dependencies.is_empty(),
+            "resource constructor does not support dependencies"
+        );
+        self.construct().await
+    }
+}
+
+/// An actual constructed resource, held separately from desired specifications.
+/// Catalogue requirements can validate its concrete Rust type during preflight.
+#[derive(Clone)]
+pub struct ResourceHandle {
+    role: ResourceRole,
+    value: Arc<dyn Any + Send + Sync>,
+    cleanup: Option<Arc<dyn ResourceCleanup>>,
+    identity: Option<Arc<dyn ResourceIdentity>>,
+}
+
+trait ResourceIdentity: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool;
+    fn downgrade(&self) -> Box<dyn WeakResourceIdentity>;
+}
+
+trait WeakResourceIdentity: Send + Sync {
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool;
+}
+
+struct WeakSharedResourceIdentity<T: ?Sized>(std::sync::Weak<T>);
+impl<T: ?Sized + Send + Sync + 'static> WeakResourceIdentity for WeakSharedResourceIdentity<T> {
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<SharedResourceIdentity<T>>()
+            .is_some_and(|other| std::sync::Weak::ptr_eq(&self.0, &Arc::downgrade(&other.0)))
+    }
+}
+
+pub(super) struct ResourceScopeIdentity {
+    role: ResourceRole,
+    concrete: TypeId,
+    value: std::sync::Weak<dyn Any + Send + Sync>,
+    identity: Option<Box<dyn WeakResourceIdentity>>,
+}
+
+impl ResourceScopeIdentity {
+    pub(super) fn matches(&self, other: &ResourceHandle) -> bool {
+        self.role == other.role
+            && self.concrete == other.value.as_ref().type_id()
+            && (std::sync::Weak::ptr_eq(&self.value, &Arc::downgrade(&other.value))
+                || self
+                    .identity
+                    .as_ref()
+                    .zip(other.identity.as_ref())
+                    .is_some_and(|(left, right)| left.same_identity(right.as_ref())))
+    }
+}
+
+struct SharedResourceIdentity<T: ?Sized>(Arc<T>);
+
+impl<T: ?Sized + Send + Sync + 'static> ResourceIdentity for SharedResourceIdentity<T> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| Arc::ptr_eq(&self.0, &other.0))
+    }
+
+    fn downgrade(&self) -> Box<dyn WeakResourceIdentity> {
+        Box::new(WeakSharedResourceIdentity(Arc::downgrade(&self.0)))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct WeakResourceHandle {
+    role: ResourceRole,
+    value: std::sync::Weak<dyn Any + Send + Sync>,
+    cleanup: Option<std::sync::Weak<dyn ResourceCleanup>>,
+    identity: Option<std::sync::Weak<dyn ResourceIdentity>>,
+}
+
+impl WeakResourceHandle {
+    pub(crate) fn upgrade(&self) -> Option<ResourceHandle> {
+        Some(ResourceHandle {
+            role: self.role,
+            value: self.value.upgrade()?,
+            cleanup: match &self.cleanup {
+                Some(cleanup) => Some(cleanup.upgrade()?),
+                None => None,
+            },
+            identity: match &self.identity {
+                Some(identity) => Some(identity.upgrade()?),
+                None => None,
+            },
+        })
+    }
+}
+
+impl ResourceHandle {
+    pub(super) fn scope_identity(&self) -> ResourceScopeIdentity {
+        ResourceScopeIdentity {
+            role: self.role,
+            concrete: self.value.as_ref().type_id(),
+            value: Arc::downgrade(&self.value),
+            identity: self.identity.as_ref().map(|identity| identity.downgrade()),
+        }
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakResourceHandle {
+        WeakResourceHandle {
+            role: self.role,
+            value: Arc::downgrade(&self.value),
+            cleanup: self.cleanup.as_ref().map(Arc::downgrade),
+            identity: self.identity.as_ref().map(Arc::downgrade),
+        }
+    }
+    pub fn new<T: Any + Send + Sync>(role: ResourceRole, value: Arc<T>) -> Self {
+        Self {
+            role,
+            value,
+            cleanup: None,
+            identity: None,
+        }
+    }
+
+    /// Identify the actual shared instance behind a binding wrapper.
+    ///
+    /// The handle retains this `Arc`; identity is compared with typed
+    /// `Arc::ptr_eq`, never an unowned address or configuration value. Reports
+    /// can share an instance only when their roles and concrete binding types
+    /// also agree. Without this identity, the binding's own `Arc` is used.
+    /// This does not change binding identity or transfer cleanup ownership.
+    pub fn with_shared_identity<T: ?Sized + Send + Sync + 'static>(
+        mut self,
+        instance: Arc<T>,
+    ) -> Self {
+        self.identity = Some(Arc::new(SharedResourceIdentity(instance)));
+        self
+    }
+
+    pub fn with_cleanup(mut self, cleanup: Arc<dyn ResourceCleanup>) -> Self {
+        self.cleanup = Some(cleanup);
+        self
+    }
+
+    pub fn role(&self) -> ResourceRole {
+        self.role
+    }
+
+    pub fn has_cleanup(&self) -> bool {
+        self.cleanup.is_some()
+    }
+
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.value, &other.value)
+    }
+
+    pub(crate) fn same_shared_instance(&self, other: &Self) -> bool {
+        self.role == other.role
+            && self.value.as_ref().type_id() == other.value.as_ref().type_id()
+            && (self.same_instance(other)
+                || match (&self.identity, &other.identity) {
+                    (Some(left), Some(right)) => left.same_identity(right.as_ref()),
+                    _ => false,
+                })
+    }
+
+    pub(crate) fn is<T: Any + Send + Sync>(&self) -> bool {
+        self.value.is::<T>()
+    }
+
+    pub fn get<T: Any + Send + Sync>(&self) -> GraphResult<Arc<T>> {
+        self.value
+            .clone()
+            .downcast()
+            .map_err(|_| GraphError::Topology {
+                reason: "constructed resource has an incompatible concrete interface".into(),
+            })
+    }
+
+    pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.shutdown().await?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceRequirement {
+    pub role: ResourceRole,
+    pub minimum: usize,
+    pub maximum: Option<usize>,
+    pub concrete_type: Option<TypeId>,
+}
+
+impl ResourceRequirement {
+    pub fn exactly_one<T: Any>(role: ResourceRole) -> Self {
+        Self {
+            role,
+            minimum: 1,
+            maximum: Some(1),
+            concrete_type: Some(TypeId::of::<T>()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FactoryDescriptor {
+    pub implementation: ImplementationIdentity,
+    pub role: ComponentRole,
+    pub configuration_version: u32,
+    pub configuration: ConfigurationSchema,
+    pub dependencies: BTreeMap<Arc<str>, ResourceRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ComponentSpecification {
+    pub descriptor: ComponentDescriptor,
+    pub role: ComponentRole,
+    pub completion: Option<SinkCompletion>,
+    pub implementation: ImplementationIdentity,
+    pub configuration_version: u32,
+    pub configuration: BTreeMap<Arc<str>, ConfigurationValue>,
+    pub dependencies: BTreeMap<Arc<str>, Vec<ResourceId>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct ComponentCreationError {
+    pub disposition: FailureDisposition,
+    #[source]
+    pub source: anyhow::Error,
+}
+
+impl ComponentCreationError {
+    pub fn retryable(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            disposition: FailureDisposition::Retryable,
+            source: source.into(),
+        }
+    }
+
+    pub fn terminal(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            disposition: FailureDisposition::Terminal,
+            source: source.into(),
+        }
+    }
+}
+
+pub struct ConstructedComponent(pub(super) Component);
+
+impl ConstructedComponent {
+    pub fn source(source: Box<dyn EnvelopeSource>) -> Self {
+        Self(Component::Source(source))
+    }
+    pub fn transformer(transformer: Box<dyn Transformer>) -> Self {
+        Self(Component::Transformer(transformer))
+    }
+    pub fn query(query: Box<dyn Transformer>) -> Self {
+        Self(Component::Query(query))
+    }
+    pub fn sink(sink: Box<dyn EnvelopeSink>) -> Self {
+        Self(Component::Sink(sink))
+    }
+    pub fn service(service: Box<dyn crate::computation::v1::ComputationService>) -> Self {
+        Self(Component::Service(service))
+    }
+}
+
+/// Construction is distinct from activation. Implementations must be cancellation
+/// safe and must not start data processing from `create`.
+#[async_trait]
+pub trait ComponentFactory: Send + Sync {
+    fn descriptor(&self) -> &FactoryDescriptor;
+    /// Describe a literal configuration using the factory's actual ports and
+    /// schemas, without constructing a component, opening resources or starting
+    /// workers. The caller supplies resource dependencies before validation.
+    fn specification_from_config(
+        &self,
+        _id: ComponentId,
+        _configuration: serde_json::Value,
+    ) -> anyhow::Result<ComponentSpecification> {
+        anyhow::bail!(
+            "factory '{}' does not support configuration-only descriptions; use an explicit component specification",
+            self.descriptor().implementation.name
+        )
+    }
+    /// Executable schemas needed to persist/replay this factory's records.
+    /// This is metadata discovery, not component construction or I/O.
+    fn record_schemas(&self) -> Vec<Arc<crate::computation::v1::Schema>> {
+        Vec::new()
+    }
+    fn supports_reconfiguration(&self) -> bool {
+        false
+    }
+    /// Additional pure definition validation, after generic schema/dependency checks.
+    fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()>;
+    fn validate_resources(
+        &self,
+        specification: &ComponentSpecification,
+        _declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        _resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<()> {
+        self.validate(specification)
+    }
+    fn validate_scope(
+        &self,
+        _graph_id: &str,
+        specification: &ComponentSpecification,
+        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<()> {
+        self.validate_resources(specification, declarations, resources)
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> Result<ConstructedComponent, ComponentCreationError>;
+}
+
+#[async_trait]
+pub trait ConfigurationResolver: Send + Sync {
+    /// Pure reference validation; do not fetch external values here.
+    fn validate_reference(&self, key: &str) -> anyhow::Result<()>;
+    async fn resolve(&self, key: &str) -> anyhow::Result<serde_json::Value>;
+}
+
+pub struct ConfigurationResolverResource(pub Arc<dyn ConfigurationResolver>);
+
+/// Runtime-only context: resolved values and actual resource instances cannot be
+/// obtained by serializing the desired specification.
+pub struct ConstructionContext {
+    pub instance_id: Arc<str>,
+    pub graph_id: Arc<str>,
+    pub component_id: ComponentId,
+    pub generation: ComponentGeneration,
+    pub specification: Arc<ComponentSpecification>,
+    configuration: BTreeMap<Arc<str>, serde_json::Value>,
+    resources: BTreeMap<ResourceId, ResourceHandle>,
+}
+
+impl ConstructionContext {
+    pub fn configuration(&self) -> &BTreeMap<Arc<str>, serde_json::Value> {
+        &self.configuration
+    }
+
+    pub fn resources<T: Any + Send + Sync>(&self, dependency: &str) -> GraphResult<Vec<Arc<T>>> {
+        let ids = self
+            .specification
+            .dependencies
+            .get(dependency)
+            .ok_or_else(|| GraphError::Topology {
+                reason: format!("undeclared construction dependency {dependency}"),
+            })?;
+        ids.iter()
+            .map(|id| {
+                self.resources
+                    .get(id)
+                    .ok_or_else(|| GraphError::Topology {
+                        reason: format!("resource {id} is not realized"),
+                    })?
+                    .get()
+            })
+            .collect()
+    }
+
+    pub(super) async fn resolve(
+        instance_id: Arc<str>,
+        graph_id: Arc<str>,
+        generation: ComponentGeneration,
+        specification: Arc<ComponentSpecification>,
+        resources: BTreeMap<ResourceId, ResourceHandle>,
+        schema: &ConfigurationSchema,
+    ) -> Result<Self, ComponentCreationError> {
+        let configuration = schema
+            .resolve_values(&specification.configuration, &resources)
+            .await?;
+        Ok(Self {
+            instance_id,
+            graph_id,
+            component_id: specification.descriptor.id().clone(),
+            generation,
+            specification,
+            configuration,
+            resources,
+        })
+    }
+}
+
+pub(super) fn validate_specification(
+    graph_id: &str,
+    spec: &ComponentSpecification,
+    factory: &dyn ComponentFactory,
+    declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<()> {
+    spec.implementation.validate()?;
+    if (spec.role == ComponentRole::Sink) != spec.completion.is_some() {
+        return Err(super::topology(
+            "only sink specifications declare a required completion boundary",
+        ));
+    }
+    let descriptor = factory.descriptor();
+    if descriptor.implementation != spec.implementation
+        || descriptor.role != spec.role
+        || descriptor.configuration_version != spec.configuration_version
+        || spec.configuration_version == 0
+    {
+        return Err(super::topology(
+            "factory implementation, role, plugin, or configuration version mismatch",
+        ));
+    }
+    descriptor.configuration.validate_values(
+        &spec.configuration,
+        &declarations
+            .iter()
+            .map(|(id, declaration)| (id.clone(), declaration.role))
+            .collect(),
+        resources,
+    )?;
+    for (slot, requirement) in &descriptor.dependencies {
+        validate_identifier("dependency slot", slot)?;
+        let dependencies = spec
+            .dependencies
+            .get(slot)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if dependencies.len() < requirement.minimum
+            || requirement.maximum.is_some_and(|maximum| {
+                maximum < requirement.minimum || dependencies.len() > maximum
+            })
+        {
+            return Err(super::topology(format!(
+                "dependency cardinality mismatch for {slot}"
+            )));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for id in dependencies {
+            if !unique.insert(id)
+                || declarations
+                    .get(id)
+                    .is_some_and(|declaration| declaration.role != requirement.role)
+            {
+                return Err(super::topology(format!(
+                    "duplicate or incompatible dependency {slot}"
+                )));
+            }
+            if let Some(handle) = resources.get(id) {
+                if requirement
+                    .concrete_type
+                    .is_some_and(|expected| expected != handle.value.as_ref().type_id())
+                {
+                    return Err(super::topology(format!(
+                        "resource {id} has an incompatible concrete interface"
+                    )));
+                }
+            }
+        }
+    }
+    if spec
+        .dependencies
+        .keys()
+        .any(|slot| !descriptor.dependencies.contains_key(slot))
+    {
+        return Err(super::topology("undeclared factory dependency slot"));
+    }
+    let declared = spec
+        .dependencies
+        .values()
+        .flatten()
+        .chain(spec.configuration.values().filter_map(|value| match value {
+            ConfigurationValue::Reference { resource, .. } => Some(resource),
+            _ => None,
+        }))
+        .all(|id| declarations.contains_key(id));
+    let validation = if declared {
+        factory.validate_scope(graph_id, spec, declarations, resources)
+    } else {
+        factory.validate(spec)
+    };
+    validation.map_err(|error| {
+        if let Some(GraphError::Reported { cause }) = error.downcast_ref::<GraphError>() {
+            return GraphError::Reported {
+                cause: cause.clone(),
+            };
+        }
+        super::topology(format!("invalid component definition: {error:#}"))
+    })
+}

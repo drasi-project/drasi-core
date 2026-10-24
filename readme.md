@@ -14,6 +14,46 @@ Continuous Queries, once started, continue to run until they are stopped. While 
 
 Continuous Queries are implemented as graph queries written in the Cypher Query Language. The use of a declarative graph query language means you can express rich query logic that takes into consideration both the properties of the data you are querying and the relationships between data in a single query.
 
+### OPTIONAL MATCH result identity
+
+Connected optional patterns retain the required row with null optional bindings
+until a complete match exists. When that changes the MATCH identity, the result
+contains a removal for the old row and an addition for the new row. Consumers
+must apply both changes by `row_signature`; equal projected values can still
+belong to different legitimate rows. Removing the last optional match restores
+the null row, whereas removing one of several matches does not.
+
+This behavior applies to explicit relationships and synthetic joins. The hash
+algorithm for MATCH identities is unchanged. Already-corrupted materialized
+results containing orphaned null rows are not automatically rewritten; rebuild
+affected query state from its authoritative source before relying on that state.
+
+Independent patterns such as `MATCH (w:Workload) OPTIONAL MATCH (a:AppliedPlan)`
+enumerate candidates for each disconnected component. Required matches produce
+their Cartesian product. An absent optional component contributes null bindings
+without dropping the required rows; later context insertion, update and deletion
+update those existing results. Multiple matching context records multiply rows,
+so queries should request that product intentionally rather than assume that a
+label is a singleton.
+Updating an isolated context without changing its matching slots resolves only
+the affected before/after matches; it does not rescan every required anchor.
+Slot-membership changes still reconcile null and concrete matches fully.
+
+Disconnected matching requires `ElementIndex::get_slot_elements`. The memory,
+RocksDB and Garnet indexes support it, including writes staged in the current
+transaction; cached and scoped indexes forward the capability. Custom indexes
+without it return an explicit unsupported-operation error instead of an empty
+result. Enumeration uses existing affinity data, not a new persisted key format.
+
+A missing optional collection remains unknown: list comprehensions and `reduce`
+over a null list return null without evaluating their body. An empty list is
+still an empty list, and non-list scalar inputs remain type errors.
+Map equality and inequality compare all keys and values recursively, using the
+same value-comparison rules as lists; map key insertion order is not significant.
+Integer/float equality compares exact numeric values in either operand order;
+inequality is its complement. Large integers are not rounded through `f64` to
+decide equality.
+
 Drasi-core is the internal library used by [Drasi](https://github.com/drasi-project/drasi-platform) to implement continuous queries. Drasi itself is a much broader solution with many more moving parts.  Drasi-core can be used stand-alone from Drasi for embedded scenarios, where continuous queries could run in-process inside an application.
 
 ## Example

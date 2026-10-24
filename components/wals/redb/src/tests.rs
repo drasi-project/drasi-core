@@ -330,6 +330,15 @@ async fn test_prune_all() {
     assert_eq!(pruned, 5);
     assert_eq!(provider.event_count(TEST_SRC).await.unwrap(), 0);
     assert_eq!(provider.oldest_sequence(TEST_SRC).await.unwrap(), None);
+    assert_eq!(provider.head_sequence(TEST_SRC).await.unwrap(), 5);
+    assert!(matches!(
+        provider.read_from(TEST_SRC, 1).await,
+        Err(WalError::PositionUnavailable {
+            oldest_available: None,
+            ..
+        })
+    ));
+    assert!(provider.read_from(TEST_SRC, 6).await.unwrap().is_empty());
 }
 
 #[tokio::test]

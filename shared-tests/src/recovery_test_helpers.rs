@@ -360,7 +360,7 @@ where
     assert_no_error_event(&mut event_rx, reaction_id, Duration::from_millis(500)).await?;
     assert_reaction_running(&core, reaction_id).await?;
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 

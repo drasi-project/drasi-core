@@ -47,7 +47,9 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn get_graph(&self) -> GraphSnapshot {
-        self.component_graph.read().await.snapshot()
+        self.computation_runtime.graph_snapshot().await.expect(
+            "computation registry publication must contain its declared component resources",
+        )
     }
 
     /// Get all components that depend on the given component.
@@ -70,8 +72,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn get_dependents(&self, id: &str) -> Vec<ComponentNode> {
-        self.component_graph
-            .read()
+        self.get_graph()
             .await
             .get_dependents(id)
             .into_iter()
@@ -99,8 +100,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn get_dependencies(&self, id: &str) -> Vec<ComponentNode> {
-        self.component_graph
-            .read()
+        self.get_graph()
             .await
             .get_dependencies(id)
             .into_iter()
@@ -125,14 +125,31 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn can_remove_component(&self, id: &str) -> Result<()> {
-        let graph = self.component_graph.read().await;
-        graph.can_remove(id).map_err(|dependent_ids| {
-            crate::error::DrasiError::validation(format!(
+        let id = crate::computation::v1::ComponentId::try_new(id)
+            .map_err(|error| crate::DrasiError::validation(error.to_string()).with_cause(error))?;
+        let control = self.computation_control()?;
+        let publication = control.registry_snapshot();
+        let mut dependents = publication.desired.data_dependents(&id);
+        if self
+            .computation_runtime
+            .ordinary_queries_at(&publication)?
+            .contains_key(&id)
+        {
+            let owned = crate::computation::runtime::native_query::query_members(&publication, &id);
+            dependents.retain(|dependent| !owned.contains_key(dependent));
+        }
+        if !dependents.is_empty() {
+            return Err(crate::error::DrasiError::validation(format!(
                 "Cannot remove '{}': depended on by: {}",
                 id,
-                dependent_ids.join(", ")
-            ))
-        })
+                dependents
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok(())
     }
 }
 

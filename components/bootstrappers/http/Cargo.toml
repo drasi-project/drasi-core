@@ -30,6 +30,7 @@ crate-type = ["lib", "cdylib"]
 workspace = true
 
 [dependencies]
+drasi-http-common = { workspace = true, features = ["bootstrap"] }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }

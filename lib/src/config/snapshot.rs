@@ -60,7 +60,7 @@ pub struct ConfigurationSnapshot {
     /// All source components with their configuration properties
     pub sources: Vec<SourceSnapshot>,
     /// All query components with their full query configurations
-    pub queries: Vec<QuerySnapshot>,
+    pub queries: Vec<QueryConfigurationSnapshot>,
     /// All reaction components with their configuration properties
     pub reactions: Vec<ReactionSnapshot>,
     /// Dependency edges between components (source→query, query→reaction)
@@ -78,11 +78,11 @@ pub struct SourceSnapshot {
     pub status: ComponentStatus,
     /// Whether the source was configured to auto-start
     pub auto_start: bool,
-    /// Configuration properties from [`Source::properties()`], including secrets.
+    /// Configuration properties from [`crate::Source::properties()`], including secrets.
     ///
     /// This is the authoritative config used to persist and recreate the source.
     /// It intentionally contains sensitive values — see the persistence contract
-    /// on [`Source::properties()`] for details.
+    /// on [`crate::Source::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
     /// Bootstrap provider configuration, if one is attached to this source
     pub bootstrap_provider: Option<BootstrapSnapshot>,
@@ -97,9 +97,12 @@ pub struct BootstrapSnapshot {
     pub properties: HashMap<String, serde_json::Value>,
 }
 
-/// Snapshot of a query component's configuration.
+/// A query's configuration and lifecycle status, not its result rows.
+///
+/// Result rows are represented by
+/// [`QueryResultSnapshot`](crate::computation::v1::QueryResultSnapshot).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuerySnapshot {
+pub struct QueryConfigurationSnapshot {
     /// Query component identifier
     pub id: String,
     /// Full query configuration (query string, source subscriptions, joins, etc.)
@@ -121,10 +124,30 @@ pub struct ReactionSnapshot {
     pub auto_start: bool,
     /// Query IDs this reaction subscribes to
     pub queries: Vec<String>,
-    /// Configuration properties from [`Reaction::properties()`], including secrets.
+    /// Configuration properties from [`crate::Reaction::properties()`], including secrets.
     ///
     /// This is the authoritative config used to persist and recreate the reaction.
     /// It intentionally contains sensitive values — see the persistence contract
-    /// on [`Reaction::properties()`] for details.
+    /// on [`crate::Reaction::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn query_configuration_snapshot_round_trips_settings_and_status() {
+        let config = crate::Query::cypher("query")
+            .query("MATCH (n:Item) RETURN n.name AS name")
+            .from_source("source")
+            .build();
+        let expected = serde_json::json!({
+            "id": "query",
+            "config": config,
+            "status": "Stopped"
+        });
+        let snapshot: QueryConfigurationSnapshot =
+            serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), expected);
+    }
 }

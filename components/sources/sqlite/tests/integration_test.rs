@@ -95,7 +95,6 @@ async fn wait_for_query_results<F>(
 }
 
 #[tokio::test]
-#[ignore]
 async fn sqlite_handle_create_update_delete_flow() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("handle.db");
@@ -180,11 +179,10 @@ async fn sqlite_handle_create_update_delete_flow() {
     })
     .await;
 
-    core.stop().await.unwrap();
+    core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-#[ignore]
 async fn sqlite_rest_crud_and_batch_flow() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("rest.db");
@@ -330,11 +328,10 @@ async fn sqlite_rest_crud_and_batch_flow() {
     )
     .await;
 
-    core.stop().await.unwrap();
+    core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-#[ignore]
 async fn sqlite_bootstrap_loads_existing_rows() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bootstrap.db");
@@ -399,10 +396,10 @@ async fn sqlite_bootstrap_loads_existing_rows() {
         },
         other => panic!("unexpected bootstrap change: {other:?}"),
     }
+    source.stop().await.unwrap();
 }
 
 #[tokio::test]
-#[ignore]
 async fn sqlite_multi_table_changes_flow_to_queries() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("multi-table.db");
@@ -512,7 +509,7 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
     assert!(saw_sensor_query, "did not receive sensors query result");
     assert!(saw_device_query, "did not receive devices query result");
 
-    core.stop().await.unwrap();
+    core.shutdown().await.unwrap();
 }
 
 /// Every change the SQLite CDC background task emits must carry a
@@ -522,7 +519,6 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
 /// `sequence = None`. This subscribes directly to the source's change stream
 /// and asserts the sequences are stamped and monotonic.
 #[tokio::test]
-#[ignore]
 async fn sqlite_emitted_changes_have_monotonic_sequence() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("sequence.db");

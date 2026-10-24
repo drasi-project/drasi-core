@@ -354,13 +354,12 @@ async fn wait_for_outbox_sequence(
 // ============================================================================
 
 #[rstest::rstest]
-#[case::insert_only(1, false)]
-#[case::named_update(2, false)]
-#[case::malformed_legacy_update(2, true)]
+#[case::insert_only(1)]
+#[case::named_update(2)]
 #[tokio::test]
 #[serial]
-async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy_compact: bool) {
-    use crate::channels::{QueryResult, ResultDiff, SourceEvent};
+async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64) {
+    use crate::channels::{ResultDiff, SourceEvent};
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
     };
@@ -437,21 +436,6 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy
     core.shutdown().await.unwrap();
     drop(core);
 
-    let legacy_entries = if legacy_compact {
-        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-        let indexes = provider.create_indexes("outbox-q").await.unwrap();
-        let writer = indexes.outbox_writer.as_ref().unwrap();
-        let mut entries = writer.read_from("outbox-q", 0).await.unwrap();
-        for (sequence, bytes) in &mut entries {
-            let result: QueryResult = rmp_serde::from_slice(bytes).unwrap();
-            *bytes = rmp_serde::to_vec(&result).unwrap();
-            writer.append("outbox-q", *sequence, bytes).await.unwrap();
-        }
-        Some(entries)
-    } else {
-        None
-    };
-
     let reopened = build_e2e_lib("outbox-reopen", &tmp_dir, Some(RecoveryPolicy::Strict))
         .await
         .unwrap();
@@ -466,30 +450,6 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy
     reopened.start().await.unwrap();
     reopened.start_source("outbox-src").await.unwrap();
     let started = reopened.start_query("outbox-q").await;
-    if let Some(legacy_entries) = legacy_entries {
-        let error = started.expect_err("malformed legacy output must fail Strict recovery");
-        let message = format!("{error:#}");
-        assert!(message.contains("sequence 2"), "{message}");
-        assert!(message.contains("expected a sequence"), "{message}");
-        assert!(message.contains("Strict recovery policy"), "{message}");
-        wait_for_status(&reopened, "outbox-q", ComponentStatus::Error).await;
-        reopened.shutdown().await.unwrap();
-        drop(reopened);
-        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-        let indexes = provider.create_indexes("outbox-q").await.unwrap();
-        assert_eq!(
-            indexes
-                .outbox_writer
-                .as_ref()
-                .unwrap()
-                .read_from("outbox-q", 0)
-                .await
-                .unwrap(),
-            legacy_entries,
-            "Strict recovery must preserve the malformed records"
-        );
-        return;
-    }
     started.expect("fresh persistent reopen must hydrate ordinary query updates");
     assert_eq!(*resume_sequence.read().await, Some(sequence));
     let query = reopened
@@ -1366,7 +1326,7 @@ mod aggregate_snapshot_tests {
 
     #[tokio::test]
     #[serial]
-    async fn aggregate_snapshot_legacy_contributor_keys_require_explicit_rebuild() {
+    async fn aggregate_snapshot_legacy_contributor_namespace_is_never_adopted() {
         use drasi_core::{
             evaluation::functions::FunctionRegistry, interface::RowMutation, query::QueryBuilder,
         };
@@ -1398,8 +1358,8 @@ mod aggregate_snapshot_tests {
         assert_ne!(signature, aapl);
         assert_ne!(signature, msft);
 
-        // Model a pre-fix live-results table without changing the accumulator or
-        // checkpoint format: intermediate and current rows use MATCH identities.
+        // Legacy processing namespaces are outside the graph's storage scope.
+        // Do not adopt their stale contributor rows or mutate them during recovery.
         let stale = rmp_serde::to_vec(&summary(1100.0, 800.0, 1)).unwrap();
         let current = rmp_serde::to_vec(&summary(2000.0, 1800.0, 2)).unwrap();
         {
@@ -1432,10 +1392,10 @@ mod aggregate_snapshot_tests {
                 .unwrap();
         }
 
-        let mut legacy =
-            HashMap::from([(aapl, summary(1100.0, 800.0, 1)), (msft, summary(2000.0, 1800.0, 2))]);
         let mut subject = PersistentAggregate::open(&tmp, "legacy-summary").await;
-        subject.assert_snapshot(legacy.clone()).await;
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(2000.0, 1800.0, 2))]))
+            .await;
         assert_eq!(
             subject
                 .send(
@@ -1453,11 +1413,11 @@ mod aggregate_snapshot_tests {
         );
         subject.shutdown().await;
 
-        // A corrected upsert cannot identify or remove old contributor keys.
-        // Reopening reads all of them; this is a migration limit, not recovery.
-        legacy.insert(signature, summary(2050.0, 1800.0, 2));
+        // Only the graph's committed group survives its reopen.
         let subject = PersistentAggregate::open(&tmp, "legacy-summary").await;
-        subject.assert_snapshot(legacy).await;
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(2050.0, 1800.0, 2))]))
+            .await;
         subject.shutdown().await;
 
         // A new query namespace and complete input reconstruction are an explicit
@@ -1478,8 +1438,9 @@ mod aggregate_snapshot_tests {
                 .read_snapshot("legacy-summary")
                 .await
                 .unwrap()
-                .len(),
-            3
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            std::collections::BTreeMap::from([(aapl, stale), (msft, current)])
         );
     }
 }

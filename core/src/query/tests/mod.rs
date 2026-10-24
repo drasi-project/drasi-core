@@ -13,6 +13,9 @@
 // limitations under the License.
 
 mod aggregate_update_tests;
+#[cfg(feature = "computation")]
+mod mutation_integrity;
+mod optional_context_work;
 mod retained_multi_source_tests;
 mod row_signature_tests;
 

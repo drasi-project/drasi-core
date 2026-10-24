@@ -43,9 +43,7 @@ async fn bootstrap_query(query: &ContinuousQuery) -> Vec<QueryPartEvaluationCont
     let mut all_results = Vec::new();
 
     for change in data {
-        if let Ok(results) = query.process_source_change(change).await {
-            all_results.extend(results);
-        }
+        all_results.extend(query.process_source_change(change).await.unwrap());
     }
 
     all_results
@@ -212,7 +210,7 @@ pub async fn collect_with_filter_test(config: &(impl QueryTestConfig + Send)) {
         builder.build().await
     };
 
-    let _ = bootstrap_query(&query).await;
+    let bootstrap_results = bootstrap_query(&query).await;
 
     // Add a low rating review to product p1 (which already has high ratings)
     let low_review = SourceChange::Insert {
@@ -251,9 +249,10 @@ pub async fn collect_with_filter_test(config: &(impl QueryTestConfig + Send)) {
     println!("\n=== Collect with Filter Test ===");
     println!("Number of results from update: {}", result.len());
 
-    // If we didn't get results from the update, check the bootstrap results
-    let bootstrap_results = bootstrap_query(&query).await;
-    println!("Bootstrap results: {}", bootstrap_results.len());
+    assert!(
+        bootstrap_query(&query).await.is_empty(),
+        "repeated identical inserts must not emit additional aggregate changes"
+    );
 
     // Check for products with high ratings either in update or bootstrap
     let all_results: Vec<_> = result.iter().chain(bootstrap_results.iter()).collect();

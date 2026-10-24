@@ -18,15 +18,16 @@ use tokio::sync::mpsc;
 
 /// Configuration options for query result subscriptions
 ///
-/// `SubscriptionOptions` allows you to customize how query results are received and buffered.
-/// Use the builder pattern to configure buffering, filtering, timeouts, and batch processing.
+/// Configure receive timeouts and batch sizes. The `buffer_size` and `query_filter`
+/// fields are retained options but are not currently applied by `Subscription`.
+/// Filter in the consumer or use `ApplicationReactionHandle::subscribe_filtered`.
 ///
 /// # Default Values
 ///
-/// - `buffer_size`: 1000
-/// - `query_filter`: Empty (receive all queries)
+/// - `buffer_size`: 1000 (does not resize the application channel)
+/// - `query_filter`: Empty (not applied by subscription receives)
 /// - `timeout`: None (wait indefinitely)
-/// - `batch_size`: None (receive one at a time)
+/// - `batch_size`: None (`recv_batch()` uses 10)
 ///
 /// # Examples
 ///
@@ -45,8 +46,6 @@ use tokio::sync::mpsc;
 /// use std::time::Duration;
 ///
 /// let options = SubscriptionOptions::default()
-///     .with_buffer_size(5000)                      // Buffer up to 5000 results
-///     .with_query_filter(vec!["users".to_string()]) // Only "users" query
 ///     .with_timeout(Duration::from_secs(30))        // 30 second timeout
 ///     .with_batch_size(50);                         // Receive up to 50 at a time
 /// ```
@@ -56,29 +55,15 @@ use tokio::sync::mpsc;
 /// ```
 /// use drasi_reaction_application::subscription::SubscriptionOptions;
 ///
-/// // Optimize for high-throughput scenarios
+/// // Receive up to 100 already-available results after the first result arrives
 /// let options = SubscriptionOptions::default()
-///     .with_buffer_size(10000)     // Large buffer
 ///     .with_batch_size(100);        // Large batches
-/// ```
-///
-/// ## Filtered Subscription
-///
-/// ```
-/// use drasi_reaction_application::subscription::SubscriptionOptions;
-///
-/// // Only receive results from specific queries
-/// let options = SubscriptionOptions::default()
-///     .with_query_filter(vec![
-///         "active_users".to_string(),
-///         "recent_orders".to_string()
-///     ]);
 /// ```
 #[derive(Clone)]
 pub struct SubscriptionOptions {
-    /// Maximum number of results to buffer
+    /// Stored capacity hint; currently does not resize the fixed application channel.
     pub buffer_size: usize,
-    /// Filter by query names (empty = all queries)
+    /// Stored query IDs; currently not applied by subscription receive methods.
     pub query_filter: Vec<String>,
     /// Maximum time to wait for results before returning None
     pub timeout: Option<Duration>,
@@ -113,14 +98,14 @@ impl SubscriptionOptions {
         Self::default()
     }
 
-    /// Set the internal buffer size for results
+    /// Store a buffer-size hint.
     ///
-    /// Controls how many results can be buffered before blocking the producer.
-    /// A larger buffer allows for more bursty workloads but uses more memory.
+    /// ApplicationReaction currently uses a fixed 1,000-message application channel.
+    /// This option does not resize it or change backpressure.
     ///
     /// # Arguments
     ///
-    /// * `size` - Maximum number of results to buffer (default: 1000)
+    /// * `size` - Stored hint (default: 1000)
     ///
     /// # Examples
     ///
@@ -128,21 +113,21 @@ impl SubscriptionOptions {
     /// use drasi_reaction_application::subscription::SubscriptionOptions;
     ///
     /// let options = SubscriptionOptions::default()
-    ///     .with_buffer_size(5000);  // Large buffer for high throughput
+    ///     .with_buffer_size(5000);  // Stores the hint; does not resize the channel
     /// ```
     pub fn with_buffer_size(mut self, size: usize) -> Self {
         self.buffer_size = size;
         self
     }
 
-    /// Filter results to only include specific queries
+    /// Store a query filter.
     ///
-    /// When set, only results from queries with matching IDs will be received.
-    /// An empty filter (default) receives results from all queries.
+    /// Subscription receive methods currently do not apply this field. Filter in
+    /// the consumer or use `ApplicationReactionHandle::subscribe_filtered` instead.
     ///
     /// # Arguments
     ///
-    /// * `queries` - List of query IDs to receive results from
+    /// * `queries` - Query IDs to store in the options
     ///
     /// # Examples
     ///
@@ -216,18 +201,21 @@ impl SubscriptionOptions {
 /// - **Batch processing**: Receive multiple results at once with `recv_batch()`
 /// - **Async iteration**: Convert to a stream with `into_stream()`
 /// - **Timeouts**: Automatically timeout based on options
-/// - **Filtering**: Automatically filter by query ID based on options
+///
+/// The stored query-filter option is not applied; filter explicitly in the consumer.
 ///
 /// # Thread Safety
 ///
-/// `Subscription` is not `Send` and should be used within a single task.
+/// `Subscription` can be moved into an owning task. Receive calls require mutable access.
 ///
 /// # Examples
 ///
 /// ## Basic Usage
 ///
 /// ```ignore
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) =
+///     drasi_reaction_application::ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()
@@ -242,7 +230,9 @@ impl SubscriptionOptions {
 /// ## Batch Processing
 ///
 /// ```ignore
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) =
+///     drasi_reaction_application::ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default().with_batch_size(50)
@@ -263,7 +253,9 @@ impl SubscriptionOptions {
 /// ```ignore
 /// use std::time::Duration;
 ///
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) =
+///     drasi_reaction_application::ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()

@@ -17,6 +17,9 @@
 //! RocksDB Index Backend for Drasi
 //!
 //! This crate provides a persistent storage backend for Drasi queries using RocksDB.
+//! Index clearing deletes data within the active transaction (or a standalone
+//! atomic write batch), preserving column families and their configured options.
+//! It does not drop/recreate schema or bypass rollback.
 //!
 //! # Usage
 //!
@@ -77,6 +80,9 @@ pub mod result_index;
 mod session_state;
 mod sizing;
 mod storage_models;
+
+#[cfg(feature = "computation")]
+pub mod computation;
 
 // Re-export the plugin provider and unified DB opener for easy access
 pub use checkpoint::RocksDbCheckpointStore;

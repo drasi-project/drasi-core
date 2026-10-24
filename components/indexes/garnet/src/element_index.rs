@@ -21,12 +21,12 @@ use std::{
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use bit_set::BitSet;
+use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
     interface::{ElementIndex, ElementStream, IndexError},
     models::{Element, ElementReference, QueryJoin, QueryJoinKey},
     path_solver::match_path::MatchPath,
 };
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::Message;
 use tokio::sync::RwLock;
 
@@ -366,6 +366,7 @@ impl GarnetElementIndex {
                                                     StoredElement::Relation(StoredRelation {
                                                         metadata: StoredElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 &element_reference,
                                                                 &other,
                                                             ),
@@ -383,6 +384,7 @@ impl GarnetElementIndex {
                                                     StoredElement::Relation(StoredRelation {
                                                         metadata: StoredElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 &other,
                                                                 &element_reference,
                                                             ),
@@ -489,8 +491,8 @@ impl GarnetElementIndex {
                 let others = self.buffered_smembers_refs(&other_pj_key).await?;
 
                 for other in others {
-                    let in_out = get_join_virtual_ref(old_element, &other);
-                    let out_in = get_join_virtual_ref(&other, old_element);
+                    let in_out = get_join_virtual_ref(query_join, old_element, &other);
+                    let out_in = get_join_virtual_ref(query_join, &other, old_element);
 
                     self.delete_element_internal(&in_out).await?;
                     self.delete_element_internal(&out_in).await?;
@@ -624,6 +626,29 @@ impl GarnetElementIndex {
         }
 
         Ok(())
+    }
+
+    async fn get_slots_internal(&self, element_key: &str) -> Result<Option<BitSet>, IndexError> {
+        let buffered = {
+            let guard = self.session_state.lock()?;
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            buffer.hash_get(element_key, "slots")
+        };
+        let bytes = match buffered {
+            BufferReadResult::Found(bytes) => Some(bytes),
+            BufferReadResult::KeyDeleted => None,
+            BufferReadResult::NotInBuffer => self
+                .connection
+                .clone()
+                .hget::<_, _, Option<Vec<u8>>>(element_key, "slots")
+                .await
+                .map_err(IndexError::other)?,
+        };
+        Ok(bytes.map(|bytes| BitSet::from_bytes(&bytes)))
     }
 
     async fn get_element_internal(
@@ -796,6 +821,62 @@ impl GarnetElementIndex {
 
 #[async_trait]
 impl ElementIndex for GarnetElementIndex {
+    async fn get_slot_elements(&self, slot: usize) -> Result<ElementStream, IndexError> {
+        let prefix = format!("ei:{{{}}}:", self.query_id);
+        let pattern = format!(
+            "{}*",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('*', "\\*")
+                .replace('?', "\\?")
+                .replace('[', "\\[")
+                .replace(']', "\\]")
+        );
+        let mut connection = self.connection.clone();
+        let mut cursor = 0u64;
+        let mut keys = HashSet::new();
+        loop {
+            let (next, page): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("TYPE")
+                .arg("hash")
+                .arg("COUNT")
+                .arg(128)
+                .query_async(&mut connection)
+                .await
+                .map_err(IndexError::other)?;
+            keys.extend(page);
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+        {
+            let guard = self.session_state.lock()?;
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            keys.extend(buffer.hash_keys_with_field(&prefix, "e"));
+        }
+        let mut rows: Vec<Arc<Element>> = Vec::new();
+        for key in keys {
+            if self
+                .get_slots_internal(&key)
+                .await?
+                .is_some_and(|affinity| affinity.contains(slot))
+            {
+                if let Some(element) = self.get_element_internal(&key).await? {
+                    rows.push(Arc::new(element.into()));
+                }
+            }
+        }
+        Ok(Box::pin(futures::stream::iter(rows.into_iter().map(Ok))))
+    }
+
     #[tracing::instrument(skip_all, err)]
     async fn get_element(
         &self,
@@ -842,34 +923,8 @@ impl ElementIndex for GarnetElementIndex {
     ) -> Result<Option<Arc<Element>>, IndexError> {
         let element_key = self.key_formatter.get_element_key(element_ref);
 
-        // Check buffer first for slots
-        let stored_slots = {
-            let guard = self.session_state.lock()?;
-            let buffer = guard.as_ref().ok_or_else(|| {
-                IndexError::other(std::io::Error::other(
-                    "read operation requires an active session",
-                ))
-            })?;
-            match buffer.hash_get(&element_key, "slots") {
-                BufferReadResult::Found(bytes) => Some(BitSet::from_bytes(bytes.as_slice())),
-                BufferReadResult::KeyDeleted => return Ok(None),
-                BufferReadResult::NotInBuffer => None, // fall through to Redis
-            }
-        };
-
-        let stored_slots = match stored_slots {
-            Some(s) => s,
-            None => {
-                let mut con = self.connection.clone();
-                match con
-                    .hget::<&str, &str, Option<Vec<u8>>>(&element_key, "slots")
-                    .await
-                {
-                    Ok(Some(stored)) => BitSet::from_bytes(stored.as_slice()),
-                    Ok(None) => return Ok(None),
-                    Err(e) => return Err(IndexError::other(e)),
-                }
-            }
+        let Some(stored_slots) = self.get_slots_internal(&element_key).await? else {
+            return Ok(None);
         };
 
         if !stored_slots.contains(slot) {
@@ -1074,10 +1129,16 @@ fn extract_join_spec_by_label(
 }
 
 fn get_join_virtual_ref(
+    join: &QueryJoin,
     ref1: &StoredElementReference,
     ref2: &StoredElementReference,
 ) -> StoredElementReference {
-    let new_id = format!("{}:{}", ref1.element_id, ref2.element_id);
+    let new_id = join.relationship_id(
+        &ref1.source_id,
+        &ref1.element_id,
+        &ref2.source_id,
+        &ref2.element_id,
+    );
     StoredElementReference {
         source_id: "$join".to_string(),
         element_id: new_id,

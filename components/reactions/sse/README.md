@@ -26,13 +26,24 @@ The SSE Reaction component exposes Drasi continuous query results to web clients
 - Live query result updates for continuous queries
 - Push-based notifications for data changes
 
-## Lifecycle
+## Lifecycle and Delivery Boundary
 
-`start()` binds the configured host and port before reporting `Running` or returning success. Binding, including hostname resolution, has a five-second timeout. If binding fails or times out, it returns an error and reports `Error` without starting background tasks. Calling `start()` on an already-started reaction returns an error without replacing the running server; call `stop()` before starting it again. Lifecycle transitions are serialized, so a concurrent `stop()` waits for an in-flight `start()`.
+`start()` binds the listener before reporting `Running`; binding, including
+hostname resolution, has a five-second timeout. Bind failures return their
+original I/O cause without starting workers. Await `stop()` before restart.
+Processing, heartbeat and server workers are owned before spawning, and stop
+closes SSE streams and joins the HTTP server before publishing `Stopped`.
+Lifecycle transitions are serialized. A cancelled partial start requires cleanup
+before another start, even if its workers have not yet been spawned.
 
-`stop()` signals the heartbeat and HTTP server tasks to shut down, ends active SSE streams, and waits for those tasks to terminate. It also delegates result-processing shutdown and queue cleanup to `ReactionBase::stop_common()`. After a successful stop, the configured port can be reused immediately. It is safe to call before `start()` or repeatedly. Heartbeat panics and HTTP server errors are preserved and reported as shutdown errors after cleanup.
-
-Auxiliary tasks have five seconds to shut down gracefully, followed by up to five seconds to join after cancellation. A timeout reports `Error`, not success. Any tasks still unfinished after cancellation remain tracked and prevent another `start()` until a subsequent `stop()` finishes cleaning them up. Result-processing shutdown retains `ReactionBase`'s existing two-second grace period and abort behavior.
+Cancellation or a five-second server-drain timeout retains ownership and rejects
+restart until a later `stop()` completes. A timed-out server is not aborted while
+it owns unfinished HTTP requests. Worker panics and server errors remain typed
+causes. Cleanup attempts the remaining independent workers after a task failure
+and reports `Error`, never successful shutdown, while cleanup remains unfinished.
+This preserves the existing broadcast behavior: no browser
+acknowledgement or durable receipt is provided, and lagged subscribers must
+reconnect and fetch a fresh snapshot.
 
 ## Configuration
 
@@ -563,7 +574,9 @@ The SSE Reaction uses Tokio's broadcast channel to efficiently distribute events
 
 - Channel capacity: 1024 messages
 - Late subscribers receive new events only (no replay)
-- Slow clients may experience message lag if they fall too far behind
+- A client that falls behind the broadcast buffer is disconnected, with the lag
+  logged. It must reconnect and fetch a fresh snapshot; the stream does not
+  silently continue with a truncated tail.
 - Client disconnections are handled automatically
 
 ### CORS Configuration
@@ -585,11 +598,11 @@ Two mechanisms ensure connection stability:
 
 The SSE Reaction handles various error conditions gracefully:
 
-- **Port binding failures or timeouts**: Prevent startup; `start()` logs and returns the error, reports `Error`, and does not start background tasks. See [Lifecycle](#lifecycle) for the five-second bind timeout and retry behavior.
+- **Port binding failures**: Logged but don't prevent startup
 - **Client disconnections**: Automatically cleaned up
-- **Broadcast channel full**: Old messages are dropped (lagging clients)
+- **Broadcast channel full**: Affected lagging subscribers are disconnected and the loss is logged
 - **No connected clients**: Messages are dropped without error
-- **Slow clients**: May receive lag errors if they fall too far behind
+- **Slow clients**: Must reconnect and resnapshot after disconnection; missed transient events are not replayed
 
 ## Performance Considerations
 
@@ -638,7 +651,7 @@ The SSE Reaction handles various error conditions gracefully:
 - Verify queries are producing output
 
 **Client shows lag errors:**
-- Increase broadcast channel capacity
+- Reconnect and fetch a fresh snapshot before treating the displayed state as current
 - Reduce query result frequency
 - Consider multiple SSE reactions for different query groups
 

@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unexpected_cfgs)]
-
-//! Application reaction plugin for Drasi
+//! Application reactions for in-process Drasi hosts.
 //!
 //! This plugin implements Application reactions for Drasi.
+//! Use [`NativeApplicationReaction`] for direct ComputationGraph envelope
+//! delivery with bounded channel or awaited callback completion. The existing
+//! [`ApplicationReaction`] remains the legacy `QueryResult` interface.
 //!
 //! # Example
 //!
@@ -36,12 +37,13 @@
 
 pub mod application;
 pub mod config;
-pub mod descriptor;
+pub mod native;
 pub mod subscription;
 
 pub use application::ApplicationReaction;
 pub use application::ApplicationReactionHandle;
 pub use config::ApplicationReactionConfig;
+pub use native::ApplicationReaction as NativeApplicationReaction;
 
 /// Builder for Application reaction
 pub struct ApplicationReactionBuilder {
@@ -128,5 +130,3 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
     }
 }
-
-// Core plugin — registered statically by the server, not exported for dynamic loading.

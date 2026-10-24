@@ -117,6 +117,161 @@ fn make_delete(source: &str, id: &str) -> SourceChange {
 }
 
 #[tokio::test]
+async fn optional_match_transitions_preserve_the_complete_identity_keyed_row_set() {
+    use crate::models::{QueryJoin, QueryJoinKey};
+    use std::collections::BTreeMap;
+
+    for synthetic in [false, true] {
+        let parser = Arc::new(CypherParser::new(Arc::new(FunctionRegistry::new())));
+        let mut builder = QueryBuilder::new(
+            "MATCH (d:DecisionExplanation) OPTIONAL MATCH (d)-[:DECISION_WRITE]->(w:PlanWriteOutcome) RETURN d.decision_id AS decision_id, w.outcome AS outcome",
+            parser,
+        );
+        if synthetic {
+            builder = builder.with_joins(vec![QueryJoin {
+                id: "DECISION_WRITE".into(),
+                keys: ["DecisionExplanation", "PlanWriteOutcome"]
+                    .into_iter()
+                    .map(|label| QueryJoinKey {
+                        label: label.into(),
+                        property: "decision_id".into(),
+                    })
+                    .collect(),
+            }]);
+        }
+        let query = builder.build().await;
+        let mut rows = BTreeMap::new();
+        let mut apply = |changes: Vec<QueryPartEvaluationContext>| {
+            for change in changes {
+                match change {
+                    QueryPartEvaluationContext::Adding {
+                        after,
+                        row_signature,
+                    } => {
+                        assert!(
+                            rows.insert(row_signature, after).is_none(),
+                            "duplicate added identity"
+                        );
+                    }
+                    QueryPartEvaluationContext::Updating {
+                        before,
+                        after,
+                        row_signature,
+                    } => {
+                        assert_eq!(
+                            rows.get(&row_signature),
+                            Some(&before),
+                            "update must identify its actual previous row"
+                        );
+                        rows.insert(row_signature, after);
+                    }
+                    QueryPartEvaluationContext::Removing {
+                        before,
+                        row_signature,
+                    } => {
+                        assert_eq!(
+                            rows.remove(&row_signature),
+                            Some(before),
+                            "delete must identify its actual previous row"
+                        );
+                    }
+                    other => panic!("unexpected non-aggregate change: {other:?}"),
+                }
+            }
+            let mut values: Vec<_> = rows
+                .values()
+                .map(|row| serde_json::to_value(row).unwrap())
+                .collect();
+            values.sort_by_key(ToString::to_string);
+            values
+        };
+        assert_eq!(
+            apply(
+                query
+                    .process_source_change(make_node(
+                        "test",
+                        "left",
+                        "DecisionExplanation",
+                        json!({"decision_id":"decision"})
+                    ))
+                    .await
+                    .unwrap()
+            ),
+            vec![json!({"decision_id":"decision","outcome":null})],
+        );
+        if !synthetic {
+            for right in ["first", "second"] {
+                assert_eq!(
+                    apply(
+                        query
+                            .process_source_change(SourceChange::Insert {
+                                element: Element::Relation {
+                                    metadata: ElementMetadata {
+                                        reference: ElementReference::new(
+                                            "test",
+                                            &format!("edge-{right}")
+                                        ),
+                                        labels: Arc::from([Arc::from("DECISION_WRITE")]),
+                                        effective_from: 1000,
+                                    },
+                                    in_node: ElementReference::new("test", "left"),
+                                    out_node: ElementReference::new("test", right),
+                                    properties: ElementPropertyMap::new(),
+                                },
+                            })
+                            .await
+                            .unwrap()
+                    ),
+                    vec![json!({"decision_id":"decision","outcome":null})],
+                );
+            }
+        }
+        for (id, count) in [("first", 1), ("second", 2)] {
+            let result = apply(
+                query
+                    .process_source_change(make_node(
+                        "test",
+                        id,
+                        "PlanWriteOutcome",
+                        json!({"decision_id":"decision","outcome":"rejected"}),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(
+                result,
+                vec![json!({"decision_id":"decision","outcome":"rejected"}); count]
+            );
+        }
+        assert_eq!(
+            apply(
+                query
+                    .process_source_change(make_delete("test", "first"))
+                    .await
+                    .unwrap()
+            ),
+            vec![json!({"decision_id":"decision","outcome":"rejected"})],
+        );
+        assert_eq!(
+            apply(
+                query
+                    .process_source_change(make_delete("test", "second"))
+                    .await
+                    .unwrap()
+            ),
+            vec![json!({"decision_id":"decision","outcome":null})],
+        );
+        assert!(apply(
+            query
+                .process_source_change(make_delete("test", "left"))
+                .await
+                .unwrap()
+        )
+        .is_empty());
+    }
+}
+
+#[tokio::test]
 async fn non_aggregating_insert_has_nonzero_row_signature() {
     let query = build_simple_query("MATCH (n:Sensor) RETURN n.name").await;
 

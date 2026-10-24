@@ -15,37 +15,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use thiserror::Error;
 
 use crate::models::{SourceChange, SourceMiddlewareConfig};
 
-use super::{ElementIndex, IndexError};
+use super::ElementIndex;
 
-#[derive(Error, Debug)]
-pub enum MiddlewareError {
-    #[error("Error processing source change: {0}")]
-    SourceChangeError(String),
-
-    #[error("Unknown middleware {0}")]
-    UnknownKind(String),
-
-    #[error("Error processing source change: {0}")]
-    IndexError(IndexError),
-}
-
-impl From<IndexError> for MiddlewareError {
-    fn from(val: IndexError) -> Self {
-        MiddlewareError::IndexError(val)
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum MiddlewareSetupError {
-    #[error("Invalid configuration: {0}")]
-    InvalidConfiguration(String),
-    #[error("No registry found for middleware")]
-    NoRegistry,
-}
+pub use drasi_core_types::interface::{MiddlewareError, MiddlewareSetupError};
 
 #[async_trait]
 pub trait SourceMiddleware: Send + Sync {

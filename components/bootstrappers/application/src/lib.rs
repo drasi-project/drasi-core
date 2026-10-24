@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unexpected_cfgs)]
-
-//! Application bootstrap plugin for Drasi
+//! Application-owned native bootstrap snapshots for Drasi.
 //!
-//! This plugin provides the Application bootstrap provider implementation for replaying
-//! stored insert events during query subscription.
+//! Attach this provider to a native query with `with_bootstrap`. The application
+//! owns its data; there is no Source-plugin callback or Server configuration factory.
 //!
 //! # Example
 //!
@@ -42,12 +40,11 @@
 //! ```
 
 pub mod application;
-pub mod descriptor;
 
 pub use application::{ApplicationBootstrapProvider, ApplicationBootstrapProviderBuilder};
 
-// Dynamic plugin entry point.
-// Core plugin — registered statically by the server, not exported for dynamic loading.
+#[cfg(test)]
+mod native_tests;
 
 #[cfg(test)]
 mod tests {

@@ -17,8 +17,8 @@
 use super::types::FfiStr;
 
 /// The FFI ABI contract version of this SDK. Used for compatibility checks at
-/// plugin load time: the host (`loader.rs`) rejects any plugin whose reported
-/// `sdk_version` differs in the **major or minor** component from this value.
+/// plugin load time. Hosts explicitly support this contract and the compatible
+/// ABI 0.16 fast-mode prefix; other major/minor versions are rejected.
 ///
 /// This is intentionally **decoupled from the crate release version**
 /// (`CARGO_PKG_VERSION`): it identifies the layout/ABI of the `#[repr(C)]`
@@ -50,7 +50,17 @@ use super::types::FfiStr;
 ///   which raise their sequence counter above it for restart monotonicity
 ///   (#827). This changes the subscribe call contract, so old plugins must be
 ///   rejected by the loader's major.minor check.
-pub const FFI_SDK_VERSION: &str = "0.14.0";
+/// - `0.15.0`: source-event MessagePack payloads require a source-local `u64`
+///   sequence. Missing or null sequences from older plugins are no longer valid.
+///   `SourceVtable::subscribe_fn` also gained `has_resume_sequence` so replay
+///   from sequence zero is not confused with an absent resume request.
+/// - `0.16.0`: state-store list returns an explicit result and initializes its
+///   output only on success; bootstrap calls preserve subscription settings and
+///   runtime properties as JSON. Rebuild older plugins before loading them.
+/// - `0.17.0`: state-store vtables append versioned durability lookup. New proxies
+///   release their transferred vtable/state. New hosts retain ABI 0.16 plugins'
+///   existing fast behavior, without granting newer recovery capabilities.
+pub const FFI_SDK_VERSION: &str = "0.17.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
