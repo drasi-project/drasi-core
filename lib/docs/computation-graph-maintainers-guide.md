@@ -1610,6 +1610,20 @@ Logging and event-history implementations live in `observability`. The old
 `managers` forwarding module has been removed; use the supported observability
 imports directly.
 
+Query progress measurements use `QueryApi` and its actual `QuerySourceProgress`
+and result publications. `get_query_progress_metrics` fences component generation
+and lifecycle operation and rejects an output-reset mismatch; it does not create
+a metrics-owned query cache. Publish the result view before confirming its input
+position, so a reported committed input never leads the corresponding result
+view. Missing or unready owners are absent, not zero-valued observations.
+
+Server's optional OTLP exporter samples that read path away from query execution,
+with process, instance, query and output identities. It owns its SDK provider and
+retains shutdown across cancellation without changing a global provider. These
+measurements identify processing progress, not completed external effects or a
+finished future queue. Recovery checks still need actual receiver records and a
+known final input boundary; a retained collector sample is not fresh proof.
+
 ## Making and validating a change
 
 ### Keep the change in its owning layer

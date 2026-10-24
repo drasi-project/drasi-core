@@ -20,7 +20,7 @@
 mod mock_source;
 mod runtime_support;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
@@ -280,6 +280,123 @@ async fn insert_person(handle: &MockSourceHandle, id: &str, name: &str, age: i64
 // ============================================================================
 // Tests
 // ============================================================================
+
+async fn query_progress_tracks_commits_not_output_counts() -> Result<()> {
+    use drasi_lib::computation::v1::SourceProgressKey;
+
+    let (source, handle) = MockSource::new("progress-source")?;
+    let query = Query::cypher("progress-query")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("progress-source")
+        .enable_bootstrap(false)
+        .auto_start(true)
+        .build();
+    let waiting = Query::cypher("waiting-query")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("missing-source")
+        .auto_start(true)
+        .build();
+    let core = runtime_support::builder()
+        .with_id("progress-test")
+        .with_source(source)
+        .with_query(query.clone())
+        .with_query(waiting)
+        .build()
+        .await?;
+    assert!(core.get_query_progress_metrics()?.is_empty());
+    core.start().await?;
+    handle
+        .wait_for_subscription_counts(1, Some(1))
+        .await
+        .context("initial query subscription")?;
+    let key = SourceProgressKey::Source("progress-source".into());
+    let initial = core.get_query_progress_metrics()?;
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].query_id, "progress-query");
+    assert!(initial[0].input_sequences.is_empty());
+    assert_eq!(initial[0].output_sequence, 0);
+    assert!(!initial[0].persistent);
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    insert_person(&handle, "p3", "Charlie", 35).await?;
+    handle
+        .send_node_insert(
+            "ignored",
+            vec!["Ignored"],
+            PropertyMapBuilder::new().build(),
+        )
+        .await?;
+    let completed = timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshots = core.get_query_progress_metrics()?;
+            assert_eq!(snapshots.len(), 1);
+            let snapshot = &snapshots[0];
+            let input = snapshot.input_sequences.get(&key).copied().unwrap_or(0);
+            assert!(snapshot.output_sequence >= input.min(3));
+            if input == 4 {
+                break Result::<_>::Ok(snapshot.clone());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "expected committed input 4; actual={:?}",
+            core.get_query_progress_metrics()
+        )
+    })??;
+    assert_eq!(completed.output_sequence, 3);
+    assert_eq!(core.get_query_results("progress-query").await?.len(), 3);
+    core.stop_query("progress-query").await?;
+    assert!(core.get_query_progress_metrics()?.is_empty());
+    let mut replacement = query;
+    replacement.query = "MATCH (p:Person) RETURN p.name AS full_name".into();
+    core.update_query("progress-query", replacement).await?;
+    assert!(core.get_query_progress_metrics()?.is_empty());
+    core.start_query("progress-query").await?;
+    handle
+        .wait_for_subscription_counts(2, Some(1))
+        .await
+        .context("replacement query subscription")?;
+    insert_person(&handle, "p4", "Dora", 40).await?;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshots = core.get_query_progress_metrics()?;
+            if let Some(snapshot) = snapshots.first() {
+                if snapshot.input_sequences.get(&key) == Some(&5) {
+                    assert_ne!(
+                        snapshot.component_generation,
+                        completed.component_generation
+                    );
+                    assert_eq!(snapshot.output_sequence, 1);
+                    break Result::<_>::Ok(());
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "expected replacement input 5; actual={:?}",
+            core.get_query_progress_metrics()
+        )
+    })??;
+    core.shutdown().await?;
+    assert!(core.get_query_progress_metrics().is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_progress_is_owned_on_current_thread() -> Result<()> {
+    query_progress_tracks_commits_not_output_counts().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_progress_is_owned_on_multiple_threads() -> Result<()> {
+    query_progress_tracks_commits_not_output_counts().await
+}
 
 /// Test: Query output metrics are updated after processing events.
 #[tokio::test]

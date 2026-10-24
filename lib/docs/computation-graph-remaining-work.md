@@ -563,6 +563,12 @@ with meaningful timing and no invented duration across a restart.
 completed handling, queue pressure, progress lag, errors and processing time.
 Keep names and units consistent, prevent double counting and exclude sensitive data.
 
+**Implemented first slice:** Query committed-input and produced-output positions
+can be read from their actual owners, with lifecycle/output identity and
+persistence information. Server has optional OTLP export of those measurements.
+This is not yet all-component instrumentation or proof of completed external
+delivery; the wider measurements and recovery qualification remain unfinished.
+
 **Finish when:** Enabled measurements report exact expected counts and timing
 boundaries across normal work, retries, batching and failure.
 
@@ -575,6 +581,11 @@ boundaries across normal work, retries, batching and failure.
 **Work:** Provide an optional application-owned export path for logs, measurements
 and completed traces to OpenTelemetry services, local Drasi consumers, or both.
 Bound waiting data, report dropped records and prevent monitoring its own output.
+
+**Implemented first slice:** Server can own a dedicated OTLP/HTTP JSON query-
+progress meter provider without replacing the application's global provider.
+Export has a configured HTTP timeout, and cancelled shutdown retains its worker.
+The broader logs/traces export and all-component measurements remain open.
 
 **Finish when:** Slow or broken monitoring destinations cannot stall business
 processing, and export/flush/shutdown have explicit ownership.

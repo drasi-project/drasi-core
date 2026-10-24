@@ -1423,9 +1423,6 @@ impl ContinuousQueryTransformer {
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
             .insert(progress.graph.key.clone(), progress.sequence);
-        if let Some(confirmation) = &self.source_progress {
-            confirmation.confirm_input(&progress.graph);
-        }
         // Keep completion timings on the live branch, not in already committed outbox bytes.
         if let Some(output) = &mut output {
             QueryChangeCodec::append_post_commit_profiling(
@@ -1435,7 +1432,11 @@ impl ContinuousQueryTransformer {
                 timestamp_ns(),
             )?;
         }
-        self.publish(output)
+        let outputs = self.publish(output)?;
+        if let Some(confirmation) = &self.source_progress {
+            confirmation.confirm_input(&progress.graph);
+        }
+        Ok(outputs)
     }
 }
 

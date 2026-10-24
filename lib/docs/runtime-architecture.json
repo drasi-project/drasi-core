@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "source_fingerprint": "fnv1a64:aa553e55957168d5",
+  "source_fingerprint": "fnv1a64:f27af90110d70a57",
   "source_files": [
     "components/computation-contracts/src/a2_bridge.rs",
     "components/computation-contracts/src/admission_messages.rs",
@@ -13403,14 +13403,14 @@
       "name": "drasi_lib::computation::instance::ComputationHandle",
       "kind": "struct",
       "file": "lib/src/computation/instance.rs",
-      "line": 430,
+      "line": 439,
       "condition": "",
       "fields": [
         {
           "name": "entry",
           "declaration": "Arc < Entry >",
           "variant": "",
-          "line": 434,
+          "line": 443,
           "condition": ""
         }
       ]
@@ -13606,42 +13606,42 @@
       "name": "drasi_lib::computation::instance::InstanceGraph",
       "kind": "struct",
       "file": "lib/src/computation/instance.rs",
-      "line": 531,
+      "line": 540,
       "condition": "",
       "fields": [
         {
           "name": "lifecycle",
           "declaration": "tokio :: sync :: Mutex < InstanceLifecycle >",
           "variant": "",
-          "line": 532,
+          "line": 541,
           "condition": ""
         },
         {
           "name": "instance_id",
           "declaration": "String",
           "variant": "",
-          "line": 534,
+          "line": 543,
           "condition": ""
         },
         {
           "name": "entry",
           "declaration": "Mutex < Option < Arc < Entry > > >",
           "variant": "",
-          "line": 535,
+          "line": 544,
           "condition": ""
         },
         {
           "name": "pending",
           "declaration": "Mutex < Vec < Arc < PendingComponents > > >",
           "variant": "",
-          "line": 536,
+          "line": 545,
           "condition": ""
         },
         {
           "name": "closed",
           "declaration": "AtomicBool",
           "variant": "",
-          "line": 537,
+          "line": 546,
           "condition": ""
         }
       ]
@@ -13650,14 +13650,14 @@
       "name": "drasi_lib::computation::instance::InstanceLifecycle",
       "kind": "struct",
       "file": "lib/src/computation/instance.rs",
-      "line": 520,
+      "line": 529,
       "condition": "",
       "fields": [
         {
           "name": "stop_incomplete",
           "declaration": "bool",
           "variant": "",
-          "line": 524,
+          "line": 533,
           "condition": ""
         }
       ]
@@ -13666,42 +13666,42 @@
       "name": "drasi_lib::computation::instance::PendingComponents",
       "kind": "struct",
       "file": "lib/src/computation/instance.rs",
-      "line": 726,
+      "line": 735,
       "condition": "",
       "fields": [
         {
           "name": "value",
           "declaration": "tokio :: sync :: Mutex < Option < ComponentBatch > >",
           "variant": "",
-          "line": 727,
+          "line": 736,
           "condition": ""
         },
         {
           "name": "resources",
           "declaration": "Option < Arc < RejectedResources > >",
           "variant": "",
-          "line": 728,
+          "line": 737,
           "condition": ""
         },
         {
           "name": "control",
           "declaration": "Option < GraphControl >",
           "variant": "",
-          "line": 729,
+          "line": 738,
           "condition": ""
         },
         {
           "name": "done",
           "declaration": "AtomicBool",
           "variant": "",
-          "line": 730,
+          "line": 739,
           "condition": ""
         },
         {
           "name": "cleanup_started",
           "declaration": "AtomicBool",
           "variant": "",
-          "line": 731,
+          "line": 740,
           "condition": ""
         }
       ]
@@ -28819,14 +28819,14 @@
       "name": "drasi_lib::computation::v1::query::ContinuousQueryFactory",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 1891,
+      "line": 1892,
       "condition": "",
       "fields": [
         {
           "name": "descriptor",
           "declaration": "FactoryDescriptor",
           "variant": "",
-          "line": 1892,
+          "line": 1893,
           "condition": ""
         }
       ]
@@ -29186,14 +29186,14 @@
       "name": "drasi_lib::computation::v1::query::QueryIndexProviderResource",
       "kind": "struct",
       "file": "lib/src/computation/v1/query.rs",
-      "line": 1889,
+      "line": 1890,
       "condition": "",
       "fields": [
         {
           "name": "0",
           "declaration": "Arc < dyn ComputationIndexProvider >",
           "variant": "",
-          "line": 1889,
+          "line": 1890,
           "condition": ""
         }
       ]
@@ -35331,63 +35331,63 @@
       "name": "drasi_lib::metrics::query_metrics::QueryOutputMetrics",
       "kind": "struct",
       "file": "lib/src/metrics/query_metrics.rs",
-      "line": 19,
+      "line": 38,
       "condition": "",
       "fields": [
         {
           "name": "outbox_size",
           "declaration": "AtomicUsize",
           "variant": "",
-          "line": 25,
+          "line": 44,
           "condition": ""
         },
         {
           "name": "outbox_earliest_seq",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 26,
+          "line": 45,
           "condition": ""
         },
         {
           "name": "outbox_latest_seq",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 27,
+          "line": 46,
           "condition": ""
         },
         {
           "name": "result_seq_advances",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 28,
+          "line": 47,
           "condition": ""
         },
         {
           "name": "live_results_count",
           "declaration": "AtomicUsize",
           "variant": "",
-          "line": 29,
+          "line": 48,
           "condition": ""
         },
         {
           "name": "outer_transaction_duration_ns_last",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 30,
+          "line": 49,
           "condition": ""
         },
         {
           "name": "outer_transaction_duration_ns_max",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 31,
+          "line": 50,
           "condition": ""
         },
         {
           "name": "snapshot_fetch_count",
           "declaration": "AtomicU64",
           "variant": "",
-          "line": 32,
+          "line": 51,
           "condition": ""
         }
       ]
@@ -35396,63 +35396,128 @@
       "name": "drasi_lib::metrics::query_metrics::QueryOutputMetricsSnapshot",
       "kind": "struct",
       "file": "lib/src/metrics/query_metrics.rs",
-      "line": 129,
+      "line": 148,
       "condition": "",
       "fields": [
         {
           "name": "outbox_size",
           "declaration": "usize",
           "variant": "",
-          "line": 132,
+          "line": 151,
           "condition": ""
         },
         {
           "name": "outbox_earliest_seq",
           "declaration": "u64",
           "variant": "",
-          "line": 134,
+          "line": 153,
           "condition": ""
         },
         {
           "name": "outbox_latest_seq",
           "declaration": "u64",
           "variant": "",
-          "line": 136,
+          "line": 155,
           "condition": ""
         },
         {
           "name": "result_seq_advances",
           "declaration": "u64",
           "variant": "",
-          "line": 138,
+          "line": 157,
           "condition": ""
         },
         {
           "name": "live_results_count",
           "declaration": "usize",
           "variant": "",
-          "line": 140,
+          "line": 159,
           "condition": ""
         },
         {
           "name": "outer_transaction_duration_ns_last",
           "declaration": "u64",
           "variant": "",
-          "line": 142,
+          "line": 161,
           "condition": ""
         },
         {
           "name": "outer_transaction_duration_ns_max",
           "declaration": "u64",
           "variant": "",
-          "line": 144,
+          "line": 163,
           "condition": ""
         },
         {
           "name": "snapshot_fetch_count",
           "declaration": "u64",
           "variant": "",
-          "line": 146,
+          "line": 165,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::metrics::query_metrics::QueryProgressMetricsSnapshot",
+      "kind": "struct",
+      "file": "lib/src/metrics/query_metrics.rs",
+      "line": 19,
+      "condition": "",
+      "fields": [
+        {
+          "name": "query_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 28,
+          "condition": ""
+        },
+        {
+          "name": "component_generation",
+          "declaration": "u64",
+          "variant": "",
+          "line": 29,
+          "condition": ""
+        },
+        {
+          "name": "component_operation",
+          "declaration": "u64",
+          "variant": "",
+          "line": 30,
+          "condition": ""
+        },
+        {
+          "name": "output_generation",
+          "declaration": "u64",
+          "variant": "",
+          "line": 31,
+          "condition": ""
+        },
+        {
+          "name": "config_hash",
+          "declaration": "u64",
+          "variant": "",
+          "line": 32,
+          "condition": ""
+        },
+        {
+          "name": "persistent",
+          "declaration": "bool",
+          "variant": "",
+          "line": 33,
+          "condition": ""
+        },
+        {
+          "name": "input_sequences",
+          "declaration": "std :: collections :: BTreeMap < crate :: computation :: v1 :: SourceProgressKey , u64 >",
+          "variant": "",
+          "line": 34,
+          "condition": ""
+        },
+        {
+          "name": "output_sequence",
+          "declaration": "u64",
+          "variant": "",
+          "line": 35,
           "condition": ""
         }
       ]
@@ -45922,7 +45987,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
-      "line": 434,
+      "line": 443,
       "condition": ""
     },
     {
@@ -46082,7 +46147,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Mutex / Option / shared strong",
-      "line": 535,
+      "line": 544,
       "condition": ""
     },
     {
@@ -46092,7 +46157,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "Mutex",
-      "line": 532,
+      "line": 541,
       "condition": ""
     },
     {
@@ -46102,7 +46167,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Mutex / Vec entries / shared strong",
-      "line": 536,
+      "line": 545,
       "condition": ""
     },
     {
@@ -46112,7 +46177,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 534,
+      "line": 543,
       "condition": ""
     },
     {
@@ -46122,7 +46187,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 537,
+      "line": 546,
       "condition": ""
     },
     {
@@ -46132,7 +46197,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Mutex / Option",
-      "line": 727,
+      "line": 736,
       "condition": ""
     },
     {
@@ -46142,7 +46207,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option",
-      "line": 729,
+      "line": 738,
       "condition": ""
     },
     {
@@ -46152,7 +46217,7 @@
       "variant": "",
       "cardinality": "0..1",
       "relationship": "Option / shared strong",
-      "line": 728,
+      "line": 737,
       "condition": ""
     },
     {
@@ -46162,7 +46227,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 731,
+      "line": 740,
       "condition": ""
     },
     {
@@ -46172,7 +46237,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 730,
+      "line": 739,
       "condition": ""
     },
     {
@@ -60542,7 +60607,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 1892,
+      "line": 1893,
       "condition": ""
     },
     {
@@ -60922,7 +60987,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong / trait object; concrete implementation erased",
-      "line": 1889,
+      "line": 1890,
       "condition": ""
     },
     {
@@ -66242,7 +66307,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 26,
+      "line": 45,
       "condition": ""
     },
     {
@@ -66252,7 +66317,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 27,
+      "line": 46,
       "condition": ""
     },
     {
@@ -66262,7 +66327,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 30,
+      "line": 49,
       "condition": ""
     },
     {
@@ -66272,7 +66337,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 31,
+      "line": 50,
       "condition": ""
     },
     {
@@ -66282,7 +66347,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 28,
+      "line": 47,
       "condition": ""
     },
     {
@@ -66292,7 +66357,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 32,
+      "line": 51,
       "condition": ""
     },
     {
@@ -66302,7 +66367,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 29,
+      "line": 48,
       "condition": ""
     },
     {
@@ -66312,7 +66377,27 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 25,
+      "line": 44,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::metrics::query_metrics::QueryProgressMetricsSnapshot",
+      "to": "drasi_computation_contracts::progress::SourceProgressKey",
+      "field": "input_sequences",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "BTreeMap entries",
+      "line": 34,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::metrics::query_metrics::QueryProgressMetricsSnapshot",
+      "to": "std::string::String",
+      "field": "query_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 28,
       "condition": ""
     },
     {
@@ -69301,7 +69386,7 @@
     },
     {
       "name": "drasi_lib::computation::instance",
-      "code_lines": 764,
+      "code_lines": 771,
       "types": 12,
       "files": [
         "lib/src/computation/instance.rs"
@@ -69333,7 +69418,7 @@
     },
     {
       "name": "drasi_lib::computation::runtime",
-      "code_lines": 1935,
+      "code_lines": 1990,
       "types": 7,
       "files": [
         "lib/src/computation/runtime/mod.rs"
@@ -69901,7 +69986,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::query",
-      "code_lines": 2352,
+      "code_lines": 2353,
       "types": 9,
       "files": [
         "lib/src/computation/v1/query.rs"
@@ -69925,7 +70010,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::query_api",
-      "code_lines": 76,
+      "code_lines": 106,
       "types": 1,
       "files": [
         "lib/src/computation/v1/query_api.rs"
@@ -70221,7 +70306,7 @@
     },
     {
       "name": "drasi_lib::lib_core_ops::metrics_ops",
-      "code_lines": 23,
+      "code_lines": 39,
       "types": 0,
       "files": [
         "lib/src/lib_core_ops/metrics_ops.rs"
@@ -70285,7 +70370,7 @@
     },
     {
       "name": "drasi_lib::metrics",
-      "code_lines": 6,
+      "code_lines": 8,
       "types": 0,
       "files": [
         "lib/src/metrics/mod.rs"
@@ -70301,8 +70386,8 @@
     },
     {
       "name": "drasi_lib::metrics::query_metrics",
-      "code_lines": 96,
-      "types": 2,
+      "code_lines": 107,
+      "types": 3,
       "files": [
         "lib/src/metrics/query_metrics.rs"
       ]

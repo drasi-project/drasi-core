@@ -2091,6 +2091,20 @@ lifecycle metrics at their respective owners. Useful Stockroom signals include:
 Your application chooses a metrics exporter or endpoint and exposes the
 measurements it needs.
 
+`DrasiLib::get_query_progress_metrics()` reads actual committed input and produced
+output positions for ready queries. It performs no storage or network I/O, so a
+host can use it in an OpenTelemetry observable-instrument callback. It includes
+component generation/operation, output generation and configuration hash; keep
+those identities with the measurements. Unavailable queries are omitted, not
+reported as zero. Filtered inputs can advance input without producing output.
+Drasi Server provides an optional application-owned OTLP exporter for this first
+progress slice; it does not install a global provider in an embedding application.
+
+Progress does not, by itself, mean a workload is finished. Establish the last
+input actually sent, verify every required destination's completed records,
+account for scheduled work, and capture final state at that boundary. Old
+collector samples or a quiet output stream are not substitutes.
+
 Profiling metadata measures elapsed intervals, including queueing and storage,
 not CPU time. Source-to-query delay, evaluation, output dispatch, and destination
 completion are distinct intervals. Missing replay timing is not a zero-duration

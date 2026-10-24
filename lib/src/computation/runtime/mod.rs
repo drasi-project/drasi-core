@@ -1990,6 +1990,61 @@ impl Runtime {
             _ => unreachable!(),
         }
     }
+    pub(crate) fn query_progress_metrics(
+        &self,
+    ) -> anyhow::Result<Vec<crate::metrics::QueryProgressMetricsSnapshot>> {
+        let control = self.control()?;
+        anyhow::ensure!(
+            !matches!(
+                control.state(),
+                GraphState::Cancelled
+                    | GraphState::Completed
+                    | GraphState::Failed
+                    | GraphState::CleanupRequired
+            ),
+            "query progress is unavailable while the graph is {:?}",
+            control.state()
+        );
+        let publication = control.registry_snapshot();
+        let mut snapshots = Vec::new();
+        for (id, component) in &publication.observed.components {
+            if component.failure.is_some()
+                || !component.started
+                || !matches!(
+                    component.lifecycle,
+                    ComponentLifecycle::Running | ComponentLifecycle::Quiesced
+                )
+            {
+                continue;
+            }
+            if let Some(api) = publication.query_api(id) {
+                if let Some(snapshot) = api.progress_metrics(component)? {
+                    snapshots.push((id, snapshot));
+                }
+            }
+        }
+        let current = control.registry_snapshot();
+        Ok(snapshots
+            .into_iter()
+            .filter(|(id, snapshot)| {
+                current
+                    .observed
+                    .components
+                    .get(id)
+                    .is_some_and(|component| {
+                        component.generation.0 == snapshot.component_generation
+                            && component.operation.0 == snapshot.component_operation
+                            && component.failure.is_none()
+                            && component.started
+                            && matches!(
+                                component.lifecycle,
+                                ComponentLifecycle::Running | ComponentLifecycle::Quiesced
+                            )
+                    })
+            })
+            .map(|(_, snapshot)| snapshot)
+            .collect())
+    }
     pub(crate) async fn graph_schema(&self) -> anyhow::Result<crate::schema::GraphSchema> {
         let publication = self.control()?.registry_snapshot();
         let sources: Vec<_> = publication
