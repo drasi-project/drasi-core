@@ -924,6 +924,7 @@ struct DurableOutputStores {
 
 async fn persist_bootstrap_boundary(
     query_id: &str,
+    config_hash: u64,
     checkpoint_store: &Arc<dyn CheckpointStore>,
     session_control: &Option<Arc<dyn SessionControl>>,
     positions: &HashMap<String, bytes::Bytes>,
@@ -976,6 +977,12 @@ async fn persist_bootstrap_boundary(
             .commit()
             .await
             .context("commit bootstrap handover")?;
+    }
+    if checkpoint_store.is_persistent() {
+        checkpoint_store
+            .write_config_hash(config_hash)
+            .await
+            .context("complete bootstrap recovery marker")?;
     }
     Ok(())
 }
@@ -1149,7 +1156,7 @@ async fn load_durable_output(
         !checkpoints.is_empty()
             && checkpoints
                 .values()
-                .all(|checkpoint| checkpoint.source_position.is_some())
+                .all(|checkpoint| checkpoint.sequence > 0 || checkpoint.source_position.is_some())
     } else {
         false
     };
@@ -1241,11 +1248,13 @@ struct PersistentIndexHandles<'a> {
     future_queue: &'a Option<Arc<dyn drasi_core::interface::FutureQueue>>,
 }
 
-/// Wipe graph indexes and source checkpoints, then persist `current_hash`.
+/// Wipe graph indexes and source checkpoints, retaining the reset marker
+/// when bootstrap still needs to commit its replacement snapshot.
 /// Used by config-hash mismatch and by AutoReset after output inconsistency.
 async fn wipe_indexes_and_checkpoints(
     query_id: &str,
     current_hash: u64,
+    bootstrap_pending: bool,
     checkpoint_store: &Arc<dyn CheckpointStore>,
     indexes: PersistentIndexHandles<'_>,
 ) -> anyhow::Result<()> {
@@ -1280,7 +1289,11 @@ async fn wipe_indexes_and_checkpoints(
         .await
         .with_context(|| format!("Query '{query_id}' failed to clear checkpoints"))?;
     checkpoint_store
-        .write_config_hash(current_hash)
+        .write_config_hash(if bootstrap_pending {
+            output_reset_in_progress_hash(current_hash)
+        } else {
+            current_hash
+        })
         .await
         .with_context(|| format!("Query '{query_id}' failed to write config hash after rebuild"))?;
     Ok(())
@@ -1292,6 +1305,7 @@ async fn wipe_indexes_and_checkpoints(
 async fn autoreset_rebuild_after_output_inconsistency(
     query_id: &str,
     current_hash: u64,
+    bootstrap_pending: bool,
     plan: OutputGenerationPlan,
     output_state: &RwLock<QueryOutputState>,
     stores: &DurableOutputStores,
@@ -1311,7 +1325,14 @@ async fn autoreset_rebuild_after_output_inconsistency(
         .write()
         .await
         .reset_from_generation(plan.persisted);
-    wipe_indexes_and_checkpoints(query_id, current_hash, &stores.checkpoint_store, indexes).await
+    wipe_indexes_and_checkpoints(
+        query_id,
+        current_hash,
+        bootstrap_pending,
+        &stores.checkpoint_store,
+        indexes,
+    )
+    .await
 }
 
 /// Like [`autoreset_rebuild_after_output_inconsistency`], but the caller already
@@ -1320,6 +1341,7 @@ async fn autoreset_rebuild_after_output_inconsistency(
 async fn rebuild_output_and_indexes_in_open_session(
     query_id: &str,
     current_hash: u64,
+    bootstrap_pending: bool,
     plan: OutputGenerationPlan,
     output_state: &RwLock<QueryOutputState>,
     stores: &DurableOutputStores,
@@ -1357,7 +1379,11 @@ async fn rebuild_output_and_indexes_in_open_session(
         .with_context(|| format!("Query '{query_id}' failed to clear checkpoints"))?;
     stores
         .checkpoint_store
-        .write_config_hash(current_hash)
+        .write_config_hash(if bootstrap_pending {
+            output_reset_in_progress_hash(current_hash)
+        } else {
+            current_hash
+        })
         .await
         .with_context(|| format!("Query '{query_id}' failed to write config hash after rebuild"))?;
     Ok(())
@@ -1861,8 +1887,9 @@ impl Query for DrasiQuery {
                 }
             }
             let bootstrap_problem = if self.base.config.enable_bootstrap
-                && matches!(stored_config_hash, Ok(Some(hash)) if hash == current_hash)
-                && bootstrap_result_sequence.is_none()
+                && matches!(stored_config_hash, Ok(Some(hash))
+                    if (hash == current_hash && bootstrap_result_sequence.is_none())
+                        || hash == output_reset_in_progress_hash(current_hash))
             {
                 Some("incomplete durable bootstrap or legacy bootstrap without a committed output boundary")
             } else {
@@ -1891,6 +1918,7 @@ impl Query for DrasiQuery {
                         rebuild_output_and_indexes_in_open_session(
                             &self.base.config.id,
                             current_hash,
+                            self.base.config.enable_bootstrap,
                             plan,
                             &self.output_state,
                             &stores,
@@ -1937,6 +1965,7 @@ impl Query for DrasiQuery {
                     if let Err(e) = rebuild_output_and_indexes_in_open_session(
                         &self.base.config.id,
                         current_hash,
+                        self.base.config.enable_bootstrap,
                         plan,
                         &self.output_state,
                         &stores,
@@ -1984,6 +2013,7 @@ impl Query for DrasiQuery {
                     if let Err(e) = rebuild_output_and_indexes_in_open_session(
                         &self.base.config.id,
                         current_hash,
+                        self.base.config.enable_bootstrap,
                         plan,
                         &self.output_state,
                         &stores,
@@ -2050,6 +2080,7 @@ impl Query for DrasiQuery {
                         if let Err(e) = rebuild_output_and_indexes_in_open_session(
                             &self.base.config.id,
                             current_hash,
+                            self.base.config.enable_bootstrap,
                             plan,
                             &self.output_state,
                             &stores,
@@ -2129,6 +2160,7 @@ impl Query for DrasiQuery {
                     if let Err(re) = rebuild_output_and_indexes_in_open_session(
                         &self.base.config.id,
                         current_hash,
+                        self.base.config.enable_bootstrap,
                         plan,
                         &self.output_state,
                         &stores,
@@ -2309,6 +2341,7 @@ impl Query for DrasiQuery {
                             if let Err(e) = autoreset_rebuild_after_output_inconsistency(
                                 &self.base.config.id,
                                 current_hash,
+                                self.base.config.enable_bootstrap,
                                 plan,
                                 &self.output_state,
                                 &stores,
@@ -2661,6 +2694,7 @@ impl Query for DrasiQuery {
                                                     autoreset_rebuild_after_output_inconsistency(
                                                         &self.base.config.id,
                                                         current_hash,
+                                                        self.base.config.enable_bootstrap,
                                                         plan,
                                                         &self.output_state,
                                                         &stores,
@@ -2878,6 +2912,10 @@ impl Query for DrasiQuery {
                         .commit()
                         .await
                         .context("commit empty bootstrap output")?;
+                    checkpoint_store
+                        .write_config_hash(self.config_hash)
+                        .await
+                        .context("complete empty bootstrap recovery marker")?;
                 }
                 Ok(())
             }
@@ -3112,6 +3150,7 @@ impl Query for DrasiQuery {
                 let output_state_for_supervisor = self.output_state.clone();
                 let live_results_for_supervisor = self.live_results_writer.read().await.clone();
                 let source_abort_handles = abort_handles.clone();
+                let config_hash = self.config_hash;
 
                 let span = tracing::info_span!(
                     "bootstrap_supervisor",
@@ -3143,6 +3182,7 @@ impl Query for DrasiQuery {
                             }
                             persist_bootstrap_boundary(
                                 &query_id_clone,
+                                config_hash,
                                 &checkpoint_store_for_supervisor,
                                 &session_control_for_supervisor,
                                 &positions,

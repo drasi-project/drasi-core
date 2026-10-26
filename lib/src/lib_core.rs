@@ -652,7 +652,7 @@ impl DrasiLib {
             completed: false,
         };
 
-        let stopped = self.lifecycle.stop_all_components().await;
+        let stopped = self.lifecycle.shutdown_all_components().await;
         *self.running.write().await = false;
         stopped.map_err(DrasiError::Internal)?;
 
@@ -1018,7 +1018,83 @@ impl DrasiLib {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reactions::Reaction;
     use crate::sources::Source;
+
+    struct FailOnceStopReaction {
+        inner: crate::reactions::tests::manager_tests::TestMockReaction,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        active: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Reaction for FailOnceStopReaction {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn type_name(&self) -> &str {
+            "fail-once-stop"
+        }
+        fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+            self.inner.properties()
+        }
+        fn query_ids(&self) -> Vec<String> {
+            self.inner.query_ids()
+        }
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.inner.initialize(context).await;
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.inner.start().await
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0,
+                "injected reaction stop failure"
+            );
+            self.active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.inner.stop().await
+        }
+        async fn status(&self) -> crate::ComponentStatus {
+            self.inner.status().await
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn permanent_shutdown_retries_failed_reaction_before_releasing_runtime() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicBool::new(false));
+        let core = DrasiLib::builder()
+            .with_reaction(FailOnceStopReaction {
+                inner: crate::reactions::tests::manager_tests::TestMockReaction::new(
+                    "fail-once".into(),
+                    vec![],
+                ),
+                calls: calls.clone(),
+                active: active.clone(),
+            })
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        assert!(core.shutdown().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(active.load(Ordering::SeqCst));
+        assert!(core.component_graph.read().await.has_runtime("fail-once"));
+        assert_eq!(
+            core.get_reaction_status("fail-once").await.unwrap(),
+            crate::ComponentStatus::Error
+        );
+        assert!(core.stop_reaction("fail-once").await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        core.shutdown().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!active.load(Ordering::SeqCst));
+        assert!(!core.component_graph.read().await.has_runtime("fail-once"));
+    }
 
     struct ControlledStopSource {
         inner: crate::sources::tests::TestMockSource,

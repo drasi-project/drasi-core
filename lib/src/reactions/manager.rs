@@ -782,6 +782,14 @@ impl ReactionManager {
     /// # Errors
     /// Returns an error if the reaction is not found or the stop operation fails.
     pub async fn stop_reaction(&self, id: String) -> Result<()> {
+        self.stop_reaction_inner(id, false).await
+    }
+
+    pub(crate) async fn stop_reaction_for_shutdown(&self, id: String) -> Result<()> {
+        self.stop_reaction_inner(id, true).await
+    }
+
+    async fn stop_reaction_inner(&self, id: String, permanent: bool) -> Result<()> {
         let reaction =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Reaction>>(&self.graph, &id)
                 .await
@@ -795,11 +803,18 @@ impl ReactionManager {
         // and transition to Error when forwarder tasks are aborted.
         {
             let mut g = self.graph.write().await;
-            g.validate_and_transition(
-                &id,
-                ComponentStatus::Stopping,
-                Some("Stopping reaction".to_string()),
-            )?;
+            let retry_failed = permanent
+                && g.get_component(&id)
+                    .is_some_and(|node| node.status == ComponentStatus::Error);
+            // Ordinary stop still rejects Error reactions. Permanent teardown
+            // must retry their cleanup without claiming they have recovered.
+            if !retry_failed {
+                g.validate_and_transition(
+                    &id,
+                    ComponentStatus::Stopping,
+                    Some("Stopping reaction".to_string()),
+                )?;
+            }
         }
 
         // Now abort subscription forwarder tasks

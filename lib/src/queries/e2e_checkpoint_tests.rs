@@ -395,6 +395,128 @@ mod durable_bootstrap_tests {
             .is_empty());
     }
 
+    #[derive(Clone, Copy)]
+    enum ReplacementCause {
+        ConfigChange,
+        IncompleteBootstrap,
+        SourceGap,
+    }
+
+    #[rstest::rstest]
+    #[case::config_change_strict(ReplacementCause::ConfigChange, RecoveryPolicy::Strict)]
+    #[case::config_change_auto_reset(ReplacementCause::ConfigChange, RecoveryPolicy::AutoReset)]
+    #[case::incomplete_strict(ReplacementCause::IncompleteBootstrap, RecoveryPolicy::Strict)]
+    #[case::incomplete_auto_reset(ReplacementCause::IncompleteBootstrap, RecoveryPolicy::AutoReset)]
+    #[case::source_gap_strict(ReplacementCause::SourceGap, RecoveryPolicy::Strict)]
+    #[case::source_gap_auto_reset(ReplacementCause::SourceGap, RecoveryPolicy::AutoReset)]
+    #[tokio::test]
+    #[serial]
+    async fn interrupted_replacement_bootstrap_obeys_recovery_policy(
+        #[case] cause: ReplacementCause,
+        #[case] policy: RecoveryPolicy,
+    ) {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let config = |original: bool, policy| {
+            Query::cypher("replacement")
+                .query(
+                    if original && matches!(cause, ReplacementCause::ConfigChange) {
+                        "MATCH (n:Node) RETURN count(n) AS previous_count"
+                    } else {
+                        "MATCH (n:Node) RETURN count(n) AS count"
+                    },
+                )
+                .from_source("source")
+                .enable_bootstrap(true)
+                .auto_start(false)
+                .with_storage_backend(StorageBackendRef::Named("persistent".into()))
+                .with_recovery_policy(policy)
+                .build()
+        };
+        for original in [true, false] {
+            let core = build_e2e_lib("replacement-instance", &directory, None)
+                .await
+                .unwrap();
+            let mut source = E2eTestSource::new("source", true).unwrap();
+            source.bootstrap = true;
+            source.bootstrap_node_id = if original { "original" } else { "interrupted" };
+            let incomplete = !original || matches!(cause, ReplacementCause::IncompleteBootstrap);
+            if incomplete {
+                source.bootstrap_completion = Some(Arc::new(tokio::sync::Mutex::new(None)));
+            }
+            if !original && matches!(cause, ReplacementCause::SourceGap) {
+                source.set_fail_count(1);
+            }
+            core.add_source(source).await.unwrap();
+            core.add_query(config(original, RecoveryPolicy::AutoReset))
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+            core.start_source("source").await.unwrap();
+            core.start_query("replacement").await.unwrap();
+            let query = core
+                .query_manager()
+                .get_query_instance("replacement")
+                .await
+                .unwrap();
+            if incomplete {
+                wait_for_bootstrap_rows(&query, 1).await;
+            } else {
+                query.fetch_snapshot().await.unwrap();
+            }
+            core.shutdown().await.unwrap();
+        }
+
+        let core = build_e2e_lib("replacement-instance", &directory, None)
+            .await
+            .unwrap();
+        let mut source = E2eTestSource::new("source", true).unwrap();
+        source.bootstrap = true;
+        source.bootstrap_node_id = "complete";
+        let subscriptions = source.subscribe_count_handle();
+        let resumed = source.last_resume_sequence();
+        core.add_source(source).await.unwrap();
+        core.add_query(config(false, policy)).await.unwrap();
+        core.start().await.unwrap();
+        core.start_source("source").await.unwrap();
+        let started = core.start_query("replacement").await;
+        match policy {
+            RecoveryPolicy::Strict => {
+                assert!(
+                    format!("{:#}", started.unwrap_err()).contains("incomplete durable bootstrap")
+                );
+                assert_eq!(subscriptions.load(Ordering::SeqCst), 0);
+            }
+            RecoveryPolicy::AutoReset => {
+                started.unwrap();
+                let query = core
+                    .query_manager()
+                    .get_query_instance("replacement")
+                    .await
+                    .unwrap();
+                let snapshot = query.fetch_snapshot().await.unwrap();
+                assert_eq!(
+                    snapshot.to_vec(),
+                    vec![serde_json::json!({"count": 1})],
+                    "replacement must discard partially populated indexes"
+                );
+                assert_eq!(snapshot.output_generation, 2);
+                assert_eq!(*resumed.read().await, None);
+                let store = query
+                    .as_any()
+                    .downcast_ref::<super::super::manager::DrasiQuery>()
+                    .unwrap()
+                    .get_checkpoint_store()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store.read_config_hash().await.unwrap(),
+                    Some(super::super::compute_config_hash(&config(false, policy)))
+                );
+            }
+        }
+        core.shutdown().await.unwrap();
+    }
+
     #[rstest::rstest]
     #[case::strict(RecoveryPolicy::Strict, None)]
     #[case::auto_reset(RecoveryPolicy::AutoReset, None)]
@@ -893,18 +1015,26 @@ async fn wait_for_outbox_sequence(
 // ============================================================================
 
 #[rstest::rstest]
-#[case::rows(false, 2)]
-#[case::empty_snapshot(true, 2)]
-#[case::mixed_sources(false, 1)]
-#[case::no_bootstrap_providers(false, 0)]
+#[case::rows(false, 2, false)]
+#[case::empty_snapshot(true, 2, false)]
+#[case::mixed_sources(false, 1, false)]
+#[case::no_bootstrap_providers(false, 0, false)]
+#[case::replacement_rows(false, 2, true)]
+#[case::replacement_empty_snapshot(true, 2, true)]
+#[case::replacement_mixed_sources(false, 1, true)]
+#[case::replacement_no_bootstrap_providers(false, 0, true)]
 #[tokio::test]
 #[serial]
 async fn test_e2e_bootstrap_snapshot_reopens_without_live_events(
     #[case] empty: bool,
     #[case] bootstrap_sources: usize,
+    #[case] replacement: bool,
 ) {
     let directory = tempfile::tempdir_in(".").unwrap();
-    for restart in [false, true] {
+    let last_run = if replacement { 2 } else { 1 };
+    for run in 0..=last_run {
+        let seed = replacement && run == 0;
+        let restart = run == last_run;
         let core = build_e2e_lib("bootstrap-reopen", &directory, Some(RecoveryPolicy::Strict))
             .await
             .unwrap();
@@ -917,7 +1047,11 @@ async fn test_e2e_bootstrap_snapshot_reopens_without_live_events(
             core.add_source(source).await.unwrap();
         }
         let config = Query::cypher("bootstrap-q")
-            .query("MATCH (n:Node) RETURN n.id AS id, n.value AS value")
+            .query(if seed {
+                "MATCH (n:Node) RETURN n.id AS id, n.value AS previous_value"
+            } else {
+                "MATCH (n:Node) RETURN n.id AS id, n.value AS value"
+            })
             .from_source("left")
             .from_source("right")
             .enable_bootstrap(true)
@@ -937,6 +1071,11 @@ async fn test_e2e_bootstrap_snapshot_reopens_without_live_events(
             .unwrap();
         let snapshot = query.fetch_snapshot().await.unwrap();
         assert_eq!(snapshot.as_of_sequence, 0);
+        if seed {
+            core.shutdown().await.unwrap();
+            continue;
+        }
+        assert_eq!(snapshot.output_generation, u64::from(replacement));
         let mut rows = snapshot.to_vec();
         rows.sort_by_key(|row| row["id"].as_str().unwrap().to_string());
         let expected = if empty {
@@ -964,43 +1103,55 @@ async fn test_e2e_bootstrap_snapshot_reopens_without_live_events(
     }
 }
 
+#[rstest::rstest]
+#[case::cursor_only(false, RecoveryPolicy::Strict)]
+#[case::sequence_only_strict(true, RecoveryPolicy::Strict)]
+#[case::sequence_only_auto_reset(true, RecoveryPolicy::AutoReset)]
 #[tokio::test]
 #[serial]
-async fn test_e2e_bootstrap_snapshot_reopens_after_filtered_event() {
+async fn test_e2e_bootstrap_snapshot_reopens_after_filtered_event(
+    #[case] sequence_only: bool,
+    #[case] policy: RecoveryPolicy,
+) {
     let directory = tempfile::tempdir_in(".").unwrap();
     for restart in [false, true] {
-        let core = build_e2e_lib(
-            "bootstrap-filtered",
-            &directory,
-            Some(RecoveryPolicy::Strict),
-        )
-        .await
-        .unwrap();
+        let core = build_e2e_lib("bootstrap-filtered", &directory, Some(policy))
+            .await
+            .unwrap();
         let mut source = E2eTestSource::new("source", true).unwrap();
         source.bootstrap = true;
         let resumed_cursor = source.last_resume_from();
         let resumed_sequence = source.last_resume_sequence();
         let events = source.event_sender();
         core.add_source(source).await.unwrap();
-        core.add_query(
-            Query::cypher("filtered")
-                .query("MATCH (n:Node) WHERE n.value = 42 RETURN n.id AS id, n.value AS value")
-                .from_source("source")
-                .enable_bootstrap(true)
-                .auto_start(false)
-                .with_storage_backend(StorageBackendRef::Named("persistent".into()))
-                .build(),
-        )
-        .await
-        .unwrap();
+        let mut config = Query::cypher("filtered")
+            .query("MATCH (n:Node) WHERE n.value = 42 RETURN n.id AS id, n.value AS value")
+            .from_source("source")
+            .enable_bootstrap(true)
+            .auto_start(false)
+            .with_storage_backend(StorageBackendRef::Named("persistent".into()));
+        let sequence_source = E2eTestSource::new("sequence-only", true).unwrap();
+        let sequence_events = sequence_source.event_sender();
+        let sequence_resumed = sequence_source.last_resume_sequence();
+        if sequence_only {
+            config = config.from_source("sequence-only");
+            core.add_source(sequence_source).await.unwrap();
+        }
+        core.add_query(config.build()).await.unwrap();
         core.start().await.unwrap();
         core.start_source("source").await.unwrap();
+        if sequence_only {
+            core.start_source("sequence-only").await.unwrap();
+        }
         core.start_query("filtered").await.unwrap();
         assert_eq!(
             *resumed_cursor.read().await,
             restart.then(|| Bytes::from_static(b"filtered-1"))
         );
         assert_eq!(*resumed_sequence.read().await, restart.then_some(1));
+        if sequence_only {
+            assert_eq!(*sequence_resumed.read().await, restart.then_some(7));
+        }
         let query = core
             .query_manager()
             .get_query_instance("filtered")
@@ -1015,13 +1166,50 @@ async fn test_e2e_bootstrap_snapshot_reopens_after_filtered_event() {
             .unwrap();
         if !restart {
             send_event(&events, "source", 1, b"filtered-1").await;
+            if sequence_only {
+                use drasi_core::models::{
+                    Element, ElementMetadata, ElementReference, SourceChange,
+                };
+                let event = SourceEventWrapper::new(
+                    "sequence-only".into(),
+                    crate::channels::SourceEvent::Change(SourceChange::Insert {
+                        element: Element::Node {
+                            metadata: ElementMetadata {
+                                reference: ElementReference::new("sequence-only", "filtered"),
+                                labels: Arc::from(vec![Arc::from("Excluded")]),
+                                effective_from: 0,
+                            },
+                            properties: Default::default(),
+                        },
+                    }),
+                    chrono::Utc::now(),
+                    7,
+                );
+                sequence_events
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .send(Arc::new(event))
+                    .await
+                    .unwrap();
+            }
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
                     let checkpoint = store.read_checkpoint("source").await.unwrap();
+                    let sequence_checkpoint_ready = !sequence_only
+                        || store
+                            .read_checkpoint("sequence-only")
+                            .await
+                            .unwrap()
+                            .is_some_and(|checkpoint| {
+                                checkpoint.sequence == 7 && checkpoint.source_position.is_none()
+                            });
                     if checkpoint.is_some_and(|checkpoint| {
                         checkpoint.sequence == 1
                             && checkpoint.source_position == Some(Bytes::from_static(b"filtered-1"))
-                    }) {
+                    }) && sequence_checkpoint_ready
+                    {
                         break;
                     }
                     tokio::task::yield_now().await;
