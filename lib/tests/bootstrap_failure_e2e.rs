@@ -14,8 +14,8 @@
 
 //! Integration test for bootstrap failure handling.
 //!
-//! Verifies that failed queries report `Error` and can be stopped through both
-//! the query runtime and managed lifecycle APIs.
+//! Verifies that failed queries report `Error`, cancel their source forwarders,
+//! and can be stopped through both runtime and managed lifecycle APIs.
 
 mod mock_source;
 
@@ -65,6 +65,16 @@ async fn wait_for_query_status(
     Ok(status)
 }
 
+async fn wait_for_cancelled_subscriptions(query: &dyn drasi_lib::queries::Query) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while query.subscription_count().await != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 async fn core_with_failed_bootstrap_query() -> Result<DrasiLib> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     mock_source
@@ -108,10 +118,7 @@ async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
         .await
         .map_err(anyhow::Error::msg)?;
     assert_eq!(query.status().await, ComponentStatus::Error);
-    assert!(
-        query.subscription_count().await > 0,
-        "a failed query still owns source forwarders until stopped"
-    );
+    wait_for_cancelled_subscriptions(query.as_ref()).await?;
     query.stop().await?;
     assert_eq!(query.subscription_count().await, 0);
     assert_eq!(query.status().await, ComponentStatus::Stopped);
@@ -135,7 +142,7 @@ async fn updating_failed_query_releases_old_subscriptions_without_restarting() -
         .get_query_instance("q1")
         .await
         .map_err(anyhow::Error::msg)?;
-    assert!(old_query.subscription_count().await > 0);
+    wait_for_cancelled_subscriptions(old_query.as_ref()).await?;
     let mut config = old_query.get_config().clone();
     config.query = "MATCH (p:Person) RETURN p".to_string();
     config.enable_bootstrap = false;
@@ -173,7 +180,7 @@ async fn removing_failed_query_releases_subscriptions() -> Result<()> {
         .get_query_instance("q1")
         .await
         .map_err(anyhow::Error::msg)?;
-    assert!(query.subscription_count().await > 0);
+    wait_for_cancelled_subscriptions(query.as_ref()).await?;
 
     core.remove_query("q1").await?;
     assert_eq!(query.subscription_count().await, 0);
@@ -194,7 +201,7 @@ async fn stop_all_releases_failed_query_subscriptions(#[case] manager_only: bool
         .get_query_instance("q1")
         .await
         .map_err(anyhow::Error::msg)?;
-    assert!(query.subscription_count().await > 0);
+    wait_for_cancelled_subscriptions(query.as_ref()).await?;
 
     if manager_only {
         core.query_manager().stop_all().await?;
@@ -214,9 +221,8 @@ async fn stop_all_releases_failed_query_subscriptions(#[case] manager_only: bool
 }
 
 /// When multiple sources' bootstrap providers fail, the query should enter the
-/// Error state and the supervisor's multi-source aggregation should report each
-/// failed source. This exercises the `failures` collection and join logic that a
-/// single-source test never reaches.
+/// Error state and cancel all forwarding tasks, even when more than one provider
+/// fails concurrently.
 #[tokio::test]
 async fn query_enters_error_state_when_multiple_bootstraps_fail() -> Result<()> {
     let (source_a, _handle_a) = MockSource::new("source-a")?;
@@ -261,7 +267,7 @@ async fn query_enters_error_state_when_multiple_bootstraps_fail() -> Result<()> 
         .get_query_instance("q-multi")
         .await
         .map_err(anyhow::Error::msg)?;
-    assert!(query.subscription_count().await > 0);
+    wait_for_cancelled_subscriptions(query.as_ref()).await?;
     core.stop_query("q-multi").await?;
     assert_eq!(query.subscription_count().await, 0);
     assert_eq!(query.status().await, ComponentStatus::Stopped);
