@@ -7,7 +7,7 @@ All Drasi plugins (sources, bootstrappers, reactions, indexes, identity, secret 
 - `export_plugin!` must stay gated behind the `dynamic-plugin` feature (prevents duplicate FFI symbols in static builds)
 - Bump `FFI_SDK_VERSION` (plugin-sdk/src/ffi/metadata.rs) on ANY `#[repr(C)]` layout or wire-format change, including changes made in ffi-primitives or host-sdk
 - Event payloads cross the FFI boundary only as serialized MessagePack - never as repr(Rust) pointers
-- ffi-primitives must stay dependency-free (std only)
+- ffi-primitives must stay dependency-free (std only); bylaw.toml and Architecture CI check its production library dependencies
 - Indexes, state stores, and WALs are NOT dynamic plugins - they link statically (wiring rules: see lib/AGENTS.md)
 - .tsp files inside plugin src/ directories are wire-format documentation, not codegen inputs - there is no codegen step to find, and they should not be deleted
 

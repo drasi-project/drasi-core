@@ -87,6 +87,39 @@ chmod +x .githooks/pre-commit
 git config core.hooksPath .githooks
 ```
 
+### Set up optional architecture checks
+
+You do not need cargo-bylaw for normal builds, tests, Clippy, hooks, or editor use. The architecture workflow installs it separately in CI. Dev-container setup does not install it.
+
+To run architecture checks locally, install the pinned release in an isolated directory:
+
+```sh
+cargo install --git https://github.com/danielgerlag/cargo-bylaw \
+	--rev 650ca7d61597ddc3814370de1edd4eadee294540 --locked cargo-bylaw \
+	--root "$HOME/.local/share/drasi-bylaw"
+rustup component add rust-src --toolchain 1.95.0
+PATH="$HOME/.local/share/drasi-bylaw/bin:$PATH" cargo bylaw --version
+```
+
+The version command prints `cargo-bylaw 0.1.1`. The Git revision pins that release because its CLI publication to crates.io failed. Do not substitute version 0.1.0, which reports incomplete analysis on valid Drasi code.
+
+This installation does not replace a cargo-bylaw binary used by another project. It does not change your shell profile or PATH. Prefix each Bylaw command with the same `PATH=...` assignment, or add that directory to PATH yourself. Installing without `--root` uses Cargo's shared installation directory and may replace another installed version.
+
+Bylaw uses the repository's Rust 1.95.0 toolchain and its own embedded analyzer. No editor extension or separate rust-analyzer binary is needed. The `rust-src` component is an explicit addition to that toolchain, not a change to the repository's toolchain file. Python 3.11 or later is needed only for the supplemental manifest checks and fixtures, not for `cargo bylaw check`.
+
+Analysis enables build scripts and procedural macros. It can execute repository build code, fetch dependencies, and populate Cargo's caches and target directory. Selecting five origin crates still loads the workspace and can build native dependencies such as RocksDB. One macOS probe used about 4.2 GiB of memory. That observation is not a resource limit.
+
+Prepare the native tools before checking. CI uses these packages on Ubuntu:
+
+```sh
+sudo apt-get install -y --no-install-recommends \
+	cmake clang libclang-dev pkg-config libssl-dev protobuf-compiler
+```
+
+On macOS, provide a C++ toolchain, libclang, CMake, and `protoc`. Bylaw itself does not need Docker. Use WSL for Windows development; native Windows analysis is not verified.
+
+See [Run architecture checks](../contributing-code-tests/#run-architecture-checks) for the commands and policy scope.
+
 ### Editors
 
 You can choose whichever editor you are most comfortable for working on Rust code. If you don't have a code editor set up for Rust, we recommend VS Code.
@@ -95,4 +128,3 @@ Alternatively, you can choose whichever editor you are most comfortable for work
 
 - [Visual Studio Code](https://code.visualstudio.com/)
 - [Rust Analyzer extension](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
-

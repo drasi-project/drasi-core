@@ -1,0 +1,88 @@
+name: Architecture
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BYLAW_REV: 650ca7d61597ddc3814370de1edd4eadee294540
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target/architecture
+
+jobs:
+  architecture:
+    name: Architecture
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Prepare Rust and native build prerequisites
+        run: |
+          rustup show
+          rustup component add rust-src
+          python3 -c 'import tomllib'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev pkg-config libssl-dev protobuf-compiler
+
+      - name: Cache pinned Bylaw CLI
+        id: bylaw-cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ runner.temp }}/bylaw
+          key: bylaw-${{ runner.os }}-${{ runner.arch }}-${{ env.BYLAW_REV }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Install pinned Bylaw CLI
+        if: steps.bylaw-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install --git https://github.com/danielgerlag/cargo-bylaw \
+            --rev "$BYLAW_REV" --locked cargo-bylaw \
+            --root "$RUNNER_TEMP/bylaw" --target-dir "$RUNNER_TEMP/bylaw-build"
+
+      - name: Add isolated CLI to this job's PATH
+        run: echo "$RUNNER_TEMP/bylaw/bin" >> "$GITHUB_PATH"
+
+      - name: Cache architecture analysis dependencies
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/architecture
+          key: architecture-${{ runner.os }}-${{ runner.arch }}-${{ env.BYLAW_REV }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'bylaw.toml') }}
+
+      - name: Check inventories and inactive production dependencies
+        run: python3 .github/scripts/check-architecture.py
+
+      - name: Test allowed directions and forbidden dependencies
+        run: python3 .github/scripts/check-architecture.test.py -v
+
+      - name: Check workspace architecture
+        run: |
+          status=0
+          cargo bylaw check --format json \
+            > "$RUNNER_TEMP/bylaw-report.json" \
+            2> "$RUNNER_TEMP/bylaw-stderr.log" || status=$?
+          cat "$RUNNER_TEMP/bylaw-report.json"
+          cat "$RUNNER_TEMP/bylaw-stderr.log" >&2
+          exit "$status"
+
+      - name: Ensure analysis did not change Cargo.lock
+        if: always()
+        run: git diff --exit-code HEAD -- Cargo.lock
+
+      - name: Save architecture diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: architecture-diagnostics
+          path: |
+            ${{ runner.temp }}/bylaw-report.json
+            ${{ runner.temp }}/bylaw-stderr.log

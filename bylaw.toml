@@ -1,0 +1,229 @@
+version = 1
+
+[analysis]
+manifest_path = "Cargo.toml"
+packages = [
+    "drasi-ffi-primitives",
+    "drasi-lib",
+    "drasi-query-ast",
+    "drasi-query-cypher",
+    "drasi-query-gql",
+]
+target_kinds = ["library"]
+incomplete = "deny"
+proc_macros = true
+build_scripts = true
+
+[selectors.ffi]
+packages = ["drasi-ffi-primitives"]
+
+[selectors.runtime]
+packages = ["drasi-lib"]
+
+[selectors.ast]
+packages = ["drasi-query-ast"]
+
+[selectors.parsers]
+packages = ["drasi-query-cypher", "drasi-query-gql"]
+
+[selectors.evaluation]
+packages = ["drasi-core", "drasi-functions-cypher", "drasi-functions-gql", "drasi-lib"]
+
+[selectors.external-parsers]
+external_crates = ["drasi_query_cypher", "drasi_query_gql"]
+
+[selectors.external-evaluation]
+external_crates = ["drasi_core", "drasi_functions_cypher", "drasi_functions_gql", "drasi_lib"]
+
+[selectors.indexes]
+packages = ["drasi-index-garnet", "drasi-index-rocksdb"]
+
+[selectors.external-indexes]
+external_crates = ["drasi_index_garnet", "drasi_index_rocksdb"]
+
+# Include static implementations and test plugins, but not shared helpers or SDKs.
+[selectors.plugins]
+packages = [
+    "drasi-bootstrap-application",
+    "drasi-bootstrap-cloudflare-radar",
+    "drasi-bootstrap-dataverse",
+    "drasi-bootstrap-gtfs-rt",
+    "drasi-bootstrap-here-traffic",
+    "drasi-bootstrap-http",
+    "drasi-bootstrap-kafka",
+    "drasi-bootstrap-kubernetes",
+    "drasi-bootstrap-mssql",
+    "drasi-bootstrap-mysql",
+    "drasi-bootstrap-neo4j",
+    "drasi-bootstrap-noop",
+    "drasi-bootstrap-open511",
+    "drasi-bootstrap-oracle",
+    "drasi-bootstrap-platform",
+    "drasi-bootstrap-postgres",
+    "drasi-bootstrap-scriptfile",
+    "drasi-bootstrap-sqlite",
+    "drasi-bootstrap-sui-deepbook",
+    "drasi-identity-aws",
+    "drasi-identity-azure",
+    "drasi-identity-test",
+    "drasi-reaction-a2a",
+    "drasi-reaction-application",
+    "drasi-reaction-aws-sqs",
+    "drasi-reaction-azure-storage",
+    "drasi-reaction-dashboard",
+    "drasi-reaction-eventgrid",
+    "drasi-reaction-file",
+    "drasi-reaction-grpc",
+    "drasi-reaction-http",
+    "drasi-reaction-log",
+    "drasi-reaction-loki",
+    "drasi-reaction-mcp",
+    "drasi-reaction-platform",
+    "drasi-reaction-profiler",
+    "drasi-reaction-rabbitmq",
+    "drasi-reaction-snapshot-test",
+    "drasi-reaction-sse",
+    "drasi-reaction-storedproc-mssql",
+    "drasi-reaction-storedproc-mysql",
+    "drasi-reaction-storedproc-postgres",
+    "drasi-secret-store-azure-keyvault",
+    "drasi-secret-store-file",
+    "drasi-secret-store-keyring",
+    "drasi-source-application",
+    "drasi-source-cloudflare-radar",
+    "drasi-source-dataverse",
+    "drasi-source-grpc",
+    "drasi-source-gtfs-rt",
+    "drasi-source-here-traffic",
+    "drasi-source-http",
+    "drasi-source-hyperliquid",
+    "drasi-source-kafka",
+    "drasi-source-kubernetes",
+    "drasi-source-mock",
+    "drasi-source-mssql",
+    "drasi-source-mysql",
+    "drasi-source-neo4j",
+    "drasi-source-open511",
+    "drasi-source-oracle",
+    "drasi-source-otel",
+    "drasi-source-platform",
+    "drasi-source-postgres",
+    "drasi-source-ris-live",
+    "drasi-source-sqlite",
+    "drasi-source-sui-deepbook",
+    "drasi-source-websocket",
+]
+
+[selectors.external-plugins]
+external_crates = [
+    "drasi_bootstrap_application",
+    "drasi_bootstrap_cloudflare_radar",
+    "drasi_bootstrap_dataverse",
+    "drasi_bootstrap_gtfs_rt",
+    "drasi_bootstrap_here_traffic",
+    "drasi_bootstrap_http",
+    "drasi_bootstrap_kafka",
+    "drasi_bootstrap_kubernetes",
+    "drasi_bootstrap_mssql",
+    "drasi_bootstrap_mysql",
+    "drasi_bootstrap_neo4j",
+    "drasi_bootstrap_noop",
+    "drasi_bootstrap_open511",
+    "drasi_bootstrap_oracle",
+    "drasi_bootstrap_platform",
+    "drasi_bootstrap_postgres",
+    "drasi_bootstrap_scriptfile",
+    "drasi_bootstrap_sqlite",
+    "drasi_bootstrap_sui_deepbook",
+    "drasi_identity_aws",
+    "drasi_identity_azure",
+    "drasi_identity_test",
+    "drasi_reaction_a2a",
+    "drasi_reaction_application",
+    "drasi_reaction_aws_sqs",
+    "drasi_reaction_azure_storage",
+    "drasi_reaction_dashboard",
+    "drasi_reaction_eventgrid",
+    "drasi_reaction_file",
+    "drasi_reaction_grpc",
+    "drasi_reaction_http",
+    "drasi_reaction_log",
+    "drasi_reaction_loki",
+    "drasi_reaction_mcp",
+    "drasi_reaction_platform",
+    "drasi_reaction_profiler",
+    "drasi_reaction_rabbitmq",
+    "drasi_reaction_snapshot_test",
+    "drasi_reaction_sse",
+    "drasi_reaction_storedproc_mssql",
+    "drasi_reaction_storedproc_mysql",
+    "drasi_reaction_storedproc_postgres",
+    "drasi_secret_store_azure_keyvault",
+    "drasi_secret_store_file",
+    "drasi_secret_store_keyring",
+    "drasi_source_application",
+    "drasi_source_cloudflare_radar",
+    "drasi_source_dataverse",
+    "drasi_source_grpc",
+    "drasi_source_gtfs_rt",
+    "drasi_source_here_traffic",
+    "drasi_source_http",
+    "drasi_source_hyperliquid",
+    "drasi_source_kafka",
+    "drasi_source_kubernetes",
+    "drasi_source_mock",
+    "drasi_source_mssql",
+    "drasi_source_mysql",
+    "drasi_source_neo4j",
+    "drasi_source_open511",
+    "drasi_source_oracle",
+    "drasi_source_otel",
+    "drasi_source_platform",
+    "drasi_source_postgres",
+    "drasi_source_ris_live",
+    "drasi_source_sqlite",
+    "drasi_source_sui_deepbook",
+    "drasi_source_websocket",
+]
+
+[[rule]]
+id = "ffi-is-std-only"
+kind = "only-dependencies"
+from = "ffi"
+allowed = ["ffi"]
+scope = "both"
+allow_toolchain = true
+allow_self = true
+because = "FFI primitives must not pull in domain types or third-party dependencies."
+
+[[rule]]
+id = "runtime-does-not-depend-on-plugins"
+kind = "forbid-dependencies"
+from = "runtime"
+to = ["plugins", "external-plugins"]
+scope = "both"
+because = "Concrete plugins depend on the embedded runtime, never the reverse."
+
+[[rule]]
+id = "runtime-does-not-depend-on-indexes"
+kind = "forbid-dependencies"
+from = "runtime"
+to = ["indexes", "external-indexes"]
+scope = "both"
+because = "Index backends are injected; the RocksDB dev-dependency only tests injection."
+
+[[rule]]
+id = "ast-does-not-depend-on-upper-layers"
+kind = "forbid-dependencies"
+from = "ast"
+to = ["parsers", "external-parsers", "evaluation", "external-evaluation", "plugins", "external-plugins", "indexes", "external-indexes"]
+scope = "both"
+because = "The shared AST is independent of parsing, evaluation, and concrete adapters."
+
+[[rule]]
+id = "parsers-do-not-depend-on-upper-layers"
+kind = "forbid-dependencies"
+from = "parsers"
+to = ["evaluation", "external-evaluation", "plugins", "external-plugins", "indexes", "external-indexes"]
+scope = "both"
+because = "Language parsers produce the shared AST without depending on evaluation or adapters."
