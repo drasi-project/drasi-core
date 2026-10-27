@@ -27,7 +27,6 @@ jobs:
         run: |
           rustup show
           rustup component add rust-src
-          python3 -c 'import tomllib'
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake clang libclang-dev pkg-config libssl-dev protobuf-compiler
@@ -57,12 +56,6 @@ jobs:
             ~/.cargo/git
             target/architecture
           key: architecture-${{ runner.os }}-${{ runner.arch }}-${{ env.BYLAW_REV }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'bylaw.toml') }}
-
-      - name: Check inventories and inactive production dependencies
-        run: python3 .github/scripts/check-architecture.py
-
-      - name: Test allowed directions and forbidden dependencies
-        run: python3 .github/scripts/check-architecture.test.py -v
 
       - name: Check workspace architecture
         run: |

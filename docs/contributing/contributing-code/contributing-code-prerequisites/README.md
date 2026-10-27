@@ -105,7 +105,7 @@ The version command prints `cargo-bylaw 0.1.1`. The Git revision pins that relea
 
 This installation does not replace a cargo-bylaw binary used by another project. It does not change your shell profile or PATH. Prefix each Bylaw command with the same `PATH=...` assignment, or add that directory to PATH yourself. Installing without `--root` uses Cargo's shared installation directory and may replace another installed version.
 
-Bylaw uses the repository's Rust 1.95.0 toolchain and its own embedded analyzer. No editor extension or separate rust-analyzer binary is needed. The `rust-src` component is an explicit addition to that toolchain, not a change to the repository's toolchain file. Python 3.11 or later is needed only for the supplemental manifest checks and fixtures, not for `cargo bylaw check`.
+Bylaw uses the repository's Rust 1.95.0 toolchain and its own embedded analyzer. No editor extension or separate rust-analyzer binary is needed. The `rust-src` component is an explicit addition to that toolchain, not a change to the repository's toolchain file. This setup does not require Python.
 
 Analysis enables build scripts and procedural macros. It can execute repository build code, fetch dependencies, and populate Cargo's caches and target directory. Selecting five origin crates still loads the workspace and can build native dependencies such as RocksDB. One macOS probe used about 4.2 GiB of memory. That observation is not a resource limit.
 

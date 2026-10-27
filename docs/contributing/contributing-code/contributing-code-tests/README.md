@@ -60,18 +60,13 @@ The [policy](../../../../bylaw.toml) analyzes the library targets of `drasi-ffi-
 
 Plugin-to-runtime dependencies, runtime-to-AST/parser dependencies, and parser-to-AST dependencies remain allowed. The runtime's RocksDB dev-dependency remains allowed. There is no general third-party dependency allowlist outside FFI primitives.
 
-For the same supplemental checks as CI, use Python 3.11 or later:
+CI runs the same Bylaw command directly. There is no separate dependency checker or Python requirement.
 
-```sh
-python3 .github/scripts/check-architecture.py
-python3 .github/scripts/check-architecture.test.py -v
-```
+Bylaw checks source use and resolved declarations for the current host and default features. Dependencies behind disabled features or settings for another platform may not be checked. This initial setup does not guarantee enforcement across every feature and target combination. These checks do not replace behavioral tests or make query results, scheduling, and external services deterministic.
 
-Replace `python3` with your newer interpreter if needed. The fixture runner also needs the pinned Bylaw CLI on PATH. It creates temporary workspaces, checks allowed and forbidden dependencies, and removes the fixtures afterward. It does not inject invalid dependencies into this checkout.
+To add a concrete plugin or index backend, update both its package selector and `external_crates` selector in `bylaw.toml`. Use the library target's Rust crate name for `external_crates`, not a dependency alias. Static implementations and test plugins count as concrete plugins; `drasi-source-mapping` is a helper and does not.
 
-Bylaw checks source use and resolved declarations for the current host and default feature graph. The Python helper also checks normal manifest dependencies that are optional, target-specific, renamed, unused, or registry-sourced. This is not semantic coverage of every target or feature combination. These checks do not replace behavioral tests or make query results, scheduling, and external services deterministic.
-
-To add a concrete plugin or index backend, update both its package selector and `external_crates` selector in `bylaw.toml`. Use the library target's Rust crate name for `external_crates`, not a dependency alias. The helper checks those exact-name inventories against Cargo metadata. Static implementations and test plugins count as concrete plugins; `drasi-source-mapping` is a helper and does not. Keep all five rules, origin packages, and complete analysis settings.
+Selectors use exact names. Bylaw does not discover new plugins or indexes for these lists, and a selector that matches nothing can pass. Review the lists when adding, removing, or renaming crates.
 
 Bylaw exits with `0` for success, `1` for rule violations, `2` for configuration errors, and `3` for analysis errors. For structured diagnostics, run `cargo bylaw check --format json`. Fix the dependency direction or build prerequisites rather than allowing incomplete analysis. Report analyzer failures separately from architecture violations.
 
