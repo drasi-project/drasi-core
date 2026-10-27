@@ -679,6 +679,14 @@ fn test_schema_aggregation_mode_is_enum_with_all_variants() {
 // -----------------------------------------------------------------------
 
 use crate::websocket::QuerySnapshotStore;
+
+impl QuerySnapshotStore {
+    async fn apply(&self, result: &drasi_lib::channels::QueryResult) {
+        self.apply_and_broadcast(result, &crate::websocket::WebSocketHub::new(1))
+            .await
+            .expect("snapshot update should succeed");
+    }
+}
 use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use std::collections::HashMap;

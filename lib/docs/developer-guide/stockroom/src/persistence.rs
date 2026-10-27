@@ -28,6 +28,7 @@ fn codec() -> anyhow::Result<EnvelopeCodec> {
 
 struct SaveReorder;
 
+// ANCHOR: reorder-key
 fn reorder_key(id: &RecordId) -> String {
     let bytes = id
         .value()
@@ -36,6 +37,7 @@ fn reorder_key(id: &RecordId) -> String {
         .collect::<String>();
     format!("reorder/{}/{bytes}", id.namespace())
 }
+// ANCHOR_END: reorder-key
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +89,7 @@ async fn print_saved_reorders(runner: &mut DeliveryRunner) -> anyhow::Result<()>
     Ok(())
 }
 
+// ANCHOR: save-reorder
 #[async_trait]
 impl TransactionalDeliveryHandler for SaveReorder {
     async fn handle(
@@ -149,6 +152,7 @@ impl TransactionalDeliveryHandler for SaveReorder {
         Ok(())
     }
 }
+// ANCHOR_END: save-reorder
 
 struct DurableAlerts {
     descriptor: ComponentDescriptor,
@@ -190,11 +194,13 @@ impl EnvelopeSink for DurableAlerts {
             std::future::pending::<()>().await;
         }
         let mut runner = self.runner.lock().await;
+        // ANCHOR: durable-handle
         runner.deliver_transactional(&input, &SaveReorder).await?;
         let sequence = QueryChangeCodec::query_sequence(&input.envelope)?;
         println!("Saved reorder changes through query sequence {sequence}.");
         print_saved_reorders(&mut runner).await?;
         self.completed.send_replace(sequence);
+        // ANCHOR_END: durable-handle
         Ok(())
     }
 }
@@ -256,6 +262,7 @@ impl PersistentStockroom {
             progress.clone(),
         )?;
         let sql = source.handle();
+        // ANCHOR: persistent-query
         let query = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: GRAPH.into(),
@@ -278,6 +285,7 @@ impl PersistentStockroom {
         .with_source_progress(progress)?
         .with_bootstrap(bootstrap)
         .with_delivery_tracking();
+        // ANCHOR_END: persistent-query
         let results = query.results();
         // ANCHOR: output-journal
         let journal = QosChannel::persistent_with_recovery(

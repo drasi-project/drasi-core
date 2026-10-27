@@ -1,59 +1,65 @@
 # Maintaining ComputationGraph
 
-**Development snapshot: 21 October 2026, `agentofreality-parallel-computation-graph`.**
+**Development snapshot: 27 October 2026, `agentofreality-parallel-computation-graph`.**
 
-This guide describes the current Core and matching Server checkouts, including
-the native database, inspection, coordination and activation-credential changes.
-Core base
-[`fc201f77`](https://github.com/drasi-project/drasi-core/commit/fc201f771199a5c365d2eb0e5757f8f9dafcef57)
-and Server base
-[`15dafa2`](https://github.com/drasi-project/drasi-server/commit/15dafa225ac76ba9868452a7082f693027621ad7)
-identify the starting revisions, not all of the working-tree additions or a
-published-release qualification.
+This guide is for a Drasi engineer who knows the ComponentGraph-based
+`drasi-lib`: source/query/reaction managers, source subscriptions, the query
+worker, result channels, plugin callbacks and component status. It explains
+where those responsibilities now live, what stayed the same, and how to
+investigate a problem without recreating the old execution paths.
 
-This guide is for engineers changing Drasi itself: its runtime, query execution,
-storage integration, component lifecycle or plugin hosting. For building a
-solution *with* Drasi, use the [application developer guide](developer-guide/README.md).
-For exact signatures and configuration fields, use the
-[implementation reference](computation-graph-reference.md).
+The implementation described is the current Core checkout, based on
+[`3b22333e`](https://github.com/drasi-project/drasi-core/commit/3b22333e56b46c9682366799cf055890ce07f500),
+and its matching Server integration. This is a development description, not
+a claim that every deployment or plugin has been release-qualified.
 
-For current migration status and completion criteria, see the
-[cleanup plan](computation-graph-cleanup-plan.md). The
-[remaining-work list](computation-graph-remaining-work.md) puts unfinished work
-in priority order, with a description, effort estimate and completion condition
-for each item.
+**The central change is ownership, not a new query language.** Previously,
+ComponentGraph largely recorded metadata, relationships, runtime references and
+status while managers coordinated execution. ComputationGraph owns the
+components, their connections, resources, execution tasks and lifecycle.
+The familiar managers are now facades over that one runtime, not second
+registries or executors. Both ordinary and explicitly composed queries run
+`ContinuousQueryTransformer` and use the same Core evaluator.
 
-ComputationGraph makes the processing topology an executable, owned structure.
-It decides which component instances exist, which connections they use, when
-their work runs, and what must finish before they can be replaced. That common
-foundation supports both ordinary source-query-reaction solutions and native
-pipelines containing other transformers, sinks and services.
-
-The main benefit is not another way to draw the same dependencies. It is a
-common place to enforce execution, connection and ownership rules that would
-otherwise have to be coordinated separately by each component category.
-Durability builds on those rules, but remains explicitly configured.
+Here, **ordinary** means the familiar Source/Query/Reaction authoring and plugin
+interfaces. **Native** means implementing the computation component contracts
+directly. These are two assembly paths into one graph, not runtime modes.
+Read the ownership, input and worked-flow sections first; the later sections
+explain the detailed lifecycle, storage and hosting contracts.
 
 Two different meanings of "graph" matter here. The **ComputationGraph** is the
 runtime topology, including ordinary queries and their helpers. It is not the
 **data graph** of nodes and relationships evaluated by Cypher/GQL. Changing
 runtime wiring does not require reimplementing graph matching.
 
+For building a solution rather than changing Drasi, use the
+[application developer guide](developer-guide/README.md). Use the
+[data design](computation-graph-data-design.md) for record-by-record examples,
+the [implementation reference](computation-graph-reference.md) for signatures,
+and the [capability comparison](componentgraph-vs-computationgraph.md) for the
+problems and scenarios this architecture addresses. The
+[remaining-work list](computation-graph-remaining-work.md) and
+[cleanup plan](computation-graph-cleanup-plan.md) distinguish open requirements
+from the broader native-only target; that target is not a prerequisite for
+using supported ordinary plugins.
+
 ## Reading map
 
 1. [What changed from ComponentGraph](#what-changed-from-componentgraph)
 2. [Ownership and the two assembly paths](#ownership-and-the-two-assembly-paths)
-3. [Following one change through the runtime](#following-one-change-through-the-runtime)
-4. [Scheduling, readiness and lifecycle](#scheduling-readiness-and-lifecycle)
-5. [Data contracts, identity and ordering](#data-contracts-identity-and-ordering)
-6. [Query execution, bootstrap and scheduled work](#query-execution-bootstrap-and-scheduled-work)
-7. [Stateful processing outside a query](#stateful-processing-outside-a-query)
-8. [Recovery is a chain of completion boundaries](#recovery-is-a-chain-of-completion-boundaries)
-9. [Resource ownership and cancellation-safe cleanup](#resource-ownership-and-cancellation-safe-cleanup)
-10. [Live changes and persisted desired state](#live-changes-and-persisted-desired-state)
-11. [Plugin hosting without a second executor](#plugin-hosting-without-a-second-executor)
-12. [Inspection and diagnosing a running system](#inspection-and-diagnosing-a-running-system)
-13. [Making and validating a change](#making-and-validating-a-change)
+3. [Inputs, result nodes and query chains](#inputs-result-nodes-and-query-chains)
+4. [Following one change through the runtime](#following-one-change-through-the-runtime)
+5. [Scheduling, readiness and lifecycle](#scheduling-readiness-and-lifecycle)
+6. [Data contracts, identity and ordering](#data-contracts-identity-and-ordering)
+7. [Query execution, bootstrap and scheduled work](#query-execution-bootstrap-and-scheduled-work)
+8. [Reading state without running another query](#reading-state-without-running-another-query)
+9. [Stateful processing outside a query](#stateful-processing-outside-a-query)
+10. [Recovery is a chain of completion boundaries](#recovery-is-a-chain-of-completion-boundaries)
+11. [Resource ownership and cancellation-safe cleanup](#resource-ownership-and-cancellation-safe-cleanup)
+12. [Live changes and persisted desired state](#live-changes-and-persisted-desired-state)
+13. [Plugin hosting without a second executor](#plugin-hosting-without-a-second-executor)
+14. [Inspection and diagnosing a running system](#inspection-and-diagnosing-a-running-system)
+15. [Making and validating a change](#making-and-validating-a-change)
 
 Code links point into this checkout; named symbols identify useful entry points
 without relying on line numbers that move with edits. Historical links are
@@ -85,18 +91,17 @@ sequences, durable multicast, explicit source-time merging and capability-checke
 recovery paths. It also gives maintainers one ownership model to extend instead
 of adding a new manager/executor for each processing shape.
 
-The latest native fan-out work closes a migration restriction, not a missing
-requirement in the old product. A source can feed several transformers/queries;
+Fan-out is a general graph capability, not something missing from the old
+source/query subscription model. A source can feed several transformers/queries;
 a transformer can feed several transformers and sinks. One producer is reused,
 while each required consumer keeps its own progress owner and recovery boundary.
 This is separate from choosing a multicast journal for the connecting pipes.
 
-The selected MySQL source/bootstrap/stored-procedure and SQLite source/bootstrap
-libraries now use the native ABI through static and dynamic hosting. Their common
-crates preserve reusable protocol, mapping, SQL and worker logic; the old Rust
-entry points remain thin consumers where still required. This does not complete
-old-stack retirement. SQL Server has native implementations, but its remaining
-parity gaps and user-deferred real-database qualification stay open.
+Continuous queries, persistent indexes, source checkpoints, transactions inside
+supported providers and multiple subscribers already existed. The new graph
+makes execution and recovery boundaries explicit across more component shapes.
+It does not make every path durable, turn all branches into one transaction,
+or make an external effect exactly-once.
 
 For the previous design, read the pinned
 [ComponentGraph module](https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/component_graph/mod.rs),
@@ -107,11 +112,21 @@ deliberately different: its `ComponentGraphView` holds a weak runtime reference
 and provides read-only views. It is not a second mutable runtime.
 The former `ComponentGraph` alias has been removed.
 
-Snapshot names also distinguish what is being captured:
-`config::QueryConfigurationSnapshot` contains a query's configuration and status;
-`computation::v1::QueryResultSnapshot` contains its result nodes, the output's
-projector (present even when empty), output sequence and generation. The former `QuerySnapshot` aliases have been removed; import
-the explicit type for the boundary being inspected.
+### Translate the old code map before following a bug
+
+| Familiar place or responsibility | Current owner and first files to inspect |
+|---|---|
+| Manager registration and object lookup | [`runtime/mod.rs`](../src/computation/runtime/mod.rs) assembles declarations; [`graph/registry.rs`](../src/computation/v1/graph/registry.rs) publishes the authoritative objects and state |
+| Query worker, subscription forwarders and future-queue reader | [`pipeline.rs`](../src/computation/v1/pipeline.rs) assembles helpers; [`graph.rs`](../src/computation/v1/graph.rs) runs nodes; [`query.rs`](../src/computation/v1/query.rs) owns query processing |
+| Query-language evaluation | [`core/src/computation/query_adapter.rs`](../../core/src/computation/query_adapter.rs) calls the shared [`QueryEvaluator`](../../core/src/query/evaluator.rs), not a new evaluator |
+| Source and result channels | [`ranked_pipe.rs`](../src/computation/v1/ranked_pipe.rs) adapts ordinary admission; native pipes own per-connection acceptance/handling; [`query_catalog.rs`](../src/computation/v1/query_catalog.rs) serves ordinary result subscriptions |
+| Component start/stop and asynchronous status updates | [`graph/controller.rs`](../src/computation/v1/graph/controller.rs) owns operations; coherent registry publication drives [`runtime/events.rs`](../src/computation/runtime/events.rs) synchronously |
+| Source/Reaction plugin callbacks | [`plugin_source.rs`](../src/computation/v1/plugin_source.rs) and [`plugin_reaction.rs`](../src/computation/v1/plugin_reaction.rs) keep adapters graph-owned; plugin workers still need real cleanup |
+| Query persistence and output cache | Query indexes, checkpoints, current result nodes and outbox have explicit owners; [`query_recovery.rs`](../src/computation/v1/query_recovery.rs) and [`query_delivery.rs`](../src/computation/v1/query_delivery.rs) coordinate recovery and handoff |
+
+For example, fixing a missing source subscription still requires understanding
+the source plugin. But adding a new worker loop to QueryManager would now bypass
+the graph's lifecycle, progress and cancellation rules rather than fix them.
 
 ## Ownership and the two assembly paths
 
@@ -120,6 +135,34 @@ the explicit type for the boundary being inspected.
 Each DrasiLib instance has one root ComputationGraph. Ordinary component
 registrations and native component batches share that instance namespace.
 Adding a batch does not create a competing runtime.
+
+The graph's vocabulary names responsibilities you previously found scattered
+through managers:
+
+| Term | Meaning |
+|---|---|
+| Component | A lifecycle-owned unit: source, transformer, query, sink or portless service |
+| Port | A named input/output with a declared data schema |
+| Pipe | A connection carrying envelopes between ports, with its own capacity and delivery policy |
+| Resource | An actual storage, bootstrap, identity or other service needed by an owner |
+| Declaration / factory | Intended configuration / the code that constructs it from declared resources |
+| Controller / node task | The graph's lifecycle coordinator / owned execution of one component's work |
+
+`ResourceSpecification` declares what must be resolved.
+`ResourceHandle` supplies the actual typed service. A resource name, matching
+database path or capability label is not proof of a shared storage owner.
+
+Do not collapse these three relationship types:
+
+| Relationship | Example | Runtime consequence |
+|---|---|---|
+| Data | Query output feeds a sink input | Schema, routing, capacity and acknowledgement rules |
+| Ownership/resource dependency | Journal uses a storage group; a producer reads actual consumer-progress owners | Create prerequisites first, retain them until users finish cleanup |
+| Control/readiness | A connected component reports availability or exchanges a control request | Bounded control delivery independent of a full data pipe |
+
+Data paths are acyclic. Resource dependencies have their own validation and
+cleanup order; they are not inferred from every data edge. Control
+relationships do not turn readiness notifications into data records.
 
 Ordinary Source and Reaction objects appear as graph-owned service
 adapters at the root. Their semantic kinds remain Source and Reaction;
@@ -160,41 +203,14 @@ Stop decisions must inspect every group member: a stopped evaluator can still
 have active subscription or output helpers. Ordinary stop APIs must finish those
 helpers before reporting completion, without stopping a shared source.
 
-Failed definitions remain inspectable and retryable. The declaration resource
-contains configuration-related metadata and any typed preparation error; it does
-not run the query. Ordinary and directly constructed queries now use the actual
-graph ID and query ID, with the enclosing instance scope, for storage and producer
-identity. The retired `lib-query/<hex ID>` namespace is not adopted or translated;
-this is part of the breaking release and does not delete the old files.
-Current-release reconstruction must keep these identities stable. Catalog
-transport counters survive replacement so a new component generation cannot
-reuse an already-published stream position.
-
-There is no query execution compatibility switch or legacy hash reader. The
-native configuration record and fingerprint are shared by both admission paths.
-Source order and middleware order remain meaningful; label sets and join
-declarations are canonicalized. Operational capacity/startup changes do not
-invalidate processing identity.
-
-Source-facing memory queries explicitly include volatile checkpoints alongside
-native memory indexes. The minimal processing-only Core memory provider does
-not acquire that extra capability. Persistent queries require persistent
-checkpoints, an outbox and live results; those interfaces alone do not establish
-atomicity without their actual shared transaction. Reset and deprovisioning
-propagate unsupported cleanup errors. Current reset markers require their
-generation, and stored output must already carry its producer identity.
-
-The result timestamp is production time, including scheduled results; the
-envelope retains logical event/due time separately. Ordinary result metadata is
-projected when crossing the result API boundary, without adding those duplicate
-fields to the native execution path.
-
-Completed bootstrap is reused on clean restart. `has_pending_snapshot` requests
-an additional prepared snapshot, for example a source subscription with no
-checkpoint; it defaults to false in both Rust and native SDK contracts. Initial
-bootstrap and explicit reset can still request a snapshot without that refresh
-signal. Native preparation still permits only one snapshot and retains cleanup
-ownership across cancellation.
+Failed definitions remain inspectable rather than disappearing. The declaration
+resource contains configuration-related metadata and any typed preparation
+error; it does not run the query. Missing dependencies are waits, while genuine invalid
+definitions remain failures requiring correction. The
+[lifecycle section](#declaration-construction-and-readiness-are-different-facts)
+explains that distinction; the
+[identity section](#event-time-and-progress-sequence-answer-different-questions)
+explains reconstruction.
 
 ### Ordinary APIs are assembly, not a fallback engine
 
@@ -239,16 +255,154 @@ for construction and resource contracts. The
 [ordinary/native pipeline parity tests](../tests/computation_pipeline_parity.rs)
 protect the shared behavior.
 
+## Inputs, result nodes and query chains
+
+### Learn the shared data boundary first
+
+The old ordinary path exchanged source changes on one side of the query and
+query-row differences on the other. Those public presentations remain useful.
+Inside the new graph, standard sources, transformers and queries exchange the
+same **`drasi.graph-change` version-1 data**. A query result is an ordinary graph
+node, so another query can consume it without a query-to-source adapter.
+
+```text
+ChangeEnvelope                 one delivery's data and metadata
+  ChangeSet                    an ordered collection of operations
+    ChangeOperation            add, update or delete; identifies the record
+      Record image             full element, property patch or partial before-image
+```
+
+The envelope also identifies its producer/stream and ordering policy. Handling
+acknowledgements and storage transactions stay outside this immutable data.
+The business element's identity is `(source_id, element_id)`; that is not the
+same thing as an envelope's delivery identity.
+
+For a source node initially `{quantity: 8, note: "seasonal"}`:
+
+| Change | Resulting properties |
+|---|---|
+| Patch sets `quantity: 3` | `{quantity: 3, note: "seasonal"}` |
+| Patch sets `note: null` | `{quantity: 8, note: null}`; null is a value |
+| Patch removes `note` | `{quantity: 8}`; an explicit removal |
+| Full replacement `{quantity: 3}` | `{quantity: 3}`; omitted properties are gone |
+
+Each row is an independent change to the initial node. A partial before-image
+contains only known old fields; it is not a complete replacement or a removal
+list. A patch can construct known state without a previous element, but that
+does not make it a producer-authoritative full image.
+
+A query returning `RETURN p.name AS name, p.quantity AS quantity` publishes
+nodes labeled `Result` by default, with those aliases as properties. Its
+dataset namespace identifies the producing output; its element ID is an
+opaque row identity supplied by the evaluator. Equal projected values can
+still be different rows. **Key a result view by identity, not by its JSON
+values.** Add installs a full node, update replaces the full node, and delete
+removes it. Query-facing grouping information travels in a checked annotation,
+not as hidden business properties.
+
+See [the detailed data contract](#one-graph-change-contract-for-source-transformer-and-query-data)
+for rich typed values, exact operations, authority and wire rules.
+
+### Query inputs name producer outputs, not only sources
+
+The ordinary query configuration now uses `inputs`, replacing `sources` and
+the old `sourceId` entries. `QueryInputConfig` names a `component`, an optional
+output `port`, and optional node/relation selections and middleware `pipeline`.
+An input can be an ordinary source or an output of a native source,
+transformer or query.
+
+This ordinary builder creates a second query over an existing query's rows:
+
+```rust
+let count = drasi_lib::Query::cypher("low-stock-count")
+    .query("MATCH (r:Result) RETURN count(r) AS Items")
+    .from_input("low-stock")
+    .with_result_label("LowStockCount")
+    .build();
+```
+
+The corresponding configuration fields are:
+
+```yaml
+inputs: [low-stock]
+result:
+  label: LowStockCount
+```
+
+`from_input_port(component, port)` or
+`inputs: [{component: low-stock, port: out}]` selects a particular port.
+Without a port, resolution uses the producer's declared primary output, or
+its only output. Several outputs without a primary are an error. **Never
+guess `out` when the producer is not yet present.** Retain the unresolved
+declaration and resolve it against the producer's actual descriptor when it
+arrives. `result.label` changes the result-node label, not the port schema.
+Both endpoint selection and result label participate in query configuration
+identity.
+
+Read [`config/schema.rs`](../src/config/schema.rs),
+[`builder.rs`](../src/builder.rs),
+[`runtime/query_assembly.rs`](../src/computation/runtime/query_assembly.rs) and
+[`pipeline.rs`](../src/computation/v1/pipeline.rs). Deferred binding is part
+of existing graph reconciliation, not a manager-owned retry worker.
+
+### A query chain needs a starting view as well as a live edge
+
+Suppose `low-stock` already contains ten result nodes when `low-stock-count`
+is added. A live pipe alone supplies later changes, not those ten nodes.
+Starting both components successfully cannot repair that missing initial state.
+
+| Situation | Required behavior |
+|---|---|
+| Both explicit queries are empty before the first event | Bind and ready the downstream path before admitting initial input |
+| Add downstream after upstream has state | Bind live input first, capture a real snapshot/cursor, then suppress buffered changes covered by that cut |
+| Restart a volatile downstream query | Refresh its input view, including deletions that occurred while it was stopped |
+| Resume persistent downstream state | Validate the saved producer epoch and replay after its committed input cursor |
+| Intentionally read future changes only | Explicitly disable bootstrap; do not turn unavailable snapshot support into an empty snapshot |
+
+Ordinary query assembly can supply `OutputBootstrapProvider` for selected
+outputs. It uses the output catalogue's actual snapshot/replay providers and
+the downstream query's actual progress owner. A persistent downstream query
+cannot bootstrap from a volatile producer snapshot. A hand-wired native
+`ComponentBatch` establishes transport only; bind an appropriate query-scoped
+bootstrap provider when initial state is needed.
+
+Strict recovery reports gaps or changed epochs. Explicit `AutoReset` can reset
+the **receiving query** and bootstrap it for supported reset conditions; it
+requires a real bootstrap provider and refuses persistent reset with bound
+durable destinations. It neither resets upstream nor catches every error as
+permission to start empty.
+
+The implementation is [`output_bootstrap.rs`](../src/computation/v1/output_bootstrap.rs)
+with [`query_recovery.rs`](../src/computation/v1/query_recovery.rs).
+The same evaluator processes the snapshot, replay and subsequent live changes.
+Query readiness means initialization completed, not that every queued replay
+item or output handoff has finished.
+
 ## Following one change through the runtime
 
-Consider an ordinary source feeding a continuous query and reaction:
+Start with the path familiar from ComponentGraph:
+
+```text
+Before: source subscription -> query-owned worker -> result channel -> reaction
+        managers coordinate start/stop; ComponentGraph records shared state
+
+Now:    source adapter -> graph-owned reader/pipe -> query component
+                                                    -> outlet -> reaction adapter
+        one graph owns the components, tasks, bindings and lifecycle
+
+Native: source output -> transformer/query input -> sink or another query
+        the same graph loop; no ordinary wrapper conversion where unnecessary
+```
+
+Consider a source update that makes a product enter the low-stock result:
 
 1. The source produces a `SourceEventWrapper`, including source-change time,
    sequence and any resumable source position. Its owned subscription supplies
-   the event to a query-local reader.
+   the event to a graph-owned, query-local reader.
 2. The reader converts it to a native graph-change envelope. A ranked pipe
    admits it to that query's shared bounded inbox, applying the source's
-   backpressure or drop policy.
+   backpressure or drop policy. An explicitly selected native producer already
+   supplies a graph envelope and does not need this source-wrapper conversion.
 3. The graph selects an available input and invokes the query transformer.
    The transformer interprets source/progress metadata and calls the shared
    evaluator through its actual storage owner. Input-local middleware uses the
@@ -257,12 +411,18 @@ Consider an ordinary source feeding a continuous query and reaction:
    providers supply trusted origins too. Preserve element namespaces and never
    select a pipeline from an incoming producer annotation.
 4. With atomic publication, index mutations, input progress, result projection
-   (canonical result nodes) and output history are committed together. No
-   downstream send is part of
-   that transaction unless explicitly using shared output storage.
+   (canonical result nodes) and output history are committed together. The query
+   then publishes its in-memory result view, confirms `QuerySourceProgress`
+   (the query's committed input), and returns output to the graph. This progress
+   publication can precede outgoing delivery. Ordinary downstream sends are not
+   part of the transaction; a proven shared-storage group can include its
+   participating journal appends.
 5. The graph forwards emitted envelopes through the selected output pipes.
    When every required branch has accepted a batch, it invokes the transformer's
-   delivery-confirmation hook and drains any bounded continuations.
+   `delivery_completed` hook and drains bounded continuations: further emissions
+   belonging to the same input. Only after that work succeeds does it publish
+   optional graph-owned handled-input progress and complete the upstream
+   `Handled` acknowledgement.
 6. The query-results outlet/catalog exposes committed results to ordinary
    subscriptions. The reaction adapter applies its declared handling/recovery
    contract. Acceptance into a reaction's own queue is not proof that an
@@ -288,6 +448,15 @@ The compatibility boundaries are in
 [`runtime/reaction.rs`](../src/computation/runtime/reaction.rs).
 Follow those when data arrives correctly at one interface but disappears or
 changes meaning at another.
+
+**Case: the input advanced but the result did not.** Product quantity changes
+from 8 to 7 and the query selects quantities below 5. The query can commit the
+new input position without emitting a result batch. Its output sequence need
+not advance. This is normal processing, not proof of a stalled worker.
+Conversely, observing that input checkpoint does not prove that an earlier
+output has finished downstream handling. Use the
+[completion boundaries](#recovery-is-a-chain-of-completion-boundaries), not
+a guessed one-input/one-output counter.
 
 **Fan-out is not a transaction.** Independent branches are sent sequentially;
 a slow branch backpressures the producer, and earlier branches may have
@@ -382,10 +551,38 @@ or successful addition as successful startup. Caller-side failure to construct
 a supplied object remains outside graph registration.
 
 Strict construction rejects cycles, role/port/schema mismatches and unmet
-connection capabilities before execution. Incremental assembly can retain
-unresolved declarations until dependencies arrive. This distinction lets a
+connection capabilities before execution. Valid declarations can retain
+unresolved dependencies until they arrive. This distinction lets a
 live system describe an incomplete intended topology without pretending that
 it is already executable.
+
+**Case: late dependency versus invalid configuration.** A query declared before
+its named producer should expose the missing producer/output as a
+`DependencyWait`. When that producer arrives, the existing graph resumes
+construction and resolves its actual primary port. A malformed identifier,
+incompatible schema or ambiguous multi-output producer is instead a validation
+failure; waiting longer or repeatedly constructing it cannot fix the definition.
+Do not convert such failures into dependency waits.
+
+The creation, start and query-ready waits answer different questions:
+
+| Wait or observation | Establishes | Does not establish |
+|---|---|---|
+| `ComponentHandle::wait_created` | The requested generation was constructed and coherently published | Required connections, activation or initial query state |
+| `ComponentHandle::wait_started` | That generation reached its running/activation boundary | Queue drain or consumer completion |
+| `QueryResults::wait_ready` | Recovery/bootstrap initialization and output-delivery preparation completed | Pending input replay, pending output or business effects all finished |
+
+The registry publishes public configuration/read facets together with observed
+state. A private observation arriving earlier must not release a public wait.
+Dependency notifications preserve disabled auto-start and explicit stops;
+they do not grant a fresh start request.
+
+**Case: a stopped wait is cancelled.** A caller starts a query whose input is
+missing, then stops it and drops its readiness wait. Dropping the wait must not
+own or erase the declaration. Later arrival of the source must not undo the
+explicit stop. Conversely, dropping a caller while an accepted stop joins a
+worker must not lose that join. The graph retains the operation and reports its
+outcome through the same generation-fenced state.
 
 Readiness and neighbor notifications use separate bounded control channels.
 They need not wait behind a full data pipe. Components can address connected
@@ -437,16 +634,6 @@ transactional, consumer and bootstrap Host calls. Start completion racing a
 control panic must take the local quarantine path, never unwind the controller.
 Native abort/memory-fault isolation and complete coverage of every synchronous
 callback are not implied.
-
-The separate [instance host](../../components/instance-host/README.md) runs a
-normal DrasiLib per process; [bridge sources/sinks](../../components/computation-plugins/common/bridge/README.md)
-carry data. This is composition, not a special remote-component execution mode.
-Local child/group termination and inter-instance message recovery remain distinct.
-The bridge carries one `GraphChange` format for source, transformer and query
-data (plus complete source transactions); it has no query-change selector or
-`query_prefixes`. Its element-namespace allowlist names the exact derived dataset
-namespaces it exports next to the physical source prefixes, and it infers no wider
-authorization from query metadata.
 
 ### Stale work cannot act on a replacement
 
@@ -524,11 +711,12 @@ round trips and meaning, not just successful deserialization.
 
 ### One graph-change contract for source, transformer and query data
 
-Sources, middleware and queries all publish `drasi.graph-change` (encoding
-`drasi-element-msgpack-v1`). The practical benefit is that data needs no
-conversion between components: a query's output can feed a sink, middleware or
-another query directly, and a new consumer only has to understand one record
-format. When maintaining this path, keep these rules:
+Standard sources, middleware and queries publish `drasi.graph-change` version 1
+(encoding `drasi-element-msgpack-v1`). Custom formats are still supported on
+ports whose factories implement them. For standard graph data, a query's
+output can feed a compatible sink, middleware or another query directly,
+without a separate query-row decoder. When maintaining this path, keep these
+rules:
 
 - **Records are canonical element data.** A record is an `ElementImage`
   (full), an `ElementPatch` (set values plus a separate removal set) or an
@@ -540,12 +728,18 @@ format. When maintaining this path, keep these rules:
   `SourceChange::Replace { element }` is an explicit full replacement that
   `decode_changes` returns as `Replace` rather than folding into `Insert`. Keep
   the set and removal names disjoint (`SourceChange::validate`). Rich values,
-  including expressions, ranges and `Awaiting`, cross as inert data and are never
-  evaluated by the codec or a transport. Do not add JSON or bincode conversions
-  into this path.
+  including temporal/spatial values, collections, expressions, ranges and
+  `Awaiting`, cross through validated shared values. Values outside the compact
+  `ElementValue` variants use its `Typed` route; they are not unsupported merely
+  because the compact variants cannot express them. Expressions remain inert
+  data at the codec/transport boundary. Canonical positive integers use the
+  unsigned representation and negative integers the signed representation;
+  preserve numeric meaning rather than assuming every internal enum tag stays
+  unchanged. Do not replace the canonical path with a lossy JSON round trip.
 - **A query result is a node.** `ResultNodeProjector` builds it: label `Result`
-  by default, properties named by the `RETURN` aliases, the opaque row identity
-  as the hex `element_id`, and the output's dataset namespace as `source_id`.
+  by default (or configured `result.label`), properties named by the `RETURN`
+  aliases, the opaque row identity as the hex `element_id`, and the output's
+  dataset namespace as `source_id`.
   Nothing query-specific is stored in the node. Row kind, grouping flags and
   ordinals live in the scoped `drasi.query-projection.v1` annotation, which is
   trusted only when it was written for the envelope's own change set;
@@ -554,6 +748,14 @@ format. When maintaining this path, keep these rules:
   that materialize results, including the dashboard, keep aggregate groups in the
   same identity-keyed row collection as other results. A separate latest-aggregate
   slot leaves snapshot rows stale and loses independent groups and deletions.
+- **Result updates are full replacements.** Added rows carry full nodes;
+  updates use `Updated` with `Replace` semantics and a full after-image.
+  Ordinary row updates also carry the full before-image; aggregation has one
+  only when the evaluator supplied it. Removals use `Deleted` with the old
+  full node. A `Noop` produces no operation. Aggregation/default flags are
+  query-facing context, not generic commands to delete a row. These rules
+  justify a simple keyed replacement view for query results, but not for
+  arbitrary source patches.
 - **Row identity is opaque and the dataset is scoped.** The identity comes from
   the evaluator signature, so equal values can be separate rows. The dataset
   namespace (`output_identity::dataset_namespace`) hashes the construction scope,
@@ -566,9 +768,11 @@ format. When maintaining this path, keep these rules:
   (derived query output). The second is valid only after the receiver validated
   the producer's identity, output epoch and accepted sequence, so a query rejects
   it without a current `GraphProducerProgress`. Business times travel unchanged.
-  Queries stamp their output with that progress; a persistent output epoch is
-  stable across reconstruction and changes on reset, while volatile incarnations
-  distinguish restarts. `QueryInputBatch` carries the ordering into the same
+  Queries stamp their output with that progress. A persistent output epoch is
+  stable across equivalent reconstruction and changes on reset; a newly
+  constructed volatile object gets a new incarnation. A stop/start of the
+  same retained object does not by itself require one. `QueryInputBatch`
+  carries the ordering into the same
   `QueryEvaluator` for both policies; do not add a second evaluator for
   derived data.
 - **Control is event-local.** `SystemMetadata.control` carries a checked kind
@@ -577,6 +781,12 @@ format. When maintaining this path, keep these rules:
   control or ordering, and annotations or lineage never become a control, so
   fresh derived data is not mistaken for scheduling. `reemit` and an unchanged
   relay keep both. A historical control is provenance only.
+- **Clocks keep their meaning.** Result-node images use business event time,
+  falling back to supplied production time when it is absent;
+  the ordinary result's timestamp is production time, including scheduled
+  output. Envelope logical event/due time remains separate from transport
+  counters and local wait clocks. Ordinary result metadata is projected at
+  the result API boundary, not duplicated throughout native execution.
 - **One wire.** Native/binary envelope wire is version 1 and ABI layout 1.0. All
   matching hosts and libraries must be rebuilt; there is no reader or migration
   for an earlier wire or for query-row records, so a mismatch is a build error to
@@ -589,8 +799,25 @@ Code: [`graph_codec.rs`](../../components/computation-contracts/src/graph_codec.
 [`element_patch.rs`](../../components/computation-contracts/src/element_patch.rs),
 [`data_value.rs`](../../core-types/src/data_value.rs) and
 [`output_identity.rs`](../../components/computation-contracts/src/output_identity.rs).
-The [data design](computation-graph-data-design.md#8-queries) explains the
+The [data design](computation-graph-data-design.md#8-graph-data-and-a-query-example) explains the
 records and their consequences.
+
+The receiving component's protocol matters as well as its schema:
+
+| Boundary | What it accepts |
+|---|---|
+| Native HTTP/gRPC/SSE notification sinks | Ordinary source, transformer or query graph-change data; output identity comes from declared input bindings |
+| Ordinary Reaction adapter | Current query projection converted to ordinary `QueryResult`, for a subscribed query |
+| Query input | Graph changes plus its explicitly supported control, bootstrap and complete-transaction protocols |
+| Snapshot-replacing sink input | Recovery snapshots only when that particular input exposes a real replacement handler |
+
+The native network path does not require a query annotation. It also does not
+treat scheduling controls or snapshot/progress recovery frames as ordinary
+notifications. Check
+[`common/network/src/wire.rs`](../../components/computation-plugins/common/network/src/wire.rs)
+and [`graph_view.rs`](../../components/computation-contracts/src/graph_view.rs)
+separately from the ordinary reaction's `QueryChangeCodec::to_legacy_result`
+boundary.
 
 **Intentional design choice.** There is no mandatory state store or materializer.
 Each component owns whatever storage, if any, it needs (a query keeps indexes and
@@ -599,7 +826,7 @@ declared per component rather than imposed by the framework. Do not add a
 framework-wide materialized view as a prerequisite for a node.
 
 Output readers are available in-process and through the native v1 read/follow
-extensions; see [read inspection](#inspection-and-diagnosing-a-running-system)
+extensions; see [reading state](#reading-state-without-running-another-query)
 for their ownership and bounds.
 
 `PortFormatCatalogue`, `ComponentFactory::port_formats` and native
@@ -621,9 +848,45 @@ intentional conversion. See
 
 ### Event time and progress sequence answer different questions
 
-**Source-change time determines temporal order; progress identity determines
-what has been processed.** Neither should be replaced by wall-clock receipt
-time or an arbitrary property in the record.
+**Business time describes when a fact applies; validated progress describes
+which producer revision was processed.** For `EventTime` inputs, source-change
+time also rejects stale mutations. For `ProducerSequence` inputs, the validated
+producer revision admits corrections even when their business time is older.
+Neither policy permits substituting receipt time or an arbitrary record
+property for the required authority.
+
+For example, a late source contribution may correct a query's total at business
+time 90 after that query already published a total at time 100. The downstream
+query must apply the later **output revision**, not reject it as stale source
+data or rewrite time 90 to 100.
+
+| Identity / position | Scope and purpose |
+|---|---|
+| Element reference | Business node/relationship: source or output dataset plus element ID |
+| Query row identity | Opaque evaluator row/group identity; not a hash of displayed columns |
+| Query recovery identity | Instance/construction scope, graph, query, configuration and optional volatile incarnation |
+| Producer epoch + logical sequence | The immediate output history and revision accepted by a downstream owner |
+| Transport emission sequence | Transmissions on one stream, including replay of older logical output |
+| Component generation / operation epoch | Runtime replacement and lifecycle races; not durable data-history identities |
+| Source position | Source-specific replay position, such as WAL/binlog/commit-and-row position |
+
+For query outputs, the producer epoch is derived from the complete
+`QueryRecoveryIdentity` plus the output reset generation:
+
+| Event | Identity consequence |
+|---|---|
+| Reemit saved output | Same logical change/output identity; new transport delivery may be assigned |
+| Reopen persistent query with the same scope, configuration, stores and reset generation | Compatible recovery identity and producer epoch |
+| Reset output history | New reset generation and producer epoch; dataset namespace need not change |
+| Stop/start the same volatile object | Incarnation can remain; a bootstrap reset can still change reset generation |
+| Construct a new volatile query object | New incarnation; cannot silently resume persistent downstream input |
+| Replace runtime component | New component generation; durable epoch follows recovered state, not this counter |
+
+Ordinary and directly constructed queries use the actual graph/query IDs under
+the enclosing instance scope. Catalog transport counters survive replacement.
+There is no old hash reader or adoption of the retired `lib-query/<hex ID>`
+namespace; current-release reconstruction must keep the current identities
+stable. That incompatibility does not authorize deleting old storage.
 
 Every output stream has one producer and increasing transport emission
 sequences. A replay can emit the same logical output again with a new transport
@@ -639,7 +902,7 @@ not inherited raw source sequence 2 and then incorrectly suppress event 1.
 [`producer_progress.rs`](../src/computation/v1/producer_progress.rs),
 `GraphInputProgress::from_envelope`, distinguishes immediate producer progress
 from inherited provenance. [`query_identity.rs`](../src/computation/v1/query_identity.rs)
-handles query recovery identity.
+re-exports the shared [query identity contract](../../components/computation-contracts/src/query_identity.rs).
 [`output_identity.rs`](../src/computation/v1/output_identity.rs) canonicalizes
 retry comparisons for replay and delivery. Reuse these rules rather than
 inventing an identity from just a timestamp, record key or transport envelope ID.
@@ -669,15 +932,15 @@ cases and completion after continuations.
 
 ### Ordinary ordering preserves each producer's progress
 
-The ordinary query inbox is a `RankedInputQueue` shared across its sources.
+The ordinary query inbox is a `RankedInputQueue` shared across its inputs.
 It compares the earliest admitted sequence from each producer by source time,
-source-list rank and sequence. It does not move a later sequence ahead of an
+configured input rank and sequence. It does not move a later sequence ahead of an
 earlier outstanding event from that producer, even if timestamps go backwards.
 Otherwise a simple high-water checkpoint could skip unprocessed input.
 
 The source's dispatch mode chooses blocking versus drop-on-full admission to
 this inbox; the query's dispatch mode governs its output subscribers. Changing
-source-list order changes query configuration identity. Inspect
+input-list order changes query configuration identity. Inspect
 [`ranked_pipe.rs`](../src/computation/v1/ranked_pipe.rs) and the shared
 [`channels/priority_queue.rs`](../src/channels/priority_queue.rs) before changing
 these rules.
@@ -733,9 +996,10 @@ Server/factory recipe for this component.
 `ContinuousQueryTransformer` handles graph input/output, query configuration,
 progress, recovery and result publication. The standard `ContinuousQueryFactory`
 constructs that component directly with output-delivery tracking enabled.
-`TransactionTransformer` retains compatible query constructors for direct
-assembly. Direct construction and factory construction must not be assumed
-to have identical output-handoff configuration.
+Direct query constructors opt in with `with_delivery_tracking()`, so do not
+assume their default output-handoff configuration matches the factory.
+`TransactionTransformer` is only the linear transaction container; it is not
+a second query host or a query execution mode.
 
 The bridge to the engine is
 [`core/src/computation/query_adapter.rs`](../../core/src/computation/query_adapter.rs).
@@ -784,10 +1048,13 @@ reduces the relationship to a single slot without those bounds. Keep
 are rejected or the requested bounds are executed correctly; do not present
 this as a native graph capability or a fixed ComponentGraph defect.
 
-### Mutation integrity uses source time
+<a id="mutation-integrity-uses-source-time"></a>
 
-The shared evaluator admits mutations by source-scoped element identity and
-`ElementMetadata.effective_from` (epoch milliseconds). This is not receipt time,
+### Mutation integrity follows the admitted ordering policy
+
+For `EventTime` input, the shared evaluator admits mutations by source-scoped
+element identity and `ElementMetadata.effective_from` (epoch milliseconds).
+This is not receipt time,
 transport sequence, a property, or the source-time merger's arrival policy.
 Strictly older inserts, updates and deletes are skipped with a structured warning
 containing the identity and incoming/stored timestamps. Processing continues and
@@ -817,8 +1084,12 @@ retention contract; elapsed wall time is not sufficient.
 Query configuration fingerprints include input endpoint selection, result label,
 execution mode and shared mutation semantics. Increasing transaction admission
 limits does not change grouped processing semantics or require resetting committed
-state. Incompatible stored identities fail as `ConfigurationChanged`; there is
-no automatic migration. Explicit reset/rebootstrap must still preserve pending
+state. Input and middleware order remain meaningful; label sets and join
+declarations are canonicalized. Capacity/startup settings alone do not invalidate
+processing identity. Both assembly paths share this native configuration and
+fingerprint; there is no query compatibility switch. Incompatible stored
+identities fail as `ConfigurationChanged`; there is no automatic migration.
+Explicit reset/rebootstrap must still preserve pending
 delivery obligations. Changing source clocks or correcting a value with an older
 timestamp requires an explicit upstream ordering policy, not bypassing the guard.
 
@@ -831,7 +1102,10 @@ rejection of incompatible stored identities.
 An ordinary batch preserves its per-change evaluation behavior. An explicitly
 complete source transaction carries framing, identity, a commit position and
 admission limits. `SourceTransactionBuilder` cannot publish an unfinished or
-failed assembly. The query must opt into this schema and atomic publication.
+failed assembly. It produces **one graph-change envelope containing ordinary
+operations plus a checked completeness marker**, not one special transaction
+payload record or a different graph-data schema. The query must opt into
+complete-transaction processing and atomic publication.
 
 The engine evaluates the group under one transaction and consolidates its final
 row changes. For example, moving value between two records need not expose an
@@ -839,8 +1113,8 @@ intermediate total that exists only halfway through the source transaction.
 This boundary stops at that query's publication; it does not atomically update
 every downstream query or external consumer.
 
-Read [`source_transaction.rs`](../src/computation/v1/source_transaction.rs) for
-framing and limits, then `evaluate_source_transaction` in the core adapter and
+Read the shared [`source_transaction.rs`](../../components/computation-contracts/src/source_transaction.rs)
+for framing and limits, then `evaluate_source_transaction` in the core adapter and
 [`query_results.rs`](../../core/src/computation/query_results.rs) for result
 consolidation. [Source-transaction tests](../tests/computation_source_transactions.rs)
 cover incomplete input and final-result semantics.
@@ -869,6 +1143,15 @@ boundary; [`query_recovery.rs`](../src/computation/v1/query_recovery.rs) applies
 it during recovery. Dropping a snapshot stream requests cancellation, but
 query cleanup must still await the provider's stop hook before releasing storage.
 The rows are not one fictitious source transaction.
+
+Completed bootstrap is reused when the recovery contract permits it; a clean
+restart does not unconditionally rescan. `has_pending_snapshot` requests an
+additional prepared snapshot, such as an ordinary subscription without a
+checkpoint, and defaults to false in Rust and the native SDK. Initial bootstrap
+and explicit reset can still request a snapshot. Generic output inputs refresh
+volatile views as described in the [chain startup case](#a-query-chain-needs-a-starting-view-as-well-as-a-live-edge).
+Native preparation permits one snapshot and retains cleanup ownership across
+cancellation.
 
 ### Paired bootstrap borrows the source's actual engine
 
@@ -972,7 +1255,118 @@ then the core adapter's `evaluate_due_future` and the query's `on_wakeup`.
 and the scheduling mutation cases in
 [query fault tests](../tests/computation_query_faults.rs) protect this ownership.
 
+## Reading state without running another query
+
+The old ordinary result API remains a presentation over the query's owned
+state. Generic output readers extend that idea to any source, transformer or
+query output that actually supplies a provider. Reading does not start another
+evaluator, and providing a port does not require a second materialized view.
+
+### Choose the reader by the promise it makes
+
+| Need | Interface | What not to infer |
+|---|---|---|
+| One current query answer | `QueryApi` / `QueryResultsCatalog` snapshot | All source input or downstream work is complete |
+| Future notifications only | Connected output/outlet subscription | Existing rows are automatically loaded |
+| Current query answer and live changes | `subscribe_query_results` | A durable consumer checkpoint or completed external effects |
+| Generic snapshot followed by available retained history | `OutputHandle::catch_up` | A gap-free subscription to future output |
+| Disposable generic current-plus-live view | `OutputHandle::snapshot_and_follow` | Crash-durable retention |
+| Durable query-result consumer | `QueryReplayTransformer` / `CheckpointedSink` plus `ConsumerProgressStore` | Destination business effects are automatically atomic |
+| Per-operation handling recovery | `DeliveryRunner` plus a completion-capable handler | Whole-batch or remote exactly-once execution |
+
+`config::QueryConfigurationSnapshot` describes query configuration/status.
+`computation::v1::QueryResultSnapshot` contains current full result nodes, the
+projector (dataset and label, present even when empty), sequence and generation.
+Use the explicit type; the old `QuerySnapshot` aliases are gone. The query's
+current row map answers "what is true now?" Its retained outbox answers "which
+result changes remain available?" Their capacities and lifetimes are different.
+
+### Snapshot first is not automatically snapshot plus live
+
+**Case: a viewer connects while output changes.** Reading rows and only then
+subscribing loses updates between those actions. The ordinary
+`subscribe_query_results` path subscribes first, captures a snapshot and filters
+the overlap. A snapshot through logical output 42 already covers queued output
+41 and 42; the viewer installs that snapshot/cursor and starts applying 43.
+Retained history can repair supported lag; missing history is an error, not
+permission to ignore it.
+
+The generic catalogue exposes independent per-port `SnapshotProvider`,
+`ReplayProvider` and `SnapshotFollowProvider` registrations through
+`ComputationComponent::output_readers()`. One does not imply another or imply
+persistence. A provider reads its own state; an output with no registered
+snapshot must not appear as an empty dataset.
+
+`DrasiLib::output_catalogue()` resolves an `OutputHandle` for a selected source,
+query or transformer output. Each successful read carries an `OutputCursor`:
+the `GraphProducerIdentity` epoch and committed logical sequence. Snapshots
+contain full records; replayed envelopes carry current producer progress for
+that epoch. `NotReady`, `Gap`, `EpochChanged` and `Retired` are typed failures.
+`catch_up` takes a snapshot and replays after its cursor, detecting gaps and
+epoch changes. It does not keep following later events.
+
+`snapshot_and_follow(limits)` uses an actual follow provider to capture the
+snapshot and exclusive follow position together. The query opens its
+`OutputFollowHub` lease under the same state lock as snapshot capture and
+publishes committed output under that lock. The hub retains only the tail, not
+another copy of the result table. Install the snapshot and cursor coherently
+before applying the tail.
+
+### Follow leases are bounded and owned, not durable subscriptions
+
+Each follow lease has count, full encoded-envelope byte and non-renewing
+lifetime limits. Queries allow 64 active leases, each bounded by at most the
+configured outbox capacity, 16 MiB and 300 seconds. A slow reader receives
+`Gap` on overflow or `LeaseExpired` on expiry without backpressuring the
+producer. Drop releases retention synchronously; cancelling `next` does not
+consume an item. Stop/reset/replacement retire old leases.
+
+**Case: a slow subscriber restarts.** A dashboard with an expired volatile
+lease should obtain a fresh snapshot and rebuild its disposable view. A
+required durable subscriber must instead resume its persisted cursor and honor
+retained-output/recovery rules. Disconnecting that subscriber does not retire
+its obligation. Choosing the first mechanism cannot provide the second one's
+restart guarantee.
+
+### Reader publication uses the same graph ownership rules
+
+The graph captures providers at construction/reconfiguration and publishes weak,
+generation-fenced references. Undeclared output ports fail registration;
+changing registrations during processing damages the generation. Every read is
+re-fenced against current publication, so an old handle cannot read a
+replacement's state. Queries register over their existing output state/outbox,
+and ordinary APIs retain their configured outlet semantics.
+
+The catalogue holds existing registry/state watch receivers, not a
+command-capable `GraphControl` or component owners.
+`ConstructionContext::output_catalogue()` gives factories that read-only view.
+`resolve_component` captures primary-port selection and providers from one
+publication; resolving them independently could cross a replacement.
+
+Start with [`output_catalogue.rs`](../src/computation/v1/output_catalogue.rs),
+[`query_output.rs`](../src/computation/v1/query_output.rs),
+[`query_catalog.rs`](../src/computation/v1/query_catalog.rs) and
+[`runtime/native_query.rs`](../src/computation/runtime/native_query.rs).
+[Native read transport limits](#native-output-read-services) are separate
+from the in-process provider's limits.
+
 ## Stateful processing outside a query
+
+### Input-local middleware trusts bindings, not event claims
+
+Ordinary middleware selections still identify the input pipeline they apply to.
+Now that a query can consume arbitrary producer outputs, the immediate producer
+is not necessarily the element's original source. `bind_inputs` captures the
+trusted `(input port, stream) -> producer scope` mapping. An ordinary subscription
+helper resolves to its configured source alias; a native edge resolves to its
+actual immediate component. Snapshot providers supply trusted origins too.
+
+For example, `inventory -> normalize -> query` may still carry elements whose
+`source_id` is `inventory`. Query-local middleware for `normalize` must not be
+selected by that field or by an inherited annotation claiming to be a different
+producer. Preserve element namespaces while selecting the pipeline from the
+host-resolved binding. Follow `bind_inputs` and `process` in
+[`query.rs`](../src/computation/v1/query.rs), then the shared Core input scope.
 
 ### Standalone middleware retains the state needed to interpret changes
 
@@ -1002,6 +1396,13 @@ re-keys outputs as input changes, is a different, future component
 ([CW-68](computation-graph-remaining-work.md#cw-68)); it would own its own
 storage and recovery, and it does not exist today.
 
+For example, a `map` rule emits an event when `quantity < 5`. It can emit an
+update at quantity 3 and ignore a later event at quantity 8. Ignoring that
+event does **not** emit a deletion of the earlier output. A continuous query
+maintaining `WHERE quantity < 5` can retract the result because it owns the
+indexed prior state. Do not document event filtering as maintained-view
+filtering or add hidden view storage to `map`/`jq` to imitate it.
+
 Read [`middleware.rs`](../src/computation/v1/middleware.rs) alongside
 [`middleware_recovery.rs`](../src/computation/v1/middleware_recovery.rs).
 [Middleware recovery tests](../tests/computation_middleware_recovery.rs)
@@ -1027,12 +1428,32 @@ Ordinary transformers do not become safe participants through a configuration
 flag alone.
 
 [`transaction_transformer.rs`](../src/computation/v1/transaction_transformer.rs)
-contains both the linear container and the distinct query-body arrangement;
+contains the linear container, not a separate query-body arrangement;
 [`transaction_state.rs`](../src/computation/v1/transaction_state.rs) scopes
 step state. [Transaction-transformer tests](../tests/computation_transaction_transformer.rs)
 cover rollback, output replay and interrupted replacement.
 
 ## Recovery is a chain of completion boundaries
+
+ComponentGraph-based queries already had persistent indexes and source
+checkpoints. The maintainer's new task is to follow **each actual owner** across
+a general graph path. Persistence of one owner does not establish another
+owner's completion or replay contract.
+
+| State or progress | What it proves |
+|---|---|
+| Source WAL/journal and source position | Source-defined accepted/replayable history, subject to its retention contract |
+| Query indexes and committed input checkpoint | This query processed that logical input; the answer may be unchanged |
+| Query live-result state and output sequence | Current rows and produced logical result batches |
+| Query outbox and pending delivery | Committed output available for replay/handoff without reevaluation |
+| Pipe journal and subscriber cursor | That channel's retained acceptance/handling obligations |
+| Graph-owned handled-input progress | Successful local processing, forwarding, continuations and completion hooks |
+| Consumer checkpoint / `DeliveryRunner` ledger | That consumer's explicitly recorded result/operation completion |
+
+These positions can advance at different rates and have different identities.
+There is no universal cross-query completion counter. To prove completion for
+a test or operation, first establish a finite input boundary, then inspect the
+actual query and required consumer owners at their respective boundaries.
 
 ### A storage provider must prove a usable transaction boundary
 
@@ -1056,8 +1477,19 @@ This is also why stateful components need cancellation guards, not just an
 `if result.is_err()` branch after an awaited operation.
 
 Default inline-memory queries avoid persistent machinery by using direct
-memory indexes and a no-op session controller. Explicit non-atomic publication
-cannot satisfy an atomic-output claim. Preserve this distinction when extending
+memory indexes and a no-op session controller. Source-facing memory queries
+also have volatile checkpoints for coordination; the minimal processing-only
+Core memory provider does not acquire that capability automatically.
+Persistent queries require persistent checkpoints, an outbox and live results,
+with actual shared participation for atomic publication. The interfaces alone
+are insufficient.
+
+Explicit non-atomic publication cannot satisfy an atomic-output claim. Its
+persistent output path marks pending publication and refuses unfinished state
+on recovery rather than presenting a stale answer as current. Reset and
+deprovisioning propagate unsupported cleanup errors; stored output must carry
+its producer identity and reset markers must carry their generation.
+Preserve these distinctions when extending
 [`pipeline.rs`](../src/computation/v1/pipeline.rs) or
 [`legacy_index.rs`](../src/computation/v1/legacy_index.rs).
 
@@ -1151,6 +1583,12 @@ Temporary disconnection is not subscriber retirement. Otherwise reconnecting a
 slow consumer would silently lose its backlog. Lossy retention and gap skipping
 are explicit policies; skip diagnostics must follow confirmed cursor advancement,
 not a cancelled attempt to advance it.
+
+For example, alerts has handled output 42 but audit is still at 39. A lossless
+shared journal may have to retain 40-42 for audit and eventually block new
+publication. Restarting audit resumes its cursor; removing its socket or read
+handle does not authorize pruning that backlog. This differs from an expiring
+dashboard follow lease, which can fail and rebuild from a snapshot.
 
 Read [`retained_pipe.rs`](../src/computation/v1/retained_pipe.rs) and
 [`retained_store.rs`](../src/computation/v1/retained_store.rs) for a single
@@ -1445,19 +1883,37 @@ restore pruned events or undo an external effect.
 
 Replacing a persistent resource can destroy the only remaining path to
 unconfirmed work. Before accepting such a change, supported retirement paths
-stop the actual users, verify pending obligations under the real storage
-gates, and hold those owners against restart/rebinding through the decision.
+require the instance to be successfully stopped and its applied topology
+equivalent to the accepted desired topology. They verify pending obligations
+under the real storage gates and hold actual owners against restart/rebinding
+through the decision.
 
 The race to prevent is: inspect "empty," release the lock, accept new work,
 then replace the resource based on the stale empty observation. Retirement
 holds the proof stable instead.
+
+For a managed query, output journal and consumer, the positive procedure is:
+
+1. Stop admitting application input at a known boundary; account for scheduled
+   work and let required consumers finish pending output.
+2. Await `DrasiLib::stop()` successfully and verify accepted/applied topology
+   agreement. A timeout is not a stopped instance.
+3. Read the desired revision and submit the complete changed definition with
+   `apply_desired_state(expected_revision, request_id, desired)`.
+4. Management obtains graph freezes and storage/journal/consumer/bootstrap
+   retirement guards **internally**. The application does not build a public
+   proof object.
+5. Management commits desired configuration and the receipt, then loads
+   authoritative state to decide whether to retire or resume the held owners.
+   Resolve the same request ID after uncertainty; do not issue an unrelated
+   replacement or restart old owners merely because a call returned an error.
 
 If configuration commit is uncertain, those protections remain held until
 authoritative resolution. Confirmed rejection can resume old owners; accepted
 retirement requires the affected generations to be reconstructed/removed.
 Dropping an unresolved lease does not automatically resume them.
 
-Query deprovisioning starts a new output incarnation, not a reused one. It
+Query reset/deprovisioning starts a new output history, not a reused one. It
 records an in-progress reset before clearing anything, so an interrupted wipe
 is refused at recovery rather than resumed from partial state. The restarted
 sequence numbers are published under a strictly newer output generation, so a
@@ -1467,6 +1923,11 @@ configuration hash as a configuration change: a storage error while reading it
 fails recovery instead of authorizing an automatic reset. See
 [`query_recovery.rs`](../src/computation/v1/query_recovery.rs) and `recover` in
 [`query.rs`](../src/computation/v1/query.rs).
+
+`AutoReset` is a receiving-query recovery policy requiring bootstrap, not a
+general exception handler or source reset. In particular it cannot discard
+bound durable output destinations. Resolve their actual obligations first;
+a new query configuration or directory name cannot erase them.
 
 Explicit data-loss authorization is revision-bound and names a complete
 recovery domain. It permits removal, not in-place reuse, data deletion or
@@ -1495,8 +1956,18 @@ An ordinary source change event the host cannot decode ends that change stream
 with `UndecodableSourceEvent` (see
 [`proxies/change_receiver.rs`](../../components/host-sdk/src/proxies/change_receiver.rs)).
 Skipping it would let the source confirm later positions past the lost change,
-so a restart could never replay it. The source fails instead and resumes from
-its last confirmed position.
+so a restart could never replay it. Fail the stream instead of confirming past
+it; any supported source replay must use the last confirmed position.
+
+**Case: invalid plugin data.** A native source emits a malformed canonical
+record, an undeclared output port or an unowned stream. Decode validated data
+at the Host boundary and check output schema, port, stream and emission sequence
+before graph forwarding. A receiving query additionally validates its input's
+producer progress before accepting its ordering authority. Record the affected
+component/generation's typed failure; silently dropping bad data or converting
+it to an empty batch can falsely advance progress. Independent branches and the
+controller remain available. This is a component/protocol failure, not
+automatically a graph-driver failure.
 
 Rust futures, trait objects, `Arc`s, allocator ownership and runtime internals
 do not cross the C ABI. Producer-owned buffers are released by their producer.
@@ -1578,6 +2049,59 @@ data-only contracts remain in
 Keep the [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
 ordinary SDK wire contracts separate.
 
+### Native input bindings and component-owned resources
+
+A native sink or transformer opts into `Capabilities::binds_inputs` when it
+needs producer identity. The Host supplies `CreateRequest::inputs` from the
+actual declared edges: input port, output component/port and stream. It holds
+construction until the streams are bound and reconstructs on relevant binding
+changes. The plugin must not infer identity from a stream's spelling, record
+namespace or inherited annotation. Multi-output producers use explicit aliases
+through the shared `SinkOutputs` helper.
+
+This is how native HTTP/gRPC/SSE sinks consume ordinary graph data from sources,
+transformers and queries without pretending they all are query results.
+The ordinary Reaction adapter remains a separate query-facing boundary.
+
+Plugin-private clients, sockets and workers remain owned by the component.
+Declared storage, progress, bootstrap and identity services retain the graph's
+explicit ownership/borrowing and dependency rules. For independent native
+libraries, use
+the worker ownership helpers in `drasi-computation-contracts::workers`;
+host/ordinary code uses `drasi_lib::context::workers`. A plugin should not
+depend on the query runtime merely to spawn and join an owned I/O worker.
+
+### Native output read services
+
+Native `output_reads_v1` and `output_follow_v1` expose registered per-output
+providers independently of pending `next`/`transform` work. Factory metadata
+must match actual snapshot/replay/follow registrations, captured without I/O at
+construction. An unsupported extension is not an empty read result.
+
+Reads are available only while the component is started. The v1 provider-export
+transport bounds replies to 16 MiB, snapshots to 16,384 records, replay to
+1,024 envelopes, and each component to 16 reads and 16 leases. Exceeding a
+limit fails explicitly; results are not truncated. Stop, replacement and
+release synchronously retire leases. A follow item stays owned until the Host
+acknowledges returning it, so cancellation of a completed-but-unobserved reply
+cannot lose it. These are bounded volatile handovers, not durable consumers or
+streamed large-snapshot exports.
+
+A different, read-only **`output-snapshots-v1` sink service** lets an opted-in
+factory read an allowed set of outputs through `NativeOutputSnapshots`.
+`NativeOutputSnapshotsResource` supplies the Host's endpoint allow-list and
+limits; construction binds it to the actual output catalogue. The service
+streams validated full records from one captured snapshot, one bounded
+operation at a time. It grants neither graph ownership nor writes and does not
+establish atomic snapshot/live follow. The native SSE sink uses this service.
+Do not confuse it with exporting a component's providers or accepting incoming
+recovery snapshot envelopes.
+
+See the [SDK read and binding contracts](../../components/computation-plugin-sdk/README.md#optional-per-output-snapshot-replay-and-follow-providers)
+and [in-process reader model](#reading-state-without-running-another-query).
+All services use the current base ABI 1.0 and envelope wire v1; optional
+negotiation does not imply every loaded library implements every service.
+
 ### Activation credentials preserve per-start identity behavior
 
 `activation_credentials_v1` is an optional extension over the frozen base
@@ -1624,6 +2148,45 @@ A trait implemented by an in-process Rust component does not automatically
 exist across FFI. Test separately built libraries and actual capability
 negotiation, not just Rust mocks in one binary.
 
+### Server and process hosting keep the same instance boundary
+
+Server configures explicit entries in `instances`, each owning its own
+DrasiLib/ComputationGraph. There is no runtime selector or hidden ComponentGraph
+fallback. Familiar source/query/reaction configuration still uses the ordinary
+assembly path; it does not select a separate engine.
+
+For explicit native composition, an instance's `computation.graph` is the
+authoring form with factory kinds, resources and connections.
+`computation.definition` is the expanded Core version-1 `DesiredTopology`
+used for persisted/exported topology and advanced settings. Both resolve through
+the same construction and validation path; use one form, not both. Literal
+factory settings in the authoring form are not automatically secret references.
+Keep reconstruction recipes distinct from opaque supplied objects.
+
+Instance-scoped `/api/v1/instances/{instanceId}/computation` inspection and
+ordinary query APIs read the real graph. Native queries can be visible through
+ordinary read APIs; ordinary reactions/live subscriptions additionally require
+the actual query-results outlet/catalog connection. An instance's `running`
+flag is not every node's readiness, and separate instances do not produce one
+atomic inventory or progress snapshot. The
+[Server guide](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#native-computation-components)
+documents those authoring and API boundaries.
+
+For process separation, the
+[instance host](../../components/instance-host/README.md) runs a normal
+DrasiLib in each process, while
+[bridge components](../../components/computation-plugins/common/bridge/README.md)
+carry data between them. This is actual process hosting, not a special remote
+node executor. Child-process ownership, bridge delivery and storage recovery
+remain distinct. Native in-process plugins are trusted code; an ABI panic
+guard is not isolation from aborts or memory faults.
+
+The bridge carries one `GraphChange` format for source, transformer and query
+data, including complete source transactions. Its element-namespace allow-list
+must name the exact derived output datasets as well as permitted physical
+source prefixes; query metadata grants no broader authorization. There is no
+separate query-change selector or `query_prefixes` setting.
+
 ### Current source adoption and consumer boundaries
 
 | Surface | Implemented scope and limit |
@@ -1660,25 +2223,20 @@ and saved numeric connection ID are insufficient after a same-data-directory
 restart. Missing or denied proof is rejected before accepting SQL work, not
 treated as permission to kill another session.
 
-Server's canonical definitions now cover seven PostgreSQL configurations and
-Trading's actual 11-query group with two shared PG sources, one HTTP source and
-composed initialization. Generation uses actual factory metadata and the app's
-query declarations; secret `ConfigurationValue` references remain references.
-Provisioning installs the complete fixed-member bundle in one existing batch,
-then its SSE reaction; partial/conflicting bundles fail explicitly. See the
-[Server recipes and qualification tools](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/postgres).
-
-The matching Server checkout also contains metadata-driven MySQL and SQLite
-generators and real source/query/procedure-or-REST consumers, with actual schema,
-credential rotation, saved references and reconstruction coverage. SQL Server's
+Selected PostgreSQL, MySQL and SQLite paths have static/dynamic native hosting,
+actual-owner progress and bootstrap integration. Their Server recipes use
+factory metadata and retain secret references as references. SQL Server's
 generator/metadata checks are not database qualification. The
 [native inventory](../../components/computation-plugins/README.md) links the
 role-specific libraries and supported modes.
 
-This does not close cold undrained-input reconstruction, other selected families,
-old-consumer retirement or cleanup stages 6 through 9. HTTP snapshots/live prices
-gain no durable or atomic replay guarantee, and a handled procedure call is not
-an exactly-once external effect.
+Native source/reaction conversion is not universal, and the continuous query
+implementation is built into the runtime rather than an independently loadable
+query plugin. Ordinary adapters remain supported on the same graph. Remaining
+native persistent-input-pipe reconstruction combinations need their own proof;
+working source-WAL/query/journal reopen cases do not qualify every combination.
+HTTP snapshots/live prices gain no durable or atomic replay guarantee, and a
+handled procedure call is not an exactly-once external effect.
 
 ## Inspection and diagnosing a running system
 
@@ -1723,63 +2281,13 @@ success for a catalog error. See the
 [Host reader](../../components/host-sdk/src/computation/source_schema.rs) and
 [Core inspection](../src/computation/runtime/inspection.rs).
 
-Generic output reads are optional per output port. A component's
-`ComputationComponent::output_readers()` registers a `SnapshotProvider` and/or
-a `ReplayProvider`, and optionally a `SnapshotFollowProvider`; capability is
-exactly what is registered, one does not imply the other or persistence, and a
-provider derives answers from its own data (no shared row store or mandatory
-materializer). Each success carries a `GraphProducerIdentity` epoch plus a
-committed sequence (`OutputCursor`). Snapshots hold only full-image records;
-replayed envelopes must carry the producer's current `GraphProducerProgress`
-marker for that epoch, whose logical sequence (not the transport sequence)
-is the position. Failures are typed `NotReady`, `Gap`,
-`EpochChanged` or `Retired`, never an empty success. The graph captures the
-providers with the slot at construction/reconfiguration and publishes weak,
-generation-fenced references in the registry (like the schema reader).
-Registrations naming undeclared output ports are rejected at build, addition
-and replacement preparation; a registration that changes afterwards damages
-the generation instead of being dropped.
-`DrasiLib::output_catalogue()` resolves an `OutputHandle` for any source, query
-or transformer output; every read is re-fenced against the current publication,
-so stop, restart, replacement or removal retires an old handle instead of
-reading a successor's data. Queries register providers over their existing
-output state/outbox (`query_output.rs`). Query-facing APIs retain their
-configured outlet delivery semantics. Calling
-`OutputHandle::catch_up` (snapshot then replay from its cursor) detects epoch
-changes and gaps; it is not a gap-free live handover.
-
-The catalogue retains only the graph's existing registry and state watch
-receivers, not a command-capable `GraphControl` or component owners.
-`ConstructionContext::output_catalogue()` supplies that read-only view to
-factories after the graph publications exist. A host read-service policy can
-therefore be resolved before the graph runs and bound to the actual catalogue at
-component creation, without a lazy global registry or another row store.
-`resolve_component` captures primary selection and providers from one publication;
-use it instead of resolving a default port and later reading a different generation.
-
-`OutputHandle::snapshot_and_follow(limits)` uses an actual registered
-`SnapshotFollowProvider` to capture a snapshot and its exclusive follow position
-together. The query opens its `OutputFollowHub` lease under the same state lock
-as snapshot capture and publishes committed envelopes under that lock. The hub
-stores only the tail, not another materialized view. Count, full encoded-envelope
-bytes and a non-renewing lifetime bound each lease. Queries allow 64 active leases,
-each at most the configured outbox capacity, 16 MiB and 300 seconds.
-Overflow fails that reader with `Gap` without blocking the producer; expiry
-returns `LeaseExpired`. Dropping the handle releases it synchronously, cancelled
-`next` calls do not consume an item, and stop/reset/replacement retire old leases.
-The catalogue additionally fences every pending tail read and checks schema,
-stream, epoch and logical progress. Consumers install snapshot state and its
-cursor coherently before processing the tail. No worker or state store is added
-to components that do not register this capability.
-
-Native reads run independently of pending data operations and are available
-only while the component is started. The v1 transport bounds replies to 16 MiB,
-snapshots to 16,384 records, replay to 1,024 envelopes and each component to
-16 reads and 16 leases. Exceeding a limit is an explicit error, not truncation.
-Lease-owned operations release retention synchronously on drop or retirement;
-an item is retained until the host acknowledges returning it, so cancellation
-of a completed-but-unobserved reply cannot lose the item. These are volatile
-handover leases, not crash-durable consumers or streamed large snapshots.
+Generic output reads use the same weak registry ownership and per-read
+generation fencing; see [reading state](#reading-state-without-running-another-query)
+before choosing snapshot, catch-up or live follow. The catalogue validates
+schema, stream, epoch and logical progress on pending tail reads as well as
+initial resolution. [Native read services](#native-output-read-services) have
+additional ABI limits; do not diagnose a bounded-read rejection as missing
+query rows.
 
 Public errors preserve internal causes through
 [`error.rs`](../src/error.rs), rather than reducing them to formatted strings.
@@ -1827,7 +2335,9 @@ and result publications. `get_query_progress_metrics` fences component generatio
 and lifecycle operation and rejects an output-reset mismatch; it does not create
 a metrics-owned query cache. Publish the result view before confirming its input
 position, so a reported committed input never leads the corresponding result
-view. Missing or unready owners are absent, not zero-valued observations.
+view. This is the query's processing boundary, before the graph's outgoing
+acceptances and final handled-input acknowledgement. Missing or unready owners
+are absent, not zero-valued observations.
 
 Server's optional OTLP exporter samples that read path away from query execution,
 with process, instance, query and output identities. It owns its SDK provider and
@@ -1835,6 +2345,9 @@ retains shutdown across cancellation without changing a global provider. These
 measurements identify processing progress, not completed external effects or a
 finished future queue. Recovery checks still need actual receiver records and a
 known final input boundary; a retained collector sample is not fresh proof.
+Do not subtract independent queries' output counters or expose their maximum as
+a universal "graph caught up" result. Query input, query output, replay transport
+and consumer handled progress require their own scopes and evidence.
 
 Ordinary HTTP/gRPC WAL cleanup must not use the first restored subscriber as the
 whole recovery group. `SourceBase::begin_wal_subscriptions` holds cleanup for a
@@ -2001,9 +2514,30 @@ Use [the qualification ledger](../tests/runtime_parity/requirements.tsv) and
 when making release claims. Framework support, one backend test and
 production-duration operational evidence are different levels of confidence.
 
-The focused commands above check one boundary; they are not acceptance for a
-data-contract change. Final acceptance of a cross-cutting change such as the
-unified graph-change contract requires all supported tests, plus the GPU Lab,
-Move-a-Wall and Building Comfort demonstrations run against binaries built from
-the same sources. A passing focused or targeted run, or an older recorded
-demonstration, does not substitute for them.
+### Current qualification is evidence for named scopes
+
+Recorded local validation for the current functionality includes strict Core
+lint, all 35 runtime profiles (8,625 successful repeated execution records), and
+the separate workspace run (4,922 passed, zero failed, 233 existing ignores).
+Repeated profile executions are not unique-test counts; many ignored workers
+are executed through their parent/profile paths.
+
+The actual macOS-to-Linux TLS/reopen/ownership profile and enabled
+subscribe/drop stress were executed. GPU Lab, Move-a-Wall and Building Comfort
+passed rebuilt-code live/browser/restart checks; GPU's UI suite passed 376
+tests. The revised Stockroom companion also passed its default/optional and
+network lessons. These are scoped local proofs, not a newer CI result,
+universal release qualification or a performance comparison.
+
+The broader requirements ledger still records **20 covered, 23 partial and
+5 unqualified** requirements. SQL Server live qualification remains explicitly
+deferred. Remaining connector conversions, external-effect gaps, native
+persistent-input-pipe combinations, bounded-read limits and other open work
+must be assessed for the deployment actually being changed. Do not describe
+all native persistent replay as missing when specific reopen cases work, or
+describe every combination as complete because one profile passed.
+
+For a future cross-cutting data-contract change, rerun the supported profiles
+and matching-built demonstrations affected by that change. An older recorded
+run or a targeted result alone is not evidence for new binaries. A docs-only
+edit does not require rerunning runtime builds.

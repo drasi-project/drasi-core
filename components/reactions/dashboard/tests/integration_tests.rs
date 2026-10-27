@@ -28,7 +28,7 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-async fn next_query_result<S>(stream: &mut S) -> Result<Value>
+async fn next_message<S>(stream: &mut S, message_type: &str) -> Result<Value>
 where
     S: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
@@ -44,7 +44,7 @@ where
         if let Message::Text(text) = message {
             let value: Value = serde_json::from_str(text.as_ref())
                 .context("websocket payload was not valid json")?;
-            if value.get("type").and_then(Value::as_str) == Some("query_result") {
+            if value.get("type").and_then(Value::as_str) == Some(message_type) {
                 return Ok(value);
             }
         }
@@ -162,15 +162,15 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     // WebSocket protocol harness.
     let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+    next_message(&mut ws_receiver, "query_snapshot").await?;
 
     ws_sender
         .send(Message::Text(
             r#"{"type":"subscribe","query_ids":["test-query"]}"#.to_string(),
         ))
         .await?;
-    // Brief yield to let server process the subscribe before we send data.
-    tokio::task::yield_now().await;
-    sleep(Duration::from_millis(50)).await;
+    let baseline = next_message(&mut ws_receiver, "query_snapshot").await?;
+    assert_eq!(baseline["rows"], serde_json::json!([]));
 
     // INSERT verification.
     source_handle
@@ -183,7 +183,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
                 .build(),
         )
         .await?;
-    let insert_message = next_query_result(&mut ws_receiver).await?;
+    let insert_message = next_message(&mut ws_receiver, "query_result").await?;
     let add_diff = insert_message["results"]
         .as_array()
         .and_then(|results| results.iter().find(|result| result["op"] == "add"))
@@ -209,7 +209,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
                 .build(),
         )
         .await?;
-    let update_message = next_query_result(&mut ws_receiver).await?;
+    let update_message = next_message(&mut ws_receiver, "query_result").await?;
     assert!(
         update_message["results"]
             .as_array()
@@ -230,7 +230,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     source_handle
         .send_node_delete("person-1", vec!["Person"])
         .await?;
-    let delete_message = next_query_result(&mut ws_receiver).await?;
+    let delete_message = next_message(&mut ws_receiver, "query_result").await?;
     assert!(
         delete_message["results"]
             .as_array()
@@ -314,12 +314,13 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
     // Open a live WebSocket so we can observe it being closed on shutdown.
     let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+    next_message(&mut ws_receiver, "query_snapshot").await?;
     ws_sender
         .send(Message::Text(
             r#"{"type":"subscribe","query_ids":["shutdown-query"]}"#.to_string(),
         ))
         .await?;
-    sleep(Duration::from_millis(50)).await;
+    next_message(&mut ws_receiver, "query_snapshot").await?;
 
     // Stop the reaction (and the rest of the core).
     core.stop().await?;

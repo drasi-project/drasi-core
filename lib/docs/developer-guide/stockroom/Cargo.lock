@@ -2678,6 +2678,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "drasi-computation-contracts",
  "drasi-core",
  "drasi-host-sdk",
  "drasi-index-rocksdb",

@@ -15,7 +15,7 @@ use drasi_core::{
 use drasi_lib::{computation::v1::*, DrasiLib};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
@@ -218,6 +218,7 @@ fn parse_rows<T: FileRow>(text: &str) -> anyhow::Result<BTreeMap<String, T>> {
     Ok(result)
 }
 
+// ANCHOR: inventory-changes
 fn inventory_changes<T: FileRow>(
     previous: &BTreeMap<String, T>,
     current: &BTreeMap<String, T>,
@@ -229,9 +230,8 @@ fn inventory_changes<T: FileRow>(
             None => changes.push_back(SourceChange::Insert {
                 element: product.element(time),
             }),
-            Some(old) if old != product => changes.push_back(SourceChange::Update {
+            Some(old) if old != product => changes.push_back(SourceChange::Replace {
                 element: product.element(time),
-                removed_properties: BTreeSet::new(),
             }),
             Some(_) => {}
         }
@@ -243,6 +243,7 @@ fn inventory_changes<T: FileRow>(
     }
     changes
 }
+// ANCHOR_END: inventory-changes
 
 struct FileSource<T: FileRow> {
     descriptor: ComponentDescriptor,
@@ -519,9 +520,11 @@ impl ComputationComponent for Alerts {
 // ANCHOR: alert-sink
 #[async_trait]
 impl EnvelopeSink for Alerts {
+    // ANCHOR: alert-completion
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
+    // ANCHOR_END: alert-completion
 
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         let mut view = self.view.borrow().clone();
@@ -1554,7 +1557,7 @@ mod tests {
         source.reload().await?;
         ensure!(matches!(
             source.pending.front(),
-            Some(SourceChange::Update { .. })
+            Some(SourceChange::Replace { .. })
         ));
         source.stop().await?;
         Ok(())
@@ -1589,6 +1592,49 @@ mod tests {
         let duplicate = serde_json::json!([data[0], data[0]]);
         ensure!(parse_inventory(&duplicate.to_string()).is_err());
         ensure!(parse_inventory(r#"[{"sku":"bolts","quantity":3}]"#).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn full_snapshot_replacement_removes_payload_without_changing_identity() -> anyhow::Result<()> {
+        let mut with_payload = inventory(3);
+        with_payload[0]["payload"] = serde_json::json!(r#"{"quantity":2}"#);
+        let previous = parse_inventory(&with_payload.to_string())?;
+        let current = parse_inventory(&inventory(3).to_string())?;
+        let Element::Node {
+            metadata: before_metadata,
+            properties: before_properties,
+        } = previous["bolts"].element(1)
+        else {
+            anyhow::bail!("original product must be a node");
+        };
+        ensure!(before_properties.get("payload").is_some());
+        let mut changes = inventory_changes(&previous, &current, 2);
+        ensure!(changes.len() == 1);
+        let change = changes.pop_front().context("missing replacement")?;
+        let SourceChange::Replace { element } = &change else {
+            anyhow::bail!("an authoritative changed row must replace its previous image");
+        };
+        let Element::Node {
+            metadata,
+            properties,
+        } = element
+        else {
+            anyhow::bail!("product must remain a node");
+        };
+        ensure!(metadata.reference == before_metadata.reference);
+        ensure!(properties.get("payload").is_none());
+        let envelope =
+            GraphChangeCodec::encode_change(change, StreamId::try_new("inventory/out")?, 2, None)?;
+        let decoded = GraphChangeCodec::decode_changes(&envelope)?;
+        ensure!(matches!(
+            decoded.as_slice(),
+            [SourceChange::Replace {
+                element: Element::Node { metadata, properties }
+            }] if metadata.reference == ElementReference::new("inventory", "bolts")
+                && properties.get("payload").is_none()
+        ));
+        ensure!(inventory_changes(&current, &current, 3).is_empty());
         Ok(())
     }
 

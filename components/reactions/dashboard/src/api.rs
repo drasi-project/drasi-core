@@ -288,7 +288,10 @@ async fn get_query_snapshot(
                         data,
                     })
                     .collect();
-                return Ok(Json(QuerySnapshot { rows }));
+                return Ok(Json(QuerySnapshot {
+                    rows,
+                    ..Default::default()
+                }));
             }
         }
     }

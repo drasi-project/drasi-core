@@ -34,6 +34,19 @@ embedded applications.
 You should be comfortable with Rust, Cargo, and `async`/`await`. No prior knowledge
 of Drasi, graph databases, or stream-processing frameworks is assumed.
 
+Follow the main Stockroom path first; sections marked **Alternative** or
+**Host profile** are choices, not additional steps required by that path.
+
+| Running variant | What it teaches | What survives reopening |
+|---|---|---|
+| File lessons, beginning with `cargo run --locked` | Changing facts, queries, views and composition | The input file; processing is rebuilt |
+| `--features persistence -- --state ...` in Part III | SQLite capture, query storage, retained alerts and saved reorders | Processing and consumer completion in the same state directory |
+| `--features management -- managed ...` in Part IV | Saved definitions, factories and revisioned configuration | Configuration; this variant rebuilds its memory query from the file |
+
+Saving configuration does not implicitly enable processing recovery, and choosing
+a persistent query provider does not implicitly retain input or complete effects.
+The later lessons make those boundaries explicit.
+
 ## Contents
 
 **Part I - Build a working application**
@@ -197,22 +210,10 @@ Ready. Watching inventory.json for saved changes.
 Leave this terminal running. The first line always precedes result output;
 an initial aggregate can appear before the final readiness line.
 
-#### Own the application's logging
-
-Stockroom installs its tracing subscriber **before constructing `DrasiLib`**.
-Its `init_tracing` function defaults to warning-level diagnostic logs on stderr,
-and includes `ComponentLogLayer` for Drasi's component log capture. The result
-lines on stdout are application output, not INFO logs.
-
-Use `RUST_LOG=info cargo run --locked` for diagnostics, or in PowerShell set
-`$env:RUST_LOG = "info"` before running. At INFO level you can see
-`__component_graph__`, an internal inspection source the runtime supplies.
-
-In another host application, configure tracing once before creating the runtime.
-Otherwise Drasi attempts to install its default global subscriber; subsequently
-calling an infallible `.init()` on another subscriber can panic. Integrate the
-log layer into the host's existing subscriber instead. Chapter 8 explains capture
-and subscriptions in more detail.
+Stockroom sends diagnostic warnings to stderr and result lines to stdout.
+For more diagnostics use `RUST_LOG=info cargo run --locked`; in PowerShell set
+`$env:RUST_LOG = "info"` first. The starter already owns its tracing setup;
+[Chapter 8](#install-tracing-once) shows how to integrate it into another host.
 
 #### Make your first change
 
@@ -303,6 +304,24 @@ A **stream** identifies one output's ordered emissions.
 The sink is where the application reacts to changes. In the native API its
 role is Sink; "reacting" describes what it does, not a separate plugin interface.
 
+#### Choose an application surface
+
+The same runtime can be configured through different interfaces. “Native” names
+the component processing contract; it does not mean “must be a dynamic library.”
+
+| Surface | What the application supplies | Where it is used here |
+|---|---|---|
+| Explicit native Rust composition | Sources, transformers, queries and sinks plus their ports, pipes and resources in a `ComponentBatch` | The main Stockroom path |
+| Ordinary Source/Query/Reaction APIs | Convenience declarations such as `DrasiLib::add_query`; the host assembles graph components and adapters | The optional query-input example in Chapter 5; existing connector APIs |
+| Native dynamic plugins | Trusted libraries exporting native factories; the Host SDK loads them into the same graph | HTTP/SSE/webhook lessons |
+| Drasi Server | An existing application that hosts `DrasiLib` instances and exposes configuration/HTTP APIs | Optional **Server host** configuration examples |
+| Instance host and bridges | Independently owned instances, optionally in child processes, with explicit data links | Process isolation in Chapter 18 |
+
+There is one ComputationGraph per `DrasiLib`, not a second query engine for the
+ordinary API. Native sinks consume envelopes; an ordinary Reaction adapter
+consumes query results. Code below uses explicit native Rust composition unless
+its surrounding lesson identifies another surface.
+
 Use an existing native component when it supports your integration. The small
 file source makes the first exercise self-contained; Chapter 5 replaces it
 with a packaged HTTP source and adds an SSE notification sink without writing
@@ -341,6 +360,9 @@ The imports, query text, and `GRAPH` are at the top of the companion.
 `GRAPH` is `ComponentBatch::GRAPH_ID`, the public identity for the graph inside
 `DrasiLib`. The application's instance ID is a separate scope. The memory
 provider supplies the state needed to evaluate the query.
+`outbox_capacity` bounds retained query emissions for result replay; it is not the
+capacity of the connecting pipe. Chapter 6 separates the buffers and Part III
+adds durable delivery tracking.
 `query.results()` supplies the read handle used to await readiness and inspect
 the maintained answer. Obtain it before moving the query into the component
 batch. Later lessons introduce configurable construction and query settings.
@@ -478,7 +500,7 @@ impl Product {
 ```
 
 When a SKU first appears, the source emits `SourceChange::Insert`; when the
-same SKU's properties change, it emits `SourceChange::Update`. Removing a SKU
+same SKU's full file image changes, it emits `SourceChange::Replace`. Removing a SKU
 from the file produces `SourceChange::Delete`. Its metadata helper is:
 
 <!-- excerpt: stockroom/src/main.rs#element-metadata -->
@@ -516,7 +538,7 @@ fn quantity_update(sku: &str, quantity: i64, time: u64) -> SourceChange {
             metadata: metadata(sku, time),
             properties: ElementPropertyMap::from(serde_json::json!({"quantity": quantity})),
         },
-        removed_properties: BTreeSet::new(),
+        removed_properties: std::collections::BTreeSet::new(),
     }
 }
 ```
@@ -534,6 +556,39 @@ The query retains `sku` and `minimum`. At the graph-change boundary:
 | `Replace` | Replace the element with the supplied full image: properties it omits are dropped, as one change rather than a delete followed by an insert. |
 | `Delete` | Remove the element identified by its metadata. No property payload is required. |
 
+The file is authoritative for each complete product row. `Replace` therefore
+removes an optional `payload` when it disappears from the next saved image,
+without changing the product's identity. A merge update with no explicit removals
+would incorrectly retain that old property. The snapshot differ is:
+
+<!-- excerpt: stockroom/src/main.rs#inventory-changes -->
+```rust
+fn inventory_changes<T: FileRow>(
+    previous: &BTreeMap<String, T>,
+    current: &BTreeMap<String, T>,
+    time: u64,
+) -> VecDeque<SourceChange> {
+    let mut changes = VecDeque::new();
+    for (sku, product) in current {
+        match previous.get(sku) {
+            None => changes.push_back(SourceChange::Insert {
+                element: product.element(time),
+            }),
+            Some(old) if old != product => changes.push_back(SourceChange::Replace {
+                element: product.element(time),
+            }),
+            Some(_) => {}
+        }
+    }
+    for sku in previous.keys().filter(|sku| !current.contains_key(*sku)) {
+        changes.push_back(SourceChange::Delete {
+            metadata: row_metadata::<T>(sku, time),
+        });
+    }
+    changes
+}
+```
+
 Updates and deletions must use the original element reference. Generating a
 new ID for each update creates different elements instead of updating one.
 A live node and relationship cannot share one element identity; that collision
@@ -545,6 +600,100 @@ references, for example). `ElementValue` and `ElementPropertyMap` preserve the
 typed model, and the graph-change records carry those values without reducing
 them to JSON. A string that looks like a date is still a string unless you
 construct or parse a temporal value.
+
+#### Follow an element into an envelope
+
+An **element** is a domain fact: a Product node or a relationship. A **record**
+is its schema-defined identity and encoded image. A **change operation** says
+what to do with a record. A **change set** groups operations under one schema,
+and a **ChangeEnvelope** carries that set with stream metadata and context:
+
+```text
+SourceChange / Element
+  -> GraphChangeCodec
+  -> ChangeEnvelope
+       system metadata: emitting stream, sequence, optional timestamp, ordering
+       change set: schema + identity + ordered operations
+         operation: kind + record/reference + available images
+       annotations and lineage: attribution and derivation context
+```
+
+The operation and the image answer different questions. `RecordImage::Full`
+claims a complete image; `Patch` carries changes to known fields; `Partial`
+contains only available information and does not claim completeness. Null is a
+value, not a removal. A consumer must understand the image it receives.
+
+| Domain change | Shared operation | How to apply it |
+|---|---|---|
+| `SourceChange::Insert` | Added with a full `after` image | Upsert the complete element |
+| `SourceChange::Update` | Updated in Patch mode | Set supplied properties and remove explicitly named properties; keep other known fields |
+| `SourceChange::Replace` | Updated in Replace mode with full `after` | Replace the old image, dropping omitted properties |
+| `SourceChange::Delete` | Deleted with a validated record reference | Remove by identity; a before image is optional |
+| Query result update | Updated in Replace mode with full result-node `after` | Replace that row in a keyed view; Chapter 4 uses this guarantee |
+
+Applying a patch without a saved base can construct an element from the known
+properties. That does not turn partial knowledge into a producer-authoritative
+full image. Whether those fields suffice for a query or consumer is a separate
+question.
+
+The standard graph encoding preserves rich values, but enum tags can normalize:
+canonical nonnegative integers use `Unsigned`, while negative integers use
+`Signed`. This preserves numeric meaning; it is not a promise to preserve the
+input language's integer variant. JSON remains a presentation boundary.
+
+Several operations in one envelope are processed together by the receiving
+contract, but collection alone is not proof of a database commit. A complete
+source transaction also carries validated completeness metadata; Part III
+introduces that separate promise.
+
+<a id="keep-the-layers-of-identity-separate"></a>
+
+#### Keep identity scopes separate
+
+Use the identity belonging to the question you are answering:
+
+| Coordinate | Identifies | Use |
+|---|---|---|
+| `ElementReference` | Source/dataset namespace and element ID | Update the same node or relationship |
+| `RecordId` | Schema-defined namespace and opaque identity bytes | Key a record view; never key it by JSON values |
+| `ChangeSetId` and operation ordinal | A group of changes and an operation within it | Distinguish operations, including equal-valued records |
+| Output stream and logical sequence | A producer's emissions from one output | Order new output; one emission can contain several operations |
+| Transport sequence | A particular delivery/re-emission stream position | Track transport, not deduplicate business effects |
+| Source position | Optional opaque upstream resume location | Resume source history under that source's comparison policy |
+| Output epoch / query output generation | The output provider's recovery identity | Decide whether a cursor can continue in the same output history |
+| Component generation | One constructed incarnation in the graph | Reject handles belonging to a replaced component |
+| Graph/configuration revision | Accepted topology or desired-definition version | Reject stale management changes |
+
+These are **not one interchangeable hierarchy of counters**. In particular,
+component generation is not query output generation, and neither is a source
+position. Later recovery APIs return their own identity/cursor; preserve it
+rather than manufacturing it from a component ID or a transport counter.
+One output owns one stream; new emissions increase its sequence, with gaps
+permitted by the contract. Framework metadata belongs in `SystemMetadata`,
+business attributes in records. Derive new envelopes rather than mutating shared
+input, preserving the attribution/lineage required by the transformation.
+
+| Event | What the consumer should do |
+|---|---|
+| Ordinary processing | Apply the next logical output in the current output identity |
+| Replay of committed output | Recognize the original logical output even if transport sequence changes |
+| Stop/start of the same query object | Its volatile publication incarnation is retained; a bootstrap reset can still change its query reset generation |
+| Persistent query reopen | The same validated scope, configuration, stores and reset generation preserve the producer epoch |
+| New volatile query object | It receives a new publication incarnation; old output cursors cannot identify its new history |
+| Component replacement | Acquire fresh component handles; a new component generation does not itself change a durable output epoch |
+| Explicit query reset | Reset generation participates in output epoch; use an authorized rebuild/snapshot policy, not the old cursor |
+
+A query's producer epoch is derived from its recovery identity and reset
+generation. A volatile query additionally has a per-object publication
+incarnation; a fully persistent query does not. “Fully persistent” here requires
+persistent checkpoints, outbox and live results as well as a nonvolatile provider.
+Neither this table nor equal projected values promises equal row IDs across
+every reset.
+
+For example, query output 7 can contain operations 0 and 1 for distinct records.
+A retry may arrive with transport sequence 12 while still representing output 7.
+Neither operation is new business work solely because the transport number changed.
+Chapter 11 gives that distinction durable receipts.
 
 #### Supply meaningful time
 
@@ -699,6 +848,22 @@ an empty group from an empty answer.
 Optional matches can retain a result when a related record is absent; decide
 how the application should represent those null values.
 
+For a small ungrouped example, `MATCH (p:Product) RETURN sum(p.quantity) AS total`
+illustrates the default-row boundary:
+
+| Change | Maintained terminal sum |
+|---|---|
+| First product has quantity 0 | A visible row with total 0 is established |
+| Delete that zero-valued product | The row stays 0; there is no visible 0-to-0 notification |
+| Add a product with quantity 10 | The same maintained total becomes 10 |
+| Delete it | The total returns to its default 0 rather than deleting the row |
+
+An intermediate aggregate can have a different row lifecycle:
+`MATCH (p:Product) WITH sum(p.quantity) AS total RETURN total` adds a zero row for
+a first zero contributor and removes that row when the last contributor leaves.
+Do not convert aggregate default flags into unconditional deletion instructions;
+they describe contribution/default state, not a universal rule for every aggregate.
+
 Continuous answers are not an ordered page. `ORDER BY`, `LIMIT`, and `SKIP`
 are not supported. Sort and page a maintained application view when presenting
 results to a user.
@@ -797,20 +962,23 @@ RETURN p.sku AS sku
 The query schedules reevaluation. It does not need another inventory update
 or a periodic application task to wake it.
 
-Choose the time function for the condition you mean. `drasi.trueLater`
+**Optional time-function catalogue.** The `trueFor` exercise above is complete.
+For other conditions, `drasi.trueLater`
 schedules a future condition; `drasi.trueNowOrLater` permits an immediate match
 when appropriate; `drasi.trueUntil` supports expiry. These are distinct
 policies, not alternative names for one timer. The
 [heartbeat query examples](../../../shared-tests/src/use_cases/sensor_heartbeat/queries.rs)
 show their time arguments in context.
 
-Scheduled work shares the query's state and publication boundary. In a durable
+**Recovery preview (Chapters 9 and 13).** Scheduled work shares the query's state
+and publication boundary. In a durable
 query, removing a due notification, reevaluating it, and saving its output
 belong to the transaction. A scheduling hint is not itself a completed timer,
 and it must not advance a real source's checkpoint.
 
 #### Compare with previous and historical values
 
+These optional function families are not required by the Stockroom progression.
 `drasi.previousValue` and `drasi.previousDistinctValue` compare with preceding
 values; `drasi.slidingWindow` supports rolling calculations. Historical element
 versions are a different facility:
@@ -849,6 +1017,22 @@ The application must distinguish two equal-looking rows, retract results that
 stop matching, and avoid confusing a current snapshot with a live subscription.
 Stockroom's in-memory result view is enough for a disposable display, provided
 those rules are explicit.
+
+#### Choose the reader for the job
+
+Choose a starting-state and completion contract before choosing an API:
+
+| Need | Interface | Starting state and failure policy |
+|---|---|---|
+| Inspect current rows once | `QueryResults::snapshot` or output-catalogue `snapshot()` | A point read, not a subscription |
+| Observe future query changes | Native callback/channel, or `QueryResultsCatalog` plus connected outlet | No automatic current-state load; volatile channel/broadcast gaps need an explicit policy |
+| Display current contents and then follow changes | Output catalogue `snapshot_and_follow` | One coordinated snapshot/live cut, bounded volatile lease; rebuild on gap/expiry |
+| Restore a durable materialized view | `QueryReplayTransformer` plus `CheckpointedSink` and persisted view/progress | Strict replay or explicitly authorized snapshot replacement; Chapter 11 |
+| Finish local durable work or a remote business effect | `DeliveryRunner` and the appropriate handler | Per-operation completion; remote effects additionally need destination idempotency/confirmation; Chapter 12 |
+
+The first Stockroom starts its sink before sending file data, so its live-only
+view sees the initial inserts. A viewer attached later cannot assume that a
+subscription replays the current answer.
 
 #### Use the native application callback
 
@@ -947,51 +1131,19 @@ query's own output namespace, not one of the source graph's elements. Its
 properties are the `RETURN` aliases. `QueryChangeCodec::schema()` is the same
 schema as `GraphChangeCodec::schema()`, so a sink that handles graph changes can
 receive it. Stockroom's custom `Alerts` sink demonstrates the underlying trait.
-The full implementation also handles the optional reorder, audit, and display
-branches:
+Its completion declaration is:
 
-<!-- excerpt: stockroom/src/main.rs#alert-sink -->
+<!-- excerpt: stockroom/src/main.rs#alert-completion -->
 ```rust
-#[async_trait]
-impl EnvelopeSink for Alerts {
-    fn completion(&self) -> SinkCompletion {
-        SinkCompletion::Handled
-    }
-
-    async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        let mut view = self.view.borrow().clone();
-        let mut message = String::new();
-        if self.reorders {
-            message.push_str(&reorder_messages(&input.envelope, &view)?);
-        }
-        view.apply(&input.envelope)?;
-        if self.audit {
-            ensure!(
-                input
-                    .envelope
-                    .annotations()
-                    .entries()
-                    .any(|entry| entry.contributor() == "audit"
-                        && entry.key() == "checked-by"
-                        && entry.value() == ContextValue::String("stockroom".into())),
-                "audit context was not preserved"
-            );
-            message.push_str("audit: checked-by=stockroom\n");
-        }
-        if self.display {
-            message.push_str(&format!(
-                "{}: {}\n",
-                self.query_id,
-                serde_json::to_string(&view.rows())?
-            ));
-            self.output.write_all(message.as_bytes()).await?;
-            self.output.flush().await?;
-        }
-        self.view.send_replace(view);
-        Ok(())
-    }
+fn completion(&self) -> SinkCompletion {
+    SinkCompletion::Handled
 }
 ```
+
+The sink's `handle` method applies the envelope to the keyed view below, awaits
+writing/flushing the displayed result, and then publishes the new view. The
+[complete implementation](stockroom/src/main.rs) also contains the reorder branch
+and the audit branch introduced in Chapter 5.
 
 `Handled` means this sink finished its declared work: updating and printing a
 volatile view. It does not mean the rows were saved to disk or a replenishment
@@ -1024,6 +1176,12 @@ struct ResultView(HashMap<RecordId, serde_json::Value>);
 ```
 
 Its update method is:
+
+Query result additions contain full result-node images. Query updates use
+**Replace**, with a full new row and an optional before image; deletions carry
+the row identity. Therefore this query-specific view can assign `after` directly.
+It is **not** a general materializer for source patches: those must merge fields
+and apply explicit property removals as described in Chapter 2.
 
 <!-- excerpt: stockroom/src/main.rs#view-methods -->
 ```rust
@@ -1075,8 +1233,10 @@ default-value flags) in the envelope's query projection, available from
 implementing logic that depends on how the aggregate changed.
 
 `decode_row` yields a `DecodedQueryRow`: typed `VariableValue` values keyed by
-`RETURN` alias, the node's dataset and label, its opaque identity, and the
-evaluator signature when the identity is exactly one. It does not contain a query
+`RETURN` alias, the node's dataset and label, and its opaque identity. Some
+identities can also expose an evaluator signature; application code should retain
+the complete `RecordId`, not parse or reconstruct it from that implementation detail.
+`DecodedQueryRow` does not contain a query
 ID or row kind; those belong to the envelope. `row_values_to_json` is useful for
 a JSON presentation. Keep the typed values when business logic depends on
 temporal types, element references, or distinctions a JSON projection cannot
@@ -1136,8 +1296,57 @@ before/after decoding used for reorders. A reader handle alone does not publish
 these events; the connected outlet does.
 
 The catalog's broadcast subscription is a volatile live stream. On lag, report
-the gap and rebuild through a coordinated snapshot/replay path. Chapter 11
-teaches that handover; a broadcast receiver is not durable consumer progress.
+the gap and rebuild through a coordinated path such as the viewer below.
+A broadcast receiver is not durable consumer progress.
+
+<a id="read-any-output-through-the-same-interface"></a>
+
+#### Open a current-plus-live viewer
+
+The output catalogue resolves source, query and transformer outputs by component
+and port. Each output independently exposes its actual snapshot, replay and
+snapshot/live capabilities. Graph-change format alone does not promise a snapshot.
+
+For a disposable viewer, capture the current contents and subsequent stream
+together rather than reading a snapshot and then subscribing:
+
+<!-- illustration: output-snapshot-follow -->
+```rust
+async fn open_live_view(
+    drasi: &drasi_lib::DrasiLib,
+) -> anyhow::Result<OutputSnapshotFollow> {
+    let output = drasi.output_catalogue()?.resolve(&OutputEndpoint::new(
+        ComponentId::try_new("low-stock")?,
+        PortId::try_new("out")?,
+    ))?;
+    Ok(output.snapshot_and_follow(OutputFollowLimits {
+        max_envelopes: NonZeroUsize::new(8).expect("positive capacity"),
+        max_bytes: NonZeroUsize::new(1024 * 1024).expect("positive bytes"),
+        lifetime: std::time::Duration::from_secs(30),
+    }).await?)
+}
+```
+
+Call `into_parts()` for the snapshot and follow handle. Install the snapshot's
+full records and cursor as one view, then apply envelopes from
+`follow.next().await`. If the snapshot covers logical output 42, the captured
+follow stream accounts for changes arriving during the read without applying
+covered output twice. The cursor uses the output's logical sequence and epoch,
+not its transport sequence.
+
+This is a bounded **volatile lease**, not persisted consumer acknowledgement.
+A query allows at most 64 leases, each bounded by its configured outbox capacity,
+16 MiB and five minutes. Choose limits within those ceilings. Buffer overflow
+returns `Gap`; the non-renewing deadline returns `LeaseExpired`. Neither silently
+continues with missing changes or backpressures query processing. Drop the old
+handle and capture a new snapshot when the viewer's rebuild policy allows it.
+Dropping releases retention; cancelling a pending `next` does not consume its event.
+
+`snapshot()` is a point read. `replay_after(cursor)` reads retained history.
+`catch_up()` combines snapshot/history with gap and epoch checks but does not
+subscribe to later changes. An unsupported capability fails explicitly. None
+requires the producer to use a shared row store. Persistent views and business
+effects need the different contracts in Chapters 11–12.
 
 #### Test your application
 
@@ -1299,68 +1508,14 @@ Expect Stockroom to report the webhook failure and exit unsuccessfully.
 Restart the receiver, restore quantity 8, restart Stockroom, and repeat the
 edit to see successful delivery.
 
-#### Available native integrations
-
-Native plugins and in-process components use the same graph-owned processing
-contracts. Dynamic packaging is optional; a statically linked native factory
-also works. Choose the actual native implementation for an integration rather
-than assuming every connector package exposes every execution mode.
-For databases, SQLite captures writes through its source-owned connection,
-whereas PostgreSQL and MySQL use replication protocols. Those are different
-capture boundaries, not interchangeable APIs. The Stockroom lesson keeps its
-direct Rust SQLite handle; separately hosted SQLite sources can expose the
-existing REST interface. Neither introduces a general SQL API on DrasiLib.
-
-These are native component surfaces, rather than a count of every historical
-connector package. Some are dynamically packaged; others are statically linked
-Rust components:
-
-| Integration | Input/output and use | Completion or recovery boundary |
-|---|---|---|
-| Native application callback/channel | In-process envelope sink with an explicit schema | Callback completion or bounded volatile channel acceptance |
-| HTTP source | Graph changes submitted by an external application | Volatile acceptance by default; optional admission service |
-| HTTP sink | Query-result notifications to a webhook | HTTP outcome under the configured policy; destination effects need their own contract |
-| gRPC source/sink | Native graph-change ingress and query-result egress | Explicit transport acceptance and configured handling policies |
-| SSE sink | Live query-result notifications to browser/stream clients | Volatile acceptance; reconnecting clients need a current view |
-| Capture sink | Graph-change envelopes written to a file | Write/flush completion; it accepts any graph-change envelope, including query output (result nodes) |
-| SQLite source/bootstrap | Committed changes through the original Rust handle/callbacks or source-owned REST; file or paired initial loading | Ordinary changes/transactions, or journal-backed single/shared persistent owners; file initialization requires quiescent writers |
-| PostgreSQL sources | Committed row changes or complete transactions, selected by factory | Configured-slot shared recovery or the distinct single-owner modes; whole-transaction queries require atomic persistent progress |
-| MySQL source/bootstrap | Ordinary rows, complete transactions, or explicit MySQL 5.7 positional rows; coordinated or standalone initial loading | Actual single/fixed-member progress, partial-row replay and retained history; positional rows do not claim FULL metadata, coordinated snapshots or commit clocks |
-| MySQL stored-procedure sink | Parameterized actions for query changes | Handled after actual command responses; owned cancellation/cleanup, but no exactly-once effects or blind retry of a submitted call |
-| SQL Server source/bootstrap/sink | Native CDC, standalone/coordinated loading and parameterized procedures are implemented | Real-database qualification is deferred; permission, large sink-batch and orphan-marker gaps remain. Do not select it as a qualified production replacement. |
-| Middleware transformer | Parsing, mapping, relabeling and other graph-change normalization | Memory, durable, or transactional configuration |
-| Inter-instance bridge source/sink | Data between independently owned instances | Explicit volatile or durable receiver-admission profile |
-
-The [native component packages](../../../components/computation-plugins/README.md)
-and [application sink API](../../../components/reactions/application/src/native.rs)
-describe their exact configurations and schemas. The result-notification sinks
-(HTTP, gRPC, SSE) need a current query output and reject plain source changes;
-the capture sink writes any graph-change envelope.
-
-Database capture requires its source-specific setup:
-
-| Integration | Native interface | What the host must supply |
-|---|---|---|
-| [SQLite](../../../components/computation-plugins/sources/sqlite/README.md) | Independent source/bootstrap libraries and the preserved `drasi_source_sqlite::native::SqliteSource` Rust API | Source-owned SQL/REST; actual persistent owner/set for replay; `nativeSourceBootstrap` and per-query providers for paired initialization |
-| [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md) | Independent native source and bootstrap factories | Matching row/transaction modes, explicit publication/slot settings and actual owners; shared row mode also supports memory queries without a process-restart guarantee |
-| [MySQL](../../../components/computation-plugins/sources/mysql/README.md) | Independent source, bootstrap and stored-procedure libraries | Choose row/transaction/positional semantics explicitly; supply actual owners, binlog retention and matching bootstrap resources where supported |
-| [SQL Server](../../../components/computation-plugins/sources/mssql/README.md) | Independent native libraries, not yet database-qualified | Explicit CDC/permission setup; coordinated snapshots require a pre-provisioned marker and locking contract. Qualification remains deferred. |
-
-The selected MySQL and SQLite source/bootstrap/sink roles have actual static,
-rebuilt-dynamic and Server qualification on both Tokio runtimes. SQLite has no
-legacy reaction to migrate. Source data schemas use the ordinary DrasiLib/Server
-inspection APIs through a separate native read capability.
-
-Choose a MySQL positional factory explicitly when using limited-metadata
-binlogs. Its `@N` properties, matching-catalog history checks and checkpoint
-namespace differ from the FULL-metadata factories. A parsed GTID start does not
-make file-bound partial cursors failover-portable. Stored-procedure templates
-bind values rather than interpolate SQL; errors and uncertain submitted effects
-are not silently dropped or blindly retried.
-
-The HTTP lesson receives changes another application supplies. A database CDC
-plugin instead detects committed changes through its database protocol. Choosing
-the source changes how input is obtained; query and sink composition stay native.
+The HTTP lesson receives changes another application supplies. Database
+change-data-capture (CDC) sources instead detect committed database changes.
+SQLite captures writes through its source-owned connection; PostgreSQL and MySQL
+use replication protocols. These are different capture boundaries, not
+interchangeable SQL APIs. Part III uses the native SQLite handle.
+The optional [integration profiles](#available-native-integrations) collect the
+database setup, recovery-mode and qualification limits after those concepts have
+been introduced.
 
 #### Add the audit step
 
@@ -1450,10 +1605,29 @@ contain no query at all: normalization, routing, and custom calculations do
 not require inventing query text.
 
 Connections must agree on the **complete schema descriptor**, including
-version, encoding, and definition. Sources, middleware, and queries all publish
+version, encoding, and definition. Stockroom's sources, middleware, and queries publish
 the standard graph-change schema, and a query's result rows are ordinary nodes,
-so any of them can connect to a graph-change input, including another query, with
-no conversion step. For example, with a first query that returns a `total` alias,
+so their ordinary data can share graph-change inputs without format conversion.
+The receiver must also support the event protocol: a graph schema does not
+authorize scheduling controls or snapshot/progress recovery frames everywhere.
+
+| Consumer surface | Accepted contract |
+|---|---|
+| Native HTTP/gRPC/SSE notification sink | Ordinary source, transformer or query graph changes from its configured output bindings; no query projection required |
+| Native capture sink | Graph-change envelopes supported by its capture contract |
+| Ordinary Reaction adapter | Query output converted to ordinary query results; source data is not a substitute |
+| Query input | Graph-change data, plus separately configured initialization/transaction protocols when requested |
+
+A custom schema connects directly to ports declaring the same complete schema,
+provided both factories explicitly implement it. A multi-format factory can select
+one supported format with a `ports` override, resolved before construction; see
+[Choosing a port format](../computation-graph-schemas-ports-pipes.md#choosing-a-port-format).
+Custom records need an intentional conversion into graph changes before a query
+can read them.
+
+#### Chain maintained outputs
+
+With a first query that returns a `total` alias,
 a second query can read it as:
 
 ```cypher
@@ -1461,21 +1635,61 @@ MATCH (r:Result)
 RETURN r.total AS total
 ```
 
-and the batch connects `first/out` to `second/in` like any other edge. `Result`
+The batch connects `first/out` to `second/in` like any other edge. `Result`
 is the default label of a result node; the properties are the first query's
 `RETURN` aliases. When the first query's answer is corrected, the second query
 updates too, even if the correction carries an older business time, because the
 query stream is ordered by its producer's output sequence rather than by the
-clock. Compatible schemas do not mean every sink accepts every graph change:
-sinks that report query results (HTTP, gRPC, SSE) require a current query output.
-A custom schema connects directly to any port that declares the same complete
-schema, provided the factories on both ends explicitly declare and implement it.
-A factory that implements several formats on one port can let configuration pick
-one with a `ports` override, resolved and validated before construction; see
-[Choosing a port format](../computation-graph-schemas-ports-pipes.md#choosing-a-port-format).
-Only a genuinely different format needs an intentional conversion: a query's
-input port declares graph-change, so custom records must be converted into graph
-changes before a query can read them.
+clock. Use one query with `WITH` when that is enough; chain when the maintained
+intermediate answer is itself useful.
+
+**A live edge does not load existing state.** Query output contains changes,
+not repeated full snapshots. Select the starting-state contract deliberately:
+
+| Situation | Required starting boundary |
+|---|---|
+| Both explicit queries start empty, before any input | Connect and ready the downstream path before sending initial changes |
+| Attach downstream after upstream already has rows | Bind live input before capturing a real snapshot; install the snapshot and skip buffered changes it covers |
+| Reopen a volatile downstream query | Refresh its input view, including removals that happened while it was stopped |
+| Resume a persistent downstream query | Validate the saved producer identity and replay after its committed cursor; do not substitute a new scan silently |
+| Intentionally consume only future changes | Explicitly disable bootstrap for that input; do not treat missing snapshot support as an empty source |
+
+Explicit native `ComponentBatch` connections only establish transport. Bind the
+appropriate query-scoped bootstrap provider when the starting boundary requires
+one; Chapter 10 explains that lifecycle. The ordinary query API can assemble
+the input and its bootstrap/replay services for a selected output:
+
+<!-- illustration: chained-query-input -->
+```rust
+async fn add_low_stock_count(drasi: &drasi_lib::DrasiLib) -> anyhow::Result<()> {
+    drasi.add_query(
+        drasi_lib::Query::cypher("low-stock-count")
+            .query("MATCH (r:Result) RETURN count(r) AS Items")
+            .from_input("low-stock")
+            .with_result_label("LowStockCount")
+            .build(),
+    ).await?;
+    Ok(())
+}
+```
+
+This is an **ordinary API alternative**, not a second query executor.
+`from_input_port(component, port)` selects an explicit output. Without a port,
+resolution uses the factory's declared primary output or its only output;
+several outputs without a primary are an error. YAML/JSON uses `inputs: [low-stock]`
+or `inputs: [{component: low-stock, port: out}]`; old `sources`/`sourceId`
+declarations are not accepted.
+
+With bootstrap enabled, the producer must offer a real graph snapshot and the
+live pipe is bound before capture. Snapshot rows and the covered cursor describe
+the same cut. A persistent downstream query cannot bootstrap from a volatile
+producer snapshot. On durable resume, `ReplayProvider` supplies retained output
+after the saved cursor. Strict reports gaps or changed epochs; explicit AutoReset
+can reset the **downstream query** and bootstrap from a current snapshot for those
+typed conditions. It does not reset upstream or swallow unrelated failures.
+It also cannot reset persistent output with bound durable destinations; see
+[recovery policy](#choose-recovery-policy-instead-of-hiding-corruption).
+Choose `enable_bootstrap(false)` for future-only input.
 
 Data connections form a directed acyclic graph. Control relationships, covered
 in Chapter 7, carry readiness signals separately from the acyclic data path.
@@ -1555,6 +1769,19 @@ normalized stream. Use query-local middleware when normalization belongs to
 that query's processing state. In either case, native data connections still
 determine which input reaches the query.
 
+The input selector names the **immediate connected producer**, not the namespace
+inside its records. The example above applies when `inventory/out` connects
+directly to the query. After `inventory -> audit -> query`, select `audit` (and
+its output port when needed), even though the records still name `inventory`.
+API-owned source helpers map back to the declared ordinary input alias. The
+host derives this scope from trusted port/stream bindings; it is not supplied
+by arbitrary record metadata. Direct evaluator calls without an explicit input
+scope retain namespace-based behavior.
+The `nodes` and `relations` lists describe input subscription interests; they are
+not a general-purpose filter installed on every native pipe. Apply the query's
+`MATCH`/`WHERE` predicates or a deliberately chosen transformer for data selection,
+and do not confuse declaration metadata with maintained filtering semantics.
+
 #### Choose transformations by their data contract
 
 | Middleware | Use in Stockroom | Important constraint |
@@ -1579,8 +1806,9 @@ cannot in general be mapped without knowing what came before, so that `update`
 rule is skipped (a debug diagnostic is logged) rather than failing; explicit
 rules that produce `Insert`, `Replace` or `Delete` can still run. A missing
 selection or unmatched rule produces no mapped event, while a malformed change or
-a failing configured expression is still an error. `Future` changes are not
-mapped and pass through, so scheduled work is unaffected. Use an event mapper for
+a failing configured expression is still an error. The domain API's `Future` notification is scheduled control, not a fifth
+ordinary element mutation. Such controls pass through rather than being mapped.
+Use an event mapper for
 reshaping each event. If you need a *maintained* derived dataset (retracting
 outputs that stop matching a filter, or re-keying outputs), that is a different,
 stateful component: a view transform, planned as
@@ -1735,22 +1963,9 @@ Use bounded codecs and input validation for a hard message-size limit.
 The budget excludes component state, work already received, serialization
 scratch space, and backend caches.
 
-Retained stores and non-shared QoS journals have optional byte quotas too.
-The journal charges an envelope once, not once per subscriber. Under lossless
-retention, only safely handled history can be reclaimed. Reopening with a
-smaller quota preserves existing obligations and blocks new admission until
-safe pruning is possible.
-
-Persistent journals can use `OutboxPageLimits` through `IndexedJournalOptions`
-or `QosJournalOptions` to bound the decoded payload cache. Page bytes measure
-stored records; admission quotas measure binary envelopes. Startup validates
-the complete history even with paging enabled.
-
-Shared-storage QoS has bounded history pages but count-based admission
-reservations. Ranked and broadcast pipes remain count-bounded. Select these
-limits at the actual resource owner and preserve them in its reconstruction
-recipe. See [journal resource limits](../computation-graph-qos.md#optional-journal-resource-limits)
-for the supported constructors.
+Ranked and broadcast pipes remain count-bounded. The
+[persistent journal limits](#bound-retained-history-and-caches) in Chapter 11 add
+storage admission and decoded-cache limits once the retained owner is introduced.
 
 #### Decide what "ordered" means
 
@@ -1826,12 +2041,40 @@ source's logical input sequences arrive in order. Ties use declared source
 order and logical sequence among buffered events. A complete envelope remains
 indivisible.
 
-An event becomes eligible when all active sources' observed progress permits
-early release, or when its maximum residence wait expires. Optional idle
-detection prevents a silent source from blocking the early-release calculation
-forever. Idleness is not a watermark proving there can be no earlier event.
-`max_wait_ms` is an eligibility bound, not a delivery deadline under
-backpressure.
+For early release, take the earliest buffered event by source time, declared
+source rank, then logical sequence. Every **active** source must have an observed
+maximum timestamp, and the candidate must be at or before **each maximum minus
+`reorder_window_ms`**. An unseen source blocks early release until its idle grace
+expires; there must still be at least one active source. A new event only raises,
+never lowers, its source's observed maximum.
+
+Separately, **any** expired residence deadline makes the earliest buffered event
+eligible. This drains earlier source times first, even if the event whose deadline
+expired is not first in timestamp order. Idle timeout is measured from source
+activity, with a grace period at activation. Idleness is not proof that an earlier
+event cannot arrive.
+
+For the settings above, the following trace uses milliseconds, initially empty
+buffers and uncongested output. Each source's logical sequences increase in arrival
+order even where its timestamps do not:
+
+| Residence clock | Arrival or timer | Decision |
+|---|---|---|
+| 0 | inventory time 10,000 | Hold: catalog has not yet been observed |
+| 100 | inventory time 14,000 | Inventory cutoff is 12,000; catalog still blocks |
+| 200 | catalog time 12,000 | Cutoffs are 12,000 and 10,000; emit inventory 10,000 |
+| 300 | inventory time 13,000 | Its maximum remains 14,000; catalog cutoff still holds the remaining events |
+| 400 | catalog time 16,000 | Cutoffs are 12,000 and 14,000; emit catalog 12,000, hold inventory 13,000 and 14,000 |
+| 5,100 | The time-14,000 event reaches its 5,000-ms residence deadline | Emit time 13,000 first, then 14,000; the expired deadline makes the earlier event eligible too |
+| 5,400 | Catalog time 16,000 reaches its deadline | Emit 16,000 even though the inventory cutoff has not advanced |
+| 10,000 / 10,100 | Inventory times 20,000 then 22,000 | Hold 20,000 while catalog remains active |
+| 10,400 | Catalog becomes idle, 10,000 ms after its last activity | Inventory's cutoff is 20,000; emit 20,000 without waiting for its residence deadline |
+
+Equal timestamps use the declared source order and then logical sequence.
+An event with time 19,999 arriving after the final emission is late, while equal
+time is not late. If all sources become idle, only residence expiry can release
+otherwise held work. Backpressure can delay every delivery in this trace:
+`max_wait_ms` bounds eligibility, not completion at the consumer.
 
 An input older than the emitted time frontier is late. FailAndRetain holds it
 and reports a typed error; Route sends it to an explicitly connected `late`
@@ -1922,10 +2165,6 @@ connection. After the five-second readiness deadline, Stockroom reports
 `connection for 'inventory:out'`, then exits unsuccessfully. Restore the edge,
 rerun, and confirm that `Ready. Watching inventory.json` returns.
 
-Then stop the persistent lesson with Ctrl-C while it is applying an edit.
-Its signal receiver remains owned while work completes, and the healthy graph
-is quiesced before terminal cleanup.
-
 A failed definition remains inspectable. Retryable acquisition failures can be
 retried after their cause is repaired; unchanged terminal validation failures
 need a corrected definition. An instance can contain a running query, a failed
@@ -1935,6 +2174,35 @@ not just whether a graph handle exists.
 Observed state separates realization, lifecycle, health, binding, and
 availability. Running is not the same as healthy; a healthy source can be idle;
 an exhausted finite source is not an unavailable listening source.
+
+#### Read a readiness observation
+
+Follow the missing-edge exercise through its distinct boundaries:
+
+| Observation / wait | What is established | What is not established |
+|---|---|---|
+| `wait_created` | The requested generation is present as Created in a coherent registry publication | A connection, running worker or loaded query |
+| `wait_started` | That generation reached its requested running/activation boundary | Queue drain or current business completion |
+| `QueryResults::wait_ready` | Query recovery/bootstrap initialization and output-delivery preparation completed | All pending input replay, output handoffs or consumer work completed |
+| Business-state predicate with a deadline | The particular answer/state the application awaited | Completion of unrelated inputs, other branches or timers |
+
+In the exercise, the inventory object can be realized while its required output
+connection is missing. Inspect its **binding** and dependency wait instead of
+diagnosing an unhealthy file parser. After repair it may be started and available
+but idle because there is no edit to emit. During startup, inspect:
+
+| Dimension | Question to ask in the observed component snapshot |
+|---|---|
+| Realization | Was this definition constructed, or is construction deferred/failed? |
+| Lifecycle | Is this incarnation stopped, activating, running or stopping? |
+| Health | Has an actual failure been reported? |
+| Binding | Are required resources, streams and connections present? |
+| Availability | Can this component currently offer its service? |
+
+Use `inspect_computation_inventory` / `inspect_computation_graph` and the named
+component's dependency waits to answer those questions; Chapter 8 covers retained
+observation history. Query readiness can coexist with pending replay, so continue
+using the result predicate rather than assuming the ready flag means “caught up.”
 
 #### Use readiness and control relationships
 
@@ -1988,6 +2256,45 @@ retire the owners it still needs.
 Deprovision is not a pause button. Similarly, a configuration change that
 removes a component is not an ordinary stop; its recovery obligations need
 separate consideration in Chapter 17.
+
+#### Name resource owners before sharing them
+
+A **resource** is a service a component uses, such as an index provider, a
+bootstrap provider or a retained journal. A `ResourceSpecification` declares its
+ID, role and ownership. A `ResourceHandle` is the actual typed service.
+Declaring an IndexBackend does not open a database.
+
+| Assembly step | Responsibility |
+|---|---|
+| Declare | Name the service and its role, lifetime and dependencies |
+| Provide or construct | Supply the actual handle, or acquire it through a declared constructor |
+| Resolve | Pass only declared handles of the required type/cardinality to the consumer |
+| Clean up | Stop users before releasing their prerequisites; retain ownership after incomplete cleanup |
+
+`ResourceOwnership::Graph` makes the resource's cleanup part of graph lifecycle.
+Borrowed ownership leaves that lifetime with the outer application. A borrowed
+user cannot keep a graph-owned prerequisite alive after its graph is disposed.
+
+The persistent Stockroom will use these different relationships:
+
+```text
+data:       SQLite source -> query -> output journal -> alert consumer
+progress:   SQLite source reads the actual QuerySourceProgress published by query
+storage:    query uses query indexes; journal uses journal indexes;
+            alert consumer uses its completion/business-state transaction owner
+```
+
+The data arrows are not resource-dependency declarations. Two index sets opened
+from the same provider/path are not automatically one transaction. Pass the same
+actual progress owner to the source and query, rather than constructing two
+same-named owners. A cloned handle to that owner is appropriate; matching names
+alone are not evidence.
+
+Dependent resources declare prerequisite edges separately. For example, a
+shared-storage journal depends on its actual storage group: construct the group
+first and release it only after all journals/users finish cleanup. Replacement
+can therefore reconstruct transitive users. Chapter 15 adds factory requirements
+and saved recipes to this ownership model.
 
 #### Preserve errors across cleanup
 
@@ -2105,12 +2412,19 @@ settings and status. A configuration export is not a processing-state backup.
 application's structure. It observes the authoritative registry; it is not
 a second mutable owner of components.
 
+<a id="own-the-applications-logging"></a>
+
 #### Install tracing once
 
 For a small host that lets Drasi initialize tracing, use
 `observability::get_or_init_global_registry`. If your application already
 owns the subscriber, integrate `ComponentLogLayer` into that setup instead.
 An existing global subscriber cannot be retrofitted by installing another one.
+Install the host subscriber before constructing `DrasiLib`; otherwise Drasi may
+install its default, and a later infallible subscriber `.init()` can panic.
+Stockroom defaults diagnostic logs to warnings on stderr and includes
+`ComponentLogLayer`. Result lines on stdout are application output, not INFO logs.
+At INFO level, `__component_graph__` is the runtime's internal inspection source.
 
 Stockroom already includes `tracing-subscriber` with its `env-filter` feature.
 Its setup is:
@@ -2187,39 +2501,21 @@ progress. Unready, stopped or unsupported queries are omitted, never reported as
 zero. A terminal graph or a failed read returns an error. Do not replace that
 error with zero or reuse an old collector sample as a fresh observation.
 
-When hosting through **Drasi Server**, add this optional section at the root of
-the Server configuration, outside `instances`:
+An embedding application installs its own exporter. The optional
+[Server metrics profile](#server-host-progress-metrics) configures Drasi Server's
+exporter; that YAML is not an embedded `DrasiLib` configuration.
 
-```yaml
-metrics:
-  endpoint: "${OTEL_METRICS_ENDPOINT:-http://127.0.0.1:4318/v1/metrics}"
-  exportIntervalMs: 1000
-  exportTimeoutMs: 1000
-```
-
-This sends OTLP/HTTP JSON to an existing collector; it does not start one. The
-`drasi.progress` scope exports `drasi.query.progress.sequence` with
-`drasi.progress.stage` set to `input.committed` or `output.produced`. Input points
-identify the source/stream. All points carry instance/query and component/output
-identity; `service.instance.id` changes when the metrics runtime is reconstructed.
-See the [Server metrics reference](https://github.com/drasi-project/drasi-server/blob/006b038cffffd948cd54d4b4fb71f57e5e27aa02/README.md#opentelemetry-progress-metrics)
-for limits, attributes and authentication settings.
-
-With `metrics` absent, Server creates no metrics exporter or worker. When enabled,
-a restart creates a new provider and reads progress from the actual reconstructed
-queries, not from the collector. Change the endpoint or intervals by updating
-configuration and restarting Server; there is no live metrics-reconfiguration API.
-Export failures are logged, and shutdown failures are returned. Export and SDK
-shutdown run away from the application's Tokio executor; cancelled cleanup
-retains the worker. This first slice does not export all-component throughput,
-latency, queue pressure or completed destination work.
-
-Progress does not, by itself, mean a workload is finished. Establish the last
-input actually sent, wait for every required query to commit it, verify each
+Progress does not, by itself, mean a workload is finished. For a controlled finite
+or quiesced workload, first stop new production and account for outstanding timers.
+Establish the last input actually accepted at each relevant source boundary,
+wait for every required query to commit its corresponding input, verify that each
 destination recorded all output through the resulting output position, and
-finalize the capture. Account separately for scheduled work and take final
-snapshots at that completed boundary. Quiet output, matching record counts and
+finalize the capture. Take final snapshots at that completed boundary.
+Quiet output, matching record counts and
 logger flush alone cannot prove these steps.
+Do not compare unrelated producer counters or infer a general input-to-output
+mapping across a chain. If the actual owners cannot establish a fixed cut and
+the necessary progress, this completion recipe does not apply.
 
 Profiling metadata measures elapsed intervals, including queueing and storage,
 not CPU time. Source-to-query delay, evaluation, output dispatch, and destination
@@ -2268,6 +2564,53 @@ then follow its storage, bootstrap, replay, and completion boundaries through
 the next chapters. The same `inventory.json` remains your input; the application
 adds native SQLite capture, persistent query storage, and retained alert output.
 
+#### Follow one accepted input to completed work
+
+The persistent path has several commits, not one transaction across the graph:
+
+| Boundary | What it commits or establishes | What can still be unfinished |
+|---|---|---|
+| Source database transaction | Changed products and their source-journal entry | Query processing |
+| Atomic query processing transaction | Query indexes, input checkpoint, live rows, result sequence and outbox | Forwarding to outgoing journals/consumers |
+| Outgoing journal acceptance | A retained delivery obligation for its subscriber | Business handling |
+| Transactional consumer operation | One business mutation and its completion record | Later operations in the batch |
+| Completed consumer batch | All operations promised by that consumer | Unrelated branches or external work outside its contract |
+
+SQLite's file synchronization groups one saved snapshot's mutations in a known
+database commit. The source emits **one complete transaction envelope** containing
+ordinary graph operations plus completeness metadata. The receiving query is
+explicitly transaction-enabled with matching limits, so it does not publish a
+half-applied source group. A snapshot load or arbitrary envelope batch does not
+acquire that guarantee simply by containing several rows.
+
+For one query input, processing proceeds in this order:
+
+```text
+source commit and retained input
+  -> atomic query commit
+  -> publish query results and committed QuerySourceProgress
+  -> forward output to every required branch
+  -> delivery-completion callback (downstream acceptance, not business completion)
+  -> finish any continuations belonging to this same input
+  -> optional graph handled-input progress and upstream Handled acknowledgement
+```
+
+Query committed progress can be visible before output forwarding finishes.
+The graph's upstream delivery acknowledgement cannot pass unfinished forwarding
+or continuations. A crash after query commit therefore replays retained output,
+not the business calculation; journal replay receipts resolve a handoff whose
+acceptance was recorded but whose confirmation was lost.
+Downstream consumers have their own concurrent handling/acknowledgement path.
+Their work may finish before or after the producer receives an acceptance; that
+acceptance does not itself prove their business completion.
+
+These are owner-specific boundaries. They do not provide a universal mapping
+from arbitrary source counters to every output. To reason about final completion,
+first establish a finite accepted-input cut, stop new producers, account for
+scheduled work, and use the actual owners' progress/completion evidence. The
+held-alert capstone supplies a concrete controlled boundary; quiet output alone
+does not.
+
 ### 9. Make query state durable
 
 Stockroom can rebuild its current inventory from the file, but that does not
@@ -2307,6 +2650,11 @@ than waiting for an event that may never arrive.
 Restock the product while the application is stopped, then restart it. The
 file synchronization step compares against the saved database rows, submits
 the changed quantity, and retracts the low-stock result.
+
+**Lifecycle check.** While this persistent lesson is applying an edit, press
+Ctrl-C. Its signal receiver remains owned while admitted work completes, and
+healthy processing is quiesced before terminal cleanup. A failed or timed-out
+cleanup is reported; it does not authorize another owner of the state directory.
 
 The implementation is [persistence.rs](stockroom/src/persistence.rs):
 
@@ -2372,7 +2720,9 @@ The first example uses `InMemoryComputationProvider`. The starter's optional
 drasi-index-rocksdb = { path = "../drasi-core/components/indexes/rocksdb", features = ["computation"] }
 ```
 
-With an application-owned storage directory, construct:
+For a separate illustration, construct a provider with an application-owned
+directory. The runnable `--state` lesson derives its paths from the supplied state
+directory; do not switch it to this illustrative `./stockroom-state` path on reopen:
 
 <!-- illustration: native-index-provider -->
 ```rust
@@ -2403,16 +2753,37 @@ volatile source sequence and comparison state unrecoverable.
 For directly constructed queries, bind the stable enclosing scope before
 registration or activation:
 
-<!-- illustration: query-scope -->
+The running native query combines scope, transaction mode and the actual
+progress/bootstrap owners. `limits` is the same `SourceTransactionLimits` used
+by SQLite; the source's paired bootstrap and progress bindings are explained in
+Chapter 10.
+
+<!-- excerpt: stockroom/src/persistence.rs#persistent-query -->
 ```rust
-let query = ContinuousQueryTransformer::new(definition, provider.clone())
-    .await?
-    .with_recovery_scope(INSTANCE)?;
+let query = ContinuousQueryTransformer::new_configured(
+    ContinuousQueryDefinition {
+        graph_id: GRAPH.into(),
+        id: ComponentId::try_new("low-stock")?,
+        query: LOW_STOCK.into(),
+        language: ComputationQueryLanguage::Cypher,
+        output_stream: StreamId::try_new("low-stock/out")?,
+        outbox_capacity: size(128),
+    },
+    provider.clone(),
+    QueryOptions::default(),
+    QueryExecutionSettings {
+        source_transactions: Some(limits),
+        ..Default::default()
+    },
+    None,
+)
+.await?
+.with_recovery_scope(INSTANCE)?
+.with_source_progress(progress)?
+.with_bootstrap(bootstrap)
+.with_delivery_tracking();
 ```
 
-Here `definition` is a `ContinuousQueryDefinition` with the same low-stock
-calculation. The persistent lesson additionally configures its input for
-complete source transactions and binds the source progress/bootstrap services.
 Keep the instance scope, graph ID, query ID, output stream, and storage directory
 stable across reconstruction. A different instance should use its own storage
 namespace. `with_id` alone does not partition every externally supplied
@@ -2460,8 +2831,11 @@ boundary.
 
 AutoReset permits rebuilding when the applicable contract allows it.
 Choose it only when the source can reconstruct the required state and a
-rebuild is an acceptable application action. Preserve pending tracked output
-through the reset or resolve its obligations explicitly first.
+rebuild is an acceptable application action. It requires an actual bootstrap
+provider and refuses reset when persistent output has bound durable destinations.
+Resolve the destinations and their pending obligations through an explicit
+recovery plan; enabling AutoReset is not permission to discard them. It resets
+the receiving query for supported reset conditions, not upstream source state.
 
 Query text, language, source/pipeline configuration, joins, mutation semantics,
 and output identity can affect recovery identity. A query edit is not always
@@ -2481,6 +2855,22 @@ after process failure. Select the failure mode you actually need and can
 support; a class name containing "persistent" is not evidence.
 
 After assembling the relevant owners, add an explicit requirement:
+
+The selected `consumer` names one boundary and all inputs contributing to it;
+it does not silently enroll unrelated branches as required subscribers.
+
+| Guarantee | Required evidence at that boundary |
+|---|---|
+| Acceptance | Success returned upstream protects the input at the selected failure scope |
+| Replay | Accepted input can reach this boundary again after interruption |
+| CommittedProcessing | Participating state, input progress and output commit together |
+| Publication | Committed output reaches recoverable storage before its owner releases it |
+
+For example, a persistent query followed by a volatile outgoing pipe cannot
+satisfy process-restart Publication. A memory-only input path cannot establish
+process-restart acceptance merely because the query's own indexes are durable.
+These are assertions over actual constructed contracts, not switches that install
+the missing services.
 
 <!-- illustration: recovery-requirement -->
 ```rust
@@ -2522,7 +2912,9 @@ Missing requested history fails explicitly, including a fully pruned log.
 `WalSourceResource` and `WalReplaySource` can expose an actual WAL and processing
 progress owner as a native replay source.
 
-Ordinary HTTP/gRPC sources protect retained WAL input while their initial query
+**Alternative ordinary source adapters.** Unlike native source admission,
+ordinary HTTP/gRPC sources can use the source-WAL interface. They protect retained
+WAL input while their initial query
 subscriptions are restored. The first fast subscriber cannot authorize deletion
 of data still needed by a slower one. Replay registration is protected against
 pruning, and stop awaits submitted pruning work. If you host these plugins
@@ -2631,6 +3023,19 @@ database failure as a failure; an empty snapshot means the source was genuinely
 empty at its boundary. `has_pending_snapshot` distinguishes a new initial load
 from a replay-only start, which preserves completed initialization.
 
+| Saved state at start | Initialization decision |
+|---|---|
+| No prior initialization | Establish a real snapshot/live cut and commit its covered watermarks |
+| Completed reusable persistent state | Replay after the saved cursor; do not reload a fresh snapshot as though it were history |
+| Completed volatile input view | Refresh current input, including deletions while stopped; the volatile refresh policy can apply under Strict |
+| Interrupted persistent initialization | Remains incomplete; Strict does not declare it complete or silently erase it |
+| Typed replay gap or changed producer epoch | Strict fails; AutoReset needs permission and an actual bootstrap provider, and refuses a persistent reset with bound durable destinations |
+
+Live pipes are already bound while the snapshot is captured. Buffered changes
+covered by its cursor are skipped; later changes remain input work. Completing
+bootstrap makes the query readable/ready but can leave replay to process, as the
+[readiness table](#read-a-readiness-observation) explains.
+
 #### Make watermarks describe real coverage
 
 `ComputationBootstrapSnapshot` carries a stream of changes and
@@ -2683,9 +3088,31 @@ A read-only progress capability does not itself retain source history.
 The source must separately guarantee that input after that progress remains
 available for replay. State the retained-until-consumer boundary explicitly.
 
+#### Finish snapshot cleanup
+
+Dropping the snapshot stream must cancel its work. A provider with auxiliary
+workers must implement `stop` and await them before query storage is released.
+Retain incomplete cleanup after timeout or cancellation, and reject a second
+snapshot owner until cleanup succeeds.
+
+A successfully stopped paired provider can be replaced even if its old handle
+is retained. That handle must not resume or cancel the replacement. Conversely,
+dropping an active or failed-cleanup handle is not evidence that its workers
+finished. A rejected replacement must leave a valid stopped original usable.
+
+Verified retirement needs a stronger held lifecycle than a sampled successful
+stop. `freeze_for_retirement` prevents reuse while a configuration removal is
+being resolved; [Chapter 17](#retire-a-managed-durable-path-without-discarding-work)
+shows how management holds that exclusion.
+
+This completes the single-owner Stockroom bootstrap path. Snapshot rows are not
+automatically one upstream database transaction; preserve that distinction from
+the complete source groups introduced in Part III.
+
 #### Share a source without sharing its recovery owner
 
-One inventory source can feed both `low-stock` and a second audit query. Do not
+**Alternative: multiple consumers.** One inventory source can feed both
+`low-stock` and a second audit query. Do not
 create a source per query or make both queries publish through one progress
 owner. Give each query its own `QuerySourceProgress`, bind it to that query,
 and construct a `ConsumerProgressSet` from those actual owners, the graph ID
@@ -2732,7 +3159,8 @@ contracts for retention and enrollment rules.
 
 #### Pair separately loaded SQLite components
 
-Paired initialization must use the actual source's worker coordination and
+**Host profile: separately loaded source and bootstrap libraries.** Paired
+initialization must use the actual source's worker coordination and
 journal, not another connection found by database path. Set
 `coordinated_snapshot: true` on a replay/shared SQLite source and bind one
 graph-owned source/bootstrap coordinator. Each query gets a separate provider
@@ -2752,7 +3180,8 @@ the source's REST API remain the application interfaces.
 
 #### Combine initial data from multiple inputs
 
-A query joining database inventory with an HTTP catalog needs both initial
+**Alternative: multiple initial datasets.** A query joining database inventory
+with an HTTP catalog needs both initial
 datasets. Use `CompositeBootstrapProvider` to wrap the real query-scoped
 providers, then attach the composite through the query's existing
 `with_bootstrap` method. Supply the instance, graph and query scope, and an
@@ -2779,26 +3208,6 @@ single cross-database snapshot instant. The
 [real PostgreSQL/HTTP example](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/postgres)
 demonstrates the supported combination. Chapter 16 shows its managed recipe.
 
-#### Finish snapshot cleanup
-
-Dropping the snapshot stream must cancel its work. A provider with auxiliary
-workers must implement `stop` and await them before query storage is released.
-Retain incomplete cleanup after timeout or cancellation, and reject a second
-snapshot owner until cleanup succeeds.
-
-A successfully stopped paired provider can be replaced even if its old handle
-is retained. That handle must not resume or cancel the replacement. Conversely,
-dropping an active or failed-cleanup handle is not evidence that its workers
-finished. A rejected replacement must leave a valid stopped original usable.
-
-Verified retirement needs a stronger held lifecycle than a sampled successful
-stop. `freeze_for_retirement` prevents reuse while a configuration removal is
-being resolved. Chapter 17 explains why that exclusion matters.
-
-Snapshot rows are not automatically one upstream database transaction.
-If Stockroom needs transaction-preserving input, use the distinct protocol
-in Chapter 13.
-
 **Summary.** Bootstrap is a handover protocol, not just an initial file load.
 Prepare subscriptions before consuming rows, commit truthful watermarks, retain
 external initialization identity, and await cleanup. The query can now establish
@@ -2815,12 +3224,128 @@ and output in a QoS journal. This chapter explains its outgoing connection,
 then shows two alternatives: admission for externally submitted input and
 snapshot/outbox recovery for a materialized view.
 
+#### Register a bounded codec
+
+Persistent transport needs executable validators, not only schema names.
+`EnvelopeCodec` is the bounded JSON envelope codec; `BinaryEnvelopeCodec` is the
+binary alternative. Record payload encoding remains schema-specific.
+
+<!-- illustration: envelope-codec -->
+```rust
+fn codec() -> anyhow::Result<EnvelopeCodec> {
+    let mut codec = EnvelopeCodec::new(
+        NonZeroUsize::new(1024 * 1024).expect("positive size"),
+    );
+    codec.register_schema(GraphChangeCodec::schema())?;
+    Ok(codec)
+}
+```
+
+Register every schema the path actually carries with a trusted executable
+validator. Decoding validates both that schema and the outer encoding.
+
+#### Protect query output handoff
+
+This is the actual SQLite-backed Stockroom path. Open its output journal with
+replay receipts:
+
+<!-- excerpt: stockroom/src/persistence.rs#output-journal -->
+```rust
+let journal = QosChannel::persistent_with_recovery(
+    QosChannelDefinition {
+        stream: StreamId::try_new("low-stock/out")?,
+        capacity: size(128),
+        durable: true,
+        retention: RetentionPolicy::Backpressure,
+        subscribers: [("alerts".into(), SubscriptionStart::Earliest)].into(),
+    },
+    provider.create_indexes(GRAPH, "output-journal").await?,
+    codec()?,
+    "low-stock",
+    QosRecoveryOptions::Replay(ReplayOptions {
+        failure_scope: FailureMode::ProcessRestart,
+        receipt_capacity: size(128),
+    }),
+)
+.await?;
+```
+
+A QoS channel appends once and keeps a cursor for each named subscriber. Its
+lossless retention policy backpressures new work while required consumers are
+behind. Give the graph this actual resource and use it on the edge:
+
+<!-- illustration: journal-binding -->
+```rust
+let output_journal = ResourceId::try_new("output-journal")?;
+let handle = journal.resource();
+batch = batch
+    .declare_resource(ResourceSpecification {
+        id: output_journal.clone(),
+        role: handle.role(),
+        ownership: ResourceOwnership::Graph,
+        binding: "output-journal".into(),
+    })?
+    .provide_resource(output_journal.clone(), handle)?
+    .connect(
+        EdgeDefinition::new(
+            endpoint("low-stock", "out")?,
+            endpoint("alerts", "in")?,
+        ),
+        Box::new(journal.definition().pipe(output_journal, "alerts")),
+    );
+```
+
+This **replaces** the bounded edge from the first application. Opening a
+persistent channel does not make some other edge durable. The tracked query
+retains committed output until every required destination accepts it. If the
+process stops after journal acceptance but before confirmation, replay receipts
+recognize the same logical output despite a new transport sequence.
+
+Tracked destination membership includes component, port, subscriber and journal
+identity. Keep those identities and delivery tracking enabled while output is
+pending. An allowed replacement under the same destination identity inherits its
+unfinished work.
+
+Earliest, Latest and After select a **new** subscriber's starting position;
+reconnecting an existing subscriber preserves its saved cursor. Disconnecting
+does not retire it. Only explicit retirement or an intentional member-definition
+change releases its obligation.
+
+#### Acknowledge only the promised boundary
+
+`EnqueueReceipt` proves acceptance, not handling. On failure, distinguish
+NotAccepted from Unknown; cancellation can leave acceptance unknown too.
+`send_batch` is not atomic: a failure can retain receipts for an accepted prefix
+and envelopes that were never attempted.
+
+A received `Delivery` may carry an `Acknowledgement`. Complete it with the
+actual handling outcome; dropping it does not acknowledge work. Acknowledged
+subscribers have one outstanding delivery each, regardless of journal capacity.
+The consumer in Chapter 12 commits its promised work before completing the batch.
+
+#### Bound retained history and caches
+
+Retained stores and non-shared QoS journals also support byte quotas. A journal
+charges an envelope once, not per subscriber; lossless retention reclaims only
+safely handled history. A smaller quota on reopen preserves existing obligations
+and blocks new admission until safe pruning is possible.
+
+`OutboxPageLimits` through `IndexedJournalOptions` or `QosJournalOptions` bounds
+the decoded payload cache. Page bytes measure stored records; admission quotas
+measure binary envelopes. Startup still validates complete history. The
+shared-storage alternative in Chapter 13 has bounded history pages but
+count-based admission reservations. Set limits on the actual resource owner
+and preserve them in its reconstruction recipe; see
+[journal resource limits](../computation-graph-qos.md#optional-journal-resource-limits).
+
 **Try it.** Run with `--hold-alerts`, lower a quantity, and wait for the retained
 alert message. Stop and reopen without that option. Compare the pending count
 at open with the count on one more idle reopen. This separates stored output
 from completed handling without relying on a timeout.
 
-#### Assemble a retained path
+<a id="assemble-a-retained-path"></a>
+
+#### Alternative: durable source admission
 
 For an ingress protocol without its own durable change log, use graph-owned
 admission instead of inventing another source WAL:
@@ -2834,10 +3359,8 @@ flowchart LR
     Output --> Alerts["Recoverable alert consumer"]
 ```
 
-A QoS channel appends once and maintains independent progress for its named
-subscribers. It is not a collection of unrelated per-edge queues.
-
-Define a lossless channel:
+This replaces the input protocol, not the running lesson's SQLite journal.
+Reuse the codec above and define a lossless input channel:
 
 <!-- illustration: channel-definition -->
 ```rust
@@ -2855,36 +3378,10 @@ fn channel_definition(
 }
 ```
 
-Earliest, Latest, and After select a **new** subscriber's starting position.
-Reconnecting an existing subscriber preserves its saved cursor.
-Disconnecting does not retire it. Explicit retirement or a member-definition
-change releases its obligation; a full lossless journal backpressures while
-required subscribers still owe work.
-
 A `RetainedPipe` is useful for a lower-level single-consumer retained connection.
 Give independent consumers independent cursors, or use a QoS channel.
 
-#### Register a bounded codec
-
-Persistent transport needs an explicit set of executable schemas:
-
-<!-- illustration: envelope-codec -->
-```rust
-fn codec() -> anyhow::Result<EnvelopeCodec> {
-    let mut codec = EnvelopeCodec::new(
-        NonZeroUsize::new(1024 * 1024).expect("positive size"),
-    );
-    codec.register_schema(GraphChangeCodec::schema())?;
-    Ok(codec)
-}
-```
-
-`EnvelopeCodec` is the bounded JSON envelope codec; `BinaryEnvelopeCodec` is
-the binary alternative. Record payload encoding remains schema-specific.
-Register every schema the path actually carries with a trusted executable
-validator. Decoding validates that schema as well as the outer encoding.
-
-#### Protect source admission
+<a id="protect-source-admission"></a>
 
 Open the input channel with producer admission:
 
@@ -2916,6 +3413,11 @@ let admission = SourceAdmission::new(
 
 The instance scope must match the actual application's stable identity.
 The persistent companion uses its own constant for that scope.
+Declare/provide this input resource and select its subscriber pipe exactly as for
+the output journal above. Admission receipts identify client submissions;
+replay receipts identify the immediate persistent producer's output. The two modes
+cannot coexist on one channel. Disabled is the default, and reopening must retain
+the selected recovery contract.
 
 A source exposing this service returns it from `EnvelopeSource::admission`.
 The graph services its bounded mailbox; it does not also call `next` to publish
@@ -2965,74 +3467,9 @@ Receipt history and producer counts are bounded. Plan capacity for the retry
 window the client needs. State that finite retry window in the client contract
 and retire producers explicitly when their obligations permit it.
 
-#### Protect query output handoff
+<a id="bring-a-new-consumer-up-to-date"></a>
 
-Open the output journal with replay receipts:
-
-<!-- excerpt: stockroom/src/persistence.rs#output-journal -->
-```rust
-let journal = QosChannel::persistent_with_recovery(
-    QosChannelDefinition {
-        stream: StreamId::try_new("low-stock/out")?,
-        capacity: size(128),
-        durable: true,
-        retention: RetentionPolicy::Backpressure,
-        subscribers: [("alerts".into(), SubscriptionStart::Earliest)].into(),
-    },
-    provider.create_indexes(GRAPH, "output-journal").await?,
-    codec()?,
-    "low-stock",
-    QosRecoveryOptions::Replay(ReplayOptions {
-        failure_scope: FailureMode::ProcessRestart,
-        receipt_capacity: size(128),
-    }),
-)
-.await?;
-```
-
-Admission identifies client submissions. Replay receipts identify output from
-the immediate persistent producer. They are different modes and cannot coexist
-on one channel. Disabled is the default; reopening must preserve the explicitly
-selected recovery contract.
-
-Give the graph the actual resource and use it on the edge:
-
-<!-- illustration: journal-binding -->
-```rust
-let output_journal = ResourceId::try_new("output-journal")?;
-let handle = journal.resource();
-batch = batch
-    .declare_resource(ResourceSpecification {
-        id: output_journal.clone(),
-        role: handle.role(),
-        ownership: ResourceOwnership::Graph,
-        binding: "output-journal".into(),
-    })?
-    .provide_resource(output_journal.clone(), handle)?
-    .connect(
-        EdgeDefinition::new(
-            endpoint("low-stock", "out")?,
-            endpoint("alerts", "in")?,
-        ),
-        Box::new(journal.definition().pipe(output_journal, "alerts")),
-    );
-```
-
-This **replaces** the corresponding bounded edge from the first application.
-Declare and bind the input channel similarly. Constructing a persistent channel
-without using its pipe does not make a different edge durable.
-
-The tracked query retains committed output until every required outgoing
-destination accepts it. If the process stops after journal acceptance but
-before confirmation, replay receipts recognize the same logical output.
-Its fresh transport sequence is not a new business emission.
-
-Tracked destination membership includes component, port, subscriber, and
-journal identity. Keep those identities and tracking enabled while output is
-pending. A replacement destination under the same allowed identity inherits
-the unfinished work.
-
-#### Bring a new consumer up to date
+#### Alternative: bring a durable view up to date
 
 Reading a snapshot and then subscribing leaves a gap in which changes can
 be missed. Applying both a snapshot and overlapping output can apply the same
@@ -3126,67 +3563,6 @@ Snapshots carry generation and recovery identity as well as sequence. Accept
 continuation only when those identities match. This restores materialized
 views; irreversible actions still need their destination-specific protocol.
 
-#### Read any output through the same interface
-
-`DrasiLib::output_catalogue()` resolves source, query and transformer outputs
-by component and port, without knowing their internal storage. Each output
-independently registers snapshot, replay and snapshot/live capabilities.
-A source may offer none; a query supplies these over its existing result state.
-Discovery reports the actual providers, not a promise inferred from graph-change
-format or persistence.
-
-For a live viewer, capture current contents and the subsequent stream together:
-
-<!-- illustration: output-snapshot-follow -->
-```rust
-async fn open_live_view(
-    drasi: &drasi_lib::DrasiLib,
-) -> anyhow::Result<OutputSnapshotFollow> {
-    let output = drasi.output_catalogue()?.resolve(&OutputEndpoint::new(
-        ComponentId::try_new("low-stock")?,
-        PortId::try_new("out")?,
-    ))?;
-    Ok(output.snapshot_and_follow(OutputFollowLimits {
-        max_envelopes: NonZeroUsize::new(8).expect("positive capacity"),
-        max_bytes: NonZeroUsize::new(1024 * 1024).expect("positive bytes"),
-        lifetime: std::time::Duration::from_secs(30),
-    }).await?)
-}
-```
-
-Call `into_parts()` to obtain the snapshot and its follow handle. Install the
-snapshot's full records and cursor as one view, then apply each envelope from
-`follow.next().await`. Changes arriving while the snapshot is being read are
-retained within the lease's limits. A cursor uses the producer's logical
-sequence and epoch, not an envelope's re-emission transport sequence.
-
-Choose limits within the provider's ceilings. A query permits up to 64 leases,
-each bounded by its configured outbox capacity, 16 MiB and five minutes.
-Exceeding a live buffer produces an explicit `Gap`; reaching its non-renewing
-deadline produces `LeaseExpired`. Neither silently discards changes and carries
-on, and neither blocks query processing. Drop the old handle and capture a new
-snapshot if the viewer's policy permits rebuilding. Dropping releases retention;
-cancelling a pending `next` does not consume its event.
-
-This bounded, volatile viewer is not the durable consumer protocol above.
-`snapshot()` is a point read, `replay_after(cursor)` reads retained history, and
-`catch_up()` combines the two with gap/epoch checks but does not subscribe to
-later output. A component without the requested capability fails explicitly.
-None of these interfaces requires a component to use a shared row store.
-
-#### Acknowledge only the promised boundary
-
-Transport acceptance and consumer acknowledgement are separate.
-`EnqueueReceipt` reports acceptance; on send failure, NotAccepted and Unknown
-must be distinguished. A cancelled waiter can also leave acceptance unknown.
-`send_batch` is not atomic; failure can retain receipts for an accepted prefix
-and envelopes that were never attempted.
-
-A received `Delivery` may carry an `Acknowledgement`. Complete it with the
-actual handling outcome. Dropping it does not acknowledge work. Acknowledged
-subscribers have one outstanding delivery each; larger journal capacity does
-not change that processing contract.
-
 **Summary.** Durable handoff requires retained responsibility, stable identity,
 and truthful receipts at every boundary. Input admission, query output replay,
 and consumer recovery solve different failure windows. Stockroom can now retain
@@ -3197,6 +3573,19 @@ an alert; the next chapter makes "handled" mean something durable.
 An alert is not finished merely because it left a queue. Stockroom may update
 application state or request replenishment from another system. Those two
 destinations need different completion contracts.
+
+#### Resume at the first unfinished operation
+
+`DeliveryRunner` records the exact input identity/content before destination work
+and advances only the completed operation prefix. If operation two fails, it
+does not acknowledge past that failure. Keep the upstream envelope until the
+whole batch finishes.
+
+Operation keys combine stable consumer scope and logical producer identity, not
+retry transport sequence or replacement configuration. A last-seen message
+number written before handling is not equivalent. After interrupted handling,
+stop and clean up the runner before reuse; await `shutdown` before releasing its
+storage.
 
 #### Construct the running consumer
 
@@ -3252,26 +3641,144 @@ the display reports that the full view is unavailable. It is never presented
 as an empty saved view. Complete enumeration of such a store requires a planned
 migration; use fresh directories for these exercises and preserve existing data.
 
-#### Resume at the first unfinished operation
+#### Commit local business state with completion
 
-`DeliveryRunner` owns bounded per-operation completion state for a native sink.
-It records exact input identity and content before destination work, then
-advances only the completed prefix. If operation two fails, the remaining
-operations stay pending.
+For state entirely within one actual transaction owner, use
+`DeliveryRunner::new_transactional` and `deliver_transactional`.
+A `TransactionalDeliveryHandler` receives a borrowed `TransactionContext`.
+Its business writes and one operation's completion commit together.
 
-Keep the upstream envelope until the whole batch finishes. After interrupted
-handling, stop and clean up the owner before reuse or reconstruction.
-Await the runner's `shutdown` before releasing its storage.
+Stockroom derives each record key from both parts of its `RecordId`, not from
+quantity, SKU display text or transport sequence:
 
-Operation keys include stable consumer scope and logical producer identity.
-They do not depend on a retry's transport sequence or a replacement's
-configuration. Retaining only a last-seen message number before handling is
-not an equivalent implementation.
+<!-- excerpt: stockroom/src/persistence.rs#reorder-key -->
+```rust
+fn reorder_key(id: &RecordId) -> String {
+    let bytes = id
+        .value()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("reorder/{}/{bytes}", id.namespace())
+}
+```
 
-#### Complete an external action
+The per-record entry stores quantity. For this small example, a second `reorders`
+entry enumerates the view as `SavedReorders { version, handled, rows }`, whose rows
+contain `SavedReorder { sku, quantity }`. `decode_reorders` validates version 1
+and checks that its handled count agrees with the separately stored counter.
+Only a new, zero-handled store is interpreted as an empty view; an older store
+without a matching enumeration entry returns unavailable, not empty.
 
-For an external destination, use `DeliveryRunner::new` with a
-`DeliveryHandler`. Define the application boundary explicitly:
+Here is the complete operation handler. Every read and write uses the runner's
+borrowed transaction, including the enumeration index:
+
+<!-- excerpt: stockroom/src/persistence.rs#save-reorder -->
+```rust
+#[async_trait]
+impl TransactionalDeliveryHandler for SaveReorder {
+    async fn handle(
+        &self,
+        item: DeliveryItem<'_>,
+        state: &TransactionContext<'_>,
+    ) -> anyhow::Result<()> {
+        let mut reorders =
+            decode_reorders(state.get("reorders").await?, state.get("handled").await?)?;
+        match item.operation {
+            ChangeOperation::Added { after, .. } | ChangeOperation::Updated { after, .. } => {
+                let row = QueryChangeCodec::decode_row(after)?;
+                let quantity = row
+                    .values
+                    .get("quantity")
+                    .and_then(|value| value.as_i64())
+                    .context("reorder requires integer quantity")?;
+                let sku = row
+                    .values
+                    .get("sku")
+                    .and_then(|value| value.as_str())
+                    .context("reorder requires sku")?
+                    .to_owned();
+                let key = reorder_key(after.identity());
+                state.put(&key, ElementValue::Integer(quantity)).await?;
+                if let Some(reorders) = &mut reorders {
+                    reorders.insert(key, SavedReorder { sku, quantity });
+                }
+            }
+            ChangeOperation::Deleted { identity, .. } => {
+                let key = reorder_key(identity.identity());
+                state.remove(&key).await?;
+                if let Some(reorders) = &mut reorders {
+                    reorders.remove(&key);
+                }
+            }
+        }
+        let count = match state.get("handled").await? {
+            None => 0,
+            Some(ElementValue::Integer(value)) => value,
+            value => anyhow::bail!("invalid handled counter: {value:?}"),
+        };
+        let handled = count.checked_add(1).context("handled counter exhausted")?;
+        if let Some(rows) = reorders {
+            state
+                .put(
+                    "reorders",
+                    ElementValue::String(
+                        serde_json::to_string(&SavedReorders {
+                            version: 1,
+                            handled,
+                            rows,
+                        })?
+                        .into(),
+                    ),
+                )
+                .await?;
+        }
+        state.put("handled", ElementValue::Integer(handled)).await?;
+        Ok(())
+    }
+}
+```
+
+For an update to quantity 2, the record entry and enumeration row become 2,
+the handled counter advances, and the runner commits those writes with this
+operation's completion. A failure before commit leaves all of them uncommitted.
+On deletion, both the record entry and its enumeration row disappear in that
+same boundary. A crash after commit cannot leave the index behind the mutation.
+For larger views, use an appropriately indexed transactional representation
+rather than rewriting a serialized map per operation.
+
+The sink calls the runner before publishing successful batch completion:
+
+<!-- excerpt: stockroom/src/persistence.rs#durable-handle -->
+```rust
+runner.deliver_transactional(&input, &SaveReorder).await?;
+let sequence = QueryChangeCodec::query_sequence(&input.envelope)?;
+println!("Saved reorder changes through query sequence {sequence}.");
+print_saved_reorders(&mut runner).await?;
+self.completed.send_replace(sequence);
+```
+
+The context supports named `get`/`put`/`remove` state and graph-element
+operations. Keep all commit-sensitive state and writes in this borrowed
+context for the duration of the callback. The owning transaction supplies the
+commit boundary.
+
+External calls cannot join this transaction. A handler that both saves a local
+quantity and sends an email still needs a separate external-effect protocol.
+Similarly, per-operation atomicity does not mean that every observer sees a
+whole source transaction's effects simultaneously.
+
+The runner persists its handling mode. Reopening external completion state as
+transactional state, or the reverse, is not a supported reinterpretation.
+Retry after confirmed rollback is different from retry after an uncertain
+commit; uncertainty fences the owner until cleanup and recovery resolve it.
+
+<a id="complete-an-external-action"></a>
+
+#### Alternative: complete an external action
+
+For an external destination, use `DeliveryRunner::new` with a `DeliveryHandler`,
+not the local transaction handler. Define the destination contract explicitly:
 
 <!-- illustration: external-handler -->
 ```rust
@@ -3294,77 +3801,26 @@ impl DeliveryHandler for ReorderHandler {
 }
 ```
 
-`ConfirmedOrders` is an application-supplied destination contract. Its
-implementation must perform or verify the action and use the stable operation
-ID for deduplication. Returning after enqueueing work in an untracked local
-worker violates the contract. An HTTP 202 response generally proves queue
-acceptance, not completed replenishment.
+`ConfirmedOrders` is supplied by the application. It must perform or verify the
+action and use the stable operation ID for deduplication. Returning after an
+untracked enqueue violates the contract; HTTP 202 normally proves queue acceptance,
+not completed replenishment.
 
-A remote action can succeed just before the process loses its acknowledgement.
-The local completion ledger cannot atomically commit that remote action.
-The destination needs idempotency or a confirmation lookup keyed by the same
-operation identity. That destination protocol, rather than HTTP transport alone,
-provides the duplicate-effect protection.
+A remote action can succeed just before its acknowledgement is lost. The local
+ledger cannot atomically commit that action. The destination must support
+idempotency or confirmation lookup keyed by the same operation identity.
+Transport success alone does not provide duplicate-effect protection.
 
-Choose `DeliveryOptions` with an explicit failure scope, stream/receipt bounds,
-and retry policy. The default makes one attempt with no delay. Implement
-`retryable` only for known transient failures; invalid data and unknown commit
-outcomes are not repaired by blind repetition.
+Choose failure scope, stream/receipt bounds and retry policy explicitly. The
+default makes one attempt with no delay. Implement `retryable` only for known
+transient failures; blind repetition does not repair invalid data or unknown
+commit outcomes.
 
-For whole-envelope remote transport, `DeliveryBatch` and `DeliveryBatchIdentity`
-avoid serializing the envelope once per operation. The receiver must derive
-identity from the decoded content and its configured consumer scope, compare
-it with the request, and only then perform effects. A caller-supplied digest
-is not proof. Network admission and shutdown still need their own bounded
-ownership.
-
-#### Commit local business state with completion
-
-For state entirely within one actual transaction owner, use
-`DeliveryRunner::new_transactional` and `deliver_transactional`.
-A `TransactionalDeliveryHandler` receives a borrowed `TransactionContext`.
-Its business writes and one operation's completion commit together.
-
-Stockroom's persistent handler saves the current alert quantity under a stable
-record key, or removes that key on a deletion. It also increments a handled
-count inside the same context:
-
-<!-- illustration: handled-counter -->
-```rust
-async fn count_handled(state: &TransactionContext<'_>) -> anyhow::Result<()> {
-    use drasi_core::models::ElementValue;
-
-    let count = match state.get("handled").await? {
-        None => 0,
-        Some(ElementValue::Integer(value)) => value,
-        value => anyhow::bail!("invalid handled count: {value:?}"),
-    };
-    state
-        .put("handled", ElementValue::Integer(count + 1))
-        .await?;
-    Ok(())
-}
-```
-
-Call this from the handler after applying the operation, as the complete
-[`SaveReorder` implementation](stockroom/src/persistence.rs)
-does. If the transaction fails, both the business mutation and completion
-remain uncommitted.
-
-The context supports named `get`/`put`/`remove` state and graph-element
-operations. Keep all commit-sensitive state and writes in this borrowed
-context for the duration of the callback. The owning transaction supplies the
-commit boundary.
-
-External calls cannot join this transaction. A handler that both saves a local
-quantity and sends an email still needs a separate external-effect protocol.
-Similarly, per-operation atomicity does not mean that every observer sees a
-whole source transaction's effects simultaneously.
-
-The runner persists its handling mode. Reopening external completion state as
-transactional state, or the reverse, is not a supported reinterpretation.
-Retry after confirmed rollback is different from retry after an uncertain
-commit; uncertainty fences the owner until cleanup and recovery resolve it.
+For whole-envelope transport, `DeliveryBatch` and `DeliveryBatchIdentity` avoid
+serializing the full envelope per operation. Before effects, the receiver derives
+identity from decoded content and its configured consumer scope and compares
+it with the request. A supplied digest is not proof. Network admission and
+shutdown still need bounded ownership.
 
 #### Expose an honest component contract
 
@@ -3378,7 +3834,9 @@ than advertising a stronger recovery contract than the destination provides.
 Recovery assertions verify declared and bound capabilities; they cannot prove
 an opaque external system's behavior.
 
-#### Track handled input without claiming persistence
+<a id="track-handled-input-without-claiming-persistence"></a>
+
+#### Alternative: track handled input without persistence
 
 A standalone transformer or ordinary `Handled` sink can participate in a
 shared producer's required recovery boundary without becoming a query. Bind
@@ -3407,8 +3865,10 @@ one reports its own completed input; the other observes the owners receiving
 its output. This supports transformer-to-transformer and transformer-to-sink
 fan-out without adding another executor.
 
-**Summary.** Completion is durable business progress, not receipt into another
-queue. Transactional handlers can commit local state with operation completion;
+**Summary.** In the durable path, completion records business progress at the
+selected failure boundary, not just receipt into a queue. Handled in general
+means the consumer finished its declared work, which can be volatile.
+Transactional handlers can commit local state with operation completion;
 external handlers require destination confirmation and idempotency. Both retain
 unfinished work rather than acknowledging past it.
 
@@ -3462,8 +3922,9 @@ fn committed_group(
 
 Add `bytes = "1"` for this example. Call `commit` only when the source commit
 is already known. `into_envelope` publishes the resulting group; replay uses
-`into_replay_envelope`. The complete transaction is one typed record, not
-independently acknowledged row envelopes.
+`into_replay_envelope`. The complete transaction is one graph-change envelope:
+ordinary operations plus the current transaction-completeness metadata, not one
+special payload record or independently acknowledged row envelopes.
 
 If the source owns the database transaction, use `prepare` instead. The
 `PreparedSourceTransaction` is inert: store its encoded bytes in the **same
@@ -3720,7 +4181,8 @@ Exercise both current-thread and multi-threaded Tokio runtimes when supporting
 both hosts.
 
 The [completed Building Comfort reference and recovery](https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2)
-is an example of that evidence with the external Server and rebuilt ordinary
+is optional qualification evidence from a **different Server/ordinary-adapter
+profile**, not another Stockroom exercise. It uses rebuilt ordinary
 gRPC adapters. Both queries processed 100,000 inputs; after SIGKILL, the aggregate
 restored input 88,748 and replayed 11,252 remaining events. Exact delivery and
 independently checked final snapshots matched the completed reference. This is
@@ -3899,13 +4361,9 @@ configuration and save the recipes that reconstruct them.
 
 #### Declare resource ownership and dependencies
 
-A `ResourceSpecification` is a declaration. A `ResourceHandle` is an actual
-typed service. Declaring an IndexBackend does not open a database; declaring
-an Identity resource does not acquire credentials.
-
-Graph ownership makes cleanup part of graph lifecycle through the resource's
-cleanup contract. Borrowed ownership means an outer application owns that
-lifetime. A borrowed user's prerequisites must outlive that user.
+Use the declaration/handle and lifetime model from
+[Name resource owners before sharing them](#name-resource-owners-before-sharing-them).
+Here factories make those requirements discoverable and reconstructible.
 
 Use `ResourceRequirement::exactly_one::<T>` when a factory needs one typed
 resource. Other cardinalities must be explicit. Dependencies can represent
@@ -4010,6 +4468,10 @@ Define reconnect or refresh behavior in the component's lifecycle.
 Use a test memory secret store only when its volatility is acceptable.
 
 #### Refresh native credentials on each start
+
+**Host profile: optional native activation credentials.** This is separate from
+the construction-time secret resolver above; it is not required by the managed
+file lesson.
 
 Factories opting into `activation_credentials_v1` can bind the Host's
 `NativeIdentityResource` under their optional `identity` slot. The resource role
@@ -4119,93 +4581,6 @@ transaction. Keep actual bindings outside the persisted document.
 actual handles. It owns application-specific policy such as allowed paths,
 provider selection, credentials, and recovery-domain validation. Wrapping
 another resolver must preserve those checks.
-
-#### Declare shared progress and composed bootstrap resources
-
-Host SDK and Server resolvers distinguish progress from initialization. A
-`consumerProgress` recipe groups the downstream owners of **one producer**;
-a `compositeBootstrap` recipe groups the initializers of **one query**.
-These JSON objects are recipe configurations, not complete graph definitions.
-The enclosing definition must declare their resources, dependencies, factories
-and connections.
-
-For a shared inventory source, the progress-set recipe is:
-
-```json
-{
-  "kind": "consumerProgress",
-  "producer": "inventory",
-  "consumers": {
-    "low-stock": "low-stock-progress",
-    "stock-audit": "stock-audit-progress"
-  }
-}
-```
-
-Declare it as a Checkpoint resource with exactly those two distinct Checkpoint
-dependencies. Each member resource uses a `sourceProgress` recipe for its actual
-component. Bind the set to the source's `consumer_progress` slot and each query's
-own member resource to its `source_progress` slot. An eligible standalone
-transformer or Handled sink instead uses its own `input_progress` slot.
-
-For `low-stock` to initialize from inventory and an HTTP catalog:
-
-```json
-{
-  "kind": "compositeBootstrap",
-  "component": "low-stock",
-  "providers": ["inventory-bootstrap", "catalog-bootstrap"]
-}
-```
-
-Declare this as a graph-owned Bootstrap resource with exactly the listed
-distinct Bootstrap dependencies. Those child recipes must resolve the actual
-providers for `low-stock`; their progress-bearing bindings use its same
-`low-stock-progress` owner. Bind only the composite resource to the query's
-single `bootstrap` slot. Other queries require their own initialization
-providers, not the same composite under a different name.
-
-Use actual factory metadata to construct canonical component specifications,
-and retain secret `ConfigurationValue` references. Server's readable
-`computation.graph.config` is literal JSON; a reference-shaped object there
-does not become a secret reference. Secret-bearing native definitions use
-canonical `computation.definition`.
-
-The [Trading example](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/trading)
-generates its complete fixed-member definition from the actual 11 app queries
-and factory metadata. App setup submits one batch through the existing
-`/computation/components` endpoint, then creates its SSE reaction. It uses two
-shared PostgreSQL sources and one HTTP source, with PG/HTTP initialization
-where needed. Repeating a matching setup is idempotent; a partial or conflicting
-bundle is an explicit error, not implicit membership replacement.
-
-#### Declare source-owned database initialization
-
-For paired SQLite loading, `nativeSourceBootstrap` creates a graph-owned
-Bootstrap resource using the **source** factory's actual identity and canonical
-configuration, including plugin provenance. It depends on either the actual
-single `sourceProgress` resource or the fixed `consumerProgress` resource, plus
-any declared configuration dependencies.
-
-| Binding | Required relationship |
-|---|---|
-| Source `source_bootstrap` | The coordinator resource; keep the source's normal progress dependency too |
-| Per-query `nativeBootstrap` | `sourceBootstrap` names that coordinator; `sourceProgress` names the query's actual owner |
-| Query `bootstrap` and `source_progress` | The paired provider and that same query progress resource |
-
-Each paired bootstrap resource declares its coordinator as a Bootstrap dependency
-and its query owner as a Checkpoint dependency. The source and provider
-configuration/scope must match the coordinator, and the Host validates actual
-owner identity rather than IDs or paths. Resource dependency order keeps the
-coordinator alive through source/provider cleanup.
-
-Use the [Host coordination recipe](../../../components/host-sdk/README.md#internal-native-sourcebootstrap-coordination)
-and the loaded factories' metadata, not handwritten guesses about provenance.
-In the matching Server checkout, `examples/native-sqlite.rs` generates file,
-single-owner and shared definitions; `examples/native-mysql.rs` generates the
-MySQL deployment. SQL Server's generator is available but its database
-qualification remains deferred. These are separate Server consumers, not extra
-Stockroom lessons or a new database-access API.
 
 #### Enable management at the host boundary
 
@@ -4320,6 +4695,101 @@ reconciliation, but they are not thereby serialized for reconstruction.
 Await instance shutdown before releasing the store or opening a replacement
 owner. A cancelled storage waiter does not release an exclusive configuration
 lease while its real operation is still running.
+
+<a id="declare-shared-progress-and-composed-bootstrap-resources"></a>
+
+#### Host profile: shared progress and composed bootstrap
+
+The basic managed Stockroom is now complete. The following **Host SDK/Server**
+recipes extend it to the alternative shared and multi-input protocols of
+Chapter 10; they are not required by the file-backed managed lesson.
+
+A `consumerProgress` recipe groups downstream owners of **one producer**.
+A `compositeBootstrap` recipe groups initializers of **one query**. These JSON
+objects are recipe configurations, not complete graph definitions: declare the
+resources, dependencies, factories and connections around them.
+
+```json
+{
+  "kind": "consumerProgress",
+  "producer": "inventory",
+  "consumers": {
+    "low-stock": "low-stock-progress",
+    "stock-audit": "stock-audit-progress"
+  }
+}
+```
+
+Declare this as a Checkpoint resource with exactly the two distinct Checkpoint
+dependencies. Each member uses a `sourceProgress` recipe for its actual component.
+Bind the set to the source's `consumer_progress`, and each query's own member to
+its `source_progress`. Eligible standalone transformers/Handled sinks instead
+use their own `input_progress` slot.
+
+For one query to initialize from inventory and an HTTP catalog:
+
+```json
+{
+  "kind": "compositeBootstrap",
+  "component": "low-stock",
+  "providers": ["inventory-bootstrap", "catalog-bootstrap"]
+}
+```
+
+Declare a graph-owned Bootstrap resource with exactly those distinct Bootstrap
+dependencies. Each child resolves an actual provider for `low-stock`; any
+progress-bearing child uses its same `low-stock-progress` owner. Bind only the
+composite to the query's single `bootstrap` slot. Other queries need their own
+providers/composites, not aliases for this one.
+
+```text
+inventory -> consumerProgress set -> low-stock-progress <- low-stock query
+                                -> stock-audit-progress <- stock-audit query
+low-stock query -> compositeBootstrap -> inventory-bootstrap -> low-stock-progress
+                                     -> catalog-bootstrap
+```
+
+Here arrows describe dependencies/read capabilities, not data pipes. Data still
+needs its own inventory/catalog-to-query connections.
+
+Build canonical component specifications from actual factory metadata and keep
+secret `ConfigurationValue` references. Server's `computation.graph.config` is
+literal JSON; a reference-shaped object there is not a secret reference.
+Secret-bearing native definitions use canonical `computation.definition`.
+
+The [Trading example](https://github.com/drasi-project/drasi-server/tree/15dafa225ac76ba9868452a7082f693027621ad7/examples/trading)
+generates a complete fixed-member definition from its 11 queries and factory
+metadata. It submits one `/computation/components` batch, then creates its SSE
+reaction, using two shared PostgreSQL sources and one HTTP source with PG/HTTP
+initialization where needed. Matching setup is idempotent; partial/conflicting
+bundles are errors, not implicit membership replacement.
+
+<a id="declare-source-owned-database-initialization"></a>
+
+#### Host profile: source-owned database initialization
+
+Paired SQLite's `nativeSourceBootstrap` creates a graph-owned Bootstrap resource
+using the **source** factory's real identity, canonical configuration and plugin
+provenance. It depends on its actual single `sourceProgress` or fixed
+`consumerProgress`, plus declared configuration dependencies.
+
+| Binding | Required relationship |
+|---|---|
+| Source `source_bootstrap` | Coordinator resource, in addition to the source's normal progress dependency |
+| Per-query `nativeBootstrap` | `sourceBootstrap` names the coordinator; `sourceProgress` names this query's actual owner |
+| Query `bootstrap` / `source_progress` | Paired provider and that same query progress resource |
+
+Each paired provider declares its coordinator as a Bootstrap dependency and its
+query owner as a Checkpoint dependency. Source/provider scope and configuration
+must match the coordinator. The Host checks actual owners, not matching paths,
+and dependency order keeps the coordinator alive through dependent cleanup.
+
+Use the [Host coordination recipe](../../../components/host-sdk/README.md#internal-native-sourcebootstrap-coordination)
+and loaded factory metadata. Matching Server generators `examples/native-sqlite.rs`
+and `examples/native-mysql.rs` supply complete definitions; SQLite's covers file,
+single-owner and shared modes. SQL Server's generator exists but its database
+qualification remains deferred. These are Server consumers, not extra Stockroom
+lessons or a general database-access API.
 
 #### Keep configuration history intentional
 
@@ -4538,10 +5008,17 @@ let policy = RelationshipPolicy {
     propagate_failure: true,
     ..RelationshipPolicy::default()
 };
+let edge = EdgeDefinition::new(
+    endpoint("inventory", "out")?,
+    endpoint("low-stock", "in")?,
+);
+batch = batch.relationship_policy(edge, policy);
 ```
 
-Apply the policy explicitly to the intended edge. Defaults use independent activation and no failure
-propagation. Binding is required, but creation need not wait on the edge.
+This sets lifecycle policy on that data relationship; it does not connect a new
+pipe. Keep the corresponding `.connect(...)` declaration. Defaults use independent
+activation and no failure propagation. Binding is required, but creation need
+not wait on the edge.
 Consumer replacement does not automatically opt into rebind, and survival
 without the relationship must be explicitly permitted.
 
@@ -4584,6 +5061,47 @@ and held exclusion against restarting or reusing the old owners while acceptance
 is decided. A missing live handle is not evidence that disk state is empty.
 Equal provider paths are not evidence that two handles represent the same
 domain.
+
+#### Retire a managed durable path without discarding work
+
+**Alternative managed durable deployment:** this procedure applies when the
+capstone's processing owners have been represented as managed factories/resources.
+The `--state` CLI itself does not expose a managed-retirement command.
+
+Suppose an accepted definition contains a query, its output journal and an
+alert consumer. The journal still owes output 7 to alerts. Removing the query's
+Rust object is insufficient: the query outbox, journal cursor, consumer ledger,
+query indexes, source-progress/bootstrap owners and their actual users may form
+one protected recovery domain. Let the resource resolver determine that complete
+domain from the real bindings; do not construct it by matching directory names.
+
+| Step | Application action | Observable consequence |
+|---|---|---|
+| 1. Fix a finite boundary | Stop admitting new application input; account for scheduled work and all required source/consumer paths | “Final output 7” is meaningful only for this controlled workload |
+| 2. Complete the outstanding work | Let alerts handle output 7, using the actual journal/consumer evidence as in Chapter 14 | Saved reorders and the completion ledger advance; an empty local queue alone proves nothing |
+| 3. Stop the instance | Await `core.stop()` successfully; verify the applied topology agrees with the previously accepted definition | Protected transitions require stopped owners, not merely paused `next` calls |
+| 4. Prepare the request | Read the current desired revision; save a new configuration request ID with the complete desired definition removing the domain and all required users | Retry will identify this exact request, not a newly invented replacement |
+| 5. Submit | Call `apply_desired_state(expected_revision, request_id, desired)` | Management obtains graph freezes and actual storage/journal/consumer/bootstrap retirement guards internally and checks drained state |
+| 6. Resolve acceptance | Read the receipt/authoritative desired state, using the same request ID after uncertainty | A thrown error alone is not proof of rejection |
+| 7. Reconcile known acceptance | Reconcile the accepted definition and inspect outcomes before restarting any surviving application paths | Removed generations stay fenced; no hidden processing-data deletion occurs |
+
+The application does **not** build a public “proof object.” The management
+transition holds the real owners while it commits desired configuration and then
+reloads authoritative store state. Known changed state retires the held guards;
+known unchanged state resumes them. An unreadable/uncertain store retains the
+transition. Do not immediately restart old owners on an error: resolve the same
+request and let management establish which definition is authoritative.
+
+If alerts still owes output 7, normal retirement rejects the pending domain.
+Resume/retry only after confirmed rejection and completed transition cleanup;
+finish the work rather than deleting the journal. If stop itself times out, retain
+the owner and complete cleanup before attempting a protected transition.
+
+For intentional abandonment, the separate authorization below requires durable
+configuration, the exact old revision and complete removal of exactly named
+domains. It is not an in-place reset or a shortcut around failed cleanup.
+
+#### Authorize intentional abandonment separately
 
 Query/bootstrap and consumer owners expose their own retirement boundaries.
 A successfully stopped bootstrap provider must remain frozen; a consumer
@@ -4675,45 +5193,14 @@ The [native SDK guide](../../../components/computation-plugin-sdk/README.md)
 contains export and factory examples. Exact ABI layouts and signatures belong
 to that reference, not to the application data model.
 
-#### Keep the layers of identity separate
-
-An envelope carries a change set, stream metadata, and context:
-
-| Identity | What it identifies |
-|---|---|
-| `ElementReference` | A node or relationship in a source namespace; for a query result, its output's dataset namespace plus an opaque row identity |
-| `RecordId` | A schema-defined record; its namespace and bytes are both significant |
-| `ChangeSetId` and operation ordinal | One identified group of changes and each operation's place in that group |
-| Stream and sequence | A producer's ordered emissions from one output |
-| Source position | An opaque upstream resume position, if the source supplies one |
-
-One output owns one stream. Its new emissions must have increasing sequences;
-gaps can be valid. Preserve increasing progress across reconnects and bind each
-logical identity to the same content on retries.
-
-A `ChangeOperation` is Added, Updated, or Deleted. Records describe their
-image as Full, Patch, or Partial, and updates explicitly distinguish Patch
-from Replace. A Patch sets the properties it lists (null is a value) and names
-any properties to remove separately; a Replace carries the complete element.
-Consumers must support the image they receive. A delete may
-contain only a validated `RecordReference`, with no before image.
-
-`SystemMetadata` belongs to the framework boundary; business attributes belong
-in records. Append context for attribution, and derive a new envelope when
-creating new output. Keep the shared input immutable.
-
-Putting several changes in a collection does not prove that their source
-committed them atomically. Whole source transactions have a separate contract
-in Chapter 13.
-
 #### Keep background work owned
 
 The graph already owns component processing tasks. Add auxiliary workers only
 when a component genuinely needs them, such as a listener or blocking I/O
 operation with a separate lifetime.
 
-The helpers in `drasi_lib::context::workers` acquire a vacant owner slot
-before spawning work:
+**Native plugin code:** use the shared contracts' worker helpers, not a dependency
+on the embedding runtime. They acquire a vacant owner slot before spawning work:
 
 <!-- illustration: owned-worker -->
 ```rust
@@ -4721,7 +5208,7 @@ async fn start_owned(
     slot: &tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
     stop: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
-    drasi_lib::context::workers::spawn_owned_worker(slot, async move {
+    drasi_computation_contracts::workers::spawn_owned_worker(slot, async move {
         if stop.await.is_err() {
             tracing::warn!("worker stop owner was dropped");
         }
@@ -4731,7 +5218,9 @@ async fn start_owned(
 }
 ```
 
-This example requires a `tracing` dependency. Its owner must subsequently signal
+This example requires `drasi-computation-contracts`, Tokio and `tracing`.
+The starter's development dependencies compile-check this native-plugin fragment;
+its application code need not acquire another runtime. Its owner must signal
 the worker and await a join. `spawn_owned_blocking_worker` applies the same
 ownership-before-spawn rule to blocking work.
 
@@ -4914,6 +5403,85 @@ or in-place dynamic reconfiguration. A native plugin is trusted in-process code,
 not a sandbox. A contained panic still requires a fresh component generation;
 native aborts and memory faults can terminate the process.
 
+#### Available native integrations
+
+**Optional deployment profiles.** Native plugins and statically linked native
+components use the same graph-owned contracts. Choose the actual implementation
+and its supported mode, not a connector package name alone.
+
+| Integration | Input/output and use | Completion or recovery boundary |
+|---|---|---|
+| Native application callback/channel | Envelope sink with an explicit schema | Callback completion or bounded volatile channel acceptance |
+| HTTP source | Externally submitted graph changes | Volatile acceptance by default; optional admission service |
+| Native HTTP sink | Graph-change notifications to a webhook | Configured HTTP outcome; destination effects need their own contract |
+| Native gRPC source/sink | Graph-change ingress/egress | Explicit transport acceptance and handling policy |
+| Native SSE sink | Live graph-change notifications | Volatile acceptance; reconnecting clients need a current view |
+| Capture sink | Graph-change envelopes written to a file | Write/flush completion, including query output as ordinary result nodes |
+| SQLite source/bootstrap | Original Rust handle/callbacks or source-owned REST; file or paired initialization | Rows/transactions, or journal-backed single/shared persistent owners; file initialization requires quiescent writers |
+| PostgreSQL sources | Committed rows or whole transactions, selected by factory | Configured-slot shared recovery or distinct single-owner modes; whole-transaction queries require atomic persistent progress |
+| MySQL source/bootstrap | Rows, whole transactions or explicit MySQL 5.7 positional rows; coordinated or standalone loading | Actual single/fixed-member progress, partial-row replay and retained history; positional rows do not claim FULL metadata, coordinated snapshots or commit clocks |
+| MySQL procedure sink | Parameterized actions for query changes | Handled after command responses; owned cancellation/cleanup, not exactly-once effects or blind retry of a submitted call |
+| SQL Server source/bootstrap/sink | CDC, standalone/coordinated loading and parameterized procedures | Real-database qualification deferred; permission, large sink-batch and orphan-marker gaps remain. Not a qualified production replacement |
+| Middleware transformer | Parsing, mapping and normalization | Memory, durable or transactional configuration |
+| Inter-instance bridge | Data between independent instances | Explicit volatile or durable receiver-admission profile |
+
+Native HTTP/gRPC/SSE use configured output bindings for source, transformer and
+query data identically. Their ordinary-data contract rejects scheduled controls
+and snapshot/progress recovery frames; it does not require a query projection.
+The **ordinary Reaction adapter** instead requires query output and converts it
+to ordinary query results. See the [native packages](../../../components/computation-plugins/README.md)
+and [application sink API](../../../components/reactions/application/src/native.rs)
+for executable schemas and configurations.
+
+| Database profile | Native interface | Required setup |
+|---|---|---|
+| [SQLite](../../../components/computation-plugins/sources/sqlite/README.md) | Independent source/bootstrap libraries and preserved `drasi_source_sqlite::native::SqliteSource` API | Source-owned SQL/REST; actual persistent owner/set for replay; `nativeSourceBootstrap` and per-query providers for paired initialization |
+| [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md) | Independent source/bootstrap factories | Matching row/transaction modes, publication/slot settings and actual owners; shared row mode can use memory queries without process-restart recovery |
+| [MySQL](../../../components/computation-plugins/sources/mysql/README.md) | Independent source/bootstrap/procedure libraries | Explicit row/transaction/positional semantics, actual owners, binlog retention and matching bootstrap resources |
+| [SQL Server](../../../components/computation-plugins/sources/mssql/README.md) | Independent libraries, not database-qualified | CDC/permissions; coordinated snapshots need a pre-provisioned marker and locking contract |
+
+Selected MySQL and SQLite roles have static, rebuilt-dynamic and Server
+qualification on both Tokio runtimes. SQLite has no legacy reaction to migrate.
+Its original Rust handle remains the Stockroom interface; separately hosted
+sources may expose source-owned REST, not a general SQL API on `DrasiLib`.
+Data schemas are available through ordinary DrasiLib/Server inspection via the
+separate native read capability.
+
+Choose MySQL positional factories explicitly for limited-metadata binlogs.
+Their `@N` properties, matching-catalog history checks and checkpoint namespace
+differ from FULL-metadata factories. A parsed GTID start does not make file-bound
+partial cursors failover-portable. Procedure templates bind values rather than
+interpolate SQL; errors and uncertain submitted effects are neither discarded nor
+blindly retried.
+
+#### Server host progress metrics
+
+**Server configuration, not embedded Rust configuration.** Add this optional
+section at the root of Drasi Server's configuration, outside `instances`:
+
+```yaml
+metrics:
+  endpoint: "${OTEL_METRICS_ENDPOINT:-http://127.0.0.1:4318/v1/metrics}"
+  exportIntervalMs: 1000
+  exportTimeoutMs: 1000
+```
+
+This sends OTLP/HTTP JSON to an existing collector; it does not start one.
+The `drasi.progress` scope exports `drasi.query.progress.sequence` with
+`drasi.progress.stage` of `input.committed` or `output.produced`. Input points
+identify the source/stream; all points carry instance/query and component/output
+identity. `service.instance.id` changes when the metrics runtime is reconstructed.
+See the [Server metrics reference](https://github.com/drasi-project/drasi-server/blob/006b038cffffd948cd54d4b4fb71f57e5e27aa02/README.md#opentelemetry-progress-metrics)
+for limits, attributes and authentication.
+
+With `metrics` absent there is no exporter/worker. When enabled, restart creates
+a new provider and reads actual reconstructed query progress, not collector state.
+Change endpoint/intervals by updating configuration and restarting; there is no
+live metrics-reconfiguration API. Export failures are logged and shutdown failures
+returned. Export/SDK shutdown run away from the application's Tokio executor;
+cancelled cleanup retains the worker. This profile does not export all-component
+throughput, latency, queue pressure or completed destination work.
+
 #### Host independent instances
 
 `drasi-instance-host` supplies a hosting library and executable. Each parent,
@@ -5021,6 +5589,7 @@ own. The final application must still identify who owns every unfinished action.
 | ComputationGraph | The authoritative owner of components, connections, resources, and lifecycle |
 | Component | A source, transformer, query, sink, or service in that graph |
 | Generation | One incarnation of a component; replacement invalidates old handles |
+| Output epoch / query reset generation | Output recovery coordinates, separate from component generation; use the [identity lifecycle table](#keep-identity-scopes-separate) |
 | Element | A source-qualified graph node or relationship |
 | Record | Immutable schema-defined identity and image bytes |
 | Envelope | One identified change set with system metadata, context, and lineage |
@@ -5065,6 +5634,8 @@ The book supplies the application path; the reference supplies the catalog.
 | Embed and own an application | `DrasiLib`, `DrasiLibBuilder`; [Stockroom starter](stockroom) and [source](stockroom/src/main.rs) |
 | Compose components and connections | `drasi_lib::computation::v1`; [schemas, ports, and pipes](../computation-graph-schemas-ports-pipes.md) |
 | Configure and read a native query | `ContinuousQueryDefinition`, `QueryExecutionSettings`, `QueryOptions`, `QueryResults` |
+| Select inputs through the ordinary query API | `Query::from_input`, `from_input_port`; [chaining and initialization](#chain-maintained-outputs) |
+| Display current contents and follow changes | `DrasiLib::output_catalogue`, `snapshot_and_follow`; [volatile viewer](#open-a-current-plus-live-viewer) |
 | Normalize data | `MiddlewareTransformer`; [middleware guide](../computation-graph-middleware.md) |
 | Reorder source time | `SourceTimeMergeTransformer`; [time-merge guide](../computation-graph-time-merge.md) |
 | Retain transport and retry identity | `QosChannel`, `SourceAdmission`, `RetainedPipe`; [QoS guide](../computation-graph-qos.md) |
@@ -5184,36 +5755,6 @@ query with `WITH` when the calculation fits one query; chain when the maintained
 intermediate state is itself a useful application boundary. Queries still have no
 `ORDER BY`, `LIMIT` or `SKIP`.
 
-The ordinary query API can name that same output without spelling out pipes:
-
-<!-- illustration: chained-query-input -->
-```rust
-async fn add_low_stock_count(drasi: &drasi_lib::DrasiLib) -> anyhow::Result<()> {
-    drasi.add_query(
-        drasi_lib::Query::cypher("low-stock-count")
-            .query("MATCH (r:Result) RETURN count(r) AS Items")
-            .from_input("low-stock")
-            .with_result_label("LowStockCount")
-            .build(),
-    ).await?;
-    Ok(())
-}
-```
-
-`from_input_port(component, port)` selects an explicit output. With no port,
-resolution uses the factory's declared primary output or its only output; several
-outputs without a primary are an error, not a first-port guess. YAML/JSON uses
-`inputs: [low-stock]` or an expanded entry such as
-`inputs: [{component: low-stock, port: out}]`. Old `sources`/`sourceId` query
-declarations are not accepted.
-
-Initialization is independent of format. With bootstrap enabled, a native
-producer must supply a real snapshot; its live pipe is already bound before
-snapshot capture. Buffered changes covered by the snapshot are skipped using
-its producer epoch and logical position. A volatile downstream query rebuilds
-that input view on restart. A persistent downstream query resumes from retained
-output through `ReplayProvider`; a retention gap or changed epoch fails under
-Strict, while explicit AutoReset permits rebuilding from a current snapshot.
-These services do not add a shared materializer to the producer. Choose
-`enable_bootstrap(false)` explicitly for a future-events-only input rather than
-treating a missing snapshot capability as an empty initial dataset.
+For input selection, the ordinary query builder and the snapshot/live starting
+boundary, use [Chain maintained outputs](#chain-maintained-outputs). Query syntax
+alone does not decide how a new consumer obtains existing producer state.

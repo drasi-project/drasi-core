@@ -32,6 +32,31 @@ pub(crate) struct GraphRegistrySnapshot {
 }
 
 impl GraphRegistrySnapshot {
+    /// Status publications do not invalidate an otherwise coherent configuration.
+    pub(crate) fn same_configuration_as(&self, other: &Self) -> bool {
+        self.desired.id == other.desired.id
+            && self.desired.revision == other.desired.revision
+            && self.observed.run_epoch == other.observed.run_epoch
+            && self.configurations == other.configurations
+            && self.primary_ports == other.primary_ports
+            && self.observed.components.len() == other.observed.components.len()
+            && self.observed.components.iter().all(|(id, component)| {
+                other
+                    .observed
+                    .components
+                    .get(id)
+                    .is_some_and(|next| component.generation == next.generation)
+            })
+            && self.observed.resources.len() == other.observed.resources.len()
+            && self.observed.resources.iter().all(|(id, resource)| {
+                other
+                    .observed
+                    .resources
+                    .get(id)
+                    .is_some_and(|next| resource.generation == next.generation)
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         desired: &GraphSnapshot,
@@ -252,6 +277,46 @@ mod tests {
             )))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn configuration_comparison_ignores_status_but_fences_changed_owners_and_values() {
+        let graph = graph();
+        let original = graph.registry.borrow().clone();
+        let id = ComponentId::try_new("component").unwrap();
+        let mut status = (*original).clone();
+        let observed = Arc::make_mut(&mut status.observed);
+        let component = observed.components.get_mut(&id).unwrap();
+        component.health = ComponentHealth::Healthy;
+        component.started = true;
+        component.operation = OperationEpoch(component.operation.0 + 1);
+        assert!(original.same_configuration_as(&status));
+
+        let mut definition = status.clone();
+        Arc::make_mut(&mut definition.desired).revision =
+            GraphRevision(original.desired.revision.0 + 1);
+        assert!(!original.same_configuration_as(&definition));
+
+        let mut values = status.clone();
+        values.configurations.insert(
+            id.clone(),
+            CapturedComponentConfiguration::Available {
+                values: serde_json::json!({"changed": true}),
+            },
+        );
+        assert!(!original.same_configuration_as(&values));
+
+        let mut replacement = status.clone();
+        let component = Arc::make_mut(&mut replacement.observed)
+            .components
+            .get_mut(&id)
+            .unwrap();
+        component.generation = ComponentGeneration(component.generation.0 + 1);
+        assert!(!original.same_configuration_as(&replacement));
+
+        let mut restarted = status;
+        Arc::make_mut(&mut restarted.observed).run_epoch += 1;
+        assert!(!original.same_configuration_as(&restarted));
     }
 
     #[tokio::test]

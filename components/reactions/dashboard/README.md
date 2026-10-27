@@ -236,6 +236,7 @@ Average reading: {{format (avg "value") "compact"}}
 | `PUT` | `/api/dashboards/:id` | Update dashboard |
 | `DELETE` | `/api/dashboards/:id` | Delete dashboard |
 | `GET` | `/api/queries` | List subscribed queries |
+| `GET` | `/api/queries/:id/snapshot` | Current `{ "rows": [{ "k": "...", "v": {...} }] }` snapshot |
 | `GET` | `/ws` | WebSocket stream endpoint |
 
 ## WebSocket Protocol
@@ -246,12 +247,41 @@ Client subscription message:
 { "type": "subscribe", "query_ids": ["test-query"] }
 ```
 
+Every connection starts subscribed to the reaction's queries. Connection setup
+and each authorized `subscribe` send an authoritative `query_snapshot`, including
+an empty `rows` array when a query has no results:
+
+```json
+{
+  "type": "query_snapshot",
+  "query_id": "test-query",
+  "revision": "42",
+  "rows": [{ "k": "12345678901234567890", "v": { "name": "Alice" } }]
+}
+```
+
+Replace the query's cached rows with this snapshot, then apply subsequent
+`query_result` frames from the **same socket**. `revision` is a decimal string,
+not a JavaScript Number; it is a connection-local synchronization boundary, not
+a durable consumer checkpoint. Each update assigns its checked revision and
+publishes under the snapshot-store lock. The socket reader registers before
+taking the snapshot, excludes buffered changes already covered by it, and
+delivers subsequent revisions in order. On a broadcast gap or out-of-order
+message the connection closes visibly; reconnect starts a new snapshot boundary.
+
+The built-in client automatically resubscribes and replaces every bound widget
+on reconnect, including clearing rows that disappeared while disconnected.
+Callbacks from an older socket cannot overwrite the new connection's state.
+Widget hydration uses this ordered stream, not competing REST requests; the
+standalone REST snapshot and field-picker API remain available.
+
 Server query-result message:
 
 ```json
 {
   "type": "query_result",
   "query_id": "test-query",
+  "revision": "43",
   "timestamp": 1714500000000,
   "results": [
     { "op": "add", "data": { "name": "Alice" } },
@@ -276,18 +306,23 @@ The frontend performs **live state accumulation** per widget:
 - `delete` removes matching rows
 - `aggregation` updates the result row with the supplied row identity
 
-This keeps the server simple: it forwards query diffs directly to clients.
+An authoritative snapshot replaces this accumulation on subscription/reconnect;
+live deltas then keep it current without refreshing the page. This does not
+provide durable notification delivery, replay across downtime, or timer recovery.
 
 ## Integration Test
 
 Protocol-target integration is in:
 
 - `tests/integration_tests.rs`
+- `src/websocket.rs` (snapshot boundaries, checked revisions and socket protocol)
+- `tests/reconnect_snapshot.test.js` (widget replacement and old-socket fencing)
 
 Run:
 
 ```bash
 cargo test -p drasi-reaction-dashboard -- --ignored --nocapture
+node tests/reconnect_snapshot.test.js
 ```
 
 The test verifies:
@@ -308,5 +343,5 @@ make lint
 ## Limitations
 
 - No authentication in v1 (single-user assumption)
-- Client re-accumulates in-memory state after reconnect
+- Browser state is in-memory; reconnect reconstructs it from current snapshots
 - Map widget uses scatter coordinates unless ECharts geo map data is registered

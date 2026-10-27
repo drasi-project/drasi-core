@@ -54,8 +54,8 @@ export class DashboardDesigner {
 
   onChanged(handler) { this.changeHandlers.push(handler); }
 
-  emitChanged() {
-    for (const h of this.changeHandlers) h(this.getDashboard());
+  emitChanged(refreshQueryIds = []) {
+    for (const h of this.changeHandlers) h(this.getDashboard(), refreshQueryIds);
   }
 
   loadDashboard(dashboard) {
@@ -217,11 +217,12 @@ export class DashboardDesigner {
             const finalConfig = this._readTypeConfig(form, widgetType, { ...config, queryId: finalQueryId });
 
             if (isEdit) {
+              const previousQueryId = existingWidget.config?.queryId;
               existingWidget.title = finalTitle;
               existingWidget.config = finalConfig;
               this.updateWidgetHeader(existingWidget.id, finalTitle, existingWidget.type);
               this.renderWidget(existingWidget.id);
-              this.emitChanged();
+              this.emitChanged(previousQueryId === finalQueryId ? [] : [finalQueryId]);
             } else {
               const widget = createDefaultWidget(widgetType, this.dashboard.widgets.length);
               widget.title = finalTitle;
@@ -230,7 +231,7 @@ export class DashboardDesigner {
               this.runtimeByWidgetId.set(widget.id, createWidgetRuntime());
               this.addWidgetToGrid(widget);
               this.renderWidget(widget.id);
-              this.emitChanged();
+              this.emitChanged([finalQueryId]);
             }
             closeModal();
             showToast(isEdit ? "Widget updated" : "Widget added", "success");
@@ -715,38 +716,18 @@ export class DashboardDesigner {
     }
   }
 
-  /// Fetch the current snapshot for a query and populate all widgets bound to it.
-  async fetchSnapshot(queryId) {
-    if (!queryId || !this.dashboard) return;
-    try {
-      const response = await fetch(`/api/queries/${encodeURIComponent(queryId)}/snapshot`);
-      if (!response.ok) return;
-      const snapshot = await response.json();
-      const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
-      if (rows.length === 0) return;
-
-      for (const widget of this.dashboard.widgets) {
-        if ((widget.config?.queryId ?? "") !== queryId) continue;
-        const runtime = this.runtimeByWidgetId.get(widget.id) ?? createWidgetRuntime();
-        // Only populate if the runtime has no data yet
-        if (runtime.rows.length === 0) {
-          for (const entry of rows) {
-            applyResultDiff(runtime, snapshotRowToAddDiff(entry));
-          }
-          this.runtimeByWidgetId.set(widget.id, runtime);
-          this.renderWidget(widget.id);
-        }
+  handleQuerySnapshot(message) {
+    if (!this.dashboard || !Array.isArray(message.rows)) return;
+    for (const widget of this.dashboard.widgets) {
+      if ((widget.config?.queryId ?? "") !== message.query_id) continue;
+      // A snapshot is authoritative, including an empty one after a reconnect.
+      const runtime = createWidgetRuntime();
+      for (const entry of message.rows) {
+        applyResultDiff(runtime, snapshotRowToAddDiff(entry));
       }
-    } catch (e) {
-      // Non-critical — widgets will still populate from WebSocket
+      this.runtimeByWidgetId.set(widget.id, runtime);
+      this.renderWidget(widget.id);
     }
-  }
-
-  /// Fetch snapshots for all queries bound to current widgets.
-  async fetchAllSnapshots() {
-    const queryIds = this.subscribedQueryIds();
-    await Promise.all(queryIds.map((q) => this.fetchSnapshot(q)));
-    // Resize charts after data populates — containers may have changed
     setTimeout(() => resizeAllCharts(), 100);
   }
 

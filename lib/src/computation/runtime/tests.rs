@@ -187,6 +187,7 @@ impl EnvelopeSource for UnboundNativeSource {
 #[derive(Default)]
 struct SourceControl {
     schema: StdMutex<Option<crate::schema::SourceSchema>>,
+    properties_read: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     resource_observers: StdMutex<Vec<Arc<dyn crate::context::ComponentResourceObserver>>>,
     updates: StdMutex<Option<crate::channels::ComponentUpdateSender>>,
     initializations: AtomicUsize,
@@ -215,6 +216,57 @@ struct SourceControl {
     pending_stop: AtomicBool,
     stop_entered: Notify,
     stop_release: Notify,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_snapshot_ignores_observation_only_publications() {
+    let (source, source_control) = ControlledSource::new("snapshot-source");
+    let core = builder().with_source(source).build().await.unwrap();
+    core.start().await.unwrap();
+    let handle = core.computation_component("snapshot-source").unwrap();
+    handle.wait_created().await.unwrap();
+    let control = core.computation_control().unwrap();
+    let revision = control.desired_snapshot().revision;
+    let (requests, mut pending) =
+        tokio::sync::mpsc::unbounded_channel::<std::sync::mpsc::SyncSender<()>>();
+    let reports = Arc::new(AtomicUsize::new(0));
+    let completed = reports.clone();
+    let observer = tokio::spawn(async move {
+        while let Some(reply) = pending.recv().await {
+            let node = handle.observed().unwrap();
+            control
+                .report_health(
+                    revision,
+                    HealthObservation {
+                        component: handle.id().clone(),
+                        generation: node.generation,
+                        operation: node.operation,
+                        health: ComponentHealth::Healthy,
+                    },
+                )
+                .await
+                .unwrap();
+            completed.fetch_add(1, Ordering::SeqCst);
+            reply.send(()).unwrap();
+        }
+    });
+    *source_control.properties_read.lock().unwrap() = Some(Arc::new(move || {
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        requests.send(reply).unwrap();
+        // Force a status publication during each synchronous configuration read.
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+    }));
+    let snapshot = core.snapshot_computation_configuration().await;
+    *source_control.properties_read.lock().unwrap() = None;
+    observer.await.unwrap();
+    core.shutdown().await.unwrap();
+    assert!(reports.load(Ordering::SeqCst) > 0);
+    let snapshot = snapshot.expect("status updates do not change configuration");
+    assert!(snapshot
+        .instance
+        .sources
+        .iter()
+        .any(|source| source.id == "snapshot-source"));
 }
 
 #[tokio::test]
@@ -812,6 +864,10 @@ impl Source for ControlledSource {
         self.control.schema.lock().unwrap().clone()
     }
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let hook = self.control.properties_read.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         HashMap::new()
     }
     fn auto_start(&self) -> bool {
