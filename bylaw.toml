@@ -26,6 +26,7 @@ packages = ["drasi-query-ast"]
 [selectors.parsers]
 packages = ["drasi-query-cypher", "drasi-query-gql"]
 
+# Includes the runtime because AST and parser code must not depend on it.
 [selectors.evaluation]
 packages = ["drasi-core", "drasi-functions-cypher", "drasi-functions-gql", "drasi-lib"]
 
