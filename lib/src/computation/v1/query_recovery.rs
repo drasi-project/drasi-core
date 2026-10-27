@@ -116,7 +116,11 @@ impl ContinuousQueryTransformer {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .reset_to_sequence(0, generation);
+            .reset_to_sequence(0, generation)?;
+        self.input_producers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?
+            .clear();
         Ok(())
     }
 
@@ -183,7 +187,27 @@ impl ContinuousQueryTransformer {
         if let Some(provider) = self.bootstrap.clone() {
             let preparation = provider
                 .prepare_with_state(&QueryBootstrapState(self.query()?))
-                .await?;
+                .await;
+            let preparation = match preparation {
+                Ok(preparation) => preparation,
+                Err(error)
+                    if self.options.recovery == QueryRecoveryPolicy::AutoReset
+                        && matches!(
+                            error.downcast_ref::<super::super::OutputReadError>(),
+                            Some(
+                                super::super::OutputReadError::Gap { .. }
+                                    | super::super::OutputReadError::EpochChanged { .. }
+                            )
+                        ) =>
+                {
+                    log::warn!(
+                        "Resetting query '{}' under AutoReset after output replay failed: {error:#}",
+                        self.definition.id
+                    );
+                    super::super::BootstrapPreparation::ResetRequired
+                }
+                Err(error) => return Err(error),
+            };
             if preparation != super::super::BootstrapPreparation::Ready {
                 if preparation == super::super::BootstrapPreparation::RefreshVolatile
                     && self.provider.is_volatile()
@@ -247,10 +271,14 @@ impl ContinuousQueryTransformer {
                 .state
                 .write()
                 .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-                .reset_to_sequence(highwater, generation);
+                .reset_to_sequence(highwater, generation)?;
             self.watermarks
                 .lock()
                 .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                .clear();
+            self.input_producers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?
                 .clear();
             self.bootstrap_complete.store(false, Ordering::Release);
             return Ok(());
@@ -352,10 +380,14 @@ impl ContinuousQueryTransformer {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .reset_to_sequence(highwater, generation);
+            .reset_to_sequence(highwater, generation)?;
         self.watermarks
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+            .clear();
+        self.input_producers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?
             .clear();
         self.bootstrap_complete.store(false, Ordering::Release);
         Ok(())
@@ -392,7 +424,7 @@ impl ContinuousQueryTransformer {
         let mut snapshot = provider
             .snapshot_with_state(&QueryBootstrapState(query))
             .await?;
-        validate_watermarks(&snapshot.watermarks)?;
+        validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
         let bootstrap_stream = StreamId::try_new(format!(
             "{}/bootstrap/{}",
             self.definition.id,
@@ -404,7 +436,13 @@ impl ContinuousQueryTransformer {
             ordinal = ordinal
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("bootstrap ordinal exhausted"))?;
-            let changes = GraphChangeCodec::decode_changes(&input)?;
+            let mut changes = drasi_core::computation::QueryInputBatch::new(
+                GraphChangeCodec::decode_changes(&input)?,
+                input.system().ordering(),
+            );
+            if let Some(origin) = provider.input_origin(input.system().stream())? {
+                changes = changes.with_input_scope(origin.component.as_str());
+            }
             let prepared = Mutex::new(None);
             let hook =
                 |results: Arc<[drasi_core::evaluation::context::QueryPartEvaluationContext]>| {
@@ -416,6 +454,7 @@ impl ContinuousQueryTransformer {
                             Some(input),
                             &self.definition.id,
                             SystemMetadata::new(stream, ordinal),
+                            &self.projector,
                             &results,
                             QueryOutputMetadata {
                                 query_id: self.definition.id.to_string(),
@@ -475,7 +514,7 @@ impl ContinuousQueryTransformer {
         snapshot
             .watermarks
             .extend(provider.complete_snapshot().await?);
-        validate_watermarks(&snapshot.watermarks)?;
+        validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
         let completion_state = provider.completion_state()?;
         if let Some(state) = &completion_state {
             validate_bootstrap_state(state)?;
@@ -493,6 +532,7 @@ impl ContinuousQueryTransformer {
                     progress_key(watermark.stream.as_str(), watermark.source_id.as_deref()),
                     watermark.sequence,
                     watermark.position,
+                    watermark.producer,
                 )
             })
             .collect();
@@ -506,7 +546,21 @@ impl ContinuousQueryTransformer {
             })?;
             query
                 .resource_transaction(|| async {
-                    for (key, sequence, position) in &watermarks {
+                    for (key, sequence, position, producer) in &watermarks {
+                        if let Some(producer) = producer {
+                            let owner = Bytes::from(
+                                serde_json::to_vec(producer).map_err(IndexError::other)?,
+                            );
+                            checkpoint
+                                .stage_checkpoint(
+                                    &super::super::producer_progress::producer_owner_key(
+                                        producer.stream(),
+                                    ),
+                                    1,
+                                    Some(&owner),
+                                )
+                                .await?;
+                        }
                         checkpoint
                             .stage_checkpoint(key, *sequence, position.as_ref())
                             .await?;
@@ -533,11 +587,22 @@ impl ContinuousQueryTransformer {
                 .await?;
         }
         if let Some(progress) = &self.source_progress {
-            for (key, sequence, position) in &watermarks {
+            for (key, sequence, position, _) in &watermarks {
                 progress.confirm(
                     progress_identity(key)?,
                     SourceCheckpoint::new(*sequence, position.clone()),
                 );
+            }
+        }
+        {
+            let mut owners = self
+                .input_producers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+            for (key, _, _, producer) in &watermarks {
+                if let Some(producer) = producer {
+                    owners.insert(key.clone(), producer.clone());
+                }
             }
         }
         self.watermarks
@@ -546,7 +611,7 @@ impl ContinuousQueryTransformer {
             .extend(
                 watermarks
                     .into_iter()
-                    .map(|(key, sequence, _)| (key, sequence)),
+                    .map(|(key, sequence, _, _)| (key, sequence)),
             );
         self.bootstrap_complete.store(true, Ordering::Release);
         Ok(())

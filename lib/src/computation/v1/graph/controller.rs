@@ -53,6 +53,7 @@ pub(super) struct InstanceSlot {
     configuration: Mutex<super::CapturedComponentConfiguration>,
     query_api: Mutex<Option<Arc<crate::computation::v1::QueryApi>>>,
     source_schema_reader: Mutex<Option<Arc<dyn crate::computation::v1::SourceSchemaReader>>>,
+    output_readers: Mutex<crate::computation::v1::OutputReaders>,
     recovery: Mutex<crate::computation::v1::ComponentRecovery>,
     uses_consumer_progress: std::sync::atomic::AtomicBool,
     uses_replay_progress: std::sync::atomic::AtomicBool,
@@ -98,6 +99,7 @@ impl InstanceSlot {
             }),
             query_api: Mutex::new(None),
             source_schema_reader: Mutex::new(None),
+            output_readers: Mutex::new(crate::computation::v1::OutputReaders::default()),
             recovery: Mutex::new(crate::computation::v1::ComponentRecovery::default()),
             uses_consumer_progress: std::sync::atomic::AtomicBool::new(false),
             uses_replay_progress: std::sync::atomic::AtomicBool::new(false),
@@ -121,7 +123,20 @@ impl InstanceSlot {
             phase: FailurePhase::Creation,
             action: "capture component metadata",
         };
-        let _ = identity.call(|| slot.take()?.refresh_configuration());
+        // Callers validate registrations before declaring a slot; a component
+        // whose registration changed since then damages its generation, so the
+        // error is reported by every later operation instead of being dropped.
+        if let Err(error) = identity.call(|| slot.take()?.refresh_configuration()) {
+            if matches!(
+                error.underlying(),
+                GraphError::Component {
+                    operation: "register output readers",
+                    ..
+                }
+            ) {
+                slot.quarantine(error);
+            }
+        }
         slot
     }
 
@@ -203,6 +218,15 @@ impl InstanceSlot {
             })
             .as_ref()
             .map(Arc::downgrade)
+    }
+
+    /// Weak publication of this generation's registered output providers.
+    pub(super) fn output_readers(&self) -> Option<crate::computation::v1::WeakOutputReaders> {
+        let readers = self.output_readers.lock().unwrap_or_else(|error| {
+            log::error!("Output reader publication is poisoned: {}", self.id);
+            error.into_inner()
+        });
+        (!readers.is_empty()).then(|| readers.downgrade())
     }
 
     pub(super) fn quarantine(&self, error: GraphError) -> Arc<GraphError> {
@@ -299,6 +323,16 @@ impl InstanceLease {
                 log::error!("Source schema publication is poisoned: {}", self.slot.id);
                 error.into_inner()
             }) = self.component.source_schema_reader();
+        let readers = self.component.output_readers();
+        let readers_valid = readers.validate(self.component.descriptor());
+        *self.slot.output_readers.lock().unwrap_or_else(|error| {
+            log::error!("Output reader publication is poisoned: {}", self.slot.id);
+            error.into_inner()
+        }) = if readers_valid.is_ok() {
+            readers
+        } else {
+            crate::computation::v1::OutputReaders::default()
+        };
         let captured =
             self.component
                 .capture_configuration()
@@ -320,7 +354,11 @@ impl InstanceLease {
                 };
             }
         }
-        Ok(())
+        readers_valid.map_err(|source| GraphError::Component {
+            component: self.slot.id.clone(),
+            operation: "register output readers",
+            source: source.into(),
+        })
     }
 
     fn refresh_control(&self) {
@@ -373,6 +411,10 @@ impl Drop for InstanceLease {
                     error.into_inner()
                 })
                 .take();
+            *self.slot.output_readers.lock().unwrap_or_else(|error| {
+                log::error!("Retiring poisoned output readers: {}", self.slot.id);
+                error.into_inner()
+            }) = crate::computation::v1::OutputReaders::default();
         }
         let mut slot = match self.slot.value.lock() {
             Ok(slot) => slot,
@@ -445,6 +487,10 @@ pub(super) enum Command {
     StartMembers {
         members: BTreeMap<ComponentId, ComponentGeneration>,
         reply: oneshot::Sender<GraphResult<StartReport>>,
+    },
+    RequestMemberActivation {
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+        reply: oneshot::Sender<GraphResult<()>>,
     },
     StopMembers {
         members: BTreeMap<ComponentId, ComponentGeneration>,
@@ -600,6 +646,7 @@ impl Command {
                 let _ = reply.send(Err(error));
             }
             Self::ProtectComponents { reply, .. }
+            | Self::RequestMemberActivation { reply, .. }
             | Self::ControlConnections { reply, .. }
             | Self::ControlHandler { reply, .. }
             | Self::RegisterFactory { reply, .. }
@@ -830,6 +877,20 @@ impl GraphControl {
         let (reply, receive) = oneshot::channel();
         self.commands
             .send(Command::StartMembers { members, reply })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        receive.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
+    /// Admit activation of newly rebound members without waiting for their
+    /// startup I/O. Outcomes remain in the ordinary lifecycle publication.
+    pub(crate) async fn request_member_activation(
+        &self,
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+    ) -> GraphResult<()> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::RequestMemberActivation { members, reply })
             .await
             .map_err(|_| GraphError::ControllerClosed)?;
         receive.await.map_err(|_| GraphError::ControllerClosed)?
@@ -1279,7 +1340,7 @@ fn creation_dependencies(
     graph: &ComputationGraph,
     index: usize,
 ) -> Vec<super::super::DependencyWait> {
-    use super::super::DependencyWait;
+    use super::super::{DependencyWait, Endpoint, PortDirection};
     let id = graph.nodes[index].descriptor.id();
     let resources: BTreeSet<_> = graph
         .snapshot
@@ -1337,9 +1398,70 @@ fn creation_dependencies(
         .specifications
         .get(id)
         .filter(|specification| !graph.factories.contains_key(&specification.implementation));
+    let binds_inputs = graph
+        .snapshot
+        .specifications
+        .get(id)
+        .and_then(|specification| graph.factories.get(&specification.implementation))
+        .is_some_and(|factory| factory.binds_inputs());
+    let undeclared_inputs = graph.nodes[index]
+        .descriptor
+        .ports()
+        .iter()
+        .filter(|port| binds_inputs && port.direction() == PortDirection::Input)
+        .map(|port| Endpoint::new(id.clone(), port.id().clone()))
+        .filter(|endpoint| {
+            !graph
+                .snapshot
+                .edges
+                .iter()
+                .any(|edge| edge.definition.to == *endpoint)
+                && !graph
+                    .snapshot
+                    .unbound_relationships
+                    .iter()
+                    .any(|edge| edge.definition.to == *endpoint)
+        });
+    let undeclared_streams: BTreeSet<_> = graph
+        .snapshot
+        .specifications
+        .get(id)
+        .and_then(|specification| graph.factories.get(&specification.implementation))
+        .filter(|factory| factory.binds_inputs())
+        .into_iter()
+        .flat_map(|_| {
+            let required = graph
+                .snapshot
+                .unbound_relationships
+                .iter()
+                .filter(|edge| edge.policy.required_for_binding);
+            graph
+                .snapshot
+                .edges
+                .iter()
+                .map(|edge| &edge.definition)
+                .chain(required.map(|edge| &edge.definition))
+                .filter(|definition| &definition.to.component == id)
+                .map(|definition| &definition.from)
+        })
+        .filter(|endpoint| {
+            !graph.ids.get(&endpoint.component).is_some_and(|index| {
+                graph.nodes[*index]
+                    .output_streams
+                    .contains_key(&endpoint.port)
+            })
+        })
+        .cloned()
+        .collect();
     dependencies
         .into_iter()
         .map(|id| DependencyWait::Component { id })
+        .chain(undeclared_inputs.map(|endpoint| DependencyWait::Connection { endpoint }))
+        .chain(
+            undeclared_streams
+                .into_iter()
+                .map(|endpoint| DependencyWait::Stream { endpoint }),
+        )
         .chain(
             resources
                 .into_iter()
@@ -2410,7 +2532,9 @@ impl ReconciliationReservation {
                             .get(component)
                             .is_some_and(|node| node.realization == RealizationState::Creating)
             }
-            Command::StartMembers { members, .. } | Command::StopMembers { members, .. } => {
+            Command::StartMembers { members, .. }
+            | Command::RequestMemberActivation { members, .. }
+            | Command::StopMembers { members, .. } => {
                 members.keys().all(|id| !self.components.contains(id))
             }
             Command::Add { addition, .. } => {
@@ -3304,6 +3428,10 @@ impl Operations {
         let resources = graph.resource_handles.clone();
         let scope = graph.execution_scope.clone();
         let graph_id = graph.snapshot.id.clone();
+        let output_catalogue = crate::computation::v1::OutputCatalogue::from_publications(
+            graph.registry.subscribe(),
+            graph.state.subscribe(),
+        );
         let peer_control = self.peer_controls.get(&index).cloned();
         let admission_snapshot = graph.snapshot.clone();
         let reconfiguration = if operation == Operation::Reconfigure {
@@ -3409,6 +3537,25 @@ impl Operations {
                         .map_err(|error| {
                             super::addition::validation_failure(node.descriptor.id(), error)
                         })?;
+                        let input_bindings = if factory.binds_inputs() {
+                            super::specification::snapshot_input_bindings(
+                                &admission_snapshot,
+                                node.descriptor.id(),
+                            )
+                            .map_err(|endpoint| {
+                                GraphError::Creation {
+                                    component: node.descriptor.id().clone(),
+                                    disposition: FailureDisposition::Retryable,
+                                    source: anyhow::anyhow!(
+                                        "input '{}:{}' has no declared output stream",
+                                        endpoint.component,
+                                        endpoint.port
+                                    ),
+                                }
+                            })?
+                        } else {
+                            Vec::new()
+                        };
                         let context = ConstructionContext::resolve(
                             scope,
                             graph_id,
@@ -3416,6 +3563,8 @@ impl Operations {
                             specification,
                             resources,
                             &factory.descriptor().configuration,
+                            output_catalogue,
+                            input_bindings,
                         )
                         .await
                         .map_err(|error| GraphError::Creation {
@@ -3560,6 +3709,7 @@ impl Operations {
                     if let Some(control) = peer_control {
                         lease.component.bind_control(control);
                     }
+                    super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
                     lease
                         .component
                         .start()
@@ -3639,6 +3789,7 @@ impl Operations {
                         &lease.slot.recovery_contract()?,
                         &admission_snapshot,
                     )?;
+                    super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
                     let Instance {
                         component,
                         sequences,
@@ -5722,6 +5873,21 @@ fn handle_command<'a>(
                         Ok(selected) => {
                             for id in members.keys() { graph.deferred_activation.remove(id); }
                             operations.begin_start(graph, selected, Some(reply), true);
+                        }
+                        Err(error) => { let _ = reply.send(Err(error)); }
+                    }
+                }
+                Some(Command::RequestMemberActivation { members, reply }) => {
+                    let selected = member_indices(graph, &members).and_then(|selected| {
+                        if graph.retirement_active() || operations.conflicts(&selected, true) {
+                            Err(GraphError::OperationInProgress)
+                        } else { Ok(selected) }
+                    });
+                    match selected {
+                        Ok(selected) => {
+                            for id in members.keys() { graph.deferred_activation.remove(id); }
+                            operations.begin_start(graph, selected, None, true);
+                            let _ = reply.send(Ok(()));
                         }
                         Err(error) => { let _ = reply.send(Err(error)); }
                     }

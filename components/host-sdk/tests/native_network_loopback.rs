@@ -49,6 +49,8 @@ mod durable_tests;
 mod grpc_family;
 #[path = "native_network/http_family.rs"]
 mod http_family;
+#[path = "fixtures/native_sink_inputs.rs"]
+mod sink_inputs;
 #[path = "native_network/sse.rs"]
 mod sse_tests;
 fn workspace() -> PathBuf {
@@ -114,12 +116,15 @@ fn plugin(kind: &str) -> Result<Arc<NativePlugin>> {
 }
 fn component(kind: &str, name: &str, config: Value) -> Result<NativeComponentProxy> {
     let plugin = plugin(kind)?;
-    plugin
-        .factories()
-        .iter()
-        .find(|factory| factory.metadata().implementation.name.as_ref() == kind)
-        .context("native factory")?
-        .create_component(ComponentId::try_new(name)?, config)
+    sink_inputs::create(
+        plugin
+            .factories()
+            .iter()
+            .find(|factory| factory.metadata().implementation.name.as_ref() == kind)
+            .context("native factory")?,
+        ComponentId::try_new(name)?,
+        config,
+    )
 }
 
 #[test]
@@ -173,7 +178,7 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
             assert!(factory
                 .specification(
                     ComponentId::try_new("metadata")?,
-                    json!({"queryId":"q","batchSize":2})
+                    json!({"outputs":{"q":{"component":"q","port":"out"}},"batchSize":2})
                 )
                 .is_ok());
         }
@@ -604,6 +609,7 @@ fn result_inputs(sequence: u64, values: &[i64]) -> Result<InputEnvelope> {
             None,
             &ComponentId::try_new("q")?,
             SystemMetadata::new(stream("q/out"), sequence),
+            &ResultNodeProjector::try_new("test/native-network-loopback/q/out", None)?,
             &changes,
             QueryOutputMetadata {
                 query_id: "q".into(),
@@ -623,7 +629,7 @@ struct ReceiverState {
     grpc: Mutex<
         Vec<(
             tonic::metadata::MetadataMap,
-            reaction::ProcessResultsRequest,
+            reaction::ProcessChangesRequest,
         )>,
     >,
     failures: AtomicUsize,
@@ -724,16 +730,16 @@ async fn http_receiver() -> Result<ReceiverServer> {
 }
 struct ReactionReceiver(Arc<ReceiverState>);
 #[tonic::async_trait]
-impl reaction::reaction_service_server::ReactionService for ReactionReceiver {
-    async fn process_results(
+impl reaction::change_service_server::ChangeService for ReactionReceiver {
+    async fn process_changes(
         &self,
-        request: tonic::Request<reaction::ProcessResultsRequest>,
+        request: tonic::Request<reaction::ProcessChangesRequest>,
     ) -> std::result::Result<tonic::Response<reaction::ProcessResultsResponse>, tonic::Status> {
         let items_processed = request
             .get_ref()
-            .results
+            .changes
             .as_ref()
-            .map_or(0, |results| results.results.len());
+            .map_or(0, |batch| batch.changes.len());
         let headers = request.metadata().clone();
         self.0
             .grpc
@@ -765,9 +771,8 @@ async fn grpc_receiver() -> Result<ReceiverServer> {
     let address = listener.local_addr()?;
     let state = ReceiverState::new();
     let cancel = state.cancel.clone();
-    let server = reaction::reaction_service_server::ReactionServiceServer::new(ReactionReceiver(
-        state.clone(),
-    ));
+    let server =
+        reaction::change_service_server::ChangeServiceServer::new(ReactionReceiver(state.clone()));
     let task = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(server)
@@ -788,7 +793,7 @@ async fn grpc_receiver() -> Result<ReceiverServer> {
 #[tokio::test(flavor = "current_thread")]
 async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip() -> Result<()> {
     let mut receiver = http_receiver().await?;
-    let base = json!({"queryId":"q","url":format!("http://{}/reaction", receiver.address),"maxRetries":1,"timeoutMs":1000});
+    let base = json!({"outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction", receiver.address),"maxRetries":1,"timeoutMs":1000});
     let mut sink = component(HTTP_SINK, "http-output", base.clone())?;
     assert!(sink.handle(result_input(1)?).await.is_err());
     sink.start().await?;
@@ -801,13 +806,16 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
             delivered[0].1, delivered[1].1,
             "retry preserves logical delivery"
         );
-        assert_eq!(delivered[0].0["x-query-sequence"], "q");
+        assert_eq!(delivered[0].0["x-drasi-component"], "q");
+        assert_eq!(delivered[0].0["x-drasi-port"], "out");
         assert_eq!(delivered[0].0["content-type"], "application/json");
         assert_eq!(
             delivered[0].1,
-            json!({"operation":"ADD","queryId":"q","sequenceId":1,
+            json!({"operation":"ADD","output":{"alias":"q","component":"q","port":"out"},"sequence":1,
             "timestamp":"2023-11-14T22:13:20.000000123+00:00","after":{"value":42},
-            "metadata":{"source":"facilities-db","source_id":"facilities-db","processed_by":"drasi-core","result_count":1}})
+            "identity":{"namespace":"test/native-network-loopback/q/out","id":"000000000000000b"},
+            "element":{"kind":"node","labels":["Result"]},
+            "effectiveFrom":1_700_000_000_000u64})
         );
     }
     receiver.state.failures.store(10, Ordering::Release);
@@ -838,12 +846,167 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
     Ok(())
 }
 
+/// Standard graph changes straight from a source: no query, projection or
+/// annotation exists anywhere on this envelope.
+fn source_graph_input(sequence: u64) -> Result<InputEnvelope> {
+    use drasi_core::models::{ElementMetadata, ElementPropertyMap, ElementReference, ElementValue};
+    let metadata = ElementMetadata {
+        reference: ElementReference::new("facilities-db", "room-1"),
+        labels: Arc::from([Arc::<str>::from("Room")]),
+        effective_from: 1_700_000_000_000,
+    };
+    let element = |name: &str| {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("name", ElementValue::String(name.into()));
+        Element::Node {
+            metadata: metadata.clone(),
+            properties,
+        }
+    };
+    let envelope = GraphChangeCodec::encode_changes(
+        &[
+            SourceChange::Insert {
+                element: element("one"),
+            },
+            SourceChange::Update {
+                element: element("two"),
+                removed_properties: ["colour".to_owned()].into(),
+            },
+            SourceChange::Delete { metadata },
+        ],
+        stream("facilities-db/out"),
+        sequence,
+        chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    )?;
+    anyhow::ensure!(
+        !QueryChangeCodec::is_query_output(&envelope),
+        "a source envelope has no query annotation"
+    );
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope,
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata() -> Result<()> {
+    let mut http = http_receiver().await?;
+    let mut sink = component(
+        HTTP_SINK,
+        "http-source-output",
+        json!({"outputs":{"facilities-db":{"component":"facilities-db","port":"out"}},"url":format!("http://{}/reaction", http.address),
+            "maxRetries":0,"timeoutMs":1000}),
+    )?;
+    sink.start().await?;
+    sink.handle(source_graph_input(7)?).await?;
+    {
+        let delivered = http.state.http.lock().expect("capture");
+        assert_eq!(delivered.len(), 3, "one request per ordered change");
+        assert_eq!(delivered[0].0["x-drasi-component"], "facilities-db");
+        assert_eq!(delivered[0].0["x-drasi-port"], "out");
+        let operations: Vec<_> = delivered
+            .iter()
+            .map(|(_, body)| body["operation"].clone())
+            .collect();
+        assert_eq!(operations, [json!("ADD"), json!("PATCH"), json!("DELETE")]);
+        assert_eq!(delivered[0].1["after"], json!({"name":"one"}));
+        assert_eq!(
+            delivered[0].1["output"],
+            json!({"alias":"facilities-db","component":"facilities-db","port":"out"})
+        );
+        assert_eq!(delivered[0].1["sequence"], 7);
+        assert!(delivered
+            .iter()
+            .all(|(_, body)| body.get("queryId").is_none()
+                && body.get("producer").is_none()
+                && body.get("metadata").is_none()
+                && body.get("rowSignature").is_none()));
+        assert_eq!(delivered[1].1["after"], json!({"name":"two"}));
+        assert_eq!(delivered[1].1["removedProperties"], json!(["colour"]));
+        assert!(delivered[1].1.get("before").is_none());
+        // An identity-only delete carries neither image.
+        assert!(delivered[2].1.get("before").is_none() && delivered[2].1.get("after").is_none());
+        for (_, body) in delivered.iter() {
+            assert_eq!(
+                body["identity"],
+                json!({"namespace":"facilities-db","id":"room-1"})
+            );
+            assert_eq!(body["element"]["labels"], json!(["Room"]));
+        }
+    }
+    // A scheduling control is not data and fails instead of being dropped.
+    let due = InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: GraphChangeCodec::encode_futures_due(
+            stream("facilities-db/out"),
+            8,
+            chrono::Utc::now(),
+        )?,
+    };
+    assert!(sink.handle(due).await.is_err());
+    sink.stop().await?;
+    http.stop().await?;
+
+    let mut grpc = grpc_receiver().await?;
+    let mut sink = component(
+        GRPC_SINK,
+        "grpc-source-output",
+        json!({"outputs":{"facilities-db":{"component":"facilities-db","port":"out"}},"endpoint":format!("grpc://{}", grpc.address),
+            "maxRetries":0,"timeoutMs":1000,"connectionRetryAttempts":1,
+            "initialConnectionTimeoutMs":1000}),
+    )?;
+    sink.start().await?;
+    sink.handle(source_graph_input(7)?).await?;
+    {
+        let delivered = grpc.state.grpc.lock().expect("capture");
+        let items: Vec<_> = delivered
+            .iter()
+            .flat_map(|(_, request)| request.changes.as_ref().expect("changes").changes.clone())
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert!(delivered.iter().all(|(_, request)| {
+            let output = request.changes.as_ref().unwrap().output.as_ref().unwrap();
+            (
+                output.alias.as_str(),
+                output.component.as_str(),
+                output.port.as_str(),
+            ) == ("facilities-db", "facilities-db", "out")
+        }));
+        let operations: Vec<_> = items.iter().map(|item| item.operation).collect();
+        assert_eq!(
+            operations,
+            [
+                reaction::ChangeOperation::Add as i32,
+                reaction::ChangeOperation::Patch as i32,
+                reaction::ChangeOperation::Delete as i32
+            ]
+        );
+        for item in &items {
+            assert_eq!(item.sequence, 7);
+            let identity = item.identity.as_ref().unwrap();
+            assert_eq!(
+                (identity.namespace.as_str(), identity.id.as_str()),
+                ("facilities-db", "room-1")
+            );
+        }
+        // A patch states what it sets and what it removes; no before image is known.
+        assert!(items[1].before.is_none() && items[1].after.is_some());
+        assert_eq!(items[1].removed_properties, ["colour"]);
+        assert!(items[0].removed_properties.is_empty());
+        // An identity-only delete carries neither image.
+        assert!(items[2].before.is_none() && items[2].after.is_none());
+    }
+    sink.stop().await?;
+    grpc.stop().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_success() -> Result<()> {
     let mut receiver = grpc_receiver().await?;
-    let config = json!({"queryId":"q","endpoint":format!("grpc://{}", receiver.address),
+    let config = json!({"outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}", receiver.address),
         "maxRetries":1,"timeoutMs":1000,"connectionRetryAttempts":1,"initialConnectionTimeoutMs":1000,
-        "metadata":{"x-custom":"custom","x-query-sequence":"q"}});
+        "metadata":{"x-custom":"custom"}});
     let mut sink = component(GRPC_SINK, "grpc-output", config)?;
     sink.start().await?;
     receiver.state.failures.store(1, Ordering::Release);
@@ -853,32 +1016,34 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
         assert_eq!(delivered.len(), 2);
         assert_eq!(delivered[0].1, delivered[1].1);
         let (headers, request) = &delivered[0];
-        assert_eq!(
-            headers
-                .get("x-query-sequence")
-                .context("query header")?
-                .to_str()?,
-            "q"
-        );
+        for (name, expected) in [("x-drasi-component", "q"), ("x-drasi-port", "out")] {
+            assert_eq!(
+                headers.get(name).context("identity header")?.to_str()?,
+                expected
+            );
+        }
         assert_eq!(
             headers.get("x-custom").context("custom header")?.to_str()?,
             "custom"
         );
         assert_eq!(request.metadata["x-custom"], "custom");
-        let output = request.results.as_ref().context("result")?;
-        assert_eq!(output.query_id, "q");
-        assert_eq!(output.results.len(), 1);
-        let item = &output.results[0];
-        assert_eq!(item.item_type, reaction::QueryResultItemType::Add as i32);
-        assert_eq!(item.sequence, 1);
-        assert_eq!(item.row_signature, 11);
-        assert_eq!(item.timestamp, output.timestamp);
-        assert!(
-            item.metadata.is_some()
-                && item.payload.is_some()
-                && item.after.is_some()
-                && item.before.is_none()
+        let output = request.changes.as_ref().context("changes")?;
+        let identity = output.output.as_ref().context("output identity")?;
+        assert_eq!(
+            (
+                identity.alias.as_str(),
+                identity.component.as_str(),
+                identity.port.as_str()
+            ),
+            ("q", "q", "out")
         );
+        assert_eq!(output.changes.len(), 1);
+        let item = &output.changes[0];
+        assert_eq!(item.operation, reaction::ChangeOperation::Add as i32);
+        assert_eq!(item.sequence, 1);
+        assert_eq!(item.timestamp, output.timestamp);
+        assert_eq!(item.identity.as_ref().unwrap().id, "000000000000000b");
+        assert!(item.payload.is_some() && item.after.is_some() && item.before.is_none());
     }
     receiver.state.failures.store(10, Ordering::Release);
     assert!(sink.handle(result_input(2)?).await.is_err());
@@ -896,7 +1061,7 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
         GRPC_SINK,
         "no-receiver",
         json!({
-            "queryId":"q","endpoint":format!("grpc://127.0.0.1:{}", free_port()?),
+            "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://127.0.0.1:{}", free_port()?),
             "connectionRetryAttempts":1,"initialConnectionTimeoutMs":50,"timeoutMs":50
         }),
     )?;
@@ -938,9 +1103,9 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
             .context("sink factory")?
             .clone();
         let sink_config = if grpc {
-            json!({"queryId":"q","endpoint":format!("grpc://{}", receiver.address),"maxRetries":0})
+            json!({"outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}", receiver.address),"maxRetries":0})
         } else {
-            json!({"queryId":"q","url":format!("http://{}/reaction",receiver.address),"maxRetries":0})
+            json!({"outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction",receiver.address),"maxRetries":0})
         };
         let query = ContinuousQueryDefinition {
             graph_id: "network-evaluator".into(),
@@ -1076,20 +1241,16 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
             tokio::time::timeout(DEADLINE, async { tokio::join!(run, drive) }).await?;
         driven?;
         assert!(matches!(run, Err(GraphError::Cancelled)));
-        let expected_metadata =
-            json!({"source_id":"facilities-db","processed_by":"drasi-core","result_count":1});
         if grpc {
             let values = receiver.state.grpc.lock().unwrap();
             assert_eq!(values.len(), 10);
             for (index, (_, request)) in values.iter().enumerate() {
-                let item = &request.results.as_ref().context("result")?.results[0];
+                let item = &request.changes.as_ref().context("changes")?.changes[0];
                 assert_eq!(item.sequence, index as u64 + 1);
-                assert_eq!(
-                    item.metadata,
-                    Some(drasi_reaction_grpc::helpers::convert_json_to_proto_struct(
-                        &expected_metadata
-                    ))
-                );
+                // Query output carries no query annotations: the change states its
+                // operation and the result node's canonical identity.
+                assert_eq!(item.operation, reaction::ChangeOperation::Add as i32);
+                assert_eq!(item.element.as_ref().unwrap().labels, ["Result"]);
                 assert_eq!(
                     item.after,
                     Some(drasi_reaction_grpc::helpers::convert_json_to_proto_struct(
@@ -1101,9 +1262,12 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
             let values = receiver.state.http.lock().unwrap();
             assert_eq!(values.len(), 10);
             for (index, (_, item)) in values.iter().enumerate() {
-                assert_eq!(item["sequenceId"], index as u64 + 1);
+                assert_eq!(item["sequence"], index as u64 + 1);
                 assert_eq!(item["after"], json!({"value":index+1}));
-                assert_eq!(item["metadata"], expected_metadata);
+                assert_eq!(item["operation"], "ADD");
+                assert_eq!(item["element"]["kind"], "node");
+                assert_eq!(item["element"]["labels"], json!(["Result"]));
+                assert!(item.get("queryId").is_none() && item.get("metadata").is_none());
             }
         }
         receiver.stop().await?;

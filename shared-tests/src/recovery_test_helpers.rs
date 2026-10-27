@@ -168,7 +168,7 @@ where
 pub fn person_query(source_id: &str, outbox_capacity: usize) -> QueryConfig {
     Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source(source_id)
+        .from_input(source_id)
         .with_outbox_capacity(outbox_capacity)
         .auto_start(true)
         .build()

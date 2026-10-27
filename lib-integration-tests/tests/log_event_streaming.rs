@@ -440,7 +440,7 @@ async fn test_query_event_streaming() {
     let source = TestSource::new("query-event-source").expect("Failed to create source");
 
     let query = Query::cypher("test-query-events")
-        .from_source("query-event-source")
+        .from_input("query-event-source")
         .query("MATCH (n) RETURN n")
         .build();
 
@@ -510,7 +510,7 @@ async fn test_query_log_streaming() {
     let source = TestSource::new("query-log-source").expect("Failed to create source");
 
     let query = Query::cypher("test-query-logs")
-        .from_source("query-log-source")
+        .from_input("query-log-source")
         .query("MATCH (n) RETURN n")
         .build();
 
@@ -546,7 +546,7 @@ async fn test_reaction_event_streaming() {
     let source = TestSource::new("reaction-event-source").expect("Failed to create source");
 
     let query = Query::cypher("reaction-event-query")
-        .from_source("reaction-event-source")
+        .from_input("reaction-event-source")
         .query("MATCH (n) RETURN n")
         .build();
 
@@ -622,7 +622,7 @@ async fn test_reaction_log_streaming() {
     let source = TestSource::new("reaction-log-source").expect("Failed to create source");
 
     let query = Query::cypher("reaction-log-query")
-        .from_source("reaction-log-source")
+        .from_input("reaction-log-source")
         .query("MATCH (n) RETURN n")
         .build();
 
@@ -682,7 +682,7 @@ async fn test_full_lifecycle_streaming() {
     let source = TestSource::new("full-lifecycle-source").expect("Failed to create source");
 
     let query = Query::cypher("full-lifecycle-query")
-        .from_source("full-lifecycle-source")
+        .from_input("full-lifecycle-source")
         .query("MATCH (n) RETURN n")
         .build();
 

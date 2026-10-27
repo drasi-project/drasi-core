@@ -391,7 +391,7 @@ impl Runtime {
                 .as_ref()
                 .map(|failure| format!("{:#}", failure.cause))
                 .or_else(|| observed.waiting_reason()),
-            source_subscriptions: config.sources,
+            inputs: config.inputs,
             joins: config.joins,
         })
     }

@@ -131,9 +131,7 @@ impl GraphMapper {
                         element: route_element,
                     });
                 } else {
-                    changes.push(SourceChange::Update {
-                        element: route_element,
-                    });
+                    changes.push(SourceChange::update(route_element));
                 }
             }
         }
@@ -173,7 +171,7 @@ impl GraphMapper {
         if self.state.known_peers.insert(peer_id) {
             vec![SourceChange::Insert { element: peer_node }]
         } else {
-            vec![SourceChange::Update { element: peer_node }]
+            vec![SourceChange::update(peer_node)]
         }
     }
 }
@@ -434,6 +432,7 @@ mod tests {
         assert!(matches!(
             changes[0],
             SourceChange::Update {
+                removed_properties: _,
                 element: Element::Relation { .. }
             }
         ));
@@ -475,6 +474,7 @@ mod tests {
         assert!(matches!(
             second[0],
             SourceChange::Update {
+                removed_properties: _,
                 element: Element::Node { .. }
             }
         ));

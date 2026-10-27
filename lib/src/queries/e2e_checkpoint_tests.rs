@@ -245,7 +245,7 @@ fn make_persistent_query(
 ) -> QueryConfig {
     let mut q = Query::cypher(id)
         .query("MATCH (n:Node) RETURN n.id AS id, n.value AS value")
-        .from_source(source_id)
+        .from_input(source_id)
         .auto_start(false)
         .enable_bootstrap(false)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()));
@@ -260,7 +260,7 @@ fn make_persistent_query(
 fn make_volatile_query(id: &str, source_id: &str) -> QueryConfig {
     Query::cypher(id)
         .query("MATCH (n:Node) RETURN n.id AS id, n.value AS value")
-        .from_source(source_id)
+        .from_input(source_id)
         .auto_start(false)
         .enable_bootstrap(false)
         .build()
@@ -386,6 +386,7 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64) {
         let mut event = SourceEventWrapper::new(
             "outbox-src".to_string(),
             SourceEvent::Change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("outbox-src", "node-1"),
@@ -901,7 +902,7 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
     // Start with initial query
     let query1 = Query::cypher("cfg-q")
         .query("MATCH (n:Node) RETURN n.id AS id")
-        .from_source("cfg-src")
+        .from_input("cfg-src")
         .auto_start(false)
         .enable_bootstrap(false)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -921,7 +922,7 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
     // Update query with different query string (config hash changes)
     let query2 = Query::cypher("cfg-q")
         .query("MATCH (n:Node) RETURN n.id AS id, n.value AS value")
-        .from_source("cfg-src")
+        .from_input("cfg-src")
         .auto_start(false)
         .enable_bootstrap(false)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -990,7 +991,7 @@ mod aggregate_snapshot_tests {
 
             let config = Query::cypher(query_id)
                 .query(query_text)
-                .from_source(SOURCE)
+                .from_input(SOURCE)
                 .auto_start(false)
                 .enable_bootstrap(false)
                 .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1133,6 +1134,7 @@ mod aggregate_snapshot_tests {
             subject
                 .send(
                     SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: grouped("p", float, 20, 8, 3),
                     },
                     3
@@ -1245,6 +1247,7 @@ mod aggregate_snapshot_tests {
             subject
                 .send(
                     SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: position("aapl", 1150, 800, 3),
                     },
                     3,
@@ -1270,6 +1273,7 @@ mod aggregate_snapshot_tests {
             subject
                 .send(
                     SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: position("msft", 1000, 1000, 4),
                     },
                     4,
@@ -1400,6 +1404,7 @@ mod aggregate_snapshot_tests {
             subject
                 .send(
                     SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: position("aapl", 1150, 800, 3),
                     },
                     3

@@ -86,7 +86,7 @@ across the ABI.
 | Settings | Output and guarantee |
 |----------|----------------------|
 | `output: Changes`, `replay: None` | Ordinary `drasi.graph-change` batches, without a source journal, checkpoint feedback or whole-transaction query guarantee. This is the fast path. |
-| `output: Transactions`, `replay: None` | One complete `drasi.source-transaction` record per committed SQLite transaction. No restart replay. |
+| `output: Transactions`, `replay: None` | One standard graph-change envelope per committed SQLite transaction, carrying every operation in order plus a current complete-transaction marker. No restart replay. |
 | `output: Transactions`, `replay: Some(...)` | SQLite data and the bounded replay record commit in the same SQLite transaction. Records remain until every required consumer commits its input progress. Requires a real file-backed database and persistent query storage. |
 
 Transaction output requires the query's `source_transactions` execution setting,

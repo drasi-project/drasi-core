@@ -19,6 +19,8 @@ use std::{
 
 mod activation_credentials;
 mod bootstrap_coordination;
+mod output_follow;
+mod output_reads;
 mod source_schema;
 
 use crate::{
@@ -54,18 +56,18 @@ pub trait Factory: Send + Sync + 'static {
     ) -> anyhow::Result<Arc<dyn crate::NativeSourceBootstrapCoordinator>> {
         anyhow::bail!("factory does not implement source/bootstrap coordination")
     }
-    fn supports_query_snapshots(&self) -> bool {
+    fn supports_output_snapshots(&self) -> bool {
         false
     }
-    fn create_with_query_snapshots(
+    fn create_with_output_snapshots(
         &self,
         request: &CreateRequest,
         control: ControlSender,
-        snapshots: Option<crate::NativeQuerySnapshots>,
+        snapshots: Option<crate::NativeOutputSnapshots>,
     ) -> anyhow::Result<CreatedComponent> {
         anyhow::ensure!(
             snapshots.is_none(),
-            "factory does not implement query snapshot reads"
+            "factory does not implement output snapshot reads"
         );
         self.create(request, control)
     }
@@ -394,8 +396,8 @@ impl ExportedPlugin {
     pub fn batching(&self) -> *const abi::batching::PluginBatchingV1 {
         &PLUGIN_BATCHING
     }
-    pub fn query_snapshots(&self) -> *const abi::query_snapshots::PluginQuerySnapshotsV1 {
-        &PLUGIN_QUERY_SNAPSHOTS
+    pub fn output_snapshots(&self) -> *const abi::output_snapshots::PluginOutputSnapshotsV1 {
+        &PLUGIN_OUTPUT_SNAPSHOTS
     }
     pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
         &PLUGIN_RECOVERY
@@ -405,6 +407,12 @@ impl ExportedPlugin {
     }
     pub fn source_schema(&self) -> *const abi::source_schema::PluginSourceSchemaV1 {
         &source_schema::EXTENSION
+    }
+    pub fn output_reads(&self) -> *const abi::output_reads::PluginOutputReadsV1 {
+        &output_reads::EXTENSION
+    }
+    pub fn output_follow(&self) -> *const abi::output_follow::PluginOutputFollowV1 {
+        &output_follow::EXTENSION
     }
     pub fn activation_credentials(
         &self,
@@ -480,24 +488,24 @@ static PLUGIN_BATCHING: abi::batching::PluginBatchingV1 = abi::batching::PluginB
     policy: Some(batching_policy),
 };
 
-static PLUGIN_QUERY_SNAPSHOTS: abi::query_snapshots::PluginQuerySnapshotsV1 =
-    abi::query_snapshots::PluginQuerySnapshotsV1 {
-        header: Header::new::<abi::query_snapshots::PluginQuerySnapshotsV1>(),
-        version: abi::query_snapshots::VERSION,
+static PLUGIN_OUTPUT_SNAPSHOTS: abi::output_snapshots::PluginOutputSnapshotsV1 =
+    abi::output_snapshots::PluginOutputSnapshotsV1 {
+        header: Header::new::<abi::output_snapshots::PluginOutputSnapshotsV1>(),
+        version: abi::output_snapshots::VERSION,
         reserved: 0,
-        factory: Some(factory_query_snapshots),
-        create: Some(create_component_with_query_snapshots),
+        factory: Some(factory_output_snapshots),
+        create: Some(create_component_with_output_snapshots),
     };
 
-unsafe extern "C" fn factory_query_snapshots(state: *mut c_void, index: u32) -> Reply {
+unsafe extern "C" fn factory_output_snapshots(state: *mut c_void, index: u32) -> Reply {
     transport::reply_boundary(|| {
         let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
         let factory = plugin
             .definition
             .factories
             .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown query-snapshot factory"))?;
-        wire::encode(&factory.supports_query_snapshots()).map_err(Failure::from)
+            .ok_or_else(|| Failure::protocol("unknown output-snapshot factory"))?;
+        wire::encode(&factory.supports_output_snapshots()).map_err(Failure::from)
     })
 }
 
@@ -998,6 +1006,7 @@ struct Instance {
     running: AtomicBool,
     activation_credentials_bound: bool,
     source_schema: Option<Arc<source_schema::SchemaState>>,
+    output_reads: Option<Arc<output_reads::ReadBinding>>,
     coordinator: Option<bootstrap_coordination::SourceLease>,
     damaged: Arc<transport::PanicState>,
     admission: bool,
@@ -1083,6 +1092,32 @@ fn validate_position_policy(
             _ => false,
         },
         "native producer changed its captured input position policy"
+    );
+    Ok(())
+}
+
+/// The declared snapshot inputs must be exactly the input ports for which the
+/// constructed sink registered a handler. Reading a handler performs no I/O.
+fn validate_snapshot_inputs(
+    metadata: &FactoryMetadata,
+    sink: &mut dyn EnvelopeSink,
+) -> anyhow::Result<()> {
+    let mut declared = std::collections::BTreeSet::new();
+    for port in &metadata.capabilities.snapshot_inputs {
+        anyhow::ensure!(
+            declared.insert(port),
+            "native sink declares snapshot input {port} more than once"
+        );
+    }
+    let mut actual = std::collections::BTreeSet::new();
+    for port in &metadata.ports {
+        if port.direction() == PortDirection::Input && sink.snapshot_consumer(port.id()).is_some() {
+            actual.insert(port.id());
+        }
+    }
+    anyhow::ensure!(
+        declared == actual,
+        "native sink snapshot handlers do not match its declared snapshot inputs"
     );
     Ok(())
 }
@@ -1176,14 +1211,14 @@ unsafe extern "C" fn create_component_with_consumer_progress(
     }
 }
 
-unsafe extern "C" fn create_component_with_query_snapshots(
+unsafe extern "C" fn create_component_with_output_snapshots(
     state: *mut c_void,
     input: BorrowedBytes,
-    snapshots: *const abi::query_snapshots::QuerySnapshotsV1,
+    snapshots: *const abi::output_snapshots::OutputSnapshotsV1,
     out: *mut abi::ComponentHandle,
 ) -> Status {
     if snapshots.is_null() {
-        return transport::status_result(Err(Failure::protocol("missing query-snapshot service")));
+        return transport::status_result(Err(Failure::protocol("missing output-snapshot service")));
     }
     unsafe {
         create_component_with_services(
@@ -1227,7 +1262,7 @@ unsafe fn create_component_with_services(
     admission: *const abi::services::SourceAdmissionV1,
     progress: *const abi::recovery::SourceProgressV1,
     consumer_progress: *const abi::consumer_progress::ConsumerProgressV1,
-    snapshots: *const abi::query_snapshots::QuerySnapshotsV1,
+    snapshots: *const abi::output_snapshots::OutputSnapshotsV1,
     consumer_bound: bool,
     coordinator: *const abi::bootstrap_coordination::BootstrapCoordinatorHandle,
     out: *mut abi::ComponentHandle,
@@ -1242,6 +1277,8 @@ unsafe fn create_component_with_services(
         let metadata = &state.plugin.definition.metadata.factories[state.index];
         let create = || -> anyhow::Result<Arc<Instance>> {
             validate_create_request(state, &request)?;
+            let resolved = metadata.for_configuration(&request.configuration)?;
+            let metadata = &resolved;
             let control = ControlSender::default();
             let factory = &state.plugin.definition.factories[state.index];
             let coordinator = if coordinator.is_null() {
@@ -1334,13 +1371,13 @@ unsafe fn create_component_with_services(
                     admission.is_null()
                         && progress.is_null()
                         && !consumer_bound
-                        && factory.supports_query_snapshots()
+                        && factory.supports_output_snapshots()
                         && metadata.role == drasi_computation_contracts::ComponentRole::Sink,
-                    "unsupported native query-snapshot binding"
+                    "unsupported native output-snapshot binding"
                 );
-                let snapshots = unsafe { crate::NativeQuerySnapshots::from_borrowed(snapshots)? };
+                let snapshots = unsafe { crate::NativeOutputSnapshots::from_borrowed(snapshots)? };
                 (
-                    factory.create_with_query_snapshots(
+                    factory.create_with_output_snapshots(
                         &request,
                         control.clone(),
                         Some(snapshots),
@@ -1385,7 +1422,7 @@ unsafe fn create_component_with_services(
                 };
                 (created, Some(reader), None)
             };
-            let component = created.component;
+            let mut component = created.component;
             anyhow::ensure!(
                 consumer_progress.is_some()
                     || (component.base().consumer_progress_reader().is_none()
@@ -1394,7 +1431,7 @@ unsafe fn create_component_with_services(
                 "native consumer progress requires its negotiated service"
             );
             metadata.validate_instance(component.base().descriptor(), &request.id)?;
-            let role = match &component {
+            let role = match &mut component {
                 Component::Source(source) => {
                     anyhow::ensure!(
                         progress.is_some() || source.recovery_reader().is_none(),
@@ -1407,10 +1444,10 @@ unsafe fn create_component_with_services(
                 }
                 Component::Sink(sink) => {
                     anyhow::ensure!(
-                        metadata.completion == Some(sink.completion())
-                            && metadata.capabilities.snapshot == sink.supports_snapshot(),
-                        "native sink completion/snapshot capability mismatch"
+                        metadata.completion == Some(sink.completion()),
+                        "native sink completion mismatch"
                     );
+                    validate_snapshot_inputs(metadata, sink.as_mut())?;
                     let batching = sink.batching()?;
                     anyhow::ensure!(
                         factory.supports_sink_batching() || batching.is_none(),
@@ -1516,6 +1553,13 @@ unsafe fn create_component_with_services(
                     .map(Box::new)
                 })
                 .transpose()?;
+            let output_reads = output_reads::capture(
+                metadata,
+                component.base().descriptor(),
+                component.base().output_readers(),
+                state.plugin.codec.clone(),
+                damaged.clone(),
+            )?;
             let source_schema = match &component {
                 Component::Source(source) => source
                     .source_schema_reader()
@@ -1525,7 +1569,7 @@ unsafe fn create_component_with_services(
             Ok(Arc::new(Instance {
                 metadata: InstanceMetadata {
                     descriptor: metadata.descriptor(request.id)?,
-                    capabilities: metadata.capabilities,
+                    capabilities: metadata.capabilities.clone(),
                 },
                 component: tokio::sync::Mutex::new(component),
                 factory: metadata.clone(),
@@ -1537,6 +1581,7 @@ unsafe fn create_component_with_services(
                 running: AtomicBool::new(false),
                 activation_credentials_bound: request.activation_credentials_bound,
                 source_schema,
+                output_reads,
                 coordinator,
                 damaged,
                 admission: !admission.is_null(),
@@ -1575,6 +1620,9 @@ unsafe extern "C" fn release_component(state: *mut c_void) {
         let instance = unsafe { Box::from_raw(state.cast::<Arc<Instance>>()) };
         if let Some(schema) = &instance.source_schema {
             schema.deactivate();
+        }
+        if let Some(reads) = &instance.output_reads {
+            reads.retire();
         }
         drop(instance);
     });
@@ -1732,7 +1780,7 @@ unsafe extern "C" fn begin(
         } else {
             Some(unsafe { RetainedTransaction::new(transaction)? })
         };
-        let c = instance.factory.capabilities;
+        let c = &instance.factory.capabilities;
         use abi::operation::*;
         if code != STOP && instance.damaged.is_damaged() {
             return Err(Failure::panicked());
@@ -1753,7 +1801,7 @@ unsafe extern "C" fn begin(
             }
             CONTINUE => c.continuations,
             WAKE_WAIT | WAKE_PENDING | ON_WAKEUP => c.wakeups,
-            SNAPSHOT => c.snapshot,
+            SNAPSHOT => !c.snapshot_inputs.is_empty(),
             CONTROL => c.control,
             TRANSACT => c.transactional,
             _ => false,
@@ -1782,6 +1830,9 @@ unsafe extern "C" fn begin(
         if code == STOP {
             if let Some(schema) = &instance.source_schema {
                 schema.deactivate();
+            }
+            if let Some(reads) = &instance.output_reads {
+                reads.deactivate();
             }
         }
         let damaged = instance.damaged.clone();
@@ -1928,6 +1979,9 @@ async fn execute(
             if let Some(schema) = &instance.source_schema {
                 schema.activate()?;
             }
+            if let Some(reads) = &instance.output_reads {
+                reads.activate()?;
+            }
         }
         STOP => {
             instance.running.store(false, Ordering::Release);
@@ -2063,7 +2117,19 @@ async fn execute(
                 PortDirection::Input,
             )?;
             if code == SNAPSHOT {
-                sink.replace_snapshot(input).await?;
+                let port = input.port.clone();
+                anyhow::ensure!(
+                    instance
+                        .factory
+                        .capabilities
+                        .snapshot_inputs
+                        .contains(&port),
+                    "native sink input {port} has no registered snapshot capability"
+                );
+                let Some(consumer) = sink.snapshot_consumer(&port) else {
+                    anyhow::bail!("native sink input {port} does not support snapshot replacement");
+                };
+                consumer.replace_snapshot(input).await?;
             } else {
                 sink.handle(input).await?;
             }

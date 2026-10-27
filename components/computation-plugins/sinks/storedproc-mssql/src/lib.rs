@@ -4,8 +4,9 @@
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, ComponentRole, ImplementationIdentity, InputEnvelope,
-    PipeRequirements, PortDescriptor, PortDirection, PortId, QueryChangeCodec, SinkCompletion,
+    ChangeRoute, ComponentDescriptor, ComponentId, ComponentRole, GraphChangeBatch,
+    GraphChangeCodec, ImplementationIdentity, InputBinding, InputEnvelope, OutputAliases,
+    PipeRequirements, PortDescriptor, PortDirection, PortId, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_plugin_sdk::{
     ActivationCredentialContext, ActivationCredentials, Capabilities, Component, ConfigSchema,
@@ -16,14 +17,10 @@ use drasi_mssql_common::{
     native::{NativeConfig, Work},
     sql, MsSqlConnection, MsSqlSourceConfig,
 };
-pub use drasi_reaction_common::{QueryConfig, TemplateSpec};
+pub use drasi_reaction_common::{OperationType, QueryConfig, TemplateSpec};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const MSSQL_SINK: &str = "drasi.mssql/storedproc";
@@ -33,7 +30,10 @@ pub struct MsSqlStoredProcFactory;
 #[serde(deny_unknown_fields)]
 pub struct MsSqlStoredProcConfig {
     pub connection: MsSqlSourceConfig,
-    pub queries: Vec<String>,
+    /// Optional aliases for the incoming outputs; the graph supplies each
+    /// output's producing component, port and stream.
+    #[serde(default, skip_serializing_if = "OutputAliases::is_empty")]
+    pub outputs: OutputAliases,
     #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
     #[serde(default)]
@@ -62,25 +62,7 @@ impl MsSqlStoredProcConfig {
         .validate_with_bound_credentials(bound)?;
         ensure!(bound || !self.connection.password.is_empty(),
             "SQL Server sink requires literal credentials unless an actual activation identity is bound");
-        ensure!(
-            !self.queries.is_empty() && self.queries.len() <= 256,
-            "SQL Server sink requires 1..=256 query IDs"
-        );
-        let mut queries = BTreeSet::new();
-        for query in &self.queries {
-            ComponentId::try_new(query.as_str())?;
-            ensure!(queries.insert(query), "duplicate SQL Server sink query");
-        }
-        for route in self.routes.keys() {
-            ensure!(
-                queries.contains(route)
-                    || self
-                        .queries
-                        .iter()
-                        .any(|id| id.rsplit('.').next() == Some(route.as_str())),
-                "SQL Server route does not match a configured query"
-            );
-        }
+        self.outputs.validate()?;
         for config in self.routes.values().chain(self.default_template.iter()) {
             for template in [&config.added, &config.updated, &config.deleted]
                 .into_iter()
@@ -88,6 +70,24 @@ impl MsSqlStoredProcConfig {
             {
                 sql::validate_template(&template.template)?;
             }
+        }
+        Ok(())
+    }
+    /// Checks that depend on the incoming edges: at most 256 outputs, and every
+    /// route must name one.
+    fn validate_outputs(&self, outputs: &SinkOutputs) -> Result<()> {
+        ensure!(
+            outputs.aliases().count() <= 256,
+            "SQL Server sink accepts 1..=256 outputs"
+        );
+        for route in self.routes.keys() {
+            ensure!(
+                outputs.contains(route)
+                    || outputs
+                        .aliases()
+                        .any(|id| id.rsplit('.').next() == Some(route.as_str())),
+                "SQL Server route does not match an output alias"
+            );
         }
         Ok(())
     }
@@ -104,7 +104,7 @@ pub fn plugin() -> Result<PluginDefinition> {
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
         vec![Arc::new(MsSqlStoredProcFactory)],
-        vec![QueryChangeCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 impl Factory for MsSqlStoredProcFactory {
@@ -141,7 +141,10 @@ impl Factory for MsSqlStoredProcFactory {
                 .ports()
                 .to_vec(),
             completion: Some(SinkCompletion::Handled),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                binds_inputs: true,
+                ..Capabilities::default()
+            },
         }
     }
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
@@ -154,6 +157,7 @@ impl Factory for MsSqlStoredProcFactory {
                 request.id.clone(),
                 config.settings,
                 request.activation_credentials_bound,
+                &request.inputs,
             )?))
             .into(),
         )
@@ -163,6 +167,7 @@ impl Factory for MsSqlStoredProcFactory {
 pub struct MsSqlStoredProcSink {
     descriptor: ComponentDescriptor,
     config: MsSqlStoredProcConfig,
+    outputs: SinkOutputs,
     work: Work<()>,
     cleanup: bool,
     interrupted: bool,
@@ -176,23 +181,33 @@ impl MsSqlStoredProcSink {
             vec![PortDescriptor::new(
                 PortId::try_new("in")?,
                 PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             )],
         )?)
     }
-    pub fn new(id: ComponentId, config: MsSqlStoredProcConfig) -> Result<Self> {
-        Self::new_with_binding(id, config, false)
+    /// `inputs` are the graph's declared incoming edges; they define the
+    /// outputs this sink accepts.
+    pub fn new(
+        id: ComponentId,
+        config: MsSqlStoredProcConfig,
+        inputs: &[InputBinding],
+    ) -> Result<Self> {
+        Self::new_with_binding(id, config, false, inputs)
     }
     fn new_with_binding(
         id: ComponentId,
         config: MsSqlStoredProcConfig,
         identity_bound: bool,
+        inputs: &[InputBinding],
     ) -> Result<Self> {
         config.validate_with_binding(identity_bound)?;
+        let outputs = SinkOutputs::from_inputs(inputs, &config.outputs)?;
+        config.validate_outputs(&outputs)?;
         Ok(Self {
             descriptor: Self::describe(id)?,
             config,
+            outputs,
             work: Work::default(),
             cleanup: false,
             interrupted: false,
@@ -225,6 +240,37 @@ impl MsSqlStoredProcSink {
         }
         .validate()?;
         Ok(connection)
+    }
+    /// Render every change's configured command in order, from the output
+    /// bound to the input's stream.
+    fn commands(&self, input: &InputEnvelope) -> Result<Vec<(String, Vec<serde_json::Value>)>> {
+        let output = self.outputs.output_for(input.envelope.system().stream())?;
+        let mut commands = Vec::new();
+        for notification in GraphChangeBatch::from_envelope(&input.envelope)?.notifications(output)
+        {
+            let operation = match notification.change().route() {
+                ChangeRoute::Added => OperationType::Add,
+                ChangeRoute::Updated => OperationType::Update,
+                ChangeRoute::Deleted => OperationType::Delete,
+            };
+            if let Some(template) = sql::resolve_template(
+                &self.config.routes,
+                self.config.default_template.as_ref(),
+                output.alias,
+                operation,
+            ) {
+                // The context is the truthful change: operation, identity,
+                // sequence and only the images the record carries.
+                let serde_json::Value::Object(context) = notification.to_json()? else {
+                    unreachable!("a notification is an object")
+                };
+                let (command, parameters) = sql::render_command(&template.template, &context)?;
+                if !command.trim().is_empty() {
+                    commands.push((command, parameters));
+                }
+            }
+        }
+        Ok(commands)
     }
     async fn activate(&mut self, connection: MsSqlSourceConfig) -> Result<()> {
         ensure!(
@@ -287,31 +333,7 @@ impl NativeSink for MsSqlStoredProcSink {
             "SQL Server sink is stopped or requires cleanup after interrupted work"
         );
         ensure!(input.port.as_str() == "in", "unknown SQL Server sink port");
-        ensure!(
-            !QueryChangeCodec::is_snapshot(&input.envelope),
-            "SQL Server sink does not implement snapshot replacement"
-        );
-        let result = QueryChangeCodec::to_legacy_result(&input.envelope)?;
-        ensure!(
-            self.config.queries.contains(&result.query_id),
-            "SQL Server sink received an unconfigured query"
-        );
-        let mut commands = Vec::new();
-        for diff in &result.results {
-            if let Some((operation, context)) = sql::build_context(&result, diff) {
-                if let Some(template) = sql::resolve_template(
-                    &self.config.routes,
-                    self.config.default_template.as_ref(),
-                    &result.query_id,
-                    operation,
-                ) {
-                    let (command, parameters) = sql::render_command(&template.template, &context)?;
-                    if !command.trim().is_empty() {
-                        commands.push((command, parameters));
-                    }
-                }
-            }
-        }
+        let commands = self.commands(&input)?;
         if commands.is_empty() {
             return Ok(());
         }
@@ -348,9 +370,20 @@ drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn inputs() -> Vec<InputBinding> {
+        use drasi_computation_contracts::{OutputEndpoint, StreamId};
+        vec![InputBinding {
+            input_port: PortId::try_new("in").expect("port"),
+            output: OutputEndpoint::new(
+                ComponentId::try_new("source.q").expect("component"),
+                PortId::try_new("out").expect("port"),
+            ),
+            stream: StreamId::try_new("q/out").expect("stream"),
+        }]
+    }
     fn config() -> serde_json::Value {
         serde_json::json!({"connection":{"host":"no-network-at-construction","database":"d","user":"u","password":"p"},
-            "queries":["source.q"],"default_template":{"added":{"template":"EXEC p {{param after.id}}"}}})
+            "outputs":{"q":{"component":"source.q","port":"out"}},"default_template":{"added":{"template":"EXEC p {{param after.id}}"}}})
     }
     #[test]
     fn real_sink_factory_and_configuration_preserve_secrets() -> Result<()> {
@@ -358,6 +391,7 @@ mod tests {
         let sink = MsSqlStoredProcSink::new(
             ComponentId::try_new("sink")?,
             serde_json::from_value(config())?,
+            &inputs(),
         )?;
         assert_eq!(
             sink.configuration()?["settings"]["connection"]["password"],
@@ -367,9 +401,67 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn source_graph_changes_render_ordered_commands_without_query_annotations() -> Result<()> {
+        use drasi_core_types::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
+            SourceChange,
+        };
+        let mut configuration = config();
+        configuration["default_template"] = serde_json::json!({
+            "added": {"template": "EXEC a {{param identity.id}},{{param after.name}}"},
+            "deleted": {"template": "EXEC d {{param identity.id}}"}
+        });
+        let sink = MsSqlStoredProcSink::new(
+            ComponentId::try_new("sink")?,
+            serde_json::from_value(configuration)?,
+            &inputs(),
+        )?;
+        let metadata = ElementMetadata {
+            reference: ElementReference::new("q", "room-1"),
+            labels: Arc::from([Arc::<str>::from("Room")]),
+            effective_from: 1_000,
+        };
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("name", ElementValue::String("one".into()));
+        let input = |stream: &str| -> Result<InputEnvelope> {
+            Ok(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: drasi_computation_contracts::GraphChangeCodec::encode_changes(
+                    &[
+                        SourceChange::Insert {
+                            element: Element::Node {
+                                metadata: metadata.clone(),
+                                properties: properties.clone(),
+                            },
+                        },
+                        SourceChange::Delete {
+                            metadata: metadata.clone(),
+                        },
+                    ],
+                    drasi_computation_contracts::StreamId::try_new(stream)?,
+                    1,
+                    None,
+                )?,
+            })
+        };
+        let commands = sink.commands(&input("q/out")?)?;
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[0].1,
+            [serde_json::json!("room-1"), serde_json::json!("one")]
+        );
+        assert_eq!(commands[1].1, [serde_json::json!("room-1")]);
+        assert!(sink.commands(&input("unbound/out")?).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn unsafe_and_unsupported_options_are_rejected() {
         for (field, value) in [
-            ("queries", serde_json::json!([])),
+            (
+                "outputs",
+                serde_json::json!({"bad id": {"component": "source.q"}}),
+            ),
             ("command_timeout_ms", serde_json::json!(0)),
             ("retry_attempts", serde_json::json!(3)),
             ("identity_provider", serde_json::json!("fake")),
@@ -393,9 +485,16 @@ mod tests {
         empty["connection"]["user"] = serde_json::json!("");
         empty["connection"]["password"] = serde_json::json!("");
         let empty: MsSqlStoredProcConfig = serde_json::from_value(empty)?;
-        assert!(MsSqlStoredProcSink::new(ComponentId::try_new("sink")?, empty.clone()).is_err());
-        let mut sink =
-            MsSqlStoredProcSink::new_with_binding(ComponentId::try_new("sink")?, empty, true)?;
+        assert!(
+            MsSqlStoredProcSink::new(ComponentId::try_new("sink")?, empty.clone(), &inputs())
+                .is_err()
+        );
+        let mut sink = MsSqlStoredProcSink::new_with_binding(
+            ComponentId::try_new("sink")?,
+            empty,
+            true,
+            &inputs(),
+        )?;
         let declared = sink.configuration()?;
         assert!(sink.start().await.is_err());
         for credentials in [
@@ -437,6 +536,7 @@ mod tests {
             ComponentId::try_new("sink")?,
             serde_json::from_value(config())?,
             true,
+            &inputs(),
         )?;
         let declared = sink.configuration()?;
         let connection =
@@ -448,6 +548,7 @@ mod tests {
         assert_eq!(connection.password, "activation-only");
         assert_eq!(sink.configuration()?, declared);
         let request = CreateRequest {
+            inputs: inputs(),
             id: ComponentId::try_new("sink")?,
             implementation: MsSqlStoredProcFactory.metadata().implementation,
             configuration_version: 1,

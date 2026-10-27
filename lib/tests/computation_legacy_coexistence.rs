@@ -344,7 +344,7 @@ async fn assert_coexistence(instance_id: &str) {
         .with_query(
             Query::cypher(LEGACY_QUERY)
                 .query("MATCH (i:Item) RETURN i.name AS name")
-                .from_source(LEGACY_SOURCE)
+                .from_input(LEGACY_SOURCE)
                 .enable_bootstrap(false)
                 .auto_start(true)
                 .build(),
@@ -782,7 +782,7 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
                 .with_query(
                     Query::cypher(LEGACY_QUERY)
                         .query("MATCH (i:Item) RETURN i.name AS name")
-                        .from_source(LEGACY_SOURCE)
+                        .from_input(LEGACY_SOURCE)
                         .enable_bootstrap(bootstrap)
                         .build(),
                 )

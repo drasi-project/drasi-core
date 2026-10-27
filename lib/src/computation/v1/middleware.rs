@@ -244,17 +244,21 @@ pub(super) async fn remember(
     let slots = Vec::new();
     for change in changes {
         match change {
-            SourceChange::Insert { element } => {
+            SourceChange::Insert { element } | SourceChange::Replace { element } => {
                 elements.set_element(element, &slots).await?;
             }
-            SourceChange::Update { element } => {
+            SourceChange::Update {
+                element,
+                removed_properties,
+            } => {
+                change.validate()?;
                 let mut merged = element.clone();
                 if let Some(previous) = elements.get_element(element.get_reference()).await? {
                     anyhow::ensure!(
                         std::mem::discriminant(&merged) == std::mem::discriminant(previous.as_ref()),
                         "middleware update cannot change an existing node into a relationship or vice versa"
                     );
-                    merged.merge_missing_properties(previous.as_ref());
+                    merged.merge_missing_properties_except(previous.as_ref(), removed_properties);
                 }
                 elements.set_element(&merged, &slots).await?;
             }
@@ -712,7 +716,11 @@ impl super::TransactionalTransformer for MiddlewareTransformer {
             input.system().sequence(),
             input.system().timestamp(),
         )?;
-        context.derive(&input, batch.changes().clone())
+        context.derive_with_control(
+            &input,
+            batch.changes().clone(),
+            batch.system().control().cloned(),
+        )
     }
 }
 

@@ -130,6 +130,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
         // Room 01_01-01 changes, but not the inputs we are interested in.
         {
             let change = SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("Contoso.Facilities", "room_01_01_01"),
@@ -198,6 +199,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
         // Room 01_01-01 comfort level inputs change
         {
             let change = SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("Contoso.Facilities", "room_01_01_01"),
@@ -368,6 +370,7 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
         //Room 01_01_01 comfort level decreases - resolves alert
         {
             let change = SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("Contoso.Facilities", "room_01_01_01"),

@@ -41,7 +41,7 @@
 //! queries:
 //!   - id: my_query
 //!     query: "MATCH (n) RETURN n"
-//!     sources: [my_source]
+//!     inputs: [my_source]
 //!     storage_backend: rocks_persistent
 //! ```
 //!
@@ -51,7 +51,7 @@
 //! queries:
 //!   - id: my_query
 //!     query: "MATCH (n) RETURN n"
-//!     sources: [my_source]
+//!     inputs: [my_source]
 //!     storage_backend:
 //!       kind: memory
 //!       enableArchive: true
@@ -74,7 +74,7 @@
 //!     .with_memory_budget_bytes(512 << 20)?;
 //! let query = Query::cypher("my_query")
 //!     .query("MATCH (n) RETURN n")
-//!     .from_source("my_source")
+//!     .from_input("my_source")
 //!     .with_storage_backend(StorageBackendRef::Named("rocksdb".to_string()))
 //!     .build();
 //! let core = DrasiLib::builder()

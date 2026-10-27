@@ -25,7 +25,7 @@ use crate::{
     },
     evaluation::context::QueryPartEvaluationContext,
     interface::{FutureElementRef, FutureQueue, IndexError, PushType},
-    models::SourceChange,
+    models::{ChangeOrdering, SourceChange},
     query::{QueryBuilder, QueryEvaluator},
 };
 
@@ -38,6 +38,45 @@ pub struct ComputationQuery {
     inner: QueryEvaluator,
     transaction: Arc<ComputationTransaction>,
     scheduling: Arc<dyn FutureQueue>,
+}
+
+/// One already-ordered input batch. `ProducerSequence` is appropriate only after
+/// the owner has validated its producer identity, epoch and output position.
+pub struct QueryInputBatch {
+    changes: Vec<SourceChange>,
+    ordering: ChangeOrdering,
+    input_scope: Option<Arc<str>>,
+}
+
+impl QueryInputBatch {
+    pub fn new(changes: Vec<SourceChange>, ordering: ChangeOrdering) -> Self {
+        Self {
+            changes,
+            ordering,
+            input_scope: None,
+        }
+    }
+
+    /// Select the middleware pipeline for every change in this batch by the
+    /// host-owned query input key instead of each element's namespace, which is
+    /// producer-controlled and differs for derived query output. Only pipeline
+    /// lookup changes: element references, data and timestamps are untouched.
+    /// A scope with no registered pipeline runs no middleware. Without a scope
+    /// the element namespace selects the pipeline, as before.
+    pub fn with_input_scope(mut self, scope: impl Into<Arc<str>>) -> Self {
+        self.input_scope = Some(scope.into());
+        self
+    }
+
+    pub fn input_scope(&self) -> Option<&str> {
+        self.input_scope.as_deref()
+    }
+}
+
+impl From<Vec<SourceChange>> for QueryInputBatch {
+    fn from(changes: Vec<SourceChange>) -> Self {
+        Self::new(changes, ChangeOrdering::EventTime)
+    }
 }
 
 struct ScheduledQueue {
@@ -165,19 +204,22 @@ impl ComputationQuery {
         &self,
         change: SourceChange,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
-        self.evaluate_source_changes(vec![change]).await
+        self.evaluate_source_changes(vec![change].into()).await
     }
 
     async fn evaluate_source_changes(
         &self,
-        input: Vec<SourceChange>,
+        input: QueryInputBatch,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
-        Ok(self.inner.evaluate_changes(input).await?)
+        Ok(self
+            .inner
+            .evaluate_changes_with_input_scope(input.changes, input.ordering, input.input_scope)
+            .await?)
     }
 
     async fn evaluate_source_transaction(
         &self,
-        input: Vec<SourceChange>,
+        input: QueryInputBatch,
     ) -> Result<Arc<[QueryPartEvaluationContext]>> {
         let results = self.evaluate_source_changes(input).await?;
         Ok(super::query_results::transaction_results(results)
@@ -209,13 +251,14 @@ impl ComputationQuery {
 
     pub async fn process_source_changes_with_non_atomic_result_hook<F, Fut>(
         &self,
-        changes: Vec<SourceChange>,
+        changes: impl Into<QueryInputBatch> + Send,
         pre_commit_hook: F,
     ) -> Result<Arc<[QueryPartEvaluationContext]>>
     where
         F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
+        let changes = changes.into();
         self.in_operation(async {
             let results: Arc<[QueryPartEvaluationContext]> =
                 self.evaluate_source_changes(changes).await?.into();
@@ -243,7 +286,7 @@ impl ComputationQuery {
 
     pub async fn process_source_changes_with_result_hook<F, Fut>(
         &self,
-        changes: Vec<SourceChange>,
+        changes: impl Into<QueryInputBatch> + Send,
         transaction: &AtomicResultTransaction,
         pre_commit_hook: F,
     ) -> Result<Arc<[QueryPartEvaluationContext]>>
@@ -258,7 +301,7 @@ impl ComputationQuery {
 
     pub async fn process_source_changes_with_transaction_group<F, Fut>(
         &self,
-        changes: Vec<SourceChange>,
+        changes: impl Into<QueryInputBatch> + Send,
         transaction: &AtomicResultTransaction,
         pre_commit_hook: F,
     ) -> Result<Arc<[QueryPartEvaluationContext]>>
@@ -271,6 +314,7 @@ impl ComputationQuery {
                 >,
             > + Send,
     {
+        let changes = changes.into();
         self.validate_transaction(transaction)?;
         self.transaction
             .run_with_mutations(async {
@@ -290,7 +334,7 @@ impl ComputationQuery {
     /// Incompatible storage is rejected before middleware or evaluation runs.
     pub async fn process_source_transaction_with_result_hook<F, Fut>(
         &self,
-        changes: Vec<SourceChange>,
+        changes: impl Into<QueryInputBatch> + Send,
         transaction: &AtomicResultTransaction,
         pre_commit_hook: F,
     ) -> Result<Arc<[QueryPartEvaluationContext]>>
@@ -298,6 +342,7 @@ impl ComputationQuery {
         F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
+        let changes = changes.into();
         self.validate_transaction(transaction)?;
         self.in_operation(async {
             let results = self.evaluate_source_transaction(changes).await?;
@@ -312,7 +357,7 @@ impl ComputationQuery {
     /// Final results and participating journal mutations share the same commit.
     pub async fn process_source_transaction_with_transaction_group<F, Fut>(
         &self,
-        changes: Vec<SourceChange>,
+        changes: impl Into<QueryInputBatch> + Send,
         transaction: &AtomicResultTransaction,
         pre_commit_hook: F,
     ) -> Result<Arc<[QueryPartEvaluationContext]>>
@@ -325,6 +370,7 @@ impl ComputationQuery {
                 >,
             > + Send,
     {
+        let changes = changes.into();
         self.validate_transaction(transaction)?;
         self.transaction
             .run_with_mutations(async {

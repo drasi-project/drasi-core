@@ -14,30 +14,32 @@ is independently versioned.
 |---|---|---|
 | `drasi.network/http-source` | `EnvelopeSource` | `out`, `GraphChangeCodec::schema()` |
 | `drasi.network/grpc-source` | `EnvelopeSource` | `out`, `GraphChangeCodec::schema()` |
-| `drasi.network/http-sink` | `EnvelopeSink` | `in`, `QueryChangeCodec::schema()` |
-| `drasi.network/grpc-sink` | `EnvelopeSink` | `in`, `QueryChangeCodec::schema()` |
-| `drasi.network/sse-sink` | `EnvelopeSink` (`Accepted`) | `in`, `QueryChangeCodec::schema()` |
+| `drasi.network/http-sink` | `EnvelopeSink` | `in`, `GraphChangeCodec::schema()` |
+| `drasi.network/grpc-sink` | `EnvelopeSink` | `in`, `GraphChangeCodec::schema()` |
+| `drasi.network/sse-sink` | `EnvelopeSink` (`Accepted`) | `in`, `GraphChangeCodec::schema()` |
 | `drasi.network/http-bootstrap` | `NativeBootstrapProvider` | query-scoped snapshot, `GraphChangeCodec::schema()` |
 
 HTTP webhook/auth/mapping, REST bootstrap, HTTP/gRPC rendering and protocol
 helpers are extracted from the existing implementations into shared crates.
 Native execution constructs no legacy
 `Source`, `Reaction`, `SourceBase`, `ReactionBase`, `SourceEventWrapper`,
-adapter or subscription queue. HTTP/gRPC sinks project typed query rows at
-the actual network boundary, using the same core JSON value projection as the
-existing output codecs. SSE reuses the established query-result DTO projection
-only to serialize the unchanged browser protocol; it has no legacy execution
-adapter or result-processing worker. The host remains the graph scheduler,
-fanout owner and continuous-query evaluator.
+adapter or subscription queue. The three sinks accept the standard graph-change
+schema from **any** producer — a source, a transformer or a query — through one
+decoder (see [Native sink input](SINKS.md)). They project typed changes to the
+truthful change JSON at the actual network boundary (`operation`, canonical
+`identity`, only the images the record carries), using the same core JSON value
+projection as the existing output codecs. No query annotation is required, no
+query identity is invented for a source and no evaluator row signature exists. The host remains the graph
+scheduler, fanout owner and continuous-query evaluator.
 
 ## Native browser SSE
 
 [`drasi-computation-sink-sse`](sinks/sse) supplies `drasi.network/sse-sink`,
-consuming query envelopes directly from graph edges:
+consuming standard graph-change envelopes from any producer directly from graph edges:
 
 ```json
 {
-  "queryStreams": {"example-query": "example-query/out"},
+  "outputs": {"example-query": {"component": "example-query", "port": "out"}},
   "host": "127.0.0.1",
   "port": 8080,
   "ssePath": "/events",
@@ -46,15 +48,23 @@ consuming query envelopes directly from graph edges:
 }
 ```
 
-Only `queryStreams` is required; the default host is `0.0.0.0`, with the other
-defaults shown above. Each query ID must match its envelope metadata and the
-configured stream. Connect every query's output to the sink's `in` port.
-The untemplated `queryId`/`results`/`timestamp` data frames, row signatures,
-before/after images and heartbeat data frames remain compatible with the
-existing SSE browser adapter. The optional `query_snapshots` dependency exposes `/snapshot/:query_id` by
-reading the existing host-owned query catalogue. It adds no result cache or
-query executor. The Server query-results and snapshot-first subscription APIs
-remain available separately.
+No setting is required; the default host is `0.0.0.0`, with the other
+defaults shown above. Each input's stream selects the declared incoming output
+(a real component and output port of a source, transformer or query); a stream
+that is not a declared edge fails. Connect every output to the sink's `in` port. The untemplated data frame is
+`{"output":{"alias","component","port"},"sequence","publishedAt","changes":[…]}`
+where each change states its real `operation` (`ADD`, `REPLACE`, `PATCH`,
+`DELETE`), canonical `identity` and only the images the record carries (see
+[Native sink input](SINKS.md)); `publishedAt` is the sink's own wall clock in
+milliseconds, not an event time. Heartbeat frames are `{"type":"heartbeat","ts":…}`.
+Patches and identity-only deletes are transmitted as such: the sink keeps no row
+cache, and the `@drasi/react` client owns applying them to its identity-keyed
+rows. The optional `output_snapshots` dependency exposes `/snapshot/:alias` for any
+bound output (source, transformer or query) as a JSON array of canonical `ADD`
+changes, read through the graph's output catalogue; an output without a snapshot
+provider, or a sink without the capability, answers `501`. It adds no result
+cache or query executor. The Server query-results and snapshot-first
+subscription APIs remain available separately.
 
 Delivery is explicitly **volatile, Accepted**, not handled by a browser.
 No connected listener is required; disconnected clients receive no history.
@@ -66,7 +76,7 @@ Construction binds no socket or worker.
 
 The native sink also reuses the legacy SSE renderer for per-query/default
 templates and static/dynamic paths, with explicit path-count bounds.
-Query-scoped snapshot readers have bounded admission, cancellation and host
+Output snapshot readers have bounded admission, cancellation and host
 runtime ownership. See the [SSE guide](sinks/sse/README.md) for configuration and
 the snapshot resource recipe. Incoming recovery snapshot/progress control
 envelopes remain unsupported; configuration does not pretend otherwise. GET/OPTIONS permit
@@ -288,10 +298,10 @@ is made. Initial performance-test graph data is ordinary ordered insert traffic.
 For the paired comparison, bind the source stream to its source ID
 (`facilities-db`, without `/out`). Queries use the single
 `ContinuousQueryFactory` execution path, without a compatibility switch.
-`QueryChangeCodec::result_metadata` projects outward `source_id`, `processed_by`
-and `result_count` at the HTTP/gRPC serialization boundary without storing those
-duplicates in native envelopes or reconstructing legacy source wrappers. The
-loopback graph test covers this exact configuration.
+Query results reach HTTP/gRPC as ordinary result nodes; the sinks state each
+change's real `operation` and canonical `identity`, and no `source_id`,
+`processed_by`, `result_count` or query identity is synthesized. The loopback graph
+test covers this exact configuration.
 Receivers must be listening before starting gRPC sinks. Single-query timing is
 the closest scheduling comparison; multi-query runs also include differences
 in input/output component wiring and queue policies, not a different query engine.
@@ -316,41 +326,49 @@ is not a successful graceful drain or proof that the write rolled back.
 
 ```json
 {
-  "queryId": "building-comfort",
-  "stream": "building-comfort/out",
-  "url": "http://127.0.0.1:9001/reaction",
-  "headers": {
-    "Content-Type": "application/json",
-    "X-Query-Sequence": "building-comfort"
+  "outputs": {
+    "building-comfort": {
+      "component": "building-comfort", "port": "out"
+    }
   },
+  "url": "http://127.0.0.1:9001/reaction",
+  "headers": {"Content-Type": "application/json"},
   "timeoutMs": 60000,
   "maxRetries": 3,
   "failurePolicy": "strict"
 }
 ```
 
-Supply `queryId` or a `queryStreams` map, and `url` or `baseUrl`. `stream` defaults
-to `{queryId}/out`; `baseUrl` alone selects `/changes/{queryId}`. Headers default to
-`application/json` and `x-query-sequence=queryId`; conflicting query identities reject. Invalid/duplicate
+Supply `url` or `baseUrl`, and optionally `outputs` (aliases for incoming
+source, transformer or query outputs); `baseUrl` alone selects
+`/changes/{alias}`, where an unaliased output is named after its component. Every request carries `x-drasi-component` and
+`x-drasi-port` naming the real producing output; configuring either header
+rejects. Headers default to `application/json`. Invalid/duplicate
 case-insensitive header names/values reject. Redirects are disabled.
 
-Each result change produces the existing default HTTP notification, not a bare
-query row: `operation` (`ADD`/`UPDATE`/`DELETE`), `queryId`, `sequenceId`,
-RFC3339 `timestamp`, optional `before`/`after`, and optional query `metadata`.
-Aggregation output maps to `UPDATE`, including absent `before` on its first
-emission. Noop/empty changes produce no request. `token` and `outputTemplates`
-reuse the legacy body/URL/method/header renderer, full-name/last-segment/default
-routing, and logged canonical fallbacks. `adaptive` plus `batchEndpoint` enables
-the legacy `{"batch":[...]}` protocol with host-owned collection and timers.
-`maxBatchBytes` bounds collected inputs; `maxRequestBytes` splits rendered
-requests. See the [HTTP sink guide](sinks/http/README.md).
+Each graph change produces one truthful notification: `operation` (`ADD`,
+`REPLACE`, `PATCH`, `DELETE`), `output` (`alias`, `component`, `port`),
+`sequence`, an RFC3339 `timestamp` only when the envelope carries one, the
+canonical `identity`, and only the `element`, `before`, `after`,
+`removedProperties` and `effectiveFrom` that the record carries. For a patch,
+`after` holds only the properties it sets and an explicit `null` stays `null`.
+Empty change sets produce no request; a scheduling control or recovery frame
+fails. `token` and `outputTemplates` reuse the legacy body/URL/method/header
+renderer, with `added`/`updated`/`deleted` routing (keyed by output alias) and
+logged canonical fallbacks; the template context is the notification object. `adaptive` plus `batchEndpoint` enables
+a `{"batch":[...]}` protocol of notifications with host-owned collection and
+timers, one batch per output. `maxBatchBytes` bounds collected inputs;
+`maxRequestBytes` splits rendered requests. See the [HTTP sink guide](sinks/http/README.md).
 
 ## gRPC sink configuration
 
 ```json
 {
-  "queryId": "building-comfort",
-  "stream": "building-comfort/out",
+  "outputs": {
+    "building-comfort": {
+      "component": "building-comfort", "port": "out"
+    }
+  },
   "endpoint": "grpc://localhost:50052",
   "timeoutMs": 60000,
   "batchSize": 1,
@@ -358,28 +376,34 @@ requests. See the [HTTP sink guide](sinks/http/README.md).
   "maxRetries": 5,
   "connectionRetryAttempts": 10,
   "initialConnectionTimeoutMs": 15000,
-  "metadata": {"x-query-sequence": "building-comfort"},
   "outputFormat": "canonicalJson",
   "failurePolicy": "strict"
 }
 ```
 
-Supply `queryId` or `queryStreams`; other defaults are shown, with `stream` derived from
-`queryId` and default metadata `x-query-sequence=queryId`. Endpoint schemes
-`grpc://` and plaintext `http://` are supported. TLS is not advertised.
+Supply `outputs`; other defaults are shown. Endpoint schemes `grpc://` and
+plaintext `http://` are supported. TLS is not advertised.
 
-The unchanged `drasi.v1.ReactionService/ProcessResults` protocol supports fixed
-and adaptive batches. Use the flat `batchSize`/`batchFlushTimeoutMs` settings or
-the legacy `batching` object. Count, byte and timeout limits flush real batches;
-query or rendered-metadata changes split RPCs without reordering items.
+The new `drasi.v1.ChangeService/ProcessChanges` protocol carries an
+`OutputIdentity` (`alias`, `component`, `port`) and ordered `Change` items; the
+legacy `ReactionService/ProcessResults` query-result protocol is not used by the
+native sink. It supports fixed and adaptive batches. Use the flat
+`batchSize`/`batchFlushTimeoutMs` settings or the legacy `batching` object.
+Count, byte and timeout limits flush real batches; output or rendered-metadata
+changes split RPCs without reordering items.
 
-Items preserve operation, row signature, before/after, original query sequence,
-timestamp and query metadata. The outer timestamp is the latest item timestamp.
-Configured metadata is sent in both the request body and actual gRPC headers.
-`canonicalJson` includes the existing canonical `payload` with `rowSignature`;
-`proto` omits it unless a body template is configured. `outputTemplates` reuses
-the legacy renderer and metadata templates without changing typed row images.
-Noop results produce no RPC. See the [gRPC sink guide](sinks/grpc/README.md).
+Each item states its `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), its
+canonical `identity` (`namespace`, `id`), an `element` shape only when the record
+carries one, a typed `before` or `after` only when present (a patch's `after`
+holds only the properties it sets, with `removed_properties` naming removals), the
+producing stream's `sequence` and a `timestamp` only when the envelope has one.
+There is no `row_signature`. The batch timestamp is the latest item timestamp, if any.
+Configured metadata is sent in both the request body and actual gRPC headers
+together with `x-drasi-component` and `x-drasi-port`.
+`canonicalJson` includes the canonical JSON `payload`; `proto` omits it unless a
+body template is configured. `outputTemplates` reuses the legacy renderer and
+metadata templates without changing typed images. See the
+[gRPC sink guide](sinks/grpc/README.md).
 
 Startup actually attempts the connection, with up to `connectionRetryAttempts`
 total attempts and `initialConnectionTimeoutMs` per attempt; errors are not
@@ -387,9 +411,10 @@ disguised as successful lazy activation.
 
 ### Sink completion, retry, skip and cancellation
 
-Both sinks validate the input port, exact schema, stream, query metadata and row
-identity. They reject snapshot/progress-only recovery control messages because
-they do not implement snapshot/recovery replacement.
+Both sinks validate the input port, exact schema and declared incoming stream.
+They reject scheduling controls and snapshot/progress-only recovery control
+messages because they do not implement snapshot/recovery replacement. No query
+annotation is read.
 
 `Handled` means network delivery completed successfully, or a failed delivery was
 deliberately skipped under the explicitly configured policy. There is no early
@@ -400,7 +425,7 @@ order. One multi-change envelope can already have partially delivered before a
 later change fails. Retries/cancellation can duplicate external effects.
 
 `failurePolicy="strict"` propagates failure (default). `"skip"` reports every
-exhausted delivery to stderr with component/query/sequence/error and deliberately
+exhausted delivery to stderr with component/output/sequence/error and deliberately
 continues. It is not an implementation of the full legacy `auto_skip_gap`
 recovery policy. The native HTTP strict path does not silently drop permanent
 poison outcomes as the legacy checkpoint loop did. Healthy paired runs should not measure failed
@@ -459,8 +484,9 @@ Use `.dylib` on macOS, `.so` on Linux or `.dll` on Windows. These loopback
 tests validate correctness; the parent paired runner owns 100k-event performance
 measurement and its scheduling/queue-path interpretation.
 
-Tests cover legacy DTO/protobuf mapping, numeric/temporal/query metadata,
-aggregation and Noop semantics, actual loopback HTTP/gRPC, cumulative stream counts,
+Tests cover legacy source DTO/protobuf mapping, numeric/temporal values,
+truthful add/replace/patch/delete projection, untimed identity-only deletion,
+multi-port output identity and Noop semantics, actual loopback HTTP/gRPC, cumulative stream counts,
 individual batch evaluation, backpressure, errors, retries/skips, independent
 health, cancelled operations, awaited listener stop/rebind, and the unchanged
 host continuous-query evaluator between native endpoints.

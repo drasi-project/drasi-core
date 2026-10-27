@@ -17,6 +17,15 @@ The `parse_json` middleware processes `SourceChange` events (specifically `Inser
     *   If `output_property` is specified and already exists, it will be overwritten (a warning will be logged).
 7.  **Pass Through:** `Delete` and `Future` changes are passed through without modification.
 
+## Property Removals and Replacements
+
+An update names the properties it sets and, separately, the properties it removes
+(`removed_properties`); every other property is left unchanged. A replacement
+supplies the complete element, and omitted properties are dropped. This middleware
+forwards both unchanged. When an update removes `target_property`, the parsed
+`output_property` is removed with it, and a parsed `output_property` that the update
+sets is no longer removed.
+
 ## Configuration Options
 
 The middleware is configured using a JSON object with the following fields:

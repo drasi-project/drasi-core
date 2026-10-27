@@ -74,16 +74,16 @@ struct Binding {
 
 #[derive(Clone)]
 struct Entry {
-    key: (chrono::DateTime<chrono::Utc>, usize, u64),
+    key: (Option<chrono::DateTime<chrono::Utc>>, usize, u64),
     generation: u64,
     envelope: ChangeEnvelope,
 }
 
-impl crate::channels::Timestamped for Entry {
-    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+impl crate::channels::priority_queue::QueueOrder for Entry {
+    fn priority_time(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.key.0
     }
-    fn ordering_tie_breaker(&self) -> Option<(usize, u64)> {
+    fn priority_rank(&self) -> Option<(usize, u64)> {
         Some((self.key.1, self.key.2))
     }
 }
@@ -101,7 +101,8 @@ struct State {
 ///
 /// Each producer's earliest admitted sequence is its head. Compare those heads
 /// by timestamp/rank; a backwards clock cannot jump a recovery watermark past
-/// unprocessed work. No idle source is awaited.
+/// unprocessed work. Untimed native heads delimit groups by admission order;
+/// their envelopes retain the absent timestamp. No idle source is awaited.
 pub struct RankedInputQueue {
     capacity: usize,
     state: Mutex<State>,
@@ -343,13 +344,13 @@ impl EnvelopeSender for Sender {
                             "source '{source}' omitted its authoritative event sequence"
                         )
                     })?;
-                    Ok((metadata.timestamp, self.binding.rank, sequence))
+                    Ok((Some(metadata.timestamp), self.binding.rank, sequence))
                 }),
-            None => envelope
-                .system()
-                .timestamp()
-                .map(|timestamp| (timestamp, self.binding.rank, envelope.system().sequence()))
-                .ok_or_else(|| anyhow::anyhow!("ranked native input omitted event time")),
+            None => Ok((
+                envelope.system().timestamp(),
+                self.binding.rank,
+                envelope.system().sequence(),
+            )),
         };
         let key = match key {
             Ok(key) => key,
@@ -561,7 +562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ranked_inputs_reject_missing_metadata_and_time_without_acceptance() {
+    async fn ranked_inputs_require_source_metadata_but_allow_untimed_native_events() {
         let queue = RankedInputQueue::new(1).expect("queue");
         let mut config = config(&ResourceId::try_new("queue").expect("id"), 0, "source", 1);
         // Type validation may defer unresolved resources; creation still rejects them.
@@ -586,7 +587,7 @@ mod tests {
         assert_eq!(failure.acceptance(), AcceptanceState::NotAccepted);
         assert!(pipe.control.is_idle().await.expect("no acceptance"));
         config.source_id = None;
-        let native = RankedInputQueue::new(1)
+        let mut native = RankedInputQueue::new(1)
             .expect("native queue")
             .bind(&config)
             .expect("native binding");
@@ -596,18 +597,19 @@ mod tests {
             original.changes().clone(),
             super::super::SystemMetadata::new(original.system().stream().clone(), 1),
         );
-        let failure = native
+        native
             .sender()
             .send(untimed)
             .await
-            .expect_err("missing native event time");
-        assert!(failure.error.to_string().contains("omitted event time"));
-        assert_eq!(failure.acceptance(), AcceptanceState::NotAccepted);
+            .expect("optional native event time");
+        let mut receiver = native.take_receiver().unwrap();
+        let delivery = receiver.receive().await.unwrap().unwrap();
+        assert!(delivery.envelope().system().timestamp().is_none());
         assert!(native
             .control
             .is_idle()
             .await
-            .expect("no native acceptance"));
+            .expect("native event was delivered"));
     }
 
     #[tokio::test]
@@ -925,7 +927,7 @@ mod tests {
         let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
         let config = crate::Query::cypher("query")
             .query("MATCH (n) RETURN n")
-            .from_source(future)
+            .from_input(future)
             .build();
         let settings = QueryExecutionSettings::from_legacy_config(&config);
         settings.validate(None).unwrap();

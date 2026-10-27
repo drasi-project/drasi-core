@@ -167,6 +167,7 @@ async fn persisted_model() {
                 }
             } else {
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: node(source, &id, time, value),
                 }
             };
@@ -292,6 +293,7 @@ async fn deletion_and_recreation_frontiers_share_the_real_index_transaction() {
         assert_element(&query, Some(1), None).await;
         query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node("a", "one", 20, 2),
             })
             .await
@@ -380,6 +382,7 @@ async fn cancelled_delete_rolls_back_the_frontier_and_cross_kind_batch_rolls_bac
             .process_source_changes_with_result_hook(
                 vec![
                     SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: node("a", "one", 20, 2),
                     },
                     SourceChange::Insert {
@@ -406,6 +409,7 @@ async fn cancelled_delete_rolls_back_the_frontier_and_cross_kind_batch_rolls_bac
     assert_element(&query, Some(1), None).await;
     query
         .process_source_change(SourceChange::Update {
+            removed_properties: Default::default(),
             element: node("a", "one", 15, 15),
         })
         .await

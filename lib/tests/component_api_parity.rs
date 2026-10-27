@@ -53,7 +53,7 @@ async fn native_query_stop_preserves_an_unrelated_inflight_stop() -> anyhow::Res
         let batch = core.computation_pipeline()?
             .source(core.borrow_computation_source("input").await?, SourceSubscriptionOptions::default())?
             .query(Query::cypher("query").query("MATCH (n) RETURN n")
-                .from_source("input").enable_bootstrap(false).build()).build()?;
+                .from_input("input").enable_bootstrap(false).build()).build()?;
         core.add_components(batch).await?;
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -401,7 +401,7 @@ async fn query_api(native: bool, added_while_running: bool) -> anyhow::Result<()
     }
     let config = Query::cypher("items")
         .query("MATCH (n:Item) RETURN n.value AS value")
-        .from_source("input")
+        .from_input("input")
         .enable_bootstrap(false)
         .auto_start(true)
         .with_outbox_capacity(17)
@@ -431,7 +431,7 @@ async fn query_api(native: bool, added_while_running: bool) -> anyhow::Result<()
     );
     let info = core.get_query_info("items").await?;
     assert_eq!(info.query, config.query);
-    assert_eq!(info.source_subscriptions[0].source_id, "input");
+    assert_eq!(info.inputs[0].component, "input");
     core.subscribe_query_logs("items").await?;
     core.subscribe_query_events("items").await?;
     assert!(
@@ -569,7 +569,7 @@ async fn manual_native_query_lifecycle_controls_its_helpers_without_stopping_sib
         for (id, auto_start) in [("manual", false), ("sibling", true)] {
             let query = Query::cypher(id)
                 .query("MATCH (n:Item) RETURN n.value AS value")
-                .from_source("input")
+                .from_input("input")
                 .auto_start(auto_start)
                 .enable_bootstrap(false)
                 .build();
@@ -669,7 +669,7 @@ async fn native_query_handles_and_subscriptions_cannot_observe_replacement_insta
         core.computation_component("input")?.wait_created().await?;
         let config = Query::cypher("items")
             .query("MATCH (n:Item) RETURN n.value AS value")
-            .from_source("input")
+            .from_input("input")
             .enable_bootstrap(false)
             .build();
         let batch = core
@@ -752,7 +752,7 @@ async fn failed_native_query_declarations_keep_configuration_status_and_events_v
     core.computation_component("input")?.wait_created().await?;
     let mut config = Query::cypher("invalid")
         .query("MATCH (n:Item) RETURN n.value AS value")
-        .from_source("input")
+        .from_input("input")
         .auto_start(false)
         .enable_bootstrap(false)
         .build();

@@ -372,7 +372,7 @@ pub fn map_mid_prices_to_changes(
                 element: relation_element,
             });
         } else {
-            changes.push(SourceChange::Update { element });
+            changes.push(SourceChange::update(element));
         }
     }
 
@@ -451,7 +451,7 @@ pub fn map_order_book_to_changes(
             element: relation_element,
         });
     } else {
-        changes.push(SourceChange::Update { element });
+        changes.push(SourceChange::update(element));
     }
 
     Ok(changes)
@@ -509,7 +509,7 @@ pub fn map_funding_rate_to_changes(
             element: relation_element,
         });
     } else {
-        changes.push(SourceChange::Update { element });
+        changes.push(SourceChange::update(element));
     }
 
     let snapshot = FundingSnapshot {

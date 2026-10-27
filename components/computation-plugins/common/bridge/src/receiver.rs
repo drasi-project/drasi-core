@@ -114,7 +114,7 @@ impl Receiver {
         observations: Arc<Observations>,
     ) -> anyhow::Result<Arc<Self>> {
         let codec = PortableEnvelopeCodec::new(
-            contract.schema,
+            contract.delivery,
             contract.namespace.clone(),
             contract.limits.clone(),
         )?;
@@ -590,12 +590,16 @@ impl Receiver {
                 })?;
             let stream = StreamId::try_new(self.contract.receiver_stream.as_str())
                 .map_err(|error| BridgeError::invalid(error.to_string()))?;
-            let mut system = SystemMetadata::new(stream.clone(), request.sequence);
+            let mut system = SystemMetadata::new(stream.clone(), request.sequence)
+                .with_ordering(input.system().ordering());
             if let Some(timestamp) = input.system().timestamp() {
                 system = system.with_timestamp(timestamp);
             }
             if let Some(position) = input.system().source_position() {
                 system = system.with_source_position(position.clone());
+            }
+            if let Some(control) = input.system().control() {
+                system = system.with_control(control.clone());
             }
             let mut output = input.derive(
                 emission_id(&stream, request.sequence)

@@ -100,7 +100,7 @@ pub struct SourceRuntime {
 /// let query_info = core.get_query_info("active_orders").await?;
 /// println!("Query: {}", query_info.query);
 /// println!("Status: {:?}", query_info.status);
-/// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
+/// println!("Inputs: {:?}", query_info.inputs);
 ///
 /// if let Some(joins) = query_info.joins {
 ///     println!("Synthetic joins configured: {}", joins.len());
@@ -119,8 +119,8 @@ pub struct QueryRuntime {
     /// Error message if status is Error
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
-    /// Source subscriptions with middleware pipelines
-    pub source_subscriptions: Vec<super::schema::SourceSubscriptionConfig>,
+    /// Upstream component inputs with middleware pipelines
+    pub inputs: Vec<super::schema::QueryInputConfig>,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<super::schema::QueryJoinConfig>>,
@@ -187,7 +187,7 @@ impl From<QueryConfig> for QueryRuntime {
             query: config.query,
             status: ComponentStatus::Stopped,
             error_message: None,
-            source_subscriptions: config.sources,
+            inputs: config.inputs,
             joins: config.joins,
         }
     }
@@ -222,13 +222,13 @@ impl From<QueryConfig> for QueryRuntime {
 /// queries:
 ///   - id: q1
 ///     query: "MATCH (n) RETURN n"
-///     source_subscriptions:
+///     inputs:
 ///       - source_id: s1
 ///     # priority_queue_capacity will be 50000 (inherited)
 ///
 ///   - id: q2
 ///     query: "MATCH (m) RETURN m"
-///     source_subscriptions:
+///     inputs:
 ///       - source_id: s1
 ///     priority_queue_capacity: 100000  # Override global
 /// ```

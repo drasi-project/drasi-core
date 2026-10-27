@@ -76,7 +76,7 @@ let batch = drasi.computation_pipeline()?
     .native_source(source_output)?
     .query(Query::cypher("order-names")
         .query("MATCH (o:Order) RETURN o.name AS name")
-        .from_source("orders")
+        .from_input("orders")
         .build())
     .build()?;
 let report = drasi.add_components(batch).await?;
@@ -165,7 +165,7 @@ let component = drasi
     .add_query_with_handle(
         Query::cypher("order-names")
             .query("MATCH (o:Order) RETURN o.name AS name")
-            .from_source("orders")
+            .from_input("orders")
             .enable_bootstrap(false)
             .auto_start(false)
             .build(),
@@ -204,8 +204,8 @@ same source-reported timestamp:
 ```rust,ignore
 let query = Query::cypher("combined")
     .query("MATCH (n:Item) RETURN n.name AS name")
-    .from_source("primary")
-    .from_source("secondary")
+    .from_input("primary")
+    .from_input("secondary")
     .build();
 ```
 

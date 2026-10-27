@@ -121,6 +121,7 @@ async fn query_retains_bootstrap_cleanup_across_cancelled_and_timed_out_stop() {
 impl ComputationBootstrapProvider for InvalidWatermarks {
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
         let watermark = || BootstrapWatermark {
+            producer: None,
             stream: StreamId::try_new("source/out").expect("stream"),
             source_id: None,
             sequence: 1,
@@ -184,7 +185,7 @@ fn envelope(sequence: u64, name: &str, update: bool) -> ChangeEnvelope {
     };
     GraphChangeCodec::encode_change(
         if update {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         } else {
             SourceChange::Insert { element }
         },
@@ -206,6 +207,7 @@ impl ComputationBootstrapProvider for Bootstrap {
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter(changes)),
             watermarks: vec![BootstrapWatermark {
+                producer: None,
                 stream: StreamId::try_new("source/out").expect("stream"),
                 source_id: None,
                 sequence: 1,
@@ -360,13 +362,17 @@ impl EnvelopeSink for RecoverySink {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
-    fn supports_snapshot(&self) -> bool {
-        true
+    fn snapshot_consumer(&mut self, _port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        Some(self)
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         self.apply(&input.envelope, false);
         Ok(())
     }
+}
+
+#[async_trait]
+impl SnapshotConsumer for RecoverySink {
     async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         if self.state.fail_snapshot.swap(false, Ordering::SeqCst) {
             anyhow::bail!("snapshot handler failed");
@@ -1008,6 +1014,7 @@ mod persistent {
             Ok(ComputationBootstrapSnapshot {
                 changes: Box::pin(futures::stream::iter(changes)),
                 watermarks: vec![BootstrapWatermark {
+                    producer: None,
                     stream: StreamId::try_new("source/out")?,
                     source_id: Some("people".into()),
                     sequence: 17,

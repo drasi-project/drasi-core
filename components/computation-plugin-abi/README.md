@@ -6,9 +6,8 @@ Source/Reaction/Bootstrap SDK **0.17.0** (which also accepts 0.16 fast-mode plug
 Its two symbols are
 `drasi_computation_plugin_metadata` and `drasi_computation_plugin_entry`.
 Do not call a legacy registration function to interpret native metadata.
-The native payload contract is **wire version 2**: bounded MessagePack with bulk
-binary buffers and binary computation envelopes. The initial, unreleased
-JSON-envelope wire version 1 is not accepted. The C table layouts are unchanged.
+The native payload contract is **wire version 1**: bounded MessagePack with bulk
+binary buffers and binary computation envelopes. The C table layouts are unchanged.
 
 Headers must match the family magic, version and exact structure size before
 reading any subsequent field. Missing metadata, unsupported capabilities and
@@ -79,7 +78,7 @@ complete consumer set. `PluginConsumerProgressV1` supplies per-factory discovery
 construction with `ConsumerProgressV1`, and immutable upstream-retention inspection.
 An advertising factory requires the binding and must reject unbound creation.
 Only source and transformer producers support it; single-owner recovery cannot
-be combined with this capability. Base ABI 1.0, wire 2 and recovery-v1 are unchanged.
+be combined with this capability. Base ABI 1.0, wire 1 and recovery-v1 are unchanged.
 
 The identity fixes the graph, producer and 1-256 distinct consumer IDs. Each
 snapshot carries every member's existing recovery-v1 snapshot as a binary frame,
@@ -124,6 +123,30 @@ subsequent generation/index/key request is limited to 4096 bytes. Batch release
 rejects stale generations or active calls. Explicit retryable handler failures use
 the extension's `RETRYABLE` status, not an empty success response.
 
-Both extensions leave base tables, strict metadata, ABI 1.0 and wire 2 unchanged.
+Both extensions leave base tables, strict metadata, ABI 1.0 and wire 1 unchanged.
 Only negotiated, bound factories may use them; missing services never imply
 recovery guarantees. See the SDK's authoring and lifecycle contracts.
+
+## Optional output reads and follow, version 1
+
+`drasi_computation_plugin_output_reads_v1` and
+`drasi_computation_plugin_output_follow_v1` are independent extensions; base ABI
+1.0, wire 1 and every other table are unchanged. A factory declares the output
+ports it serves in manifest `capabilities.output_snapshots`, `output_replays` and
+`output_follows` (empty lists are omitted); the Host requires the matching
+extension exactly then.
+
+`PluginOutputReadsV1::open` returns one producer-owned `OutputReadHandle` per
+declared (port, capability), with `request(op, input)` returning an ordinary
+operation (`SNAPSHOT`, `COMMITTED_HEAD`, `REPLAY_AFTER`). `PluginOutputFollowV1::open`
+returns a provider handle whose `begin(limits)` writes a **lease handle** and the
+operation that opens it; the lease has its own `next(ack)` operations and a
+synchronous `release`. Replies are bounded MessagePack: 16 MiB, 16,384 snapshot
+records, 1,024 replay envelopes, 16 reads and 16 leases per component. Provider
+results, including typed errors, are an `Outcome` inside a successful reply;
+lifecycle and transport failures use ABI statuses (`NOT_ACTIVE` 0x2001 while not
+started, `CLOSED` once retired). Nothing is truncated: a larger answer is an
+explicit limit outcome. Handles and leases are released once by their holder; a
+component's stop, restart or release fences them and ends leases at once.
+`next` carries the last observed item index so an unacknowledged item is resent
+rather than lost when a cancellation races completion.

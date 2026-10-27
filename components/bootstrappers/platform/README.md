@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
     // Create query that will bootstrap from production
     let query = Query::cypher("active-users")
         .query("MATCH (u:User) WHERE u.active = true RETURN u")
-        .from_source("production")
+        .from_input("production")
         .build();
 
     drasi.add_query(query).await?;

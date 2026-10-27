@@ -131,7 +131,39 @@ impl<'a> NativeTransactionContext<'a> {
         input: &ChangeEnvelope,
         changes: ChangeSetRef,
     ) -> anyhow::Result<ChangeEnvelope> {
-        let output = input.derive(input.id().clone(), changes, input.system().as_ref().clone());
+        self.derive_with_control(input, changes, None).await
+    }
+
+    /// Emit an explicit control with the new data, rather than inheriting an input control.
+    /// The input's ordering policy is retained.
+    pub async fn derive_with_control(
+        &self,
+        input: &ChangeEnvelope,
+        changes: ChangeSetRef,
+        control: Option<drasi_computation_contracts::ControlMessage>,
+    ) -> anyhow::Result<ChangeEnvelope> {
+        self.derive_with_ordering(input, changes, control, input.system().ordering())
+            .await
+    }
+
+    /// Emit new data with an explicitly chosen ordering policy. `ProducerSequence`
+    /// must only be chosen when the receiver has validated the producer's order.
+    pub async fn derive_with_ordering(
+        &self,
+        input: &ChangeEnvelope,
+        changes: ChangeSetRef,
+        control: Option<drasi_computation_contracts::ControlMessage>,
+        ordering: drasi_computation_contracts::ChangeOrdering,
+    ) -> anyhow::Result<ChangeEnvelope> {
+        let mut system = drasi_computation_contracts::SystemMetadata::new(
+            input.system().stream().clone(),
+            input.system().sequence(),
+        )
+        .with_ordering(ordering);
+        if let Some(control) = control {
+            system = system.with_control(control);
+        }
+        let output = input.derive(input.id().clone(), changes, system);
         let bytes: serde_bytes::ByteBuf = self
             .call(
                 abi::transaction::DERIVE,
@@ -237,6 +269,10 @@ mod tests {
                                     .remove(&wire::decode::<ElementReference>(&input)?);
                                 wire::encode(&())
                             }
+                            abi::transaction::DERIVE => {
+                                let request: wire::DeriveRequest<'_> = wire::decode(&input)?;
+                                wire::encode_buffer(&request.output)
+                            }
                             _ => anyhow::bail!("unsupported state request"),
                         }
                     };
@@ -292,6 +328,50 @@ mod tests {
         );
         context.remove_element(&reference).await.unwrap();
         assert!(context.get_element(&reference).await.unwrap().is_none());
+        let input = GraphChangeCodec::encode_futures_due(
+            drasi_computation_contracts::StreamId::try_new("clock/out").unwrap(),
+            1,
+            "2026-01-01T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        let data = context
+            .derive(&input, input.changes().clone())
+            .await
+            .unwrap();
+        assert!(data.system().control().is_none());
+        assert!(input.system().control().is_some());
+        let controlled = context
+            .derive_with_control(
+                &input,
+                input.changes().clone(),
+                input.system().control().cloned(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(controlled.system().control(), input.system().control());
+        use drasi_computation_contracts::ChangeOrdering;
+        assert_eq!(data.system().ordering(), ChangeOrdering::EventTime);
+        let sequenced = context
+            .derive_with_ordering(
+                &input,
+                input.changes().clone(),
+                None,
+                ChangeOrdering::ProducerSequence,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sequenced.system().ordering(),
+            ChangeOrdering::ProducerSequence
+        );
+        let retained_order = context
+            .derive(&sequenced, sequenced.changes().clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            retained_order.system().ordering(),
+            ChangeOrdering::ProducerSequence
+        );
         assert!(context.get("denied").await.is_err());
         owner.active.store(false, Ordering::Release);
         assert_eq!(

@@ -71,11 +71,25 @@ impl Drop for Directory {
     }
 }
 
+/// The exact namespace of the `plant/query` output, as the runtime derives it.
+fn query_dataset() -> String {
+    drasi_computation_contracts::output_identity::dataset_namespace(
+        "left",
+        GRAPH,
+        &ComponentId::try_new("plant/query").expect("component ID"),
+        &PortId::try_new("out").expect("port ID"),
+    )
+    .expect("output dataset namespace")
+}
+
+fn query_projector() -> ResultNodeProjector {
+    ResultNodeProjector::try_new(&query_dataset(), None).expect("query output projector")
+}
+
 fn namespace() -> Namespace {
     Namespace {
         version: 1,
-        source_prefixes: vec!["plant/".into()],
-        query_prefixes: vec!["plant/".into()],
+        source_prefixes: vec!["plant/".into(), query_dataset()],
     }
 }
 
@@ -83,7 +97,7 @@ fn configuration(
     directory: &Directory,
     source: bool,
     profile: Profile,
-    schema: PortableSchema,
+    schema: PortableDelivery,
 ) -> BridgeConfig {
     BridgeConfig {
         link_id: "link".into(),
@@ -93,7 +107,7 @@ fn configuration(
         receiver_endpoint: "bridge-in".into(),
         stream: if source { "receiver/in" } else { "sender/out" }.into(),
         peer_stream: if source { "sender/out" } else { "receiver/in" }.into(),
-        schema,
+        delivery: schema,
         profile,
         failure_scope: FailureMode::ProcessRestart,
         namespace: namespace(),
@@ -176,14 +190,28 @@ fn query_input(sequence: u64) -> Result<ChangeEnvelope> {
             VariableValue::Date(chrono::NaiveDate::from_ymd_opt(2026, 10, 12).expect("date")),
         ),
     ]);
-    Ok(QueryChangeCodec::encode_evaluation(
-        None,
-        &ComponentId::try_new("plant/query")?,
-        SystemMetadata::new(StreamId::try_new("sender/out")?, sequence),
+    query_results(
+        sequence,
+        &query_projector(),
         &[QueryPartEvaluationContext::Adding {
             after: values,
             row_signature: 42,
         }],
+    )
+}
+
+/// A current query output envelope for an explicit output scope.
+fn query_results(
+    sequence: u64,
+    projector: &ResultNodeProjector,
+    results: &[drasi_core::evaluation::context::QueryPartEvaluationContext],
+) -> Result<ChangeEnvelope> {
+    Ok(QueryChangeCodec::encode_evaluation(
+        None,
+        &ComponentId::try_new("plant/query")?,
+        SystemMetadata::new(StreamId::try_new("sender/out")?, sequence),
+        projector,
+        results,
         QueryOutputMetadata {
             query_id: "plant/query".into(),
             source_id: Some("plant/db".into()),
@@ -237,13 +265,7 @@ async fn indexes(path: &Path) -> Result<ComputationIndexes> {
 
 fn envelope_codec() -> Result<EnvelopeCodec> {
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(8 << 20).expect("nonzero codec capacity"));
-    for schema in [
-        GraphChangeCodec::schema(),
-        QueryChangeCodec::schema(),
-        SourceTransactionCodec::schema(),
-    ] {
-        codec.register_schema(schema)?;
-    }
+    codec.register_schema(GraphChangeCodec::schema())?;
     Ok(codec)
 }
 

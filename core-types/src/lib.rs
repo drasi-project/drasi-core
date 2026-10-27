@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod data_value;
 pub mod evaluation;
 pub mod interface;
 pub mod models;

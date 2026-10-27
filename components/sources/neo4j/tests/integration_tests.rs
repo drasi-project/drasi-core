@@ -96,7 +96,7 @@ async fn build_person_core(
             RETURN p.id AS id, p.name AS name
             "#,
         )
-        .from_source("neo4j-test-source")
+        .from_input("neo4j-test-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

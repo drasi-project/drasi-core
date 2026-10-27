@@ -48,6 +48,8 @@ pub struct SourceMappedOutput {
 #[derive(Debug, Clone, Deserialize)]
 pub enum MapOperation {
     Insert,
+    /// Replaces the whole element; omitted properties are dropped.
+    Replace,
     Update,
     Delete,
 }
@@ -95,9 +97,13 @@ impl SourceMiddleware for JQ {
         source_change: SourceChange,
         _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        source_change
+            .validate()
+            .map_err(|error| MiddlewareError::SourceChangeError(error.to_string()))?;
         let metadata = match &source_change {
-            SourceChange::Insert { element } => element.get_metadata(),
-            SourceChange::Update { element } => element.get_metadata(),
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => element.get_metadata(),
             SourceChange::Delete { metadata } => metadata,
             SourceChange::Future { .. } => return Ok(vec![source_change]),
         };
@@ -109,7 +115,8 @@ impl SourceMiddleware for JQ {
                 //todo: use Arc<str> instead of String
                 Some(mappings) => match &source_change {
                     SourceChange::Insert { .. } => &mappings.insert,
-                    SourceChange::Update { .. } => &mappings.update,
+                    // A replacement targets an existing identity like an update.
+                    SourceChange::Replace { .. } | SourceChange::Update { .. } => &mappings.update,
                     SourceChange::Delete { .. } => &mappings.delete,
                     _ => continue,
                 },
@@ -123,8 +130,9 @@ impl SourceMiddleware for JQ {
 
             #[allow(clippy::unwrap_used)]
             let element = match &source_change {
-                SourceChange::Insert { element } => element,
-                SourceChange::Update { element } => element,
+                SourceChange::Insert { element }
+                | SourceChange::Replace { element }
+                | SourceChange::Update { element, .. } => element,
                 SourceChange::Delete { metadata } => {
                     del_element_binding = Some(Element::Node {
                         metadata: metadata.clone(),
@@ -140,11 +148,23 @@ impl SourceMiddleware for JQ {
                     Some(op) => op,
                     None => match &source_change {
                         SourceChange::Insert { .. } => &MapOperation::Insert,
+                        SourceChange::Replace { .. } => &MapOperation::Replace,
                         SourceChange::Update { .. } => &MapOperation::Update,
                         SourceChange::Delete { .. } => &MapOperation::Delete,
                         _ => continue,
                     },
                 };
+
+                if matches!(op, MapOperation::Update)
+                    && matches!(
+                        &source_change,
+                        SourceChange::Update { removed_properties, .. }
+                            if !removed_properties.is_empty()
+                    )
+                {
+                    log::debug!("Skipping jq update rule: property removals require context not retained by this event mapper");
+                    continue;
+                }
 
                 let source_obj: Value = element.into();
 
@@ -304,9 +324,10 @@ impl SourceMiddleware for JQ {
                         MapOperation::Insert => results.push(SourceChange::Insert {
                             element: new_element,
                         }),
-                        MapOperation::Update => results.push(SourceChange::Update {
+                        MapOperation::Replace => results.push(SourceChange::Replace {
                             element: new_element,
                         }),
+                        MapOperation::Update => results.push(SourceChange::update(new_element)),
                         MapOperation::Delete => results.push(SourceChange::Delete {
                             metadata: new_element.get_metadata().clone(),
                         }),

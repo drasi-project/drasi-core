@@ -902,7 +902,7 @@ drasi.add_source(Arc::new(source)).await?;
 // Add query
 let query = Query::cypher("monitor-users")
     .query("MATCH (u:User) WHERE u.age > 18 RETURN u")
-    .from_source("platform-source")
+    .from_input("platform-source")
     .build();
 
 drasi.add_query(query).await?;

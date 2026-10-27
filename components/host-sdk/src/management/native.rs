@@ -193,43 +193,63 @@ fn snapshot_max_readers() -> usize {
     16
 }
 
-/// A read-only view of named queries in one actual catalogue resource.
+/// One allow-listed output: a component and, optionally, one of its output
+/// ports. An omitted port selects the component's primary output through the
+/// graph's shared port resolution when a read is opened.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NativeQuerySnapshotsConfig {
-    pub catalog: ResourceId,
-    pub queries: Vec<String>,
+pub struct NativeOutputSelector {
+    pub component: ComponentId,
+    #[serde(default)]
+    pub port: Option<PortId>,
+}
+
+/// An immutable allow-list and limits policy for output-snapshot reads. It
+/// declares no catalogue dependency: the native factory combines the resolved
+/// policy with the constructing graph's actual output catalogue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeOutputSnapshotsConfig {
+    pub outputs: Vec<NativeOutputSelector>,
     #[serde(default = "snapshot_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default = "snapshot_max_readers")]
     pub max_readers: usize,
 }
 
-impl NativeQuerySnapshotsConfig {
+impl NativeOutputSnapshotsConfig {
     pub fn validate(
         &self,
         specification: &ResourceSpecification,
         dependencies: &BTreeMap<ResourceId, ResourceRole>,
     ) -> Result<()> {
         anyhow::ensure!(
-            specification.role == ResourceRole::QueryCatalog && specification.id != self.catalog,
-            "native query snapshots require a separate query-catalogue resource"
+            specification.role == ResourceRole::OutputCatalogue,
+            "native output snapshots require an output-catalogue resource declaration"
         );
         anyhow::ensure!(
-            *dependencies == BTreeMap::from([(self.catalog.clone(), ResourceRole::QueryCatalog)]),
-            "native query snapshots must declare exactly their catalogue dependency"
+            dependencies.is_empty(),
+            "native output snapshots are an immutable policy and declare no dependencies"
         );
-        crate::computation::NativeQuerySnapshotsResource::validate_settings(
-            self.queries.iter().cloned(),
+        self.policy()?;
+        Ok(())
+    }
+
+    fn policy(&self) -> Result<crate::computation::NativeOutputSnapshotsResource> {
+        crate::computation::NativeOutputSnapshotsResource::new(
+            self.outputs.iter().map(|output| {
+                crate::computation::OutputSelector::new(
+                    output.component.clone(),
+                    output.port.clone(),
+                )
+            }),
             std::time::Duration::from_millis(self.timeout_ms),
             self.max_readers,
-        )?;
-        Ok(())
+        )
     }
 
     pub fn resolve(
         &self,
-        graph: &str,
         specification: &ResourceSpecification,
         dependencies: &BTreeMap<ResourceId, ResourceHandle>,
     ) -> Result<ResourceHandle> {
@@ -240,22 +260,9 @@ impl NativeQuerySnapshotsConfig {
                 .map(|(id, handle)| (id.clone(), handle.role()))
                 .collect(),
         )?;
-        let catalog = dependencies
-            .get(&self.catalog)
-            .context("native query-snapshot catalogue is unavailable")?
-            .get::<QueryResultsCatalog>()?;
-        anyhow::ensure!(
-            catalog.graph_id() == graph,
-            "query-snapshot catalogue belongs to another graph"
-        );
         Ok(ResourceHandle::new(
-            ResourceRole::QueryCatalog,
-            Arc::new(crate::computation::NativeQuerySnapshotsResource::new(
-                catalog.as_ref().clone(),
-                self.queries.iter().cloned(),
-                std::time::Duration::from_millis(self.timeout_ms),
-                self.max_readers,
-            )?),
+            ResourceRole::OutputCatalogue,
+            Arc::new(self.policy()?),
         ))
     }
 }

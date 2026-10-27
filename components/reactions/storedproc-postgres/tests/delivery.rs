@@ -170,6 +170,7 @@ fn input(sequence: u64, count: usize) -> Result<InputEnvelope> {
         None,
         &component,
         SystemMetadata::new(StreamId::try_new("out")?, sequence),
+        &ResultNodeProjector::try_new("test/storedproc-postgres-delivery/query/out", None)?,
         &changes,
         QueryOutputMetadata {
             query_id: "query".into(),

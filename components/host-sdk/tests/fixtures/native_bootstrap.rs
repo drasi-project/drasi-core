@@ -262,6 +262,7 @@ impl sdk::NativeBootstrapProvider for Provider {
                 cancel,
             }),
             watermarks: vec![BootstrapWatermark {
+                producer: None,
                 stream: StreamId::try_new("fixture/out")?,
                 source_id: None,
                 sequence: count,
@@ -283,6 +284,7 @@ impl sdk::NativeBootstrapProvider for Provider {
     }
     async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
         Ok(vec![BootstrapWatermark {
+            producer: None,
             stream: StreamId::try_new("fixture/other")?,
             source_id: Some("source".into()),
             sequence: u64::MAX,

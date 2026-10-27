@@ -713,3 +713,38 @@ failure before treating a concern as an implementation defect.
 
 **Finish when:** Each named concern has a protected fix or an evidence-backed
 closure, rather than remaining an open-ended code-cleanup task.
+
+<a id="cw-68"></a>
+
+## 42. Add a stateful view-transform component (CW-68)
+
+**Priority:** Future capability. **Effort:** Large.
+
+**Work:** Add a distinct component that maintains an output dataset as a
+transformation of the current input dataset. Keep the existing map/jq components
+as stateless event mappers: they apply configured rules to meaningful incoming
+events and ignore events or rules that make no sense in that context. A view
+transform is neither a new mode for those mappers nor a replacement for them.
+
+The new component should use the standard graph-change ports and support nodes,
+relationships, additions, full replacements, property patches and deletions.
+Retain the input information and actual emitted-output associations needed to
+reconstruct patches and maintain the view correctly. In particular, retract
+outputs that no longer pass a filter, delete children removed by one-to-many
+transformations, and remove old identities when a mapping changes an output key.
+Do not infer missing input values from a patch or rerun a historical
+non-deterministic transformation to guess what was previously emitted.
+
+Reuse shared codecs, identity, lifecycle and transaction facilities. Storage is
+an implementation choice for this component, not a requirement imposed on every
+component. Report memory-backed and durable recovery honestly; only advertise
+snapshot, replay and transactional capabilities backed by real implementations.
+When durable output is supported, commit its view state, output and progress
+coherently, with bounded retention and cancellation-safe cleanup.
+
+**Finish when:** Incremental results agree with an independently recomputed view
+after patches (including removals and explicit nulls), replacements, filtering,
+relationship changes and one-to-many identity changes. Required snapshot/live
+handover, replay, failure, restart and cleanup scenarios pass for each advertised
+capability. Existing stateless map/jq event-mapping behavior remains available
+and unchanged by this new component.

@@ -525,6 +525,7 @@ impl sdk::NativeSink for HandledSink {
                     },
             }]
             | [SourceChange::Update {
+                removed_properties: _,
                 element:
                     Element::Node {
                         metadata,

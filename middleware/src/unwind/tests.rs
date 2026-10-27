@@ -199,6 +199,7 @@ mod process {
         let result = subject
             .process(
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: Element::Node {
                         metadata: ElementMetadata {
                             reference: ElementReference::new("test", "p1"),
@@ -760,5 +761,167 @@ mod factory {
         };
 
         assert!(subject.create(&mw_config).is_err());
+    }
+}
+
+mod canonical_mutation {
+    use std::{collections::BTreeSet, sync::Arc};
+
+    use drasi_core::{
+        in_memory_index::in_memory_element_index::InMemoryElementIndex,
+        interface::{ElementIndex, SourceMiddleware, SourceMiddlewareFactory},
+        models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+            SourceMiddlewareConfig,
+        },
+    };
+    use serde_json::{json, Value};
+
+    use crate::unwind::UnwindFactory;
+
+    const CHILD: &str = "$unwind-$.status.containerStatuses[*]-p1-c1";
+
+    fn subject() -> Arc<dyn SourceMiddleware> {
+        UnwindFactory::new()
+            .create(&SourceMiddlewareConfig {
+                name: "test".into(),
+                kind: "unwind".into(),
+                config: json!({"Pod": [{
+                    "selector": "$.status.containerStatuses[*]",
+                    "label": "Container",
+                    "key": "$.containerID"
+                }]})
+                .as_object()
+                .unwrap()
+                .clone(),
+            })
+            .unwrap()
+    }
+
+    fn pod(time: u64, properties: Value) -> Element {
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("test", "p1"),
+                labels: vec!["Pod".into()].into(),
+                effective_from: time,
+            },
+            properties: ElementPropertyMap::from(properties),
+        }
+    }
+
+    fn statuses(containers: Value) -> Value {
+        json!({"status": {"containerStatuses": containers}})
+    }
+
+    async fn index_with(element: &Element) -> InMemoryElementIndex {
+        let index = InMemoryElementIndex::new();
+        index.set_element(element, &vec![]).await.unwrap();
+        index
+    }
+
+    fn deleted(changes: &[SourceChange]) -> Vec<String> {
+        changes
+            .iter()
+            .filter_map(|change| match change {
+                SourceChange::Delete { metadata } => {
+                    Some(metadata.reference.element_id.to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn removing_the_array_property_deletes_children_and_keeps_the_removal() {
+        let old = pod(
+            0,
+            statuses(json!([
+                {"containerID": "c1", "name": "nginx"},
+                {"containerID": "c2", "name": "redis"}
+            ])),
+        );
+        let index = index_with(&old).await;
+        let change = SourceChange::update_with_removals(
+            pod(1, json!({"label": "x"})),
+            BTreeSet::from(["status".to_string()]),
+        )
+        .unwrap();
+        let result = subject().process(change.clone(), &index).await.unwrap();
+        let mut gone = deleted(&result);
+        gone.sort();
+        assert_eq!(
+            gone,
+            [
+                CHILD.to_string(),
+                "$unwind-$.status.containerStatuses[*]-p1-c2".to_string()
+            ]
+        );
+        assert_eq!(result.last(), Some(&change));
+    }
+
+    #[tokio::test]
+    async fn omitting_the_array_property_removes_its_children_like_removing_it() {
+        let old = pod(0, statuses(json!([{"containerID": "c1", "name": "nginx"}])));
+        let index = index_with(&old).await;
+        let change = SourceChange::update(pod(1, json!({"label": "x"})));
+        let result = subject().process(change.clone(), &index).await.unwrap();
+        // An update is evaluated as the patch it carries; the parent stays a patch.
+        assert_eq!(deleted(&result), [CHILD.to_string()]);
+        assert_eq!(result.last(), Some(&change));
+    }
+
+    #[tokio::test]
+    async fn changed_item_update_removes_the_fields_it_no_longer_has() {
+        let old = pod(
+            0,
+            statuses(json!([{"containerID": "c1", "name": "nginx", "extra": 1}])),
+        );
+        let index = index_with(&old).await;
+        let change = SourceChange::update(pod(
+            1,
+            statuses(json!([{"containerID": "c1", "name": "nginx"}])),
+        ));
+        let result = subject().process(change, &index).await.unwrap();
+        let child = result
+            .iter()
+            .find_map(|change| match change {
+                SourceChange::Update {
+                    element,
+                    removed_properties,
+                } if element.get_reference().element_id.as_ref() == CHILD => {
+                    Some(removed_properties.clone())
+                }
+                _ => None,
+            })
+            .expect("child update");
+        assert_eq!(child, BTreeSet::from(["extra".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn replace_stays_a_replacement_and_deletes_dropped_children() {
+        let old = pod(
+            0,
+            statuses(json!([
+                {"containerID": "c1", "name": "nginx"},
+                {"containerID": "c2", "name": "redis"}
+            ])),
+        );
+        let index = index_with(&old).await;
+        let replacement = pod(1, statuses(json!([{"containerID": "c2", "name": "redis"}])));
+        let result = subject()
+            .process(SourceChange::replace(replacement.clone()), &index)
+            .await
+            .unwrap();
+        assert_eq!(deleted(&result), [CHILD.to_string()]);
+        assert!(result.iter().any(|change| matches!(
+            change,
+            SourceChange::Replace { element }
+                if element.get_reference().element_id.as_ref()
+                    == "$unwind-$.status.containerStatuses[*]-p1-c2"
+        )));
+        assert_eq!(result.last(), Some(&SourceChange::replace(replacement)));
+        assert!(!result
+            .iter()
+            .any(|change| matches!(change, SourceChange::Insert { .. })));
     }
 }

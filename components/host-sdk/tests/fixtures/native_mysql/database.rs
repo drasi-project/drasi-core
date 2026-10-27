@@ -296,11 +296,11 @@ impl Database {
     pub(crate) fn sink_settings(&self) -> Value {
         json!({
             "hostname":"127.0.0.1","port":self.port,"database":"test","user":"root","password":"native-test",
-            "queries":["left","right"],
+            "outputs":{"left":{"component":"left","port":"out"},"right":{"component":"right","port":"out"}},
             "default_template":{
-                "added":{"template":"CALL effect({{param query_id}},{{param operation}},{{param after.id}},{{param after.value}})"},
-                "updated":{"template":"CALL effect({{param query_id}},{{param operation}},{{param after.id}},{{param after.value}})"},
-                "deleted":{"template":"CALL effect({{param query_id}},{{param operation}},{{param before.id}},NULL)"}
+                "added":{"template":"CALL effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
+                "updated":{"template":"CALL effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
+                "deleted":{"template":"CALL effect({{param output.alias}},{{param operation}},{{param before.id}},NULL)"}
             }
         })
     }

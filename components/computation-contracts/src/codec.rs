@@ -22,10 +22,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    data::validate_schema, ChangeEnvelope, ChangeOperation, ChangeSet, ChangeSetId, ComponentId,
-    ContextEntry, ContextValue, ContractError, EnvelopeId, Lineage, Record, RecordId, RecordImage,
-    RecordReference, Schema, SchemaDescriptor, SchemaId, SchemaVersion, StreamId, SystemMetadata,
-    UpdateSemantics,
+    data::validate_schema, ChangeEnvelope, ChangeOperation, ChangeOrdering, ChangeSet, ChangeSetId,
+    ComponentId, ContextEntry, ContextValue, ContractError, ControlMessage, EnvelopeId, Lineage,
+    Record, RecordId, RecordImage, RecordReference, Schema, SchemaDescriptor, SchemaId,
+    SchemaVersion, StreamId, SystemMetadata, UpdateSemantics,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -284,6 +284,15 @@ struct Metadata {
     sequence: u64,
     timestamp: Option<DateTime<Utc>>,
     source_position: Option<Vec<u8>>,
+    control: Option<Control>,
+    ordering: ChangeOrdering,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Control {
+    kind: String,
+    payload: Vec<u8>,
 }
 
 impl From<&SystemMetadata> for Metadata {
@@ -293,18 +302,30 @@ impl From<&SystemMetadata> for Metadata {
             sequence: value.sequence(),
             timestamp: value.timestamp(),
             source_position: value.source_position().map(|value| value.to_vec()),
+            control: value.control().map(|control| Control {
+                kind: control.kind().to_owned(),
+                payload: control.payload().to_vec(),
+            }),
+            ordering: value.ordering(),
         }
     }
 }
 
 impl Metadata {
     fn decode(self) -> Result<SystemMetadata, ContractError> {
-        let mut value = SystemMetadata::new(StreamId::try_new(self.stream)?, self.sequence);
+        let mut value = SystemMetadata::new(StreamId::try_new(self.stream)?, self.sequence)
+            .with_ordering(self.ordering);
         if let Some(timestamp) = self.timestamp {
             value = value.with_timestamp(timestamp);
         }
         if let Some(position) = self.source_position {
             value = value.with_source_position(Bytes::from(position));
+        }
+        if let Some(control) = self.control {
+            value = value.with_control(ControlMessage::try_new(
+                control.kind,
+                Bytes::from(control.payload),
+            )?);
         }
         Ok(value)
     }
@@ -501,4 +522,260 @@ struct Frame {
     lineage: Vec<(Identity, Metadata)>,
     context_identity: u64,
     annotations: Vec<Annotation>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RecordValidationError, RecordValidator};
+
+    struct NoRecords;
+
+    impl RecordValidator for NoRecords {
+        fn validate_identity(
+            &self,
+            _: &SchemaDescriptor,
+            _: &RecordId,
+        ) -> Result<(), crate::RecordValidationError> {
+            Err(RecordValidationError::new("identity", "no records"))
+        }
+
+        fn validate(
+            &self,
+            schema: &SchemaDescriptor,
+            id: &RecordId,
+            _: RecordImage,
+            _: &[u8],
+        ) -> Result<(), crate::RecordValidationError> {
+            self.validate_identity(schema, id)
+        }
+    }
+
+    fn schema() -> Arc<Schema> {
+        Arc::new(Schema::new(
+            SchemaDescriptor::try_new(
+                SchemaId::try_new("test.control").unwrap(),
+                SchemaVersion::try_new(1).unwrap(),
+                "none",
+                Bytes::from_static(b"empty"),
+            )
+            .unwrap(),
+            Arc::new(NoRecords),
+        ))
+    }
+
+    fn codec(limit: usize) -> EnvelopeCodec {
+        let mut codec = EnvelopeCodec::new(NonZeroUsize::new(limit).unwrap());
+        codec.register_schema(schema()).unwrap();
+        codec
+    }
+
+    fn metadata(stream: &str, sequence: u64) -> SystemMetadata {
+        SystemMetadata::new(StreamId::try_new(stream).unwrap(), sequence)
+    }
+
+    fn control(kind: &str, payload: &[u8]) -> ControlMessage {
+        ControlMessage::try_new(kind, Bytes::copy_from_slice(payload)).unwrap()
+    }
+
+    fn envelope(
+        current: Option<ControlMessage>,
+        historical: Option<ControlMessage>,
+    ) -> ChangeEnvelope {
+        let changes = ChangeSet::try_new(
+            ChangeSetId::try_new("changes", Bytes::from_static(b"empty")).unwrap(),
+            schema().descriptor().clone(),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut source = metadata("source", 1);
+        if let Some(control) = historical {
+            source = source.with_control(control);
+        }
+        let input = ChangeEnvelope::new(
+            EnvelopeId::try_new("source", Bytes::from_static(b"event")).unwrap(),
+            changes.clone(),
+            source,
+        );
+        let mut output = metadata("output", 2);
+        if let Some(control) = current {
+            output = output.with_control(control);
+        }
+        input.derive(
+            EnvelopeId::try_new("output", Bytes::from_static(b"event")).unwrap(),
+            changes,
+            output,
+        )
+    }
+
+    #[test]
+    fn json_roundtrip_preserves_current_and_historical_controls_exactly() {
+        let codec = codec(4096);
+        let payloads: [&[u8]; 3] = [&[], b"payload", &[255, 0, 128, 10]];
+        for payload in payloads {
+            let current = control("custom/reevaluate", payload);
+            let historical = control("custom/history", &[9, 0, 255]);
+            let original = envelope(Some(current.clone()), Some(historical.clone()));
+            let encoded = codec.encode(&original).unwrap();
+            let decoded = codec.decode(&encoded).unwrap();
+            assert_eq!(decoded.system().control(), Some(&current));
+            assert_eq!(
+                decoded.lineage().unwrap().system().control(),
+                Some(&historical)
+            );
+            assert_eq!(codec.encode(&decoded).unwrap(), encoded);
+        }
+        let encoded = codec
+            .encode(&envelope(None, Some(control("custom/history", &[]))))
+            .unwrap();
+        let decoded = codec.decode(&encoded).unwrap();
+        assert!(decoded.system().control().is_none());
+        assert_eq!(
+            decoded
+                .lineage()
+                .unwrap()
+                .system()
+                .control()
+                .unwrap()
+                .kind(),
+            "custom/history"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["format"], 1);
+        assert!(value["system"]["control"].is_null());
+    }
+
+    #[test]
+    fn json_decode_rejects_invalid_control_kinds_and_unknown_control_fields() {
+        let codec = codec(4096);
+        let encoded = codec
+            .encode(&envelope(
+                Some(control("custom/current", b"c")),
+                Some(control("custom/history", b"h")),
+            ))
+            .unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        for kind in ["", "has space", "line\nbreak", "nul\u{0}"] {
+            for lineage in [false, true] {
+                let mut value = original.clone();
+                let target = if lineage {
+                    &mut value["lineage"][0][1]["control"]["kind"]
+                } else {
+                    &mut value["system"]["control"]["kind"]
+                };
+                *target = kind.into();
+                let changed = serde_json::to_vec(&value).unwrap();
+                assert!(
+                    matches!(
+                        codec.decode(&changed),
+                        Err(EnvelopeCodecError::Contract(
+                            ContractError::InvalidIdentifier { .. }
+                        ))
+                    ),
+                    "{kind:?} lineage={lineage}"
+                );
+            }
+        }
+        let mut value = original;
+        value["system"]["control"]["extra"] = true.into();
+        assert!(codec.decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn json_roundtrip_preserves_ordering_in_current_and_lineage_metadata() {
+        let codec = codec(4096);
+        for (current, historical) in [
+            (ChangeOrdering::EventTime, ChangeOrdering::ProducerSequence),
+            (ChangeOrdering::ProducerSequence, ChangeOrdering::EventTime),
+        ] {
+            let changes = ChangeSet::try_new(
+                ChangeSetId::try_new("changes", Bytes::from_static(b"empty")).unwrap(),
+                schema().descriptor().clone(),
+                Vec::new(),
+            )
+            .unwrap();
+            let input = ChangeEnvelope::new(
+                EnvelopeId::try_new("source", Bytes::from_static(b"event")).unwrap(),
+                changes.clone(),
+                metadata("source", 1).with_ordering(historical),
+            );
+            let original = input.derive(
+                EnvelopeId::try_new("output", Bytes::from_static(b"event")).unwrap(),
+                changes,
+                metadata("output", 2).with_ordering(current),
+            );
+            let encoded = codec.encode(&original).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            let name = |ordering| serde_json::to_value(ordering).unwrap();
+            assert_eq!(value["format"], 1);
+            assert_eq!(value["system"]["ordering"], name(current));
+            assert_eq!(value["lineage"][0][1]["ordering"], name(historical));
+            let decoded = codec.decode(&encoded).unwrap();
+            assert_eq!(decoded.system().ordering(), current);
+            assert_eq!(decoded.lineage().unwrap().system().ordering(), historical);
+            assert_eq!(codec.encode(&decoded).unwrap(), encoded);
+            let replay = decoded.reemit(3).unwrap();
+            assert_eq!(replay.system().ordering(), current);
+            assert_eq!(replay.lineage().unwrap().system().ordering(), historical);
+        }
+        let default = codec.encode(&envelope(None, None)).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&default).unwrap();
+        assert_eq!(value["system"]["ordering"], "EventTime");
+        assert_eq!(value["lineage"][0][1]["ordering"], "EventTime");
+    }
+
+    #[test]
+    fn json_decode_rejects_invalid_or_missing_ordering() {
+        let codec = codec(4096);
+        let original: serde_json::Value =
+            serde_json::from_slice(&codec.encode(&envelope(None, None)).unwrap()).unwrap();
+        for lineage in [false, true] {
+            for invalid in [
+                serde_json::json!("Sequence"),
+                serde_json::json!("eventtime"),
+                serde_json::json!(0),
+                serde_json::json!(null),
+                serde_json::json!({"EventTime": null, "ProducerSequence": null}),
+            ] {
+                let mut value = original.clone();
+                let target = if lineage {
+                    &mut value["lineage"][0][1]
+                } else {
+                    &mut value["system"]
+                };
+                target["ordering"] = invalid.clone();
+                assert!(
+                    codec.decode(&serde_json::to_vec(&value).unwrap()).is_err(),
+                    "{invalid} lineage={lineage}"
+                );
+            }
+            let mut value = original.clone();
+            let target = if lineage {
+                &mut value["lineage"][0][1]
+            } else {
+                &mut value["system"]
+            };
+            target.as_object_mut().unwrap().remove("ordering");
+            assert!(
+                codec.decode(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "missing lineage={lineage}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_size_limit_includes_current_and_historical_controls() {
+        let large = vec![255; 512];
+        let with_controls = envelope(
+            Some(control("custom/current", &large)),
+            Some(control("custom/history", &large)),
+        );
+        let encoded = codec(1 << 20).encode(&with_controls).unwrap();
+        assert!(codec(encoded.len()).encode(&with_controls).is_ok());
+        assert!(matches!(
+            codec(encoded.len() - 1).encode(&with_controls),
+            Err(EnvelopeCodecError::SizeLimit { .. })
+        ));
+        assert!(encoded.len() > codec(1 << 20).encode(&envelope(None, None)).unwrap().len() + 1024);
+    }
 }

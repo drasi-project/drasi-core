@@ -114,12 +114,13 @@ factories. The family contracts and
 retain those limits explicitly.
 
 The SSE slice now reuses the legacy renderer for query/default templates and
-static/dynamic paths. Its bounded `query_snapshots` capability reads the actual
-host catalogue; it creates neither another evaluator nor a second result cache.
+static/dynamic paths. Its bounded `output_snapshots` capability reads the graph's
+output catalogue for the allow-listed output endpoints; it creates neither another
+evaluator nor a second result cache.
 Static and rebuilt dynamic libraries pass both-runtime graph/lifecycle checks,
-including path limits, stop/restart and foreign-catalogue rejection. Server's
-`nativeQuerySnapshots` recipe preserves JSON/YAML configuration and exact
-resource dependencies. The rebuilt stock Server and Move-a-wall plugin pass the
+including path limits and stop/restart. Server's
+`nativeOutputSnapshots` recipe is an immutable allow-list and limits policy that
+preserves JSON/YAML configuration and declares no dependencies. The rebuilt stock Server and Move-a-wall plugin pass the
 real scene/API/SSE/browser checks, including empty/insert/update/delete snapshot
 equivalence between Server and native SSE for the configured queries. All
 isolated processes shut down; existing demo state was not reset. This endpoint

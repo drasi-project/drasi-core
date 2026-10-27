@@ -77,7 +77,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 ///     .with_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n:Person) RETURN n.name, n.age")
-///             .from_source("events")
+///             .from_input("events")
 ///             .auto_start(true)
 ///             .build()
 ///     )
@@ -118,7 +118,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// core.add_query(
 ///     Query::cypher("new-query")
 ///         .query("MATCH (n) RETURN n")
-///         .from_source("new-source")
+///         .from_input("new-source")
 ///         .auto_start(true)
 ///         .build()
 /// ).await?;
@@ -717,7 +717,7 @@ impl DrasiLib {
     ///     .with_query(
     ///         Query::cypher("my-query")
     ///             .query("MATCH (n) RETURN n")
-    ///             .from_source("events")
+    ///             .from_input("events")
     ///             .build()
     ///     )
     ///     // Use .with_source(source_instance) and .with_reaction(reaction_instance)
@@ -1269,7 +1269,7 @@ mod tests {
                 .with_query(
                     Query::cypher("q1")
                         .query("MATCH (n:Person) RETURN n.name")
-                        .from_source("pg-source")
+                        .from_input("pg-source")
                         .auto_start(false)
                         .build(),
                 )
@@ -1353,7 +1353,7 @@ mod tests {
 
             assert_eq!(q1.config.query, "MATCH (n:Person) RETURN n.name");
             assert!(
-                q1.config.sources.iter().any(|s| s.source_id == "pg-source"),
+                q1.config.inputs.iter().any(|s| s.component == "pg-source"),
                 "Query should reference pg-source"
             );
         }
@@ -1493,14 +1493,14 @@ mod tests {
                 .with_query(
                     Query::cypher("qa")
                         .query("MATCH (n:A) RETURN n")
-                        .from_source("src-a")
+                        .from_input("src-a")
                         .auto_start(false)
                         .build(),
                 )
                 .with_query(
                     Query::cypher("qb")
                         .query("MATCH (n:B) RETURN n")
-                        .from_source("src-b")
+                        .from_input("src-b")
                         .auto_start(false)
                         .build(),
                 )
@@ -1583,7 +1583,7 @@ mod tests {
                 .with_query(
                     Query::cypher("bp-query")
                         .query("MATCH (n) RETURN n")
-                        .from_source("bp-source")
+                        .from_input("bp-source")
                         .auto_start(false)
                         .build(),
                 );
@@ -1834,7 +1834,7 @@ mod tests {
                 .with_query(
                     Query::cypher("q1")
                         .query("MATCH (n) RETURN n")
-                        .from_source("pg-source")
+                        .from_input("pg-source")
                         .auto_start(false)
                         .build(),
                 )
@@ -1893,7 +1893,7 @@ mod tests {
                 .with_query(
                     Query::cypher("q1")
                         .query("MATCH (n) RETURN n")
-                        .from_source("pg-source")
+                        .from_input("pg-source")
                         .auto_start(false)
                         .build(),
                 )
@@ -1952,7 +1952,7 @@ mod tests {
                 .with_query(
                     Query::cypher("q1")
                         .query("MATCH (n) RETURN n")
-                        .from_source("pg-source")
+                        .from_input("pg-source")
                         .auto_start(false)
                         .build(),
                 )
@@ -2005,7 +2005,7 @@ mod tests {
                 .with_query(
                     Query::cypher("q1")
                         .query("MATCH (n) RETURN n")
-                        .from_source("pg-source")
+                        .from_input("pg-source")
                         .auto_start(false)
                         .build(),
                 )
@@ -2117,7 +2117,7 @@ mod tests {
                 .with_query(
                     Query::cypher("bp-q1")
                         .query("MATCH (n:Item) RETURN n")
-                        .from_source("http-src")
+                        .from_input("http-src")
                         .auto_start(false)
                         .build(),
                 )
@@ -2177,7 +2177,7 @@ mod tests {
                 .with_query(
                     Query::cypher("rt-q1")
                         .query("MATCH (n) RETURN n")
-                        .from_source("rt-src")
+                        .from_input("rt-src")
                         .auto_start(false)
                         .build(),
                 )

@@ -204,7 +204,7 @@ async fn test_cloudflare_radar_hijack_changes() -> Result<()> {
             RETURN h.eventId AS eventId, h.confidenceScore AS confidence
         "#,
         )
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

@@ -95,7 +95,7 @@ async fn eventgrid_end_to_end_unpacked_cloudevents() -> Result<()> {
     let (source, handle) = make_source("test-source");
     let query = Query::cypher("people-query")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let reaction = EventGridReaction::builder("eventgrid-e2e")
@@ -191,7 +191,7 @@ async fn eventgrid_end_to_end_eventgrid_schema_insert() -> Result<()> {
     let (source, handle) = make_source("test-source");
     let query = Query::cypher("people-query")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let reaction = EventGridReaction::builder("eventgrid-native")
@@ -254,7 +254,7 @@ async fn eventgrid_template_metadata_becomes_extension_attributes() -> Result<()
     let (source, handle) = make_source("test-source");
     let query = Query::cypher("people-query")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -323,7 +323,7 @@ async fn eventgrid_publish_failure_keeps_reaction_running() -> Result<()> {
     let (source, handle) = make_source("test-source");
     let query = Query::cypher("people-query")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let reaction = EventGridReaction::builder("eventgrid-fail")

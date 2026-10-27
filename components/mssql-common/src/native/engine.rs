@@ -120,7 +120,7 @@ pub(super) fn decode_rows(mut raw: Vec<CdcRow>, binding: [u8; 32]) -> Result<Vec
                 );
                 if element.get_metadata().reference == after.get_metadata().reference {
                     changes.push(Change {
-                        change: SourceChange::Update { element: after },
+                        change: SourceChange::Replace { element: after },
                         before: Some(element),
                         position: position(0),
                     });
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(changes.len(), 3);
         assert!(matches!(changes[0].change, SourceChange::Insert { .. }));
         assert_eq!(changes[1].before.as_ref(), Some(&node("dbo.Items:1", 10)));
-        assert!(matches!(changes[1].change, SourceChange::Update { .. }));
+        assert!(matches!(changes[1].change, SourceChange::Replace { .. }));
         assert_eq!(changes[2].before.as_ref(), Some(&node("dbo.Items:1", 20)));
         assert!(matches!(changes[2].change, SourceChange::Delete { .. }));
         Ok(())

@@ -49,6 +49,7 @@ pub enum EvaluationError {
         existing: &'static str,
         incoming: &'static str,
     },
+    InvalidSourceChange(crate::models::SourceChangeError),
 }
 
 #[derive(Debug)]
@@ -172,6 +173,7 @@ impl Error for EvaluationError {
             Self::IndexError(error) => Some(error),
             Self::MiddlewareError(error) => Some(error),
             Self::FunctionError(error) => Some(error),
+            Self::InvalidSourceChange(error) => Some(error),
             _ => None,
         }
     }

@@ -886,7 +886,7 @@ fn bridge(
 #[test]
 fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit() -> Result<()> {
     use drasi_computation_bridge_common::{
-        BridgeConfig, Limits, Namespace, PortableSchema, Profile, Transport,
+        BridgeConfig, Limits, Namespace, PortableDelivery, Profile, Transport,
     };
     let directory = Directory::new()?;
     let mut parent_config = HostConfig::empty("parent", directory.join("a"));
@@ -899,13 +899,12 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
         receiver_endpoint: "from-parent".into(),
         stream: "p/input".into(),
         peer_stream: "c/input".into(),
-        schema: PortableSchema::GraphChange,
+        delivery: PortableDelivery::Events,
         profile: Profile::Volatile,
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
         namespace: Namespace {
             version: 1,
             source_prefixes: vec!["parent/".into()],
-            query_prefixes: Vec::new(),
         },
         transport: Transport::Unix {
             data_path: directory.join("in.d").to_string_lossy().into_owned(),
@@ -1058,7 +1057,8 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
 #[test]
 fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Result<()> {
     use drasi_computation_bridge_common::{
-        BridgeConfig, BridgeEndpointControl, Limits, Namespace, PortableSchema, Profile, Transport,
+        BridgeConfig, BridgeEndpointControl, Limits, Namespace, PortableDelivery, Profile,
+        Transport,
     };
     let directory = Directory::new()?;
     let mut config = HostConfig::empty("receiver", directory.join("a"));
@@ -1070,13 +1070,12 @@ fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Resu
         receiver_endpoint: "inlet".into(),
         stream: "receiver/in".into(),
         peer_stream: "external/out".into(),
-        schema: PortableSchema::GraphChange,
+        delivery: PortableDelivery::Events,
         profile: Profile::Volatile,
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
         namespace: Namespace {
             version: 1,
             source_prefixes: vec!["external/".into()],
-            query_prefixes: Vec::new(),
         },
         transport: Transport::Unix {
             data_path: directory.join("in.d").to_string_lossy().into_owned(),

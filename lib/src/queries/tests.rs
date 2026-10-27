@@ -16,7 +16,7 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
-    use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::queries::output_state::FetchError;
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::test_helpers::managers::{QueryManager, SourceManager};
@@ -42,13 +42,14 @@ mod manager_tests {
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start,
@@ -61,6 +62,7 @@ mod manager_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -71,13 +73,14 @@ mod manager_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::GQL,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: true,
@@ -90,6 +93,7 @@ mod manager_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -466,7 +470,7 @@ mod manager_tests {
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, config.id);
         assert_eq!(retrieved.query, config.query);
-        assert_eq!(retrieved.sources.len(), config.sources.len());
+        assert_eq!(retrieved.inputs.len(), config.inputs.len());
     }
 
     #[tokio::test]
@@ -813,7 +817,7 @@ mod query_core_tests {
                 query: query.to_string(),
                 query_language: crate::config::QueryLanguage::Cypher,
                 middleware: vec![],
-                sources: vec![],
+                inputs: vec![],
                 auto_start: false,
                 joins: None,
                 enable_bootstrap: true,
@@ -824,6 +828,7 @@ mod query_core_tests {
                 recovery_policy: None,
                 outbox_capacity: 1000,
                 bootstrap_timeout_secs: 300,
+                result: Default::default(),
             };
 
             // Just verify the config can be created
@@ -838,7 +843,7 @@ mod query_core_tests {
             query: "".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            sources: vec![],
+            inputs: vec![],
             auto_start: false,
             joins: None,
             enable_bootstrap: true,
@@ -849,6 +854,7 @@ mod query_core_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         };
 
         // Empty queries should be caught during validation
@@ -863,7 +869,7 @@ mod query_core_tests {
 mod output_state_integration_tests {
     use super::super::*;
     use crate::channels::*;
-    use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::queries::output_state::FetchError;
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::test_helpers::managers::{QueryManager, SourceManager};
@@ -880,13 +886,14 @@ mod output_state_integration_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .iter()
-                .map(|s| SourceSubscriptionConfig {
+                .map(|s| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id: s.clone(),
+                    component: s.clone(),
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: true,
@@ -899,6 +906,7 @@ mod output_state_integration_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -1110,11 +1118,12 @@ mod output_state_integration_tests {
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: vec![SourceSubscriptionConfig {
+            inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                source_id: "gap-src".to_string(),
+                component: "gap-src".to_string(),
                 pipeline: vec![],
+                port: None,
             }],
             auto_start: true,
             joins: None,
@@ -1126,6 +1135,7 @@ mod output_state_integration_tests {
             recovery_policy: None,
             outbox_capacity: 2, // Very small — will evict quickly
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("gap-query".to_string()).await.unwrap();
@@ -1320,11 +1330,12 @@ mod output_state_integration_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: vec![SourceSubscriptionConfig {
+            inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                source_id: "noop-src".to_string(),
+                component: "noop-src".to_string(),
                 pipeline: vec![],
+                port: None,
             }],
             auto_start: true,
             joins: None,
@@ -1336,6 +1347,7 @@ mod output_state_integration_tests {
             recovery_policy: None,
             outbox_capacity: 100,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("noop-query".to_string()).await.unwrap();

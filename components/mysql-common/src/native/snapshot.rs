@@ -622,6 +622,7 @@ impl MySqlSnapshot {
             )
         };
         Ok(vec![BootstrapWatermark {
+            producer: None,
             stream: self.stream.clone(),
             source_id: Some(self.source.to_string()),
             sequence,

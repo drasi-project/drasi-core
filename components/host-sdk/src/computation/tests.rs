@@ -29,8 +29,6 @@ mod bootstrap_fixture;
 mod bootstrap_tests;
 #[path = "configuration_tests.rs"]
 mod configuration_tests;
-#[path = "source_schema_tests.rs"]
-mod source_schema_tests;
 #[path = "../../tests/fixtures/native_consumer.rs"]
 mod consumer_fixture;
 #[path = "../../tests/fixtures/native_consumer_progress.rs"]
@@ -39,6 +37,14 @@ pub(super) mod consumer_progress_fixture;
 mod consumer_progress_tests;
 #[path = "consumer_tests.rs"]
 pub(super) mod consumer_tests;
+#[path = "output_read_tests.rs"]
+mod output_read_tests;
+#[path = "port_format_tests.rs"]
+mod port_format_tests;
+#[path = "snapshot_tests.rs"]
+mod snapshot_tests;
+#[path = "source_schema_tests.rs"]
+mod source_schema_tests;
 
 fn port(direction: PortDirection) -> PortDescriptor {
     PortDescriptor::new(
@@ -873,23 +879,24 @@ fn rejects_missing_or_incompatible_native_metadata_before_entry() {
         .unwrap_err_string();
     assert!(error.contains("incompatible native computation ABI header"));
 
-    const OLD_MANIFEST: &[u8] = br#"{"abi_version":"1.0.0","wire_version":1,"plugin":{"id":"old-native","version":"1"},"factories":[],"schemas":[]}"#;
-    static OLD_WIRE: SharedMetadata = SharedMetadata(abi::Metadata {
+    const UNSUPPORTED_WIRE_MANIFEST: &[u8] = br#"{"abi_version":"1.0.0","wire_version":2,"plugin":{"id":"unsupported-wire-native","version":"1"},"factories":[],"schemas":[]}"#;
+    static UNSUPPORTED_WIRE: SharedMetadata = SharedMetadata(abi::Metadata {
         header: abi::Header::new::<abi::Metadata>(),
         target: abi::BorrowedBytes {
             data: sdk::metadata::TARGET.as_ptr(),
             len: sdk::metadata::TARGET.len(),
         },
         manifest: abi::BorrowedBytes {
-            data: OLD_MANIFEST.as_ptr(),
-            len: OLD_MANIFEST.len(),
+            data: UNSUPPORTED_WIRE_MANIFEST.as_ptr(),
+            len: UNSUPPORTED_WIRE_MANIFEST.len(),
         },
     });
-    unsafe extern "C" fn old_wire_metadata() -> *const abi::Metadata {
-        &OLD_WIRE.0
+    unsafe extern "C" fn unsupported_wire_metadata() -> *const abi::Metadata {
+        &UNSUPPORTED_WIRE.0
     }
-    let error = unsafe { NativePlugin::from_entry_points(old_wire_metadata, must_not_enter) }
-        .unwrap_err_string();
+    let error =
+        unsafe { NativePlugin::from_entry_points(unsupported_wire_metadata, must_not_enter) }
+            .unwrap_err_string();
     assert!(error.contains("unsupported native plugin ABI or wire format"));
 }
 

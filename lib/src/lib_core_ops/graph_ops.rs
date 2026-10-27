@@ -199,7 +199,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -235,7 +235,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -259,7 +259,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -285,7 +285,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -327,7 +327,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -348,7 +348,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )

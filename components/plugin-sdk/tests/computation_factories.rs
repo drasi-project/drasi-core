@@ -70,7 +70,7 @@ async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_chan
         .query(
             drasi_lib::Query::cypher("query")
                 .query("MATCH (n) RETURN count(n) AS total")
-                .from_source("mock")
+                .from_input("mock")
                 .enable_bootstrap(false)
                 .build(),
         )

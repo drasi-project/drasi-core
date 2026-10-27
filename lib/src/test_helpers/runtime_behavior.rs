@@ -34,7 +34,7 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
             .with_query(
                 crate::Query::cypher("query")
                     .query(text)
-                    .from_source("source")
+                    .from_input("source")
                     .enable_bootstrap(false)
                     .with_dispatch_buffer_capacity(capacity)
                     .build(),
@@ -158,6 +158,7 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
                 element: person("two", "same", 1001),
             },
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: person("one", "changed", 1002),
             },
             SourceChange::Delete {
@@ -415,7 +416,7 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
         .with_query(
             crate::Query::cypher("query")
                 .query("MATCH (n:Person) RETURN n.name AS name")
-                .from_source("good")
+                .from_input("good")
                 .enable_bootstrap(false)
                 .build(),
         )

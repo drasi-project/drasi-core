@@ -32,7 +32,7 @@ impl NativePlugin {
         // Exported handles retain the definition; metadata is copied before the
         // temporary export backing is released. Statically linked code cannot unload.
         unsafe {
-            Self::from_exports(
+            Self::from_exports_with_output_reads(
                 || exported.metadata(),
                 |out| exported.entry(out),
                 || Some(exported.services()),
@@ -41,11 +41,13 @@ impl NativePlugin {
                 || Some(exported.consumer()),
                 || Some(exported.configuration()),
                 || Some(exported.batching()),
-                || Some(exported.query_snapshots()),
+                || Some(exported.output_snapshots()),
                 || Some(exported.consumer_progress()),
                 || Some(exported.source_schema()),
                 || Some(exported.bootstrap_coordination()),
                 || Some(exported.activation_credentials()),
+                || Some(exported.output_reads()),
+                || Some(exported.output_follow()),
             )
         }
     }
@@ -322,7 +324,7 @@ impl NativePlugin {
         consumer: impl FnOnce() -> Option<*const abi::consumer::PluginConsumerV1>,
         configuration: impl FnOnce() -> Option<*const abi::configuration::ConfigurationMetadataV1>,
         batching: impl FnOnce() -> Option<*const abi::batching::PluginBatchingV1>,
-        query_snapshots: impl FnOnce() -> Option<*const abi::query_snapshots::PluginQuerySnapshotsV1>,
+        output_snapshots: impl FnOnce() -> Option<*const abi::output_snapshots::PluginOutputSnapshotsV1>,
         consumer_progress: impl FnOnce() -> Option<
             *const abi::consumer_progress::PluginConsumerProgressV1,
         >,
@@ -334,10 +336,59 @@ impl NativePlugin {
             *const abi::activation_credentials::PluginActivationCredentialsV1,
         >,
     ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports_with_output_reads(
+                metadata,
+                entry,
+                services,
+                recovery,
+                bootstrap,
+                consumer,
+                configuration,
+                batching,
+                output_snapshots,
+                consumer_progress,
+                source_schema,
+                coordination,
+                activation_credentials,
+                || None,
+                || None,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn from_exports_with_output_reads(
+        metadata: impl FnOnce() -> *const abi::Metadata,
+        entry: impl FnOnce(
+            *mut abi::PluginHandle,
+        ) -> Result<(), drasi_computation_plugin_sdk::transport::Failure>,
+        services: impl FnOnce() -> Option<*const abi::services::PluginServicesV1>,
+        recovery: impl FnOnce() -> Option<*const abi::recovery::PluginRecoveryV1>,
+        bootstrap: impl FnOnce() -> Option<*const abi::bootstrap::PluginBootstrapV1>,
+        consumer: impl FnOnce() -> Option<*const abi::consumer::PluginConsumerV1>,
+        configuration: impl FnOnce() -> Option<*const abi::configuration::ConfigurationMetadataV1>,
+        batching: impl FnOnce() -> Option<*const abi::batching::PluginBatchingV1>,
+        output_snapshots: impl FnOnce() -> Option<*const abi::output_snapshots::PluginOutputSnapshotsV1>,
+        consumer_progress: impl FnOnce() -> Option<
+            *const abi::consumer_progress::PluginConsumerProgressV1,
+        >,
+        source_schema: impl FnOnce() -> Option<*const abi::source_schema::PluginSourceSchemaV1>,
+        coordination: impl FnOnce() -> Option<
+            *const abi::bootstrap_coordination::PluginBootstrapCoordinationV1,
+        >,
+        activation_credentials: impl FnOnce() -> Option<
+            *const abi::activation_credentials::PluginActivationCredentialsV1,
+        >,
+        output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV1>,
+        output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV1>,
+    ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata())? };
+        let output_reads = unsafe { read_output_reads(output_reads(), &manifest)? };
+        let output_follow = unsafe { read_output_follow(output_follow(), &manifest)? };
         let mut configurations = unsafe { read_configuration(configuration(), &manifest)? };
         let batching = unsafe { read_batching(batching())? };
-        let query_snapshots = unsafe { read_query_snapshots(query_snapshots())? };
+        let output_snapshots = unsafe { read_output_snapshots(output_snapshots())? };
         let consumer_progress = unsafe { read_consumer_progress(consumer_progress())? };
         let source_schema = unsafe { read_source_schema(source_schema())? };
         let coordination = unsafe { read_bootstrap_coordination(coordination())? };
@@ -391,7 +442,7 @@ impl NativePlugin {
             } else {
                 None
             };
-            let snapshot_reads = if let Some(extension) = query_snapshots {
+            let snapshot_reads = if let Some(extension) = output_snapshots {
                 let response = unsafe {
                     drasi_computation_plugin_sdk::transport::take_reply(extension
                         .factory
@@ -514,8 +565,10 @@ impl NativePlugin {
                 .with_consumer_progress(consumer_progress)?
                 .with_bootstrap_coordination(source_coordination)?
                 .with_batching(sink_batching)?
-                .with_query_snapshots(snapshot_reads)?
+                .with_output_snapshots(snapshot_reads)?
                 .with_source_schema(source_schema)
+                .with_output_reads(output_reads)
+                .with_output_follow(output_follow)
                 .with_configuration_details(configurations.remove(&metadata.implementation))
             }));
         }
@@ -627,8 +680,8 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     let batching = unsafe { library.get::<abi::batching::BatchingFn>(abi::batching::SYMBOL) }
         .ok()
         .map(|symbol| *symbol);
-    let query_snapshots = unsafe {
-        library.get::<abi::query_snapshots::QuerySnapshotsFn>(abi::query_snapshots::SYMBOL)
+    let output_snapshots = unsafe {
+        library.get::<abi::output_snapshots::OutputSnapshotsFn>(abi::output_snapshots::SYMBOL)
     }
     .ok()
     .map(|symbol| *symbol);
@@ -648,6 +701,14 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     }
     .ok()
     .map(|symbol| *symbol);
+    let output_reads =
+        unsafe { library.get::<abi::output_reads::OutputReadsFn>(abi::output_reads::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let output_follow =
+        unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -656,11 +717,13 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && consumer.is_none()
         && configuration.is_none()
         && batching.is_none()
-        && query_snapshots.is_none()
+        && output_snapshots.is_none()
         && consumer_progress.is_none()
         && source_schema.is_none()
         && coordination.is_none()
         && activation_credentials.is_none()
+        && output_reads.is_none()
+        && output_follow.is_none()
     {
         return Ok(None);
     }
@@ -673,7 +736,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     let entry =
         entry.ok_or_else(|| anyhow::anyhow!("native computation entry symbol is missing"))?;
     Ok(Some(unsafe {
-        NativePlugin::from_exports(
+        NativePlugin::from_exports_with_output_reads(
             || metadata(),
             |out| take_status(entry(out)),
             || services.map(|entry| entry()),
@@ -682,11 +745,13 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
             || consumer.map(|entry| entry()),
             || configuration.map(|entry| entry()),
             || batching.map(|entry| entry()),
-            || query_snapshots.map(|entry| entry()),
+            || output_snapshots.map(|entry| entry()),
             || consumer_progress.map(|entry| entry()),
             || source_schema.map(|entry| entry()),
             || coordination.map(|entry| entry()),
             || activation_credentials.map(|entry| entry()),
+            || output_reads.map(|entry| entry()),
+            || output_follow.map(|entry| entry()),
         )?
     }))
 }
@@ -772,18 +837,18 @@ unsafe fn read_batching(
         .transpose()
 }
 
-unsafe fn read_query_snapshots(
-    entry: Option<*const abi::query_snapshots::PluginQuerySnapshotsV1>,
-) -> anyhow::Result<Option<abi::query_snapshots::PluginQuerySnapshotsV1>> {
+unsafe fn read_output_snapshots(
+    entry: Option<*const abi::output_snapshots::PluginOutputSnapshotsV1>,
+) -> anyhow::Result<Option<abi::output_snapshots::PluginOutputSnapshotsV1>> {
     entry
         .map(|entry| {
             let table = *unsafe { checked_table(entry)? };
             anyhow::ensure!(
-                table.version == abi::query_snapshots::VERSION
+                table.version == abi::output_snapshots::VERSION
                     && table.reserved == 0
                     && table.factory.is_some()
                     && table.create.is_some(),
-                "incompatible or incomplete native query-snapshot extension"
+                "incompatible or incomplete native output-snapshot extension"
             );
             Ok(table)
         })
@@ -826,6 +891,62 @@ unsafe fn read_source_schema(
             Ok(table)
         })
         .transpose()
+}
+
+/// The extension is required exactly when some factory declares output reads.
+unsafe fn read_output_reads(
+    entry: Option<*const abi::output_reads::PluginOutputReadsV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<Option<abi::output_reads::PluginOutputReadsV1>> {
+    let table = entry
+        .map(|entry| -> anyhow::Result<_> {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::output_reads::VERSION
+                    && table.reserved == 0
+                    && table.open.is_some(),
+                "incompatible or incomplete native output-reads extension"
+            );
+            Ok(table)
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        table.is_some()
+            || !manifest
+                .factories
+                .iter()
+                .any(|factory| factory.capabilities.declares_output_reads()),
+        "native factory declares output reads without the negotiated extension"
+    );
+    Ok(table)
+}
+
+/// The extension is required exactly when some factory declares output follows.
+unsafe fn read_output_follow(
+    entry: Option<*const abi::output_follow::PluginOutputFollowV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<Option<abi::output_follow::PluginOutputFollowV1>> {
+    let table = entry
+        .map(|entry| -> anyhow::Result<_> {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::output_follow::VERSION
+                    && table.reserved == 0
+                    && table.open.is_some(),
+                "incompatible or incomplete native output-follow extension"
+            );
+            Ok(table)
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        table.is_some()
+            || !manifest
+                .factories
+                .iter()
+                .any(|factory| factory.capabilities.declares_output_follows()),
+        "native factory declares output follows without the negotiated extension"
+    );
+    Ok(table)
 }
 
 unsafe fn read_activation_credentials(
@@ -956,8 +1077,8 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     let batching = unsafe { library.get::<abi::batching::BatchingFn>(abi::batching::SYMBOL) }
         .ok()
         .map(|symbol| *symbol);
-    let query_snapshots = unsafe {
-        library.get::<abi::query_snapshots::QuerySnapshotsFn>(abi::query_snapshots::SYMBOL)
+    let output_snapshots = unsafe {
+        library.get::<abi::output_snapshots::OutputSnapshotsFn>(abi::output_snapshots::SYMBOL)
     }
     .ok()
     .map(|symbol| *symbol);
@@ -977,6 +1098,14 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     }
     .ok()
     .map(|symbol| *symbol);
+    let output_reads =
+        unsafe { library.get::<abi::output_reads::OutputReadsFn>(abi::output_reads::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let output_follow =
+        unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && activation_credentials.is_none()
@@ -986,10 +1115,12 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && consumer.is_none()
         && configuration.is_none()
         && batching.is_none()
-        && query_snapshots.is_none()
+        && output_snapshots.is_none()
         && consumer_progress.is_none()
         && source_schema.is_none()
         && coordination.is_none()
+        && output_reads.is_none()
+        && output_follow.is_none()
     {
         return Ok(None);
     }
@@ -1004,10 +1135,12 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     unsafe { read_consumer(consumer.map(|entry| entry()))? };
     unsafe { read_configuration(configuration.map(|entry| entry()), &manifest)? };
     unsafe { read_batching(batching.map(|entry| entry()))? };
-    unsafe { read_query_snapshots(query_snapshots.map(|entry| entry()))? };
+    unsafe { read_output_snapshots(output_snapshots.map(|entry| entry()))? };
     unsafe { read_consumer_progress(consumer_progress.map(|entry| entry()))? };
     unsafe { read_source_schema(source_schema.map(|entry| entry()))? };
     unsafe { read_bootstrap_coordination(coordination.map(|entry| entry()))? };
+    unsafe { read_output_reads(output_reads.map(|entry| entry()), &manifest)? };
+    unsafe { read_output_follow(output_follow.map(|entry| entry()), &manifest)? };
     let bootstrap = unsafe { read_bootstrap(bootstrap.map(|entry| entry()))? };
     anyhow::ensure!(
         !manifest.factories.is_empty() || bootstrap.is_some(),

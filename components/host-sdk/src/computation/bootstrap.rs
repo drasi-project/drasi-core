@@ -132,6 +132,7 @@ impl NativeBootstrapFactory {
         source: Option<Arc<super::NativeSourceBootstrapResource>>,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
         let request = CreateRequest {
+            inputs: Vec::new(),
             activation_credentials_bound: false,
             id,
             configuration,

@@ -209,6 +209,14 @@ fn owned_graph_envelope_path_roundtrips_every_change_variant() {
     };
     let changes = [
         SourceChange::Update {
+            removed_properties: Default::default(),
+            element: element(ElementPropertyMap::from(json!({ "name": "Alicia" })), 2_000),
+        },
+        SourceChange::Update {
+            removed_properties: ["nickname".to_string()].into(),
+            element: element(ElementPropertyMap::from(json!({ "name": null })), 2_000),
+        },
+        SourceChange::Replace {
             element: element(ElementPropertyMap::from(json!({ "name": "Alicia" })), 2_000),
         },
         SourceChange::Delete {
@@ -238,8 +246,67 @@ fn owned_graph_envelope_path_roundtrips_every_change_variant() {
 }
 
 #[test]
+fn removals_and_replacement_keep_distinct_semantics_and_identities() {
+    let properties = ElementPropertyMap::from(json!({ "name": "Alicia" }));
+    let plain = SourceChange::update(element(properties.clone(), 2_000));
+    let removing = SourceChange::update_with_removals(
+        element(properties.clone(), 2_000),
+        ["nickname".to_string()].into(),
+    )
+    .unwrap();
+    let replace = SourceChange::replace(element(properties.clone(), 2_000));
+    let insert = SourceChange::Insert {
+        element: element(properties.clone(), 2_000),
+    };
+
+    let envelopes: Vec<_> = [&plain, &removing, &replace, &insert]
+        .into_iter()
+        .map(|change| {
+            source_event_to_envelope(
+                &wrapper(change.clone()),
+                SystemMetadataExtensions::default(),
+            )
+            .unwrap()
+        })
+        .collect();
+    // The same element under different mutation semantics must not share an identity.
+    let ids: std::collections::HashSet<_> = envelopes
+        .iter()
+        .map(|envelope| envelope.change_set().id())
+        .collect();
+    assert_eq!(ids.len(), 4);
+
+    let [_, removed, replaced, _] = envelopes.as_slice() else {
+        unreachable!()
+    };
+    let removal = &removed.change_set().updated()[0];
+    assert_eq!(removal.semantics(), UpdateSemantics::Patch);
+    assert!(matches!(
+        removal.metadata(),
+        UpdateMetadata::GraphPatch { removed_properties }
+            if removed_properties.contains("nickname")
+    ));
+    let replacement = &replaced.change_set().updated()[0];
+    assert_eq!(replacement.semantics(), UpdateSemantics::Replace);
+    assert_eq!(replacement.metadata(), &UpdateMetadata::None);
+
+    assert_eq!(source_change_from_envelope(removed).unwrap(), removing);
+    assert_eq!(source_change_from_envelope(replaced).unwrap(), replace);
+
+    let conflicting = SourceChange::Update {
+        element: element(ElementPropertyMap::from(json!({ "name": "x" })), 2_000),
+        removed_properties: ["name".to_string()].into(),
+    };
+    assert!(matches!(
+        source_event_to_envelope(&wrapper(conflicting), SystemMetadataExtensions::default()),
+        Err(ChangeAdapterError::InvalidSourceChange(_))
+    ));
+}
+
+#[test]
 fn graph_updates_and_deletes_roundtrip_with_explicit_semantics() {
     let update_input = wrapper(SourceChange::Update {
+        removed_properties: Default::default(),
         element: element(ElementPropertyMap::from(json!({ "name": "Alicia" })), 2_000),
     });
     let update =

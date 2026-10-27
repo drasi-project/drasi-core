@@ -154,6 +154,19 @@ pub trait ComputationBootstrapProvider: Send + Sync {
     fn completion_state(&self) -> anyhow::Result<Option<Bytes>> {
         Ok(None)
     }
+    /// A prepared history prefix to evaluate through the normal input path
+    /// before reading already-bound live pipes. It is not snapshot data and
+    /// must retain its producer epoch and logical positions.
+    fn take_input_replay(&self) -> anyhow::Result<Vec<ChangeEnvelope>> {
+        Ok(Vec::new())
+    }
+    /// Host-selected origin of a snapshot stream, for input-local processing.
+    /// It does not rename records or claim that snapshot item ordinals are
+    /// live producer positions. Providers without this metadata retain the
+    /// existing record-namespace middleware selection.
+    fn input_origin(&self, _stream: &StreamId) -> anyhow::Result<Option<super::OutputEndpoint>> {
+        Ok(None)
+    }
 }
 
 pub struct QueryBootstrapResource(pub Arc<dyn ComputationBootstrapProvider>);

@@ -289,7 +289,8 @@ fn should_send_change(
 
     match change {
         drasi_core::models::SourceChange::Insert { element }
-        | drasi_core::models::SourceChange::Update { element } => match element {
+        | drasi_core::models::SourceChange::Replace { element }
+        | drasi_core::models::SourceChange::Update { element, .. } => match element {
             drasi_core::models::Element::Node { metadata, .. } => metadata
                 .labels
                 .iter()

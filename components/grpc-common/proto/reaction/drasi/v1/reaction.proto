@@ -32,6 +32,15 @@ service ReactionService {
     rpc ProcessResults(ProcessResultsRequest) returns (ProcessResultsResponse);
 }
 
+// Producer-neutral graph changes from any source, transformer or query,
+// delivered by the native gRPC sink. Unlike `ReactionService.ProcessResults`
+// (the query reaction's row diffs), it carries no query identity or evaluator
+// row signature: each change states its real operation, its canonical element
+// identity and only the images the record actually holds.
+service ChangeService {
+    rpc ProcessChanges(ProcessChangesRequest) returns (ProcessResultsResponse);
+}
+
 // One ProcessResults call. Carries a single-query batch in `results`
 // plus configured per-call request metadata in `metadata`.
 //
@@ -118,4 +127,83 @@ message QueryResultItem {
     google.protobuf.Timestamp timestamp = 6;
     google.protobuf.Struct metadata = 7;
     google.protobuf.Struct payload = 8;
+}
+
+// One ProcessChanges call: a single-output batch of ordered graph changes plus
+// the configured per-call request metadata (also sent as gRPC headers).
+message ProcessChangesRequest {
+    ChangeBatch changes = 1;
+    map<string, string> metadata = 2;
+}
+
+// The configured output that produced a batch: a real component output port,
+// which may belong to a source, transformer or query. `alias` is only the
+// sink's route/display name for the output; it is not an identity.
+message OutputIdentity {
+    string alias     = 1;
+    string component = 2;
+    string port      = 3;
+}
+
+// Changes from one configured output. It is not a query identity. `timestamp`
+// is the latest item time.
+message ChangeBatch {
+    OutputIdentity output = 1;
+    repeated Change changes = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+enum ChangeOperation {
+    CHANGE_OPERATION_UNSPECIFIED = 0;
+    // The element joins the dataset; `after` is its complete image.
+    CHANGE_OPERATION_ADD         = 1;
+    // `after` is the complete element and replaces the previous one, so absent
+    // properties are removed.
+    CHANGE_OPERATION_REPLACE     = 2;
+    // `after` holds only the properties that are set (a null stays null);
+    // `removed_properties` names the properties that are removed; everything
+    // else is unchanged.
+    CHANGE_OPERATION_PATCH       = 3;
+    // The element leaves the dataset.
+    CHANGE_OPERATION_DELETE      = 4;
+}
+
+// Canonical element identity: the producing output's namespace and an opaque,
+// output-scoped key. For a query result row this is the evaluator's row
+// identity, hex encoded.
+message ElementIdentity {
+    string namespace = 1;
+    string id = 2;
+}
+
+// Node or relation shape. Absent when a deletion carries only its identity.
+message ElementShape {
+    enum Kind {
+        KIND_UNSPECIFIED = 0;
+        KIND_NODE        = 1;
+        KIND_RELATION    = 2;
+    }
+    Kind kind = 1;
+    repeated string labels = 2;
+    // Relation endpoints: (in_node)-[relation]->(out_node).
+    ElementIdentity in_node = 3;
+    ElementIdentity out_node = 4;
+}
+
+// One element change. `before`, `after` and `element` are present only when the
+// record carries them: an unknown before-image is absent, not an empty object.
+message Change {
+    ChangeOperation operation = 1;
+    ElementIdentity identity = 2;
+    ElementShape element = 3;
+    google.protobuf.Struct before = 4;
+    google.protobuf.Struct after = 5;
+    repeated string removed_properties = 6;
+    // The producing stream's sequence for the envelope carrying this change.
+    uint64 sequence = 7;
+    // The envelope's event time, only when it carries one. Never derived from
+    // the element's business time or the sequence.
+    google.protobuf.Timestamp timestamp = 8;
+    // Canonical JSON change (or a rendered body template), as a Struct.
+    google.protobuf.Struct payload = 9;
 }

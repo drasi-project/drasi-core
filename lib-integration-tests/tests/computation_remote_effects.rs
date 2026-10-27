@@ -335,7 +335,7 @@ async fn configured_pipeline(
     let checkpoints = Arc::new(RedbStateStoreProvider::new(root.join("checkpoints.redb"))?);
     let query = Query::cypher(QUERY)
         .query("MATCH (g:Group)-[:HAS]->(p:Person) WHERE g.active = true RETURN p.name AS name")
-        .from_source(SOURCE)
+        .from_input(SOURCE)
         .enable_bootstrap(false)
         .with_outbox_capacity(16)
         .with_storage_backend(StorageBackendRef::Named("rocks".into()))

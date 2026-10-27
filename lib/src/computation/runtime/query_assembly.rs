@@ -10,6 +10,179 @@ fn declaration_id(query: &str) -> anyhow::Result<ResourceId> {
 }
 
 impl Runtime {
+    pub(crate) async fn refresh_pending_query_inputs(&self) -> anyhow::Result<()> {
+        let _mutation = self.mutations.lock().await;
+        self.refresh_pending_query_inputs_locked().await
+    }
+
+    pub(super) async fn refresh_pending_query_inputs_locked(&self) -> anyhow::Result<()> {
+        let control = self.control()?;
+        let mut attempted = BTreeSet::new();
+        loop {
+            let publication = control.registry_snapshot();
+            let mut candidate = None;
+            for (query, declaration) in self.ordinary_queries_at(&publication)? {
+                if attempted.contains(&query)
+                    || declaration.failure.is_some()
+                    || publication
+                        .observed
+                        .components
+                        .get(&query)
+                        .is_some_and(|observed| {
+                            super::is_active(observed) || observed.failure.is_some()
+                        })
+                {
+                    continue;
+                }
+                let config = self.native_query_configuration_at(&publication, query.as_str())?;
+                let waiting_for_native = config.inputs.iter().any(|input| {
+                    let available = publication.desired.nodes.iter().any(|node| {
+                        node.descriptor.id().as_str() == input.component
+                            && node
+                                .descriptor
+                                .ports()
+                                .iter()
+                                .any(|port| port.direction() == PortDirection::Output)
+                    });
+                    let connected = publication.desired.edges.iter().any(|edge| {
+                        edge.definition.from.component.as_str() == input.component
+                            && edge.definition.to.component == query
+                    }) || publication.desired.unbound_relationships.iter().any(
+                        |edge| {
+                            edge.definition.from.component.as_str() == input.component
+                                && edge.definition.to.component == query
+                        },
+                    );
+                    available && !connected
+                });
+                if waiting_for_native {
+                    let producers: Vec<_> = config
+                        .inputs
+                        .iter()
+                        .filter(|input| {
+                            publication.desired.nodes.iter().any(|node| {
+                                node.descriptor.id().as_str() == input.component
+                                    && node
+                                        .descriptor
+                                        .ports()
+                                        .iter()
+                                        .any(|port| port.direction() == PortDirection::Output)
+                            })
+                        })
+                        .map(|input| input.component.clone())
+                        .collect();
+                    candidate = Some((query, config, producers, true));
+                    break;
+                }
+            }
+            if candidate.is_none() {
+                let native_factory = ContinuousQueryFactory::default()
+                    .descriptor()
+                    .implementation
+                    .clone();
+                for (query, specification) in &publication.desired.specifications {
+                    if attempted.contains(query)
+                        || specification.implementation != native_factory
+                        || !specification.configuration.contains_key("query_config")
+                        || publication
+                            .observed
+                            .components
+                            .get(query)
+                            .is_some_and(|observed| {
+                                super::is_active(observed) || observed.failure.is_some()
+                            })
+                    {
+                        continue;
+                    }
+                    let config =
+                        self.native_query_configuration_at(&publication, query.as_str())?;
+                    let mut producers = Vec::new();
+                    for input in &config.inputs {
+                        let pending = ComputationPipelineBuilder::pending_native_endpoint(
+                            query.as_str(),
+                            &input.component,
+                        )?;
+                        if publication
+                            .desired
+                            .unbound_relationships
+                            .iter()
+                            .any(|edge| {
+                                edge.definition.from == pending
+                                    && edge.definition.to.component == *query
+                            })
+                            && publication.desired.nodes.iter().any(|node| {
+                                node.descriptor.id().as_str() == input.component
+                                    && node
+                                        .descriptor
+                                        .ports()
+                                        .iter()
+                                        .any(|port| port.direction() == PortDirection::Output)
+                            })
+                        {
+                            producers.push(input.component.clone());
+                        }
+                    }
+                    if !producers.is_empty() {
+                        candidate = Some((query.clone(), config, producers, false));
+                        break;
+                    }
+                }
+            }
+            let Some((query, config, producers, ordinary)) = candidate else {
+                return Ok(());
+            };
+            let plan = if ordinary {
+                self.ordinary_query_update_plan(&publication, query.as_str(), config, false)
+                    .await?
+            } else {
+                self.native_query_update_plan(query.as_str(), config)
+                    .await?
+            };
+            let report = control
+                .mutate_members(plan.members, plan.changes, plan.bindings, BTreeSet::new())
+                .await?;
+            anyhow::ensure!(
+                report.committed && report.summary == OperationSummary::Completed,
+                "resolving query input endpoints is incomplete: {report:?}"
+            );
+            attempted.insert(query.clone());
+            let resolved = control.registry_snapshot();
+            let failed_declaration = self
+                .ordinary_queries_at(&resolved)?
+                .get(&query)
+                .is_some_and(|declaration| declaration.failure.is_some());
+            if !failed_declaration {
+                for producer in producers {
+                    anyhow::ensure!(
+                        resolved
+                            .desired
+                            .edges
+                            .iter()
+                            .map(|edge| &edge.definition)
+                            .chain(
+                                resolved
+                                    .desired
+                                    .unbound_relationships
+                                    .iter()
+                                    .map(|edge| &edge.definition)
+                            )
+                            .any(|edge| edge.from.component.as_str() == producer
+                                && edge.to.component == query),
+                        "resolved query '{query}' omitted its input connection from '{producer}'"
+                    );
+                }
+            }
+            if plan.running {
+                control
+                    .request_member_activation(super::native_query::query_members(
+                        &control.registry_snapshot(),
+                        &query,
+                    ))
+                    .await?;
+            }
+        }
+    }
+
     pub(crate) fn component_handle(&self, id: &ComponentId) -> anyhow::Result<ComponentHandle> {
         let control = self.control()?;
         let publication = control.registry_snapshot();
@@ -186,13 +359,69 @@ impl Runtime {
             .transpose()?;
         members.retain(|id, _| !outlets.contains(id));
         let selected: BTreeSet<_> = members.keys().cloned().collect();
+        let original = self.native_query_configuration_at(publication, id)?;
+        let native_inputs: BTreeMap<_, _> = original
+            .inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, input)| {
+                publication.desired.nodes.iter().any(|node| {
+                    node.descriptor.id().as_str() == input.component
+                        && node
+                            .descriptor
+                            .ports()
+                            .iter()
+                            .any(|port| port.direction() == PortDirection::Output)
+                })
+            })
+            .map(|(rank, input)| {
+                let explicit = input.port.as_deref().map(PortId::try_new).transpose()?;
+                let endpoint = publication.output_endpoint(
+                    &ComponentId::try_new(input.component.as_str())?,
+                    explicit.as_ref(),
+                )?;
+                Ok((endpoint, rank))
+            })
+            .collect::<GraphResult<_>>()?;
+        let scheduled = QueryScheduledSourceFactory::default()
+            .descriptor()
+            .implementation
+            .clone();
+        let input_queue = publication.desired.edges.iter().find_map(|edge| {
+            if edge.definition.to.component == query
+                && publication
+                    .desired
+                    .specifications
+                    .get(&edge.definition.from.component)
+                    .is_some_and(|spec| spec.implementation == scheduled)
+            {
+                if let DesiredPipe::Ranked(pipe) = &edge.pipe {
+                    return Some(&pipe.queue);
+                }
+            }
+            None
+        });
+        let native_policy = RelationshipPolicy {
+            activation: if original.enable_bootstrap {
+                ActivationCoupling::RequiresRunning
+            } else {
+                ActivationCoupling::Independent
+            },
+            ..Default::default()
+        };
         anyhow::ensure!(
             publication
                 .desired
                 .edges
                 .iter()
                 .filter(|edge| edge.definition.to.component == query)
-                .all(|edge| selected.contains(&edge.definition.from.component)),
+                .all(|edge| selected.contains(&edge.definition.from.component)
+                    || native_inputs.contains_key(&edge.definition.from)
+                        && edge.policy == native_policy
+                        && matches!(&edge.pipe, DesiredPipe::Ranked(pipe)
+                            if Some(&pipe.queue) == input_queue
+                                && pipe.source_rank == native_inputs[&edge.definition.from]
+                                && !pipe.drop_when_full && pipe.source_id.is_none() && pipe.source_dispatch.is_none())),
             "query '{id}' has custom input connections; use computation topology operations"
         );
         let mut batch = self.ordinary_query_batch(&config, catalog).await?;
@@ -240,21 +469,23 @@ impl Runtime {
             .resources;
         let mut target = publication.desired.select(GraphSelection::All)?;
         let mut changes = Vec::new();
-        target.relationships.retain(|edge| {
-            let touches = selected.contains(&edge.definition.from.component)
-                || selected.contains(&edge.definition.to.component);
-            let external_output = edge.definition.from.component == query
-                && !selected.contains(&edge.definition.to.component);
-            if touches && !external_output {
-                changes.push(DesiredMutation::Unbind {
-                    edge: edge.definition.clone(),
-                    policy: RemovalPolicy::Reject,
-                });
-                false
-            } else {
-                true
-            }
-        });
+        for relationships in [&mut target.relationships, &mut target.boundary_relationships] {
+            relationships.retain(|edge| {
+                let touches = selected.contains(&edge.definition.from.component)
+                    || selected.contains(&edge.definition.to.component);
+                let external_output = edge.definition.from.component == query
+                    && !selected.contains(&edge.definition.to.component);
+                if touches && !external_output {
+                    changes.push(DesiredMutation::Unbind {
+                        edge: edge.definition.clone(),
+                        policy: RemovalPolicy::Reject,
+                    });
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         let replacements: BTreeSet<_> = batch
             .definition
             .components
@@ -288,11 +519,15 @@ impl Runtime {
         target
             .relationships
             .extend(batch.definition.relationships.iter().cloned());
+        target
+            .boundary_relationships
+            .extend(batch.definition.boundary_relationships.iter().cloned());
         changes.extend(
             batch
                 .definition
                 .relationships
                 .iter()
+                .chain(batch.definition.boundary_relationships.iter())
                 .cloned()
                 .map(DesiredMutation::Bind),
         );
@@ -328,6 +563,22 @@ impl Runtime {
         for (source, _) in &batch.definition.subscriptions {
             if let Some(observed) = publication.observed.components.get(source) {
                 members.insert(source.clone(), observed.generation);
+            }
+            for producer in native_inputs
+                .keys()
+                .map(|endpoint| &endpoint.component)
+                .chain(
+                    batch
+                        .definition
+                        .boundary_relationships
+                        .iter()
+                        .filter(|edge| edge.definition.to.component == query)
+                        .map(|edge| &edge.definition.from.component),
+                )
+            {
+                if let Some(observed) = publication.observed.components.get(producer) {
+                    members.insert(producer.clone(), observed.generation);
+                }
             }
         }
         batch.bindings.defer_activation = true;
@@ -397,31 +648,67 @@ impl Runtime {
                 self.config.default_recovery_policy.unwrap_or_default(),
                 self.config.global_priority_queue_capacity.unwrap_or(10_000),
                 self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
-            )?;
+            )?
+            .with_output_catalogue(
+                self.config.id.clone(),
+                OutputCatalogue::new(self.control()?),
+            );
             if let Some(catalog) = catalog {
                 builder = builder.with_catalog(catalog);
             }
-            for source in &config.sources {
+            for source in &config.inputs {
+                let declared = publication
+                    .desired
+                    .nodes
+                    .iter()
+                    .find(|node| node.descriptor.id().as_str() == source.component);
+                if declared.is_none() && source.port.as_deref().is_some_and(|port| port != "out") {
+                    builder = builder.native_source(Endpoint::new(
+                        ComponentId::try_new(source.component.as_str())?,
+                        PortId::try_new(source.port.as_deref().expect("explicit port"))?,
+                    ))?;
+                    continue;
+                }
+                if publication.desired.nodes.iter().any(|node| {
+                    node.descriptor.id().as_str() == source.component
+                        && node
+                            .descriptor
+                            .ports()
+                            .iter()
+                            .any(|port| port.direction() == PortDirection::Output)
+                }) {
+                    let component = ComponentId::try_new(source.component.as_str())?;
+                    let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
+                    let output = publication.output_endpoint(&component, explicit.as_ref())?;
+                    builder = builder.native_source(output)?;
+                    continue;
+                }
+                anyhow::ensure!(
+                    source.port.as_deref().map_or(true, |port| port == "out"),
+                    "source '{}' has no output port '{}'",
+                    source.component,
+                    source.port.as_deref().unwrap_or_default()
+                );
                 let host =
-                    match self.source_host(&source.source_id).await {
+                    match self.source_host(&source.component).await {
                         Ok(host) => Some(host),
                         Err(error)
                             if error
                                 .downcast_ref::<crate::error::ComponentNotFoundError>()
                                 .is_some()
                                 && !publication.desired.nodes.iter().any(|node| {
-                                    node.descriptor.id().as_str() == source.source_id
+                                    node.descriptor.id().as_str() == source.component
                                 }) =>
                         {
                             None
                         }
                         Err(error) => {
                             return Err(error
-                                .context(format!("Source '{}' is unavailable", source.source_id)))
+                                .context(format!("Source '{}' is unavailable", source.component)))
                         }
                     };
                 builder = builder.source_binding(
-                    &source.source_id,
+                    &source.component,
                     host,
                     SourceSubscriptionOptions {
                         borrowed_recovery: true,
@@ -527,6 +814,13 @@ impl Runtime {
                 }),
             ),
         );
+        let source_hosts: Vec<_> = batch
+            .definition
+            .resources
+            .iter()
+            .filter(|resource| resource.role == ResourceRole::LegacySource)
+            .map(|resource| resource.id.clone())
+            .collect();
         for component in &mut batch.definition.components {
             component.lifecycle.auto_start = config.auto_start;
             if component.descriptor.id() != &id {
@@ -539,16 +833,9 @@ impl Runtime {
                 .dependencies
                 .insert("declaration".into(), vec![declaration.clone()]);
             if valid {
-                specification.dependencies.insert(
-                    "source_hosts".into(),
-                    config
-                        .sources
-                        .iter()
-                        .map(|source| {
-                            ComputationPipelineBuilder::source_resource_id(&source.source_id)
-                        })
-                        .collect::<GraphResult<Vec<_>>>()?,
-                );
+                specification
+                    .dependencies
+                    .insert("source_hosts".into(), source_hosts.clone());
             }
             if let Some((name, _)) = &backend {
                 specification

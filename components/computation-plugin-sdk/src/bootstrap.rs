@@ -195,6 +195,7 @@ pub struct Watermark {
     pub source_id: Option<String>,
     pub sequence: u64,
     pub position: Option<serde_bytes::ByteBuf>,
+    pub producer: Option<drasi_computation_contracts::GraphProducerIdentity>,
 }
 impl From<BootstrapWatermark> for Watermark {
     fn from(value: BootstrapWatermark) -> Self {
@@ -203,6 +204,7 @@ impl From<BootstrapWatermark> for Watermark {
             source_id: value.source_id,
             sequence: value.sequence,
             position: value.position.map(|bytes| bytes.to_vec().into()),
+            producer: value.producer,
         }
     }
 }
@@ -213,6 +215,7 @@ impl From<Watermark> for BootstrapWatermark {
             source_id: value.source_id,
             sequence: value.sequence,
             position: value.position.map(|bytes| bytes.into_vec().into()),
+            producer: value.producer,
         }
     }
 }
@@ -235,6 +238,12 @@ pub fn validate_watermarks(values: &[Watermark]) -> anyhow::Result<()> {
     );
     let mut keys = std::collections::BTreeSet::new();
     for value in values {
+        drasi_computation_contracts::validate_bootstrap_watermark(
+            &value.stream,
+            value.source_id.as_deref(),
+            value.position.as_ref().map(|position| position.as_slice()),
+            value.producer.as_ref(),
+        )?;
         let key = value.source_id.as_deref().unwrap_or(value.stream.as_str());
         anyhow::ensure!(
             !key.is_empty() && keys.insert((value.source_id.is_some(), key)),
@@ -711,11 +720,36 @@ mod tests {
     }
 
     #[test]
+    fn output_watermark_keeps_its_epoch_and_rejects_mixed_source_positions() -> anyhow::Result<()> {
+        use drasi_computation_contracts::{GraphProducerIdentity, OutputCursor};
+        let producer = GraphProducerIdentity::volatile(
+            "scope".into(),
+            "graph".into(),
+            ComponentId::try_new("producer")?,
+            StreamId::try_new("producer/out")?,
+        )?;
+        let cursor = OutputCursor::try_new(producer.clone(), 0)?;
+        let wire: Watermark = BootstrapWatermark::from_output(&cursor).into();
+        validate_watermarks(std::slice::from_ref(&wire))?;
+        let decoded: Watermark = decode(&encode(&wire)?)?;
+        let mut watermark: BootstrapWatermark = decoded.into();
+        watermark.validate()?;
+        assert_eq!(watermark.producer.as_ref(), Some(&producer));
+        assert_eq!(watermark.sequence, 0);
+        watermark.source_id = Some("other".into());
+        assert!(watermark.validate().is_err());
+        let mixed: Watermark = watermark.into();
+        assert!(validate_watermarks(&[mixed]).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn bootstrap_wire_bounds_and_distinct_checkpoint_namespaces() -> anyhow::Result<()> {
         assert!(validate_state(&[]).is_err());
         validate_state(&vec![255; MAX_STATE_BYTES])?;
         assert!(validate_state(&vec![0; MAX_STATE_BYTES + 1]).is_err());
         let make = |source_id| Watermark {
+            producer: None,
             stream: StreamId::try_new("same").unwrap(),
             source_id,
             sequence: u64::MAX,

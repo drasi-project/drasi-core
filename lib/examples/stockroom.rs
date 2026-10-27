@@ -116,7 +116,7 @@ async fn basic() -> anyhow::Result<()> {
         .with_query(
             Query::cypher("low-stock")
                 .query(LOW_STOCK)
-                .from_source("inventory")
+                .from_input("inventory")
                 .enable_bootstrap(false)
                 .build(),
         )
@@ -389,6 +389,7 @@ async fn graph() -> anyhow::Result<()> {
             ),
             (
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: Element::Node {
                         metadata: ElementMetadata {
                             effective_from: 2,

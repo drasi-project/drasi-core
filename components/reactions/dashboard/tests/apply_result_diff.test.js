@@ -56,10 +56,32 @@ function assertEqual(actual, expected, message) {
 }
 
 function newRuntime() {
-  return { rows: [], latest: null, aggregation: null };
+  return widgetsSandbox.createWidgetRuntime();
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────
+
+console.log("\n=== grouped aggregates: snapshot and live identity ===");
+{
+  const rt = newRuntime();
+  applyResultDiff(rt, snapshotRowToAddDiff({ k: "11", v: { floor: "one", value: 46 } }));
+  applyResultDiff(rt, snapshotRowToAddDiff({ k: "12", v: { floor: "two", value: 46 } }));
+  applyResultDiff(rt, { op: "aggregation", k: "11", before: { floor: "one", value: 46 },
+    after: { floor: "one", value: 32 } });
+  assertEqual(rt.rows.length, 2, "aggregate updates replace seeded rows without losing other groups");
+  assertEqual(widgetsSandbox.getAggregatedValue(rt, "value", "filter", "floor", "one"), 32,
+    "filtered gauges select the changed group");
+  assertEqual(widgetsSandbox.getAggregatedValue(rt, "value", "filter", "floor", "two"), 46,
+    "filtered gauges preserve another group");
+  assertEqual(widgetsSandbox.getAggregatedValue(rt, "value", "avg"), 39,
+    "widget aggregation operates on all grouped result rows");
+  assertEqual(widgetsSandbox.getAggregatedValue(rt, "value", "last"), 32,
+    "last selects the updated group, not the last inserted group");
+  applyResultDiff(rt, { op: "delete", k: "11", data: { floor: "one", value: 32 } });
+  assertEqual(rt.rows.length, 1, "deleting an aggregate removes only its group");
+  applyResultDiff(rt, { op: "delete", k: "12", data: { floor: "two", value: 46 } });
+  assertEqual(rt.latest, null, "deleting the last group leaves no stale aggregate value");
+}
 
 console.log("\n=== applyResultDiff: row_signature keying ===");
 

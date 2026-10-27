@@ -166,6 +166,10 @@ InputEnvelope or OutputEnvelope
           optional before record
           after record, where applicable
       system: Arc<SystemMetadata>
+        stream, emission sequence
+        optional timestamp and source position
+        ordering: EventTime | ProducerSequence
+        control: Option<ControlMessage { kind, payload }>
       lineage: Option<Arc<Lineage>>
     context: ProcessingContext
 ```
@@ -180,7 +184,10 @@ A `Record` is a validated combination of:
 - `payload: Bytes`: immutable schema-defined bytes.
 
 The payload is not necessarily UTF-8, JSON or a Rust struct in memory. The
-schema's codec determines how to decode it.
+schema's codec determines how to decode it. For the standard graph schema
+(section 8.5) it is a MessagePack-encoded element image, patch or before-image.
+The operation kind (add, update or delete, and its update semantics) belongs to
+the `ChangeOperation`, not to the payload bytes.
 
 ### 3.2 Before/after images and operations
 
@@ -221,11 +228,18 @@ There are two outer envelope codecs:
 | Codec | Outer representation | Format version |
 |---|---|---:|
 | `EnvelopeCodec` | Explicit JSON frame; opaque record/identity bytes remain encoded byte data | 1 |
-| `BinaryEnvelopeCodec` | Named MessagePack frame with binary payloads | 2 |
+| `BinaryEnvelopeCodec` | Named MessagePack frame with binary payloads | 1 |
 
 The records inside either frame retain their schema-defined payload encoding.
-For example, a binary-encoded record stays encoded bytes inside a JSON envelope;
-its fields are not automatically converted into untyped JSON properties.
+For example, a MessagePack-encoded graph record stays encoded bytes inside a JSON
+envelope; its fields are not automatically converted into untyped JSON properties.
+
+Both frames preserve the complete event: stream, sequence, timestamp, source
+position, ordering policy, the current event-local control, lineage (including
+historical controls) and context. The native plugin boundary carries these
+binary frames with native wire version 1 and ABI layout 1.0. There is no reader
+for an earlier native wire or for earlier query-row records; build the host and
+every native library from matching sources.
 
 Both codecs reconstruct checked records/change sets using explicitly registered
 executable schemas. Unknown schema versions, conflicting definitions and
@@ -428,7 +442,36 @@ changes only its annotation chain.
 Acknowledgements, transactions and index handles are not context values.
 They remain local capabilities outside the serializable envelope.
 
-Sources: [identity types][records], [metadata and context][envelopes].
+### 5.4 Ordering policy and event-local control
+
+`SystemMetadata` carries two further facts that belong to one event and are not
+record data:
+
+| Field | Meaning |
+|---|---|
+| `ordering: ChangeOrdering` | How a receiving query decides that a change is stale |
+| `control: Option<ControlMessage>` | An event-local instruction: a checked `kind` and an uninterpreted `payload` |
+
+`ChangeOrdering::EventTime` is the default for source data. Business time
+(`ElementMetadata::effective_from`) is authoritative and a strictly older
+change is skipped. `ChangeOrdering::ProducerSequence` is stated by a producer
+whose output sequence is the authority, which is how queries publish derived
+data. It is honored only after the receiver has validated the producer's
+identity, output epoch and accepted sequence (section 8.14). Business times
+still travel unchanged inside the records; they stop deciding admission for that
+event.
+
+A control is a directive about this event, such as "scheduled work is due" or
+"reevaluate these scheduled elements" (section 8.15). It is not a record, an
+annotation or a checkpoint. `ChangeEnvelope::derive` does not inherit the input's
+control or ordering: a producer states them for its own output. For example,
+`GraphChangeCodec::derive_changes` carries the input's ordering policy forward
+explicitly and attaches a control only when the new output needs one. `reemit`
+of the same logical output and a relay that forwards an event unchanged keep
+both. An input's control stays visible in lineage as provenance and is never
+treated as a command by a later consumer.
+
+Sources: [identity types][records], [metadata, controls and context][envelopes].
 
 ## 6. Transformers and schema changes
 
@@ -487,6 +530,9 @@ all records; no output at all and an empty progress-bearing envelope are differe
 `ChangeEnvelope::derive` creates a new event with the transformer's output
 identity, schema-consistent change set and system metadata. It shares the
 existing context and adds the input's identity/system metadata to lineage.
+The input's event-local control and ordering policy are not copied into the new
+event; they remain historical provenance in lineage until the producer states
+its own.
 
 Lineage does not retain the parent's record payload. It follows a single chain;
 it is not a complete record of every input that a component has processed.
@@ -645,16 +691,25 @@ Sources: [forwarding][graph-routing], [shared envelopes][envelopes],
 ## 8. Queries
 
 A continuous query specializes the transformer model: it consumes changes to
-elements, maintains indexed state, and produces changes to result rows.
+elements, maintains indexed state, and publishes its answer as changes to
+result nodes.
 
 ```mermaid
 flowchart LR
     source["Source"] -->|"drasi.graph-change"| query["Query"]
-    query -->|"drasi.query-row"| sink["Sink"]
+    query -->|"drasi.graph-change"| sink["Sink"]
+    query -->|"drasi.graph-change"| next["Another query"]
 ```
 
-This is a concrete instance of the schema-A-to-schema-B transformation. Here,
-"graph data" means the nodes and relationships evaluated inside the query.
+Source, transformer and query outputs all use the **same** data contract: one
+canonical graph-change schema. A query's result row is an ordinary node, so a
+sink that understands graph changes, a middleware stage or a second query can
+consume it directly. No adapter component sits between two queries, and there
+is no separate query-row wire format. Facts that only a result reader needs (the
+row kind, grouping keys and ordinals) travel beside the records rather than
+inside them (section 8.10).
+
+"Graph data" here means the nodes and relationships evaluated inside the query.
 Those are data records, not the processing components or their pipe connections.
 
 ### 8.1 Representations along the query path
@@ -665,13 +720,15 @@ messages between components, evaluator values and ordinary API results.
 | Layer | Principal types | Purpose |
 |---|---|---|
 | Business-data graph | `Element`, `ElementMetadata`, `ElementReference`, `ElementPropertyMap`, `ElementValue` | Represent the nodes and relationships a query indexes |
-| Source mutation | `SourceChange` | Describe an insert, patch update, delete or scheduled reevaluation |
+| Source mutation | `SourceChange` | Describe an insert, replacement, property update (with explicit removals), delete or scheduled reevaluation for the evaluator |
+| Canonical graph data | `ElementImage`, `ElementPatch`, `ElementBeforeImage`, `DataValue` | The MessagePack payloads of `drasi.graph-change` records, preserving rich values and set/null/remove distinctions |
 | Ordinary source exchange | `SourceEvent`, `SourceEventWrapper` | Pair a change/control message with source sequence, time, position and profiling |
 | Computation data | `Record`, `ChangeOperation`, `ChangeSet`, `ChangeEvent`, `ChangeEnvelope` | Carry immutable, schema-checked data between components |
 | Port-addressed data | `InputEnvelope`, `OutputEnvelope` | Associate an envelope with a component's input or output port |
 | Pipe delivery | `Delivery`, `EnqueueReceipt`, `Acknowledgement` | Distinguish queued data from the local capability to confirm handling |
 | Query evaluation | `VariableValue`, `QueryVariables`, `QueryPartEvaluationContext` | Maintain typed bindings and before/after changes while evaluating a query |
-| Native query output | `DecodedQueryRow`, `QueryResultSnapshot`, `QueryRecoveryView` | Describe typed result rows, their current set and retained change history |
+| Result projection | `ResultNodeProjector`, `QueryProjection`, `ResultOperationMetadata`, `DecodedQueryRow` | Turn evaluator results into result nodes and read them back, with the query-facing row facts kept separate |
+| Result state | `QueryResultSnapshot`, `QueryRecoveryView` | Describe the current set of result nodes and their retained change history |
 | Ordinary query exchange | `ResultDiff`, `QueryResult`, `SnapshotResponse`, `OutboxResponse` | Project query data into the ordinary result-reading and reaction interfaces |
 | Recovery progress | `SourceCheckpoint`, `SourceProgressSnapshot`, `ConsumerCheckpoint`, `DeliveryProgress` | Record distinct input, query-output and consumer completion positions |
 
@@ -680,10 +737,10 @@ codecs are defined in `drasi-computation-contracts` and re-exported through
 `drasi_lib::computation::v1`. Query execution, pipes and state ownership reside in
 DrasiLib and Core.
 
-The codec implementation also uses private typed-change intermediates. Those are
-conversion helpers, **not another representation carried on graph edges**.
-For example, the private `drasi.internal.graph-change` descriptor is not the
-public `drasi.graph-change` port schema.
+The ordinary source and result boundaries also use private typed-change
+intermediates. Those are conversion helpers, **not another representation
+carried on graph edges**. For example, the private `drasi.internal.graph-change`
+descriptor is not the public `drasi.graph-change` port schema.
 
 ### 8.2 Graph elements
 
@@ -730,43 +787,60 @@ graph that all evaluators modify.
 
 ### 8.3 Property values and evaluator values
 
-`ElementValue` supports:
+`ElementValue` has compact variants for common properties:
 
 - Null, Boolean, signed 64-bit integer and floating-point value.
 - Shared string, list and nested property object.
 - Local date-time and fixed-offset zoned date-time.
 
-`VariableValue`, used during evaluation, is broader. It also represents unsigned
-integer values, dates, local/zoned times, durations, ranges, expressions,
-references, complete elements, metadata and the `Awaiting` marker used by
-time-dependent evaluation.
+Everything else is carried by its `Typed` variant, which holds a validated
+`DataValue`: unsigned integers above the signed range, dates, local/zoned times,
+durations, ranges, complete elements, metadata, references, expressions and the
+`Awaiting` marker. A property is therefore not forced into primitive JSON.
 
+`DataValue` (in `drasi-core-types`) is the one lossless value representation
+shared by element properties, canonical graph records and query results. It
+stores floating-point values as their `f64` bits (so signed zero, infinities and
+NaN payloads survive), keeps unsigned and signed integers distinct, and keeps a
+zoned date-time's optional time-zone name and a duration's calendar and elapsed
+parts. Expressions and `Awaiting` are inert data: decoding or forwarding them
+never evaluates them. A malformed value is rejected by validation, not coerced.
+
+`VariableValue`, used during evaluation, covers the same values and converts to
+and from `DataValue` without loss (`DataValue::encode` / `decode`).
 `QueryVariables` is a `BTreeMap<Box<str>, VariableValue>`. Its keys are bindings
 or projected column names, not element-property identities.
 
-This distinction matters when writing a transformer. An evaluator value is not
-automatically a valid source property. In particular, a query value can retain
-temporal or unsigned information that `ElementValue` cannot represent in the
-same form. Do not use a JSON round trip as a lossless conversion between them.
+One limit remains: a JSON projection (such as `row_values_to_json` or an
+ordinary `QueryResult`) renders dates and other typed values as strings or tagged
+objects. A JSON round trip is a presentation, not a lossless conversion; use the
+typed value when the type matters.
 
 ### 8.4 Source mutation semantics
 
 | `SourceChange` variant | Evaluator meaning |
 |---|---|
 | `Insert { element }` | Supply a full element. If that identity already exists, replace its prior contribution rather than count another copy |
-| `Update { element }` | Patch an element's properties: supplied properties take precedence, missing properties are filled from the current element |
+| `Replace { element }` | Supply a full element as an explicit **replacement**. It replaces the existing version of the identity (properties the new element omits are dropped) in one change, and records that the producer asked for a replacement rather than an addition |
+| `Update { element, removed_properties }` | Set every property of `element` (a supplied `Null` is a value), delete only the names in `removed_properties`, and leave every other property of the current element unchanged. Without a current element it creates one from the properties it sets. A name cannot be both set and removed |
 | `Delete { metadata }` | Remove the addressed element using its identity and effective time; a full property image is unnecessary |
 | `Future { future_ref }` | Reevaluate scheduled work for an element, retaining its original time and due time |
 
-Patch merging is defined by the graph model, not by the pipe. It is not a
+Update merging is defined by the graph model, not by the pipe. It is not a
 generic JSON Patch program. Labels and relationship endpoints are fields of the
-incoming element; `merge_missing_properties` specifically merges missing
-properties.
+incoming element. `SourceChange::validate` rejects an update that both sets and
+removes a property, and every admission boundary calls it.
 
 Before changing an index, the evaluator reads the current element and any saved
 deletion-time marker:
 
-- A change older than the current element/deletion marker is skipped.
+- A change older than the current element/deletion marker is skipped when the
+  event's ordering is `EventTime` (the default for source data).
+- For data published under `ProducerSequence` ordering (a derived output, such as
+  another query's result nodes), the validated producer's accepted output
+  revision decides admission. A correction whose business time is older than the
+  node's current version is still applied, because the producer, not the clock,
+  says it is newer. Business times are preserved unchanged in the records.
 - An identical current element contributes no new result.
 - A node and relationship cannot replace each other under one live identity.
 - A deletion leaves a tombstone recording its effective time, preventing an
@@ -775,23 +849,52 @@ deletion-time marker:
 A skipped stale mutation can still count as **handled input**. Its source
 checkpoint must not remain behind merely because it produced no result change.
 
+A query evaluates one input batch with the same evaluator whichever way the
+batch arrived. `QueryInputBatch` pairs the decoded changes with the event's
+ordering policy and passes it to `QueryEvaluator`; there is no second evaluation
+engine for derived data.
+
 Sources: [model types][elements], [property values][element-values],
 [mutations][source-changes], [mutation admission and evaluation][evaluator].
 
 ### 8.5 Standard query-path schemas
 
-There is a common **envelope structure**, not one universal payload schema.
-These are the three standard data schemas relevant to continuous queries:
+There is a common **envelope structure**. One standard data schema carries
+continuous-query data:
 
 | Schema ID | Version | Record encoding | Record meaning |
 |---|---:|---|---|
-| `drasi.graph-change` | 1 | `drasi-source-change-bincode1` | One `SourceChange` per operation image |
-| `drasi.query-row` | 1 | `drasi-query-row-bincode1` | Typed query row, signature and row/aggregation metadata |
-| `drasi.source-transaction` | 1 | `drasi-source-transaction-bincode1` | One complete transaction frame containing ordered source changes |
+| `drasi.graph-change` | 1 | `drasi-element-msgpack-v1` | Canonical element images, element patches and before-images, from sources, transformers, query results **and complete source transactions** |
 
-Custom schemas can use the same record/envelope/pipe machinery. A pipe does not
-translate between a custom schema and these standard schemas.
+`SourceTransactionCodec::schema()` returns this same descriptor; there is no
+separate transaction data schema.
 
+`QueryChangeCodec::schema()` returns the `GraphChangeCodec` schema. A query's
+input port and its output port use the same descriptor, so any graph-change
+output can connect to any graph-change input that meets the port's delivery
+requirements. A query configured for complete source transactions has the same
+input descriptor and selects atomic handling explicitly; it then requires every
+input to carry its own current completeness marker (section 8.13). Its output
+remains `drasi.graph-change`.
+
+Custom schemas use the same record/envelope/pipe machinery. Ports whose complete
+schema descriptors match connect directly, including a custom schema that a
+factory explicitly declares and implements for both producer and consumer; the
+pipe neither converts nor needs to. Only formats that genuinely differ (for
+example a custom record and the standard graph-change schema) need an
+intentional conversion transformer. A factory that really implements several
+formats on a port declares them in a `PortFormatCatalogue`; configuration then
+selects one per port with `ports: {<port>: {format: "<schema id>-v<version>"}}`.
+Selection is pure and happens before construction: unknown ports or formats are
+rejected, never defaulted or converted, and the specification's ports must equal
+the resolved ones. The standard factories declare no alternatives. The resolver
+is not a prerequisite for connecting matching schemas.
+
+A sink that accepts the graph-change schema accepts the data, but may still
+interpret it more narrowly. The ordinary result-notification sinks (HTTP, gRPC,
+SSE) require the envelope to be a current query output (section 8.10) and reject
+plain source or transformer changes. The capture sink writes any graph-change
+envelope, including query output.
 
 ### 8.6 Graph-change records
 
@@ -799,32 +902,60 @@ translate between a custom schema and these standard schemas.
 
 ```text
 namespace = "drasi.graph-element"
-value     = bincode-encoded ElementReference
+value     = canonical named-MessagePack encoding of ElementReference
 ```
 
-The payload is the bincode encoding of `SourceChange`, not just a property map.
-The normal mapping is:
+The payload depends on the record's image and is always one bounded MessagePack
+value:
+
+| Record image | Payload | Meaning |
+|---|---|---|
+| `Full` | `ElementImage` | `Node { metadata, properties }` or `Relation { metadata, in_node, out_node, properties }`, each property a `DataValue` |
+| `Patch` | `ElementPatch` | An `ElementImage` of properties to **set**, plus a separate set of property names to **remove** |
+| `Partial` | `ElementBeforeImage` | Either `Metadata(ElementMetadata)` or a full `Element(ElementImage)` known before the change |
+
+The operation (`Added`, `Updated` with `Patch` or `Replace` semantics, or
+`Deleted`) is carried by the `ChangeOperation`, outside the payload. The payload
+holds only the element data.
+
+A patch distinguishes three outcomes for a property: **set** to a value, set to
+`Null` (the property exists and holds null), and **remove** (the property
+absent). A property cannot be both set and removed; validation rejects the
+patch. `ElementPatch::apply_to` produces the element after the patch, given an
+optional base of the same identity and kind. It does not claim that the result
+is a complete record when no base is supplied.
+
+The normal mapping from a source mutation is:
 
 | Source value | Envelope operation | Image |
 |---|---|---|
-| Insert | `Added` | Full after-image |
-| Update | `Updated` with `Patch` semantics | Patch after-image |
-| Delete | `Deleted` | Partial before-image containing delete metadata |
-| Future reevaluation | `Updated` with `Patch` semantics | Patch after-image containing the future reference |
+| Insert | `Added` | Full `ElementImage` |
+| Replace | `Updated` with `Replace` semantics | Full `ElementImage` |
+| Update | `Updated` with `Patch` semantics | `ElementPatch` setting every supplied property and removing the names in `removed_properties` |
+| Delete | `Deleted` | Partial before-image holding the delete metadata |
+| Future reevaluation | No record | An event-local control listing the scheduled elements (section 8.15) |
 
-A graph-schema full replacement can also be represented as a generic
-`Updated { semantics: Replace, ... }` carrying a full insert image.
-`decode_changes` converts that into a delete followed by an insert at the new
-effective time. It is not silently interpreted as a patch.
+`decode_changes` is the inverse mapping and is lossless for these variants: an
+`Added` operation becomes `Insert`, a `Replace` update becomes `Replace`, and a
+patch becomes `Update` with its removal set intact. A replacement is not
+interpreted as a patch and is not a delete followed by an insert, and it is no
+longer folded into an `Insert`. The query evaluator treats `Insert` and `Replace`
+alike as a full-row upsert that retracts the prior contribution.
+
+Consumers that apply `ElementPatch` directly (`ElementPatch::apply_to`) and
+consumers that work through `SourceChange` therefore see the same removals and
+replacements.
 
 An identity-only delete is permitted. When no delete metadata supplies its time,
 the decoder requires a nonnegative envelope timestamp and derives the effective
 milliseconds from it. It does not invent a current timestamp.
 
 The graph validator decodes the record and checks that its embedded reference
-and variant agree with the external `RecordId` and `RecordImage`.
-The bincode decoders use fixed-integer encoding, reject trailing bytes and apply
-a read limit based on the supplied payload.
+matches the external `RecordId` and that the image kind matches the payload.
+The key must be the canonical encoding of its reference. Decoders apply a size
+limit derived from the supplied payload, check collection lengths against the
+remaining input before allocating, and reject truncated or trailing bytes and
+invalid values.
 
 ### 8.7 Query input processing
 
@@ -842,21 +973,28 @@ ordering described above, not a new data representation.
 For one input envelope, the query:
 
 1. Determines its logical producer/source position and validates it against
-   the saved input owner.
+   the saved input owner. If the event's ordering is `ProducerSequence`, the
+   envelope must carry an explicit, validated immediate-producer identity;
+   otherwise the input is rejected.
 2. Checks whether the input was already handled. A configured position comparator
    can interpret an opaque source cursor; otherwise the appropriate sequence
    watermark is used.
-3. Decodes the graph changes, or the complete source transaction.
-4. Evaluates changes and produces `QueryPartEvaluationContext` values.
-5. Encodes result differences and stages the input checkpoint and output state.
+3. Decodes the graph changes (including any scheduling control), or the complete
+   source transaction.
+4. Evaluates changes under the event's ordering policy and produces
+   `QueryPartEvaluationContext` values.
+5. Projects result differences as result nodes and stages the input checkpoint
+   and output state.
 6. Commits through its processing owner.
 7. Updates the public result view, then confirms input progress and forwards
    resulting envelopes.
 
 A duplicate can advance a consumed **transport** position without reevaluating
-the logical input. A new but filtered input can commit with no outgoing row
+the logical input. A new but filtered input can commit with no outgoing result
 envelope. Query output sequence advances for actual result output, not once per
-source message.
+source message. The same path handles input whose producer is another query:
+its envelopes are ordinary graph changes stamped with that query's producer
+progress.
 
 ### 8.8 From source mutations to row differences
 
@@ -896,8 +1034,8 @@ The query's resource bundle contains several distinct indexes:
 | `ResultIndex` | Aggregation accumulators, current/default intermediate parts, time state and element tombstones |
 | `FutureQueue` | Deferred reevaluation records |
 | `CheckpointStore` | Handled input positions and query/recovery markers |
-| `OutboxWriter` | Retained emitted result batches and relevant metadata records |
-| `LiveResultsWriter` | Current materialized output rows |
+| `OutboxWriter` | Retained emitted result batches (canonical graph-change envelopes) and relevant metadata records |
+| `LiveResultsWriter` | Current materialized result nodes as canonical graph records |
 
 `ResultIndex` is **not** the same thing as `LiveResultsWriter`. The former is
 working state needed to evaluate subsequent changes; the latter is the current
@@ -913,73 +1051,134 @@ Synthetic joins are maintained through element-index join support. They provide
 query relationships between matching elements; they are not computation-graph
 edges.
 
-### 8.10 Query-row records
+### 8.10 Query results are ordinary graph nodes
 
-`QueryChangeCodec` gives each row a query-scoped record identity:
-
-```text
-namespace = "drasi.query-row/" + lowercase hex of the query ID's UTF-8 bytes
-value     = the row signature as eight big-endian bytes
-```
-
-The encoded row contains:
+A query publishes each result row as one **node** using the same
+`drasi.graph-change` records as a source. There is no query-specific record
+format:
 
 ```text
-query_id
-signature
-values: BTreeMap<String, typed value>
-kind: Row | Aggregation {
-    grouping_keys,
-    default_before,
-    default_after
-}
+record key  = "drasi.graph-element" + canonical ElementReference
+ElementReference
+  source_id  = the output's dataset namespace (section 8.12)
+  element_id = lowercase hex of the opaque row identity
+node
+  labels     = ["Result"]            (default; see below)
+  properties = the RETURN aliases, each a DataValue
+  effective_from = the event's business time in milliseconds
 ```
 
-Normal row additions use full after-images. Updates use full replacement
-after-images and preserve the before-image when supplied. Removals retain a
-before-image and its key. Query-row patches are not the graph-property patch
-mechanism.
+The properties are exactly the columns of the `RETURN` clause, keyed by alias.
+Nothing else is written into the node: no query ID, signature, row kind or
+grouping flag. A generic graph consumer, including another query, needs nothing
+from the query codec. `MATCH (r:Result) RETURN r.total AS total` reads another
+query's `total` column directly.
 
-Aggregation flags describe the evaluator's default/current group handling.
-They are not general instructions to delete a row. In particular, a default
-before value need not be an already-applied contribution, and a default after
-value does not independently prove that the group has no contributors.
+`ResultNodeProjector` is the helper that builds and reads these nodes for one
+output scope (dataset and label). `ResultNodeProjector::try_new(dataset, label)`
+defaults the label to `Result`; a caller of the helper can supply another label.
+It is stateless: it owns no rows, output cursor, epoch or publication policy.
+The query itself currently publishes with the default label.
 
-The validator checks the signature and query scope against the encoded payload.
-Snapshot projection additionally requires full rows belonging to the requested
-query.
+Adding, updating and removing a result use the ordinary operations:
 
-### 8.11 Lossless typed query values
+| Evaluator difference | Envelope operation |
+|---|---|
+| `Adding` | `Added` with a full node |
+| `Updating` | `Updated` with `Replace` semantics, a full after node and a full before node |
+| `Removing` | `Deleted` whose before image is the full node |
+| `Aggregation` | `Updated` with `Replace` semantics; the before node is present only when the evaluator supplied one |
+| `Noop` | No operation; an evaluation that yields only `Noop` publishes nothing |
 
-The query-row value codec uses a tagged representation, rather than serializing
-`VariableValue` through JSON:
+Operations keep their position in the evaluator's result slice as their ordinal,
+so a skipped `Noop` leaves a gap. Every image's effective time is the event's
+business time, never an output sequence.
 
-- Integers are encoded as signed or unsigned values; nonnegative values may
-  use the unsigned representation.
-- Floating-point values are represented using their `f64` bits, including
-  nonfinite values and signed zero.
-- Lists and objects recursively encode typed values.
-- Temporal values retain their specific kind. Zoned date-time can retain its
-  optional timezone name; duration retains calendar and elapsed-time parts.
+**Query-facing facts travel beside the records.** The row kind (`Row` or
+`Aggregation { grouping_keys, default_before, default_after }`), the original row
+identity bytes and the ordinal for each operation are written into one
+**projection-context annotation**, `drasi.query-projection.v1`. It is scoped to
+the logical change set it was written for, so an annotation inherited from an
+upstream output is never mistaken for the current output's.
+`QueryChangeCodec::projection` reads it, and `is_query_output` is true only when
+the newest projection was written for this envelope's own change set and agrees
+with its operations. A matching schema alone does not make an envelope a query
+output.
+
+Aggregation flags describe the evaluator's default/current group handling. They
+are not general instructions to delete a row. In particular, a default-before
+value need not be an already-applied contribution, and a default-after value does
+not independently prove that the group has no contributors.
+
+Reading results:
+
+- `QueryChangeCodec::decode_row` reads any result node and returns a
+  `DecodedQueryRow { dataset, label, identity, signature, values }`. `signature`
+  is present only when the opaque identity is exactly an eight-byte evaluator
+  signature. `decode_row_in` additionally requires a particular scope.
+- `QueryChangeCodec::decode_evaluation` rebuilds evaluator differences from a
+  current query output and its projection. It is a query-facing capability, not a
+  wire format.
+- `QueryChangeCodec::row_values_to_json` and `to_legacy_result` project typed
+  rows into the ordinary JSON `QueryResult`. These are presentations for
+  readers; the stored form is the typed record.
+
+The query's own sequence, generation, output metadata and snapshot/progress
+markers are separate annotations on the envelope (section 8.17).
+
+### 8.11 Shared values in result nodes
+
+Result properties use the same `DataValue` as every other graph record
+(section 8.3), not a query-specific tagged format and not JSON:
+
+- Integers are signed or unsigned; floating-point values keep their `f64` bits,
+  including nonfinite values and signed zero.
+- Lists and objects recursively hold values.
+- Temporal values retain their specific kind; a zoned date-time keeps its
+  optional time-zone name and a duration keeps its calendar and elapsed parts.
 - Elements, metadata, references, expressions, ranges and `Awaiting` have
-  explicit variants.
+  explicit variants and cross unevaluated.
 
 `QueryChangeCodec::row_values_to_json` is a **projection for readers**, not the
-stored row format. Dates and other typed values can become strings or other
-JSON representations. Code that needs type fidelity should decode the typed
-row instead of round-tripping its rendered JSON.
+stored format. Dates and other typed values can become strings or tagged
+objects. Code that needs type fidelity should decode the typed row instead of
+round-tripping its rendered JSON.
 
-### 8.12 Row identity and output generation
+A downstream consumer that needs an `Element` (such as another query) converts
+the node with `Element::try_from(ElementImage)`. A property that has no element
+property form is reported by name rather than substituted.
+
+### 8.12 Row identity, dataset namespace and output generation
 
 Query row signatures are `u64` values produced by the evaluator:
 
 - Nonaggregating rows use the MATCH binding identity.
 - Grouped rows use the grouping identity.
 
-Two rows with equal projected values can therefore have different signatures.
-Comparing only the visible column values loses that distinction.
-Conversely, changing a value under one signature normally updates that row
-rather than introducing an unrelated row.
+The opaque row identity written into the node's `element_id` is the signature's
+eight big-endian bytes, in lowercase hex. It is the evaluator's identity for the
+row, supplied by the query, and not inferred from a returned column. The identity
+bytes are opaque to consumers: they must not parse them or recompute them from
+values. Two rows with equal projected values can have different identities and
+remain **separate rows**. Comparing only the visible column values loses that
+distinction. Conversely, changing a value under one identity updates that row
+rather than introducing an unrelated one.
+
+The node's `source_id` is the output's **dataset namespace**, so two outputs
+never share row identities even when their signatures coincide:
+
+```text
+drasi.output/<SHA-256 over: "drasi.output-dataset.v1",
+              construction scope, graph ID, component ID, output port>
+```
+
+(`output_identity::dataset_namespace`; each part is length-prefixed in the hash.)
+The namespace is stable and bounded. Output epochs and sequence numbers are
+deliberately **not** part of it: a persistent output keeps the same node
+identities across restart and after a reset, while the epoch and sequence
+identify the history. The construction scope is the enclosing instance or storage
+scope selected when the query is registered, so the same query ID in a different
+instance or scope has a different dataset.
 
 `QueryRecoveryIdentity` combines the construction/instance scope, graph ID,
 query ID, configuration hash and optional volatile incarnation. Persistent
@@ -987,34 +1186,48 @@ queries omit the volatile incarnation and can retain identity when the same
 stored query is reopened. Output generation separately distinguishes a reset
 result history from the previous one.
 
+Every query output envelope is also stamped with `GraphProducerProgress`: the
+query's `GraphProducerIdentity` and its logical output sequence, distinct from
+the emission sequence. A persistent output's epoch is stable across
+reconstruction and changes when the output is reset; a volatile component gets a
+new incarnation each start, which downstream persistent owners do not accept as a
+restart-stable stream. This is what lets a downstream query validate the
+producer and admit the output under `ProducerSequence` ordering.
+
 These are scoped identities used by the implementation, not cryptographic
 proofs of data uniqueness. Row signatures and configuration hashes must not be
 replaced with hashes of rendered JSON.
 
 ### 8.13 Complete source transactions
 
-A source-transaction envelope has exactly one `Added` operation at ordinal zero,
-with a full record. Its payload contains:
+A complete source transaction is one ordinary graph-change envelope. Its
+operations are the standard records, in order: `Added` full images, `Updated`
+patches (with removed property names) or full replacements, and `Deleted`
+partial before-images. Nothing about the data is transaction-specific.
 
-```text
-version
-source_id
-transaction_id: bytes
-position: bytes
-changes: Vec<SourceChange>
-```
-
-The record's namespace is the source ID; its identity bytes are the transaction
-ID. The frame's commit position must agree with the envelope's source position.
-A matching `drasi.source-transaction.v1` annotation identifies the group.
+Completeness is a separate version-1 annotation, `drasi.source-transaction.v1`,
+scoped like a query projection to the envelope's own logical `ChangeSetId`. It
+states the source ID, transaction ID, commit position, operation count and
+`complete`. Readers positively recognize it with
+`SourceTransactionCodec::metadata`/`decode`; the schema alone never implies a
+transaction, and an annotation inherited by a different change set (a transform
+or any fresh derive) is history, not completeness. `reemit` and an unchanged
+relay of the same change set keep it. The commit position must agree with the
+envelope's source position, the operation count with the change set, and the
+envelope must carry no event-local control. Only a validated
+`SourceTransaction::into_envelope` writes the marker.
 
 All changes must belong to that source. Scheduled `Future` changes cannot appear
 inside the group. Assembly and decoding enforce change-count, byte and time
 bounds. An incomplete or rejected assembly cannot publish its successful prefix
 as a complete transaction.
 
-This schema is not ordinary batching. A vector of graph-change operations does
-not become a complete source transaction merely because it arrived together.
+This is not ordinary batching. A vector of graph-change operations does not
+become a complete source transaction merely because it arrived together; without
+its own current marker, a transaction-mode reader rejects it. Byte limits count
+the operation records' identity and payload plus the source ID, transaction ID
+and position; the private prepared-storage encoding (graph records with fixed
+framing) is bounded by the same limit.
 
 Ordinary graph-change batches are evaluated in order. They may contain
 intermediate row differences even when their storage changes are committed in
@@ -1029,17 +1242,32 @@ This gives the query's downstream reader the transaction's final result
 changes, rather than each intermediate update. It does not make two different
 queries or arbitrary sinks share the source transaction.
 
+Transaction data uses the same records and value limits as any other
+graph-change data. A query that accepts transactions publishes ordinary
+`drasi.graph-change` result nodes, exactly like any other query.
+
 ### 8.14 Logical data and replay transport
 
 A replay can transport previously committed output under a **new emission
 sequence**. `ChangeEnvelope::reemit` creates the new envelope identity and
-transport sequence while retaining its change set, annotations and lineage.
+transport sequence while retaining its change set, annotations, lineage and
+event-local metadata (ordering and control).
 
 For query output, the logical output position is retained in
 `drasi.query-output-sequence.v1`. For stateful graph-change producers,
 `GraphProducerProgress` carries a producer identity and logical sequence.
 Consumers that perform durable deduplication use this identity and logical
 sequence, not whichever transport number was assigned to the retry.
+
+Queries publish with `ChangeOrdering::ProducerSequence`. A downstream query
+admits that output by the producer's validated identity, output epoch and
+revision, not by comparing business times. This is why a result node whose
+business time is older than its previous version can still be applied when the
+producer says it is the newer revision. For example, a first query's aggregate
+can correct 20 to 30 because an older-timestamped room arrived late, and a second
+query reading the aggregate node updates to 30 rather than discarding the
+correction as stale. An output without a validated producer identity cannot be
+admitted under this policy.
 
 An ordinary source adapter also has two positions: the source's original
 sequence and the adapter's output-stream sequence. Original source metadata
@@ -1055,7 +1283,7 @@ identity-preserving path before using an ancestor's position.
 
 | Time | Meaning |
 |---|---|
-| `ElementMetadata.effective_from` | Business mutation time, in Unix milliseconds |
+| `ElementMetadata.effective_from` | Business mutation time, in Unix milliseconds; preserved unchanged through derived outputs |
 | `SourceEventWrapper.timestamp` | Source-exchange event time carried into adapter metadata |
 | `SystemMetadata.timestamp` | Optional envelope time; used by explicit ordering paths |
 | Query output metadata timestamp | Time the query result is produced |
@@ -1075,10 +1303,26 @@ timings but preserves inherited context.
 signature. Query functions can arrange reevaluation by writing to the query's
 future queue.
 
-`QueryScheduledSource` reads a committed scheduling view and emits a marked
-empty graph-change envelope when work is due. It does not remove the future
-record itself. The query pops/processes due work under its own transaction and
-publishes resulting row differences through its ordinary output path.
+Scheduled work is carried by **event-local control**, not by fake element
+patches. `GraphChangeCodec` uses the control kind `drasi.graph-control.v1` with
+two payloads:
+
+| Control | Use |
+|---|---|
+| `FuturesDue` | An empty graph-change batch announcing that scheduled work is due (`encode_futures_due`, `is_futures_due`). It cannot also carry data operations |
+| `Reevaluate` | A batch of `SourceChange::Future` values: each future reference and its ordinal travel in the control, and the data operations carry the rest. The ordinals must be increasing and, together with the data operations, form one complete ordered batch |
+
+`decode_changes` merges the listed futures back into their original positions.
+A reevaluation control is meaningful only on its own envelope: a consumer that
+receives one it does not understand rejects it rather than ignoring it, and a
+historical control kept in lineage is provenance, never a command.
+
+`QueryScheduledSource` reads a committed scheduling view and emits a
+`FuturesDue` control when work is due. It does not remove the future record
+itself. The query pops/processes due work under its own transaction and
+publishes resulting result nodes through its ordinary output path. That output
+does not inherit the input's control; fresh derived data is not accidentally
+marked as scheduling, and a control is not copied from annotations or lineage.
 
 The due-work marker is distinct from a business source ID. Scheduled
 reevaluation also distinguishes original transaction time from due/realtime.
@@ -1087,9 +1331,10 @@ future work has finished.
 
 ### 8.16 Graph-change middleware
 
-`MiddlewareTransformer` decodes graph changes, runs the selected
-`SourceMiddlewarePipeline`, and encodes the resulting changes back into
-`drasi.graph-change`. A pipeline can filter, rewrite or expand changes.
+`MiddlewareTransformer` decodes graph changes into `SourceChange` values, runs
+the selected `SourceMiddlewarePipeline`, and encodes the resulting changes back
+into `drasi.graph-change` with `derive_changes`. A pipeline can filter, rewrite
+or expand changes.
 
 For a newly processed input, this transformer produces one logical output
 change-set batch, including an empty batch for a fully filtered input.
@@ -1098,7 +1343,42 @@ input without pretending that a data record was emitted. In persistent mode,
 it saves its processing state, logical input/output progress and unconfirmed
 output under its transaction owner.
 
-Query-local source middleware follows the evaluator's source pipeline instead.
+Because it works through `SourceChange`, the stage now carries `Replace` and
+`Update` with `removed_properties` end to end. The built-in `relabel`, `decoder`,
+`parse_json` and `promote` stages forward removals and replacements, with derived
+properties following the removal of their source.
+
+**Event mappers are stateless.** The `map` and `jq` stages are *event mappers*:
+each configured rule is applied to the meaningful content of one incoming event,
+using only that event's data. They retain no input or output view, so an event
+that makes no sense for a rule is ignored by that rule. Concretely:
+
+- A `Replace` maps to a `Replace` by default (and `"op": "Replace"` can be
+  configured), using the `update` rules.
+- A removal patch cannot in general be translated into a mapped update without
+  prior context, so that update rule is skipped with a debug diagnostic instead
+  of failing. Explicit rules that map to `Insert`, `Replace` or `Delete` can still
+  run for the same event.
+- Missing selections and unmatched rules produce no mapped event. Malformed
+  changes and configured processing failures remain errors.
+- `Future` changes are not mapped and pass through, so scheduling is preserved.
+
+This is the behavior to keep for these stages. A different component, a
+**view transform** that maintains an output dataset as a transformation of the
+current input dataset (retracting outputs that stop passing a filter, deleting
+children of one-to-many mappings and removing old identities when a mapped key
+changes), would need retained input and emitted-output state. It is a separate,
+future component tracked as
+[CW-68](computation-graph-remaining-work.md#cw-68), not a mode of `map`/`jq`, and
+it does not exist yet. Storage for it would be that component's own choice.
+
+Query-local middleware follows the evaluator's input pipeline instead. The host
+selects that pipeline from the declared input binding, not from an element's
+namespace or an incoming annotation. Ordinary source subscription helpers retain
+their configured source name as the pipeline scope; query and native component
+inputs use their upstream component name. Snapshot initialization, live events
+and replay apply the same scope without rewriting element identities. Direct
+evaluator calls that supply no input scope retain namespace-based selection.
 Shared preprocessing outside queries and query-local preprocessing therefore
 run at different positions in the data path; shared preprocessing can avoid
 doing the same transformation separately for each query.
@@ -1106,28 +1386,38 @@ doing the same transformation separately for each query.
 ### 8.17 Standard source and query metadata
 
 Payload schema and metadata answer different questions. The following
-annotations retain source provenance, identify produced results or distinguish
-control data. They are not application columns.
+annotations retain source provenance, identify produced results or describe a
+query's projection. They are not application columns. (Event-local controls are
+part of `SystemMetadata`, not annotations.)
 
 | Annotation key | Data and interpretation |
 |---|---|
 | `drasi.legacy-source.v1` | Original source ID, optional source sequence/position, source timestamp, profiling and optional source-description metadata |
 | `drasi.graph-producer-progress.v1` | Immediate graph producer identity and logical sequence, separate from emission sequence |
+| `drasi.query-projection.v1` | The current output's scope (dataset, label) and, per operation, ordinal, opaque row identity and row kind; scoped to its own change set |
 | `drasi.query-output.v1` | Query ID, optional contributing source ID, production timestamp, metadata map and profiling |
 | `drasi.query-output-sequence.v1` | Logical query result sequence, preserved when output is reemitted |
 | `drasi.query-generation.v1` | Query output generation |
 | `drasi.query-recovery-identity.v1` | Scoped query identity and persistent/volatile incarnation information |
-| `drasi.query-snapshot.v1` | Whether the query-row envelope is a recovery snapshot |
+| `drasi.query-snapshot.v1` | Whether the envelope is a replace-all recovery snapshot of result nodes |
 | `drasi.query-progress-only.v1` | An explicit recovery-progress decision rather than a row replacement |
-| `drasi.query.futures-due` | Scheduled-work notification on an empty graph-change batch |
-| `drasi.source-transaction.v1` | Complete-transaction source and transaction identity |
+| `drasi.source-transaction.v1` | Complete-transaction marker scoped to its own change set (source, transaction ID, position, operation count) |
 | `drasi.source-transaction-replay.v1` | Stable source-transaction replay sequence where supplied |
 
 Readers do not use one universal dictionary rule for these keys. For example,
 source metadata preserves the original source contribution, while query-output
 readers locate the appropriate current query metadata and verify its identity.
-Producer-progress resolution checks which output stream a marker belongs to;
-it cannot treat any matching annotation found in an ancestor as current progress.
+Everything older than the current projection annotation is inherited and is
+never read as the current output's metadata. Producer-progress resolution checks
+which output stream a marker belongs to; it cannot treat any matching annotation
+found in an ancestor as current progress.
+
+`GraphChangeCodec::derive_changes` preserves the input ordering policy. A
+transformer deriving a new output from producer-sequenced input must therefore
+stamp its own `GraphProducerProgress`, not reuse an upstream marker. Volatile
+components own one output epoch while retaining their state, and create a new
+epoch on reconstruction. This does not claim persistent replay or require
+persisting the component's internal representation.
 
 Application/context annotations and the advisory change hashes can travel with
 the same event without becoming checkpoint authority. Append-only context
@@ -1137,27 +1427,30 @@ preserves their history; schema-specific readers establish their meaning.
 
 | Identity/position | Identifies |
 |---|---|
-| `ElementReference` or `RecordId` | The business element or query row being changed |
+| `ElementReference` or `RecordId` | The business element or result node being changed; for a result node, the dataset namespace plus opaque row identity |
 | `ChangeSetId` + operation ordinal | One operation within a logical batch |
 | `EnvelopeId` | One emitted event |
 | `SystemMetadata.stream` + `sequence` | Emission order on a producer's output stream |
 | Source checkpoint sequence + optional position bytes | The source input that a processing owner has committed |
-| `GraphProducerIdentity` + logical sequence | A transformer's stable output across transport replay |
+| `GraphProducerIdentity` + logical sequence | A producer's stable output across transport replay |
 | `QueryRecoveryIdentity` + output generation + query output sequence | A particular query result history |
 | Pipe journal position | Where the pipe stored an accepted envelope |
 | Consumer checkpoint or delivery-ledger position | What that consumer actually finished |
 
 The general identities retain the meanings established for Source/Sink.
-Queries add input checkpoints, typed row identities and an independently
-numbered result history; none replaces the transport's own position.
+Queries add input checkpoints, opaque result-node identities and an
+independently numbered result history; none replaces the transport's own
+position.
 
-Sources: [graph codec][graph-codec], [query codec][query-codec],
-[typed values][value-codec], [source transactions][source-transactions],
+Sources: [graph codec][graph-codec], [element image][element-image],
+[element patch][element-patch], [result nodes][result-node],
+[query codec][query-codec], [shared values][data-value],
+[source transactions][source-transactions],
 [ranked input][ranked], [middleware][middleware], [query wrapper][query],
 [Core query adapter][query-adapter], [evaluator][evaluator],
 [transaction-result collapse][transaction-results], [working indexes][result-index],
 [scheduled inputs][scheduling], [input progress][input-progress],
-[query identity][query-identity].
+[query identity][query-identity], [output identity][output-identity].
 
 ## 9. Initial data and the live-data boundary
 
@@ -1167,8 +1460,10 @@ but has a separate completion boundary.
 `ComputationBootstrapSnapshot` contains:
 
 - An asynchronous stream of `Result<ChangeEnvelope>`.
-- A list of `BootstrapWatermark` values: stream, optional source ID, sequence
-  and optional position bytes.
+- A list of `BootstrapWatermark` values: stream, sequence and either a
+  source-driver identity/opaque position or a generic output producer identity.
+  The latter binds the epoch even for an empty snapshot; it cannot be mixed
+  with source-driver position fields.
 
 The query establishes source preparation/recovered progress before consuming
 initial rows. Live input may be admitted and buffered while initial loading
@@ -1180,8 +1475,9 @@ stream finishes, the provider can return final watermarks and bounded handover
 state that were not available earlier.
 
 The final input watermarks, completed-bootstrap marker and applicable completion
-state are committed together. Only then is the initial result view ready for
-normal readers and live processing.
+state are committed together. Generic producer ownership is staged with its
+watermark, so a new epoch cannot be mistaken for an old duplicate sequence.
+Only then is the initial result view ready for normal readers and live processing.
 
 `BootstrapState` is bounded opaque initialization metadata kept in the query's
 transaction domain. It is not another source stream and is not the snapshot
@@ -1196,8 +1492,25 @@ If loading is interrupted, existing partial data is not declared a completed
 snapshot. Recovery examines the incomplete marker; it does not infer completion
 from a nonempty index.
 
+Ordinary `inputs` declarations can select source, query or transformer outputs.
+For native inputs with bootstrap enabled, the runtime binds a lossless live pipe
+and waits for upstream initialization before reading the actual registered
+`SnapshotProvider`. `OutputBootstrapProvider` captures that output's full
+records and cursor, not query-row JSON. Multiple source-driver and generic
+initializers use the existing composite bootstrap owner.
+
+A volatile query restart requests a full refresh, removing stale input state
+before loading current contents. A persistent query checks the saved output
+identity and requests the suffix after its committed input cursor through
+`ReplayProvider`. Those envelopes run through normal query processing and
+publication before queued live inputs; replay is never treated as bootstrap rows.
+Strict preserves typed gap/epoch errors. Only explicit AutoReset permits the
+logged reset and new snapshot. None of this implies a globally atomic snapshot
+across independent outputs.
+
 Sources: [bootstrap data contracts][bootstrap-data],
-[query bootstrap interface][query-bootstrap], [bootstrap processing][query-recovery].
+[query bootstrap interface][query-bootstrap], [bootstrap processing][query-recovery],
+[generic output bootstrap](../src/computation/v1/output_bootstrap.rs).
 
 ## 10. Result snapshots, retained output and readers
 
@@ -1207,6 +1520,7 @@ Sources: [bootstrap data contracts][bootstrap-data],
 are:
 
 ```text
+projector: ResultNodeProjector      (the output's dataset and label)
 rows: im::HashMap<RecordId, Record>
 sequence: u64
 outbox: VecDeque<ChangeEnvelope>
@@ -1215,14 +1529,20 @@ generation: u64
 identity: Option<QueryRecoveryIdentity>
 ```
 
-Applying committed output changes the keyed rows and appends the result envelope
-to retained output. Add/replace installs the full after-image; delete removes
-its `RecordId`. Equal-valued rows with different identities remain separate.
+The rows and the retained outbox are both canonical graph records: the rows are
+the current result nodes, and the outbox holds the published graph-change
+envelopes. Applying committed output changes the keyed rows and appends the
+result envelope to retained output. Add/replace installs the full after-image;
+delete removes its `RecordId`. Equal-valued rows with different identities
+remain separate.
 
-`QueryResultSnapshot` contains shared immutable rows, `as_of_sequence` and
-generation. Cloning the persistent map shares structure; it is not a deep copy
-of every record payload. A snapshot is a current set of rows, not a replay
-log and not a promise that every source input has been processed.
+`QueryResultSnapshot` contains the `projector`, shared immutable rows,
+`as_of_sequence` and generation. The projector is always present, so an empty
+snapshot still names its output scope instead of leaving the scope to be
+guessed from a first row. Cloning the persistent map shares structure; it is not
+a deep copy of every record payload. A snapshot is a current set of result
+nodes, not a replay log and not a promise that every source input has been
+processed.
 
 Retained output is an ordered suffix of emitted batches. Its capacity is
 independent of the number of current result rows.
@@ -1230,16 +1550,19 @@ independent of the number of current result rows.
 ### 10.2 Reading ordinary results
 
 `QueryApi` and `QueryResultsCatalog` are read access to that same query state;
-they do not evaluate the query again. `QueryResultsOutlet` forwards query-row
+they do not evaluate the query again. `QueryResultsOutlet` forwards query-output
 envelopes into catalog subscriptions.
 
-At the ordinary boundary, typed rows become `ResultDiff` and `QueryResult`.
-The row signature accompanies the projected JSON data. `SnapshotResponse`
-retains keyed rows and exposes both ordinary row iteration and keyed iteration,
-together with sequence, configuration hash and output generation.
+At the ordinary boundary, typed result nodes become `ResultDiff` and
+`QueryResult`. The row signature accompanies the projected JSON data.
+`SnapshotResponse` retains keyed rows and exposes both ordinary row iteration
+and keyed iteration, together with sequence, configuration hash and output
+generation.
 
 The JSON projection is deferred to this boundary where possible. A consumer
-reading native typed records need not construct an ordinary `QueryResult`.
+reading native records need not construct an ordinary `QueryResult`; it can
+decode the nodes with `GraphChangeCodec::decode_element` or
+`QueryChangeCodec::decode_row`.
 
 ### 10.3 Joining a snapshot to live output
 
@@ -1258,10 +1581,11 @@ checkpoint.
 
 ### 10.4 Snapshot and progress-only envelopes
 
-Recovery-aware query-row paths distinguish:
+Recovery-aware query-output paths distinguish:
 
-- **Snapshot envelope:** a complete set of full row additions plus explicit
-  snapshot metadata and its query output boundary.
+- **Snapshot envelope:** a complete set of full result-node additions plus the
+  `drasi.query-snapshot.v1` marker, the explicit output scope and its query output
+  boundary (`QueryChangeCodec::snapshot_envelope`). It means "replace the view".
 - **Ordinary change envelope:** differences to apply after the current boundary.
 - **Progress-only recovery envelope:** an explicit authorized skip decision,
   without claiming to replace rows or execute missing operations.
@@ -1274,6 +1598,41 @@ an explicit snapshot/skip recovery decision are different store operations.
 A consumer must not identify a snapshot simply by seeing many additions, or a
 skip by seeing an empty batch. The markers and recovery decision establish the
 meaning.
+
+Snapshot consumption is optional and **per input port**. An `EnvelopeSink`
+returns a `SnapshotConsumer` (whose required method is `replace_snapshot`) from
+`snapshot_consumer(port)` for each input that can really replace its state, and
+returns `None` for the others; a snapshot sent to a port without one is rejected,
+never silently accepted. For a native plugin, the factory metadata
+`snapshot_inputs` must list exactly the ports whose handlers exist. It cannot be
+a boolean promise. Multi-port sinks, custom schemas and several subscribers
+remain supported.
+
+`DrasiLib::output_catalogue()` exposes the common producer-read path.
+`SnapshotProvider`, `ReplayProvider` and `SnapshotFollowProvider` are independent,
+per-output registrations, not booleans inferred from a schema or component role.
+Snapshots contain full records and an explicit dataset even when empty.
+`OutputCursor` binds their committed logical position to the producer's epoch.
+Replay validates that same epoch and the current progress marker on every
+envelope, and reaches its reported head; re-emission transport numbers do not
+change logical positions. Missing capabilities, unavailable history and retired
+generations are explicit errors.
+
+`OutputHandle::catch_up` reads a snapshot and then its replay suffix; it detects
+gaps but does not capture subsequent live output. Use `snapshot_and_follow`
+for a coherent snapshot/live transition. Its provider opens retention with
+snapshot capture, so changes during snapshot consumption remain in a bounded
+tail. The query uses its existing result map and a shared `OutputFollowHub`;
+the hub retains only subsequent envelopes, not another copy of current rows.
+Each lease has count, full-envelope byte and non-renewing time limits. A slow
+reader receives `Gap` on overflow or `LeaseExpired` on expiry; it does not stall
+the query. Stop/reset retires its leases. Cancellation of a pending read does
+not consume an event, and dropping a lease releases retention synchronously.
+The consumer must install the snapshot and its cursor together before applying
+the tail. A volatile lease is not a durable checkpoint or historical replay.
+
+Storage remains deliberately private: no component is required to keep state
+or a materialized view, and each chooses its own representation and durability.
 
 Sources: [query output state][query-state], [catalog/outlet][catalog],
 [ordinary result exchange][query-exchange], [live reader][native-query],
@@ -1324,11 +1683,11 @@ flowchart TB
     working -->|"Existing elements, intermediate values<br/>and committed input positions"| evaluate
     evaluate -->|"Changed index entries, scheduled work<br/>and new input checkpoints"| working
     results -->|"Current output sequence<br/>and result-history metadata"| evaluate
-    evaluate -->|"Result-row mutations, output sequence<br/>and retained query-row batch"| results
-    evaluate -->|"ChangeEnvelope: drasi.query-row<br/>through output pipes"| deliver
-    deliver -->|"ChangeEnvelope to a native sink<br/>or QueryResult to an ordinary reaction"| sink
+    evaluate -->|"Result-node mutations, output sequence<br/>and retained graph-change batch"| results
+    evaluate -->|"ChangeEnvelope: drasi.graph-change<br/>(result nodes) through output pipes"| deliver
+    deliver -->|"ChangeEnvelope to a native sink or another query<br/>or QueryResult to an ordinary reaction"| sink
     reader -->|"Snapshot request or replay position"| read
-    results -->|"Current typed rows<br/>or retained query-row batches"| read
+    results -->|"Current result nodes<br/>or retained graph-change batches"| read
     read -->|"Result snapshot<br/>or ordered result changes"| reader
 ```
 
@@ -1359,7 +1718,7 @@ one query transaction
   element / archive / aggregation / future-queue changes
   input checkpoint and transport progress, where required
   encoded output batch, if the answer changed
-  materialized output-row mutations
+  materialized result-node mutations
   query output sequence and applicable handoff metadata
 commit
   publish in-memory result view
@@ -1368,7 +1727,8 @@ commit
 ```
 
 The query outbox stores the versioned envelope representation. Live result rows
-store the typed query-row bytes keyed by row signature. Recovery validates them
+store the canonical result-node records (the same `drasi.graph-change` records
+that are published), keyed by their record identity. Recovery validates them
 as records again instead of trusting an untyped JSON object.
 The query's retained-output `EnvelopeCodec` has a 64 MiB encoded-frame limit.
 
@@ -1510,7 +1870,8 @@ source mutation to invent result 9**.
 
 Tracked query output keeps a delivered-output position and a separate emission
 counter. Replay uses `reemit` to produce a valid new transport emission while
-preserving logical query sequence, output generation, typed rows and provenance.
+preserving logical query sequence, output generation, result nodes, ordering
+policy, control and provenance.
 Retention cannot evict output still required for unconfirmed handoff.
 
 `OutputBindings` records the actual receipt-tracked destinations and their
@@ -1593,21 +1954,24 @@ The next source change is a patch setting quantity to 8:
 
 ```text
 SourceChange::Update
-  Element::Node
+  element: Element::Node
     reference: ("inventory", "P-7")
     labels: ["Product"]
     effective_from: a valid millisecond time
     properties: {"quantity": Integer(8)}
+  removed_properties: {}
 ```
 
-Other existing properties remain because this is an update patch. The ordinary
-source wrapper records source sequence 42 and its optional replay position.
-The source adapter emits transport sequence 15 on its own stream.
+Other existing properties remain because this is an update patch that removes
+nothing. The ordinary source wrapper records source sequence 42 and its
+optional replay position. The source adapter emits transport sequence 15 on its
+own stream.
 
 The graph-change envelope contains an `Updated/Patch` operation, a
-`drasi.graph-element` record key for `inventory/P-7`, and the encoded
-`SourceChange`. Its source annotation still identifies source sequence 42.
-Transport sequence 15 is not written as source checkpoint 42.
+`drasi.graph-element` record key for `inventory/P-7`, and an `ElementPatch`
+payload that sets `quantity` and removes no property. Its source annotation still
+identifies source sequence 42. Transport sequence 15 is not written as source
+checkpoint 42.
 
 ### 13.3 Evaluation changes the answer
 
@@ -1619,21 +1983,27 @@ The evaluator produces an `Adding` result for a row signature, say `R`.
 `R` is an opaque evaluator identity, not the string `P-7` and not a hash the
 consumer should recompute from the JSON.
 
-The query-row operation is a full addition containing:
+The result is published as an `Added` operation holding a full node:
 
 ```text
-query_id: low-stock
-signature: R
-values:
-  id: String("P-7")
-  quantity: typed integer 8
-kind: Row
+record key: drasi.graph-element
+  ElementReference
+    source_id:  drasi.output/<hash of scope, graph, "low-stock", "out">
+    element_id: hex of R's eight bytes
+ElementImage::Node
+  labels: ["Result"]
+  properties:
+    id:       String("P-7")
+    quantity: Unsigned(8)
+projection annotation: operation 0 is a Row
 ```
 
-Its record key is scoped to `low-stock` and `R`. The query atomically commits
-source checkpoint 42, the updated query indexes, this materialized row and
-output sequence 8. It then publishes the result view and committed input
-progress.
+Its record key is scoped to the query's output dataset and `R`, not to the
+product. The query atomically commits source checkpoint 42, the updated query
+indexes, this materialized node and output sequence 8. It then publishes the
+result view and committed input progress. A second query reading
+`MATCH (r:Result) RETURN r.quantity AS quantity` would receive this same envelope
+unchanged.
 
 ### 13.4 Handoff and consumer progress
 
@@ -1727,8 +2097,8 @@ or plugin-authoring structure.
 | Source/query exchange wrappers | [exchange.rs][exchange] |
 | Schema, record images and ordered changes | [data.rs][records] |
 | Envelope metadata, derivation and context | [envelope.rs][envelopes] |
-| Standard payload codecs | [graph_codec.rs][graph-codec], [query_codec.rs][query-codec], [source_transaction.rs][source-transactions] |
-| Typed query-value storage | [value_codec.rs][value-codec] |
+| Standard payload codecs | [graph_codec.rs][graph-codec], [element_image.rs][element-image], [element_patch.rs][element-patch], [result_node.rs][result-node], [query_codec.rs][query-codec], [source_transaction.rs][source-transactions] |
+| Shared lossless values | [data_value.rs][data-value]; [value_codec.rs][value-codec] for the ordinary JSON boundary |
 | Outer envelope serialization | [codec.rs][json-codec], [binary_codec.rs][binary-codec] |
 | Port contracts and forwarding | [ports.rs][ports], [component.rs][component-dataflow], [graph.rs][graph-routing] |
 | Pipe delivery and acknowledgement | [pipe.rs][pipes], [retained_pipe.rs][retained-pipe], [qos_pipe.rs][qos] |
@@ -1738,7 +2108,7 @@ or plugin-authoring structure.
 | Query working state | [element_index.rs][element-index], [result_index.rs][result-index], [indexes.rs][indexes] |
 | Initial data and scheduled data | [bootstrap.rs][bootstrap-data], [query_recovery.rs][query-recovery], [query_scheduling.rs][scheduling] |
 | Current rows, output history and read access | [query_state.rs][query-state], [query_catalog.rs][catalog], [native_query.rs][native-query] |
-| Logical producer and input identities | [producer_identity.rs][producer-progress], [producer_progress.rs][input-progress], [query_identity.rs][query-identity] |
+| Logical producer and input identities | [producer_identity.rs][producer-progress], [producer_progress.rs][input-progress], [query_identity.rs][query-identity], [output_identity.rs][output-identity] |
 | Input/consumer progress | [source_progress.rs][source-progress], [consumer_progress.rs][consumer-progress], [input_position.rs][position-policy] |
 | Query handoff, consumer recovery and operation completion | [query_delivery.rs][query-delivery], [consumer_recovery.rs][consumer-recovery], [delivery.rs][delivery-runner] |
 | Source WAL storage and replay | [SourceBase][source-base], [redb WAL][wal-provider] |
@@ -1753,6 +2123,10 @@ or plugin-authoring structure.
 [graph-codec]: ../../components/computation-contracts/src/graph_codec.rs
 [query-codec]: ../../components/computation-contracts/src/query_codec.rs
 [value-codec]: ../../components/computation-contracts/src/internal/typed_change/value_codec.rs
+[element-image]: ../../components/computation-contracts/src/element_image.rs
+[element-patch]: ../../components/computation-contracts/src/element_patch.rs
+[result-node]: ../../components/computation-contracts/src/graph_codec/result_node.rs
+[data-value]: ../../core-types/src/data_value.rs
 [source-transactions]: ../../components/computation-contracts/src/source_transaction.rs
 [json-codec]: ../../components/computation-contracts/src/codec.rs
 [binary-codec]: ../../components/computation-contracts/src/binary_codec.rs

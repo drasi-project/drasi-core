@@ -623,7 +623,7 @@ impl EnvelopeSource for ComputationTopologySource {
                         }
                     }
                     if self.previous.contains_key(&id) {
-                        SourceChange::Update { element: emitted }
+                        SourceChange::update(emitted)
                     } else {
                         SourceChange::Insert { element: emitted }
                     }

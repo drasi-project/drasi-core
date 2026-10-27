@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::{
+    collections::BTreeSet,
     fmt::{Display, Formatter},
     sync::Arc,
 };
@@ -168,6 +169,11 @@ impl Element {
     }
 
     pub fn merge_missing_properties(&mut self, other: &Element) {
+        self.merge_missing_properties_except(other, &BTreeSet::new());
+    }
+
+    /// Keeps properties of `other` that this element omits, except explicitly removed names.
+    pub fn merge_missing_properties_except(&mut self, other: &Element, removed: &BTreeSet<String>) {
         match (self, other) {
             (
                 Element::Node {
@@ -180,7 +186,7 @@ impl Element {
                 },
             ) => {
                 assert_eq!(metadata.reference, other_metadata.reference);
-                properties.merge(other_properties);
+                properties.merge_except(other_properties, removed);
             }
             (
                 Element::Relation {
@@ -197,7 +203,7 @@ impl Element {
                 },
             ) => {
                 assert_eq!(metadata.reference, other_metadata.reference);
-                properties.merge(other_properties);
+                properties.merge_except(other_properties, removed);
             }
             _ => panic!("Cannot merge different element types"),
         }

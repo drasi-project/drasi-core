@@ -40,7 +40,7 @@ async fn separately_assembled_pipelines_share_one_root_without_helper_collisions
         let query = |id| {
             drasi_lib::Query::cypher(id)
                 .query("MATCH (n:Item) RETURN n.value AS value")
-                .from_source("input")
+                .from_input("input")
                 .enable_bootstrap(false)
                 .build()
         };
@@ -155,8 +155,8 @@ async fn scenario() {
         .query(
             "MATCH (o:Order)-[:CUSTOMER]->(c:Customer) RETURN o.name AS item, c.name AS customer",
         )
-        .from_source_with_pipeline("orders", vec!["normalize".into()])
-        .from_source("customers")
+        .from_input_with_pipeline("orders", vec!["normalize".into()])
+        .from_input("customers")
         .with_middleware(drasi_core::models::SourceMiddlewareConfig::new(
             "relabel",
             "normalize",

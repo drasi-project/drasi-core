@@ -467,6 +467,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
 
     // Update the node with new encoded data
     let update8 = SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test", "node8"),

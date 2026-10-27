@@ -285,10 +285,6 @@ impl SourceTimeMergeTransformer {
                 "merge timer deadline overflows"
             );
         }
-        anyhow::ensure!(
-            schema.descriptor() != QueryChangeCodec::schema().descriptor(),
-            "source-time merge consumes source events, not query results"
-        );
         let requirements =
             PipeRequirements::new([PipeCapability::FifoPerStream, PipeCapability::Backpressure]);
         let output_requirements = if persistent {
@@ -602,8 +598,13 @@ impl SourceTimeMergeTransformer {
             &self.state.identity
         };
         let input = &pending.input.envelope;
-        let metadata = SystemMetadata::new(identity.stream().clone(), self.state.emission_sequence)
-            .with_timestamp(input.system().timestamp().expect("validated source time"));
+        let mut metadata =
+            SystemMetadata::new(identity.stream().clone(), self.state.emission_sequence)
+                .with_ordering(input.system().ordering())
+                .with_timestamp(input.system().timestamp().expect("validated source time"));
+        if let Some(control) = input.system().control() {
+            metadata = metadata.with_control(control.clone());
+        }
         let mut envelope = input.derive(
             emission_id(identity.stream(), self.state.emission_sequence)?,
             input.changes().clone(),
@@ -749,6 +750,10 @@ impl Transformer for SourceTimeMergeTransformer {
             "drain pending merge output before new input"
         );
         let envelope = input.envelope;
+        anyhow::ensure!(
+            envelope.system().ordering() == ChangeOrdering::EventTime,
+            "source-time merge cannot reorder producer-sequence inputs"
+        );
         anyhow::ensure!(
             !GraphChangeCodec::is_futures_due(&envelope),
             "source-time merge cannot reorder scheduled query control notifications"

@@ -9,10 +9,22 @@ use serde_json::{json, Value};
 fn settings() -> Value {
     json!({
         "hostname":"no-connection-at-construction","database":"test","user":"user","password":"secret",
-        "queries":["db.people"],
+        "outputs":{"db.people":{"component":"db.people","port":"out"}},
         "default_template":{"added":{"template":"CALL added({{param after.id}},{{param after}})"}},
         "routes":{"people":{"deleted":{"template":"CALL deleted({{param before.id}})"}}}
     })
+}
+
+fn inputs() -> Vec<drasi_computation_contracts::InputBinding> {
+    use drasi_computation_contracts::{InputBinding, OutputEndpoint, PortId, StreamId};
+    vec![InputBinding {
+        input_port: PortId::try_new("in").expect("port"),
+        output: OutputEndpoint::new(
+            ComponentId::try_new("db.people").expect("component"),
+            PortId::try_new("out").expect("port"),
+        ),
+        stream: StreamId::try_new("people/out").expect("stream"),
+    }]
 }
 
 #[tokio::test]
@@ -23,6 +35,7 @@ async fn activation_credentials_are_explicit_transient_and_not_constructor_io() 
     settings.as_object_mut().unwrap().remove("user");
     settings.as_object_mut().unwrap().remove("password");
     let mut request = CreateRequest {
+        inputs: inputs(),
         id: ComponentId::try_new("sink")?,
         implementation: factory.metadata().implementation,
         configuration_version: 1,
@@ -70,6 +83,7 @@ fn native_mysql_factory_is_handled_and_construction_only() -> Result<()> {
     let sink = MySqlStoredProcSink::new(
         ComponentId::try_new("sink")?,
         serde_json::from_value(settings())?,
+        &inputs(),
     )?;
     let config = sink.configuration()?;
     assert_eq!(config["settings"]["password"], "secret");
@@ -90,7 +104,7 @@ fn native_mysql_factory_is_handled_and_construction_only() -> Result<()> {
 #[test]
 fn native_mysql_rejects_unsafe_sql_and_invalid_resource_limits() {
     for (field, value) in [
-        ("queries", json!([])),
+        ("outputs", json!({"bad id": {"component": "db.people"}})),
         ("port", json!(0)),
         ("retry_attempts", json!(9)),
         ("command_timeout_ms", json!(0)),
@@ -113,7 +127,14 @@ fn native_mysql_rejects_unsafe_sql_and_invalid_resource_limits() {
         value_config[field] = value;
         let parsed = serde_json::from_value::<MySqlStoredProcConfig>(value_config)
             .map_err(anyhow::Error::from)
-            .and_then(|config| config.validate());
+            .and_then(|config| {
+                config.validate()?;
+                let outputs = drasi_computation_contracts::SinkOutputs::from_inputs(
+                    &inputs(),
+                    &config.outputs,
+                )?;
+                config.validate_outputs(&outputs)
+            });
         assert!(parsed.is_err(), "{field}");
     }
 }

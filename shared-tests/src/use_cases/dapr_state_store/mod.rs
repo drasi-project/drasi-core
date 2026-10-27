@@ -101,6 +101,7 @@ fn create_dapr_update(element_id: &str, timestamp: u64, data: &JsonValue) -> Sou
     props.insert(RAW_DATA_PROP, create_dapr_value(data));
 
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new(SOURCE_ID, element_id),

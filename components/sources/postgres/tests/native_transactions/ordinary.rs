@@ -699,6 +699,7 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_change(
                     SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: Element::Node {
                             metadata,
                             properties,

@@ -10,9 +10,7 @@ pub use template::{build_render_input, validate_template, CompiledTemplate, Rend
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use drasi_computation_contracts::{
-    exchange::{QueryResult, ResultDiff},
-    ChangeEnvelope, ChangeOperation, QueryChangeCodec, QueryRowKind, Record, RecordImage,
-    UpdateSemantics,
+    BoundOutput, ChangeEnvelope, ChangeOperation, ChangeRoute, GraphChangeBatch,
 };
 use drasi_reaction_common::{OperationType, QueryConfig, TemplateSpec};
 use rust_decimal::Decimal;
@@ -42,94 +40,39 @@ pub fn resolve_template<'a>(
         .or_else(|| default.and_then(select))
 }
 
+/// The template route and context for one operation of standard graph changes.
+#[derive(Debug, Clone)]
+pub struct ChangeRenderInput {
+    /// The configured output alias that selects the route.
+    pub alias: String,
+    pub operation: OperationType,
+    pub context: Value,
+}
+
+/// Template context for one operation of standard graph changes.
+///
+/// A source, transformer or query produces the same data, so the context is
+/// built from the operation's records alone and is named by the configured
+/// `output` binding (alias, real component and port). It states `operation` (`ADD`, `REPLACE`, `PATCH` or
+/// `DELETE`), the canonical `identity`, `sequence`, an RFC 3339 `timestamp` when
+/// known, and only the `element`, `before`, `after` and `removedProperties`
+/// that the record carries. A patch's `after` has only the properties it sets;
+/// a template that reads an absent field fails strictly.
 pub fn build_native_render_input(
     envelope: &ChangeEnvelope,
     operation: &ChangeOperation,
-) -> Result<RenderInput> {
-    let metadata = QueryChangeCodec::result_metadata(envelope)?;
-    let row = |record: &Record| -> Result<_> {
-        anyhow::ensure!(
-            record.image() == RecordImage::Full,
-            "SQL delivery requires full query rows"
-        );
-        let row = QueryChangeCodec::decode_row(record)?;
-        anyhow::ensure!(
-            row.query_id == metadata.query_id,
-            "SQL delivery row belongs to another query"
-        );
-        Ok(row)
-    };
-    let diff = match operation {
-        ChangeOperation::Added { after, .. } => {
-            let after = row(after)?;
-            anyhow::ensure!(
-                after.kind == QueryRowKind::Row,
-                "invalid added query row kind"
-            );
-            ResultDiff::Add {
-                data: QueryChangeCodec::row_values_to_json(&after.values),
-                row_signature: after.signature,
-            }
-        }
-        ChangeOperation::Updated {
-            before,
-            after,
-            semantics: UpdateSemantics::Replace,
-            ..
-        } => {
-            let after = row(after)?;
-            let before = before.as_ref().map(row).transpose()?;
-            anyhow::ensure!(
-                before
-                    .as_ref()
-                    .is_none_or(|before| before.query_id == after.query_id
-                        && before.signature == after.signature
-                        && before.kind == after.kind),
-                "SQL delivery update changed row identity or kind"
-            );
-            match after.kind {
-                QueryRowKind::Row => ResultDiff::Update {
-                    data: QueryChangeCodec::row_values_to_json(&after.values),
-                    before: QueryChangeCodec::row_values_to_json(
-                        &before
-                            .context("SQL delivery update has no before image")?
-                            .values,
-                    ),
-                    after: QueryChangeCodec::row_values_to_json(&after.values),
-                    grouping_keys: None,
-                    row_signature: after.signature,
-                },
-                QueryRowKind::Aggregation { .. } => ResultDiff::Aggregation {
-                    before: before.map(|row| QueryChangeCodec::row_values_to_json(&row.values)),
-                    after: QueryChangeCodec::row_values_to_json(&after.values),
-                    row_signature: after.signature,
-                },
-            }
-        }
-        ChangeOperation::Deleted { before, .. } => {
-            let before = row(before
-                .as_ref()
-                .context("SQL delivery delete has no before image")?)?;
-            anyhow::ensure!(
-                before.kind == QueryRowKind::Row,
-                "invalid deleted query row kind"
-            );
-            ResultDiff::Delete {
-                data: QueryChangeCodec::row_values_to_json(&before.values),
-                row_signature: before.signature,
-            }
-        }
-        _ => anyhow::bail!("unsupported SQL query operation"),
-    };
-    let result = QueryResult {
-        query_id: metadata.query_id,
-        sequence: QueryChangeCodec::query_sequence(envelope)?,
-        timestamp: metadata.timestamp,
-        results: Vec::new(),
-        metadata: metadata.metadata,
-        profiling: metadata.profiling,
-    };
-    build_render_input(&result, &diff).context("SQL query operation has no render context")
+    output: BoundOutput<'_>,
+) -> Result<ChangeRenderInput> {
+    let notification = GraphChangeBatch::operation_notification(envelope, operation, output)?;
+    Ok(ChangeRenderInput {
+        alias: output.alias.to_owned(),
+        operation: match notification.change().route() {
+            ChangeRoute::Added => OperationType::Add,
+            ChangeRoute::Updated => OperationType::Update,
+            ChangeRoute::Deleted => OperationType::Delete,
+        },
+        context: notification.to_json()?,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -251,7 +194,10 @@ pub async fn execute_parameters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_computation_contracts::{ComponentId, QueryOutputMetadata, StreamId, SystemMetadata};
+    use drasi_computation_contracts::{
+        ComponentId, PortId, QueryChangeCodec, QueryOutputMetadata, ResultNodeProjector,
+        SinkOutput, SinkOutputs, StreamId, SystemMetadata,
+    };
     use drasi_core_types::evaluation::{
         context::QueryPartEvaluationContext, variable_value::VariableValue,
     };
@@ -295,14 +241,26 @@ mod tests {
         }
     }
 
+    fn test_outputs(alias: &str, component: &str, stream: &str) -> Result<SinkOutputs> {
+        Ok(SinkOutputs::new(BTreeMap::from([(
+            alias.to_owned(),
+            SinkOutput {
+                component: ComponentId::try_new(component)?,
+                port: PortId::try_new("out")?,
+                stream: StreamId::try_new(stream)?,
+            },
+        )]))?)
+    }
+
+    fn row(value: &str) -> BTreeMap<Box<str>, VariableValue> {
+        BTreeMap::from([
+            ("value".into(), VariableValue::String(value.into())),
+            ("nullable".into(), VariableValue::Null),
+        ])
+    }
+
     #[test]
-    fn native_sql_context_preserves_every_existing_result_diff_projection() -> Result<()> {
-        let row = |value: &str| {
-            BTreeMap::from([
-                ("value".into(), VariableValue::String(value.into())),
-                ("nullable".into(), VariableValue::Null),
-            ])
-        };
+    fn native_sql_context_is_the_same_for_query_and_unannotated_graph_changes() -> Result<()> {
         let evaluations = [
             QueryPartEvaluationContext::Adding {
                 after: row("added"),
@@ -326,34 +284,141 @@ mod tests {
                 row_signature: 4,
             },
         ];
-        let envelope = QueryChangeCodec::encode_evaluation(
+        let annotated = QueryChangeCodec::encode_evaluation(
             None,
             &ComponentId::try_new("source.query")?,
             SystemMetadata::new(StreamId::try_new("query/out")?, 1),
+            &ResultNodeProjector::try_new("test/postgres-common-sql/query/out", None)?,
             &evaluations,
             QueryOutputMetadata {
                 query_id: "source.query".into(),
                 source_id: Some("postgres".into()),
                 timestamp: chrono::DateTime::from_timestamp(10, 123_000_000).unwrap(),
-                metadata: HashMap::from([("custom".into(), json!({"keep": true}))]),
+                metadata: HashMap::new(),
                 profiling: None,
             },
         )?
         .context("query output")?;
-        let established = QueryChangeCodec::to_legacy_result(&envelope)?;
-        assert_eq!(established.results.len(), 4);
-        for (operation, diff) in envelope
+        let plain = ChangeEnvelope::new(
+            annotated.id().clone(),
+            annotated.changes().clone(),
+            (**annotated.system()).clone(),
+        );
+        let outputs = test_outputs("q", "source.query", "query/out")?;
+        let query_output = outputs.output_for(&StreamId::try_new("query/out")?)?;
+        // operation, before value, after value, identity key
+        let expected = [
+            ("ADD", None, Some("added"), "0000000000000001"),
+            ("REPLACE", Some("before"), Some("after"), "0000000000000002"),
+            ("DELETE", Some("deleted"), None, "0000000000000003"),
+            ("REPLACE", None, Some("aggregate"), "0000000000000004"),
+        ];
+        for (operation, (name, before, after, key)) in
+            plain.changes().operations().iter().zip(expected)
+        {
+            let native = build_native_render_input(&plain, operation, query_output)?;
+            let with_annotations = build_native_render_input(&annotated, operation, query_output)?;
+            assert_eq!(native.context, with_annotations.context);
+            assert_eq!(native.alias, "q");
+            assert_eq!(
+                native.context["output"],
+                json!({"alias": "q", "component": "source.query", "port": "out"})
+            );
+            assert!(native.context.get("producer").is_none());
+            assert_eq!(native.context["operation"], name);
+            assert_eq!(native.context["identity"]["id"], key);
+            assert_eq!(
+                native.context["identity"]["namespace"],
+                "test/postgres-common-sql/query/out"
+            );
+            // An unknown before image is absent, never a null row.
+            assert_eq!(native.context["before"]["value"], json!(before));
+            assert_eq!(native.context["after"]["value"], json!(after));
+            assert_eq!(native.context.get("before").is_some(), before.is_some());
+            assert!(native.context.get("row_signature").is_none());
+            assert_eq!(native.context["element"]["kind"], "node");
+            assert_eq!(native.context["element"]["labels"][0], "Result");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_sql_context_delivers_source_replacements_patches_and_deletions() -> Result<()> {
+        use drasi_computation_contracts::GraphChangeCodec;
+        use drasi_core_types::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
+            SourceChange,
+        };
+        use std::{collections::BTreeSet, sync::Arc};
+        let metadata = ElementMetadata {
+            reference: ElementReference::new("db", "7"),
+            labels: Arc::from([Arc::from("Person")]),
+            effective_from: 2_000,
+        };
+        let element = |name: &str| {
+            let mut properties = ElementPropertyMap::new();
+            properties.insert("name", ElementValue::String(name.into()));
+            properties.insert("age", ElementValue::Null);
+            Element::Node {
+                metadata: metadata.clone(),
+                properties,
+            }
+        };
+        let envelope = GraphChangeCodec::encode_changes(
+            &[
+                SourceChange::Replace {
+                    element: element("all"),
+                },
+                SourceChange::Update {
+                    element: element("some"),
+                    removed_properties: BTreeSet::from(["nickname".to_owned()]),
+                },
+                SourceChange::Delete {
+                    metadata: metadata.clone(),
+                },
+            ],
+            StreamId::try_new("db/out")?,
+            3,
+            chrono::DateTime::from_timestamp(10, 0),
+        )?;
+        let outputs = test_outputs("db", "facilities-db", "db/out")?;
+        let db_output = outputs.output_for(&StreamId::try_new("db/out")?)?;
+        let inputs = envelope
             .changes()
             .operations()
             .iter()
-            .zip(&established.results)
-        {
-            let native = build_native_render_input(&envelope, operation)?;
-            let original = build_render_input(&established, diff).context("result context")?;
-            assert_eq!(native.query_id, original.query_id);
-            assert_eq!(native.operation, original.operation);
-            assert_eq!(native.context, original.context);
-        }
+            .map(|operation| build_native_render_input(&envelope, operation, db_output))
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(inputs[0].context["operation"], "REPLACE");
+        assert_eq!(inputs[0].context["after"]["name"], "all");
+        assert_eq!(inputs[1].context["operation"], "PATCH");
+        assert_eq!(inputs[1].context["after"]["name"], "some");
+        // A null value that a patch sets is kept apart from a removed property.
+        assert!(inputs[1].context["after"]["age"].is_null());
+        assert_eq!(inputs[1].context["removedProperties"][0], "nickname");
+        assert!(inputs[0].context.get("removedProperties").is_none());
+        assert_eq!(inputs[2].context["operation"], "DELETE");
+        assert_eq!(
+            inputs[2].context["identity"],
+            json!({"namespace": "db", "id": "7"})
+        );
+        assert!(
+            inputs[2].context.get("before").is_none(),
+            "identity-only delete"
+        );
+        assert!(inputs[2].context.get("after").is_none());
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|input| input.operation)
+                .collect::<Vec<_>>(),
+            [
+                OperationType::Update,
+                OperationType::Update,
+                OperationType::Delete
+            ]
+        );
+        assert!(inputs.iter().all(|input| input.alias == "db"));
         Ok(())
     }
 }

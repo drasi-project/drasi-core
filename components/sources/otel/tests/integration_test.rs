@@ -290,17 +290,17 @@ async fn test_change_detection_through_collector() {
 
     let metric_query = Query::cypher("metric-query")
         .query("MATCH (s:Service)-[:REPORTS]->(m:Metric) RETURN s.name AS service, m.value AS latencyMs")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let dep_query = Query::cypher("dep-query")
         .query("MATCH (a:Service)-[:DEPENDS_ON]->(b:Service) RETURN a.name AS fromService, b.name AS toService")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let log_query = Query::cypher("log-query")
         .query("MATCH (s:Service)-[:EMITS]->(e:LogEvent) RETURN s.name AS service, e.body AS body, e.eventName AS eventName")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 

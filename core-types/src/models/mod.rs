@@ -19,18 +19,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+mod change_ordering;
 mod element;
 mod element_value;
 mod source_change;
 mod timestamp_range;
 
+pub use change_ordering::ChangeOrdering;
 pub use element::{
     validate_effective_from, Element, ElementMetadata, ElementReference, ElementTimestamp,
     MAX_REASONABLE_MILLIS_TIMESTAMP,
 };
 pub use element_value::ElementPropertyMap;
-pub use element_value::ElementValue;
-pub use source_change::SourceChange;
+pub use element_value::{ElementValue, TypedElementValue};
+pub use source_change::{SourceChange, SourceChangeError};
 pub use timestamp_range::{TimestampBound, TimestampRange};
 
 #[derive(Debug, Error)]

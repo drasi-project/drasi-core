@@ -152,6 +152,35 @@ fences proxy retirement; neither substitutes configuration metadata or an empty
 schema for a failed read. Older binaries without the extension remain supported.
 No application SQL read/write API is added to DrasiLib or the native ABI.
 
+## Native output snapshot, replay and follow
+
+The Host negotiates `output_reads_v1` and `output_follow_v1` only for factories
+that declare `output_snapshots`, `output_replays` or `output_follows`, and opens
+exactly the declared providers at construction. `NativeComponentProxy` exposes
+them through `ComputationComponent::output_readers()` as real shared
+`SnapshotProvider`, `ReplayProvider` and `SnapshotFollowProvider` objects; no
+executor, row store or graph is created. Reads never use the component's data
+operation slot. The proxy's fence ends reads and closes follow leases on stop,
+restart and release, whatever the library does, and decoded snapshots, replays and
+live items are validated (schema, owner, full images, logical progress, complete
+tail, item order) before they are returned; malformed or oversized buffers are
+`Invalid` or explicit limit errors. A lease's follow acknowledges only items it
+actually returned. Providers hold only their own library's handles, released once
+when the last provider reference is dropped.
+
+## Native port format selection
+
+When a plugin factory opts in (it declares `Capabilities::port_formats` or an
+optional object `ports` configuration field), `NativeFactory`
+resolves the literal `ports` configuration against the plugin's own declared
+schemas and nothing else. `specification`/`specification_from_config` describe the
+selected ports before construction; `validate` and the graph's definition check
+reject a specification whose ports differ from the resolution, and an unknown
+port or format, before `create`. The factory's `port_formats()` exposes the
+catalogue; instances are built with the resolved ports and the Host re-checks the
+constructed component's descriptor. No format is converted or defaulted. See the
+plugin SDK's "Optional per-port format selection".
+
 ## Managed native bootstrap
 
 `nativeBootstrap` recipes create one graph-owned `Bootstrap` resource for the
@@ -469,11 +498,13 @@ capabilities. Do not fall back to legacy registration after such an error.
 lifetime, including identified candidates whose initialization fails; hot
 unloading is unsupported.
 
-Native ABI 1.0 uses wire version 2: bounded MessagePack and bulk binary envelope
-buffers. Version-1 prototype native libraries must be rebuilt and are rejected
-before plugin entry. Native response buffers remain producer-owned while being
-decoded, then are released through their callback; graph envelopes contain
-fully owned local values. Legacy ABI 0.15 and persisted JSON envelopes are unchanged.
+Native ABI 1.0 uses wire version 1: bounded MessagePack and bulk binary envelope
+buffers. Build native libraries and the host from matching sources; unknown
+wire versions are rejected before plugin entry. Native response buffers remain
+producer-owned while being decoded, then are released through their callback;
+graph envelopes contain fully owned local values. JSON storage uses its own
+v1 envelope definition. Both representations preserve event-local controls,
+annotations and lineage.
 
 `NativeFactory` implements the existing `ComponentFactory` and, for explicitly
 opted-in factories, `TransactionalTransformerFactory`. Its `specification(id,

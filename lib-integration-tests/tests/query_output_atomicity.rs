@@ -32,7 +32,7 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::BootstrapEventSender;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::computation::v1::{
-    EnvelopeCodec, QueryChangeCodec, QueryRowKind, Record, RecordImage,
+    EnvelopeCodec, GraphChangeCodec, QueryChangeCodec, Record, RecordImage, ResultNodeProjector,
 };
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
@@ -829,10 +829,17 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let mut outbox_source_ids = Vec::new();
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("storage limit"));
     codec.register_schema(QueryChangeCodec::schema())?;
+    let mut output_scope: Option<ResultNodeProjector> = None;
     for (_seq, data) in &raw_outbox {
         let envelope = codec
             .decode(data)
             .context("decode durable query envelope")?;
+        let projection =
+            QueryChangeCodec::projection(&envelope).context("durable query projection")?;
+        match &output_scope {
+            Some(scope) => assert_eq!(scope, projection.projector()),
+            None => output_scope = Some(projection.projector().clone()),
+        }
         let result = QueryChangeCodec::to_legacy_result(&envelope)
             .context("project the durable query envelope")?;
         if let Some(source_id) = result
@@ -857,12 +864,11 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let live_row_count = live_rows.len();
     let mut live_names = Vec::new();
     for (signature, data) in live_rows {
-        let identity = QueryChangeCodec::encode_row(
-            QUERY_ID,
-            signature,
-            &Default::default(),
-            QueryRowKind::Row,
-            RecordImage::Full,
+        let scope = output_scope
+            .as_ref()
+            .context("live rows require a durable output envelope that supplies their scope")?;
+        let identity = GraphChangeCodec::element_reference(
+            &scope.reference(&ResultNodeProjector::signature_identity(signature))?,
         )?
         .identity()
         .clone();
@@ -872,9 +878,10 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
             RecordImage::Full,
             bytes::Bytes::from(data),
         )?;
-        let row = QueryChangeCodec::decode_row(&record).context("decode durable live row")?;
-        assert_eq!(row.query_id, QUERY_ID);
-        assert_eq!(row.signature, signature);
+        let row =
+            QueryChangeCodec::decode_row_in(scope, &record).context("decode durable live row")?;
+        assert_eq!(row.dataset, scope.dataset());
+        assert_eq!(row.signature, Some(signature));
         if let Some(name) = row.values.get("name") {
             live_names.push(name.to_string());
         }
@@ -937,7 +944,7 @@ async fn build_core(
         .with_query(
             Query::cypher(QUERY_ID)
                 .query(opts.query_text)
-                .from_source(SOURCE_ID)
+                .from_input(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(std::env::var(BOOTSTRAP_ENV).ok().as_deref() == Some("1"))
                 .with_outbox_capacity(32)

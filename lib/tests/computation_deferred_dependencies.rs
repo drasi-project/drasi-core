@@ -606,12 +606,21 @@ async fn verify_late_connection(late_stream: bool) {
                 endpoint: Endpoint::new(component("producer"), output.clone()),
             }
         ));
-        control
+        let consumer = control
             .add_component(ComponentAddition::new(ConstructedComponent::sink(
                 Box::new(consumer()),
             )))
             .await
             .expect("sink declaration");
+        let waiting = wait_for_creation_state(&control, consumer.id()).await;
+        assert_eq!(waiting.realization, RealizationState::Blocked);
+        assert!(waiting.failure.is_none(), "{waiting:?}");
+        assert_eq!(
+            waiting.waiting_for,
+            [DependencyWait::Connection {
+                endpoint: Endpoint::new(consumer.id().clone(), input.clone()),
+            }]
+        );
         let edge = EdgeDefinition::new(
             Endpoint::new(component("producer"), output.clone()),
             Endpoint::new(component("consumer"), input.clone()),
@@ -654,7 +663,7 @@ async fn verify_late_connection(late_stream: bool) {
                 .await
                 .expect("bind the actual output stream");
         }
-        control
+        let report = control
             .connect(
                 edge,
                 Box::new(BoundedPipeConfig { capacity: 2 }),
@@ -662,9 +671,15 @@ async fn verify_late_connection(late_stream: bool) {
             )
             .await
             .expect("connect declared components");
+        assert_eq!(report.summary, OperationSummary::Completed, "{report:#?}");
         let envelope = tokio::time::timeout(Duration::from_secs(3), receive.recv())
             .await
-            .expect("automatic processing deadline")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "automatic processing deadline; graph state: {:#?}",
+                    control.observed()
+                )
+            })
             .expect("delivered change");
         assert_eq!(
             GraphChangeCodec::decode_changes(&envelope).expect("decode"),
@@ -807,7 +822,14 @@ async fn verify_declared_connection_before_producer() {
                     vec![PortDescriptor::new(
                         output.clone(),
                         PortDirection::Output,
-                        QueryChangeCodec::schema().descriptor().clone(),
+                        SchemaDescriptor::try_new(
+                            SchemaId::try_new("test.incompatible-late-endpoint")
+                                .expect("schema id"),
+                            SchemaVersion::try_new(1).expect("schema version"),
+                            "test-incompatible",
+                            bytes::Bytes::from_static(b"incompatible-late-endpoint"),
+                        )
+                        .expect("incompatible schema"),
                         PipeRequirements::default(),
                     )],
                 )

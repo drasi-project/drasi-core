@@ -9,6 +9,7 @@ use serde_json::json;
 fn positional_factories_are_explicit_and_do_not_claim_coordinated_loading() -> Result<()> {
     let factory = MySqlPositionalChangesFactory;
     let mut request = CreateRequest {
+        inputs: Vec::new(),
         id: ComponentId::try_new("source")?,
         implementation: factory.metadata().implementation,
         configuration_version: 1,
@@ -45,7 +46,8 @@ fn positional_factories_are_explicit_and_do_not_claim_coordinated_loading() -> R
 }
 
 #[test]
-fn native_mysql_modes_have_distinct_fixed_schemas_and_progress_contracts() -> Result<()> {
+fn native_mysql_modes_share_the_standard_schema_with_distinct_implementations_and_progress_contracts(
+) -> Result<()> {
     ExportedPlugin::new(plugin()?)?;
     let changes = MySqlChangesFactory.metadata();
     let rows = MySqlSharedChangesFactory.metadata();
@@ -54,7 +56,9 @@ fn native_mysql_modes_have_distinct_fixed_schemas_and_progress_contracts() -> Re
     assert!(changes.configuration.fields["settings"].secret);
     assert_eq!(changes.ports, rows.ports);
     assert_eq!(transactions.ports, shared.ports);
-    assert_ne!(changes.ports, transactions.ports);
+    // Both modes publish standard graph data; the mode is the implementation, not a schema.
+    assert_eq!(changes.ports, transactions.ports);
+    assert_ne!(changes.implementation, transactions.implementation);
     assert!(!MySqlChangesFactory.supports_source_progress());
     assert!(!MySqlChangesFactory.supports_consumer_progress());
     assert!(MySqlTransactionsFactory.supports_source_progress());

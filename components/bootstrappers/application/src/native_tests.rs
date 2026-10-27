@@ -171,7 +171,7 @@ fn existing_insert_storage_rule_does_not_accept_deletes_or_updates() {
             unreachable!()
         };
         provider
-            .store_insert_event(SourceChange::Update { element })
+            .store_insert_event(SourceChange::update(element))
             .await;
         provider
             .store_insert_event(SourceChange::Delete {

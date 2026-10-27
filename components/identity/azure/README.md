@@ -105,7 +105,7 @@ let app = DrasiLib::builder()
     .with_query(
         Query::cypher("my-query")
             .query("MATCH (n:MyNode) RETURN n.id AS id, n.value AS value")
-            .from_source("my-source")
+            .from_input("my-source")
             .build()
     )
     .build()

@@ -996,7 +996,7 @@ SubmitEventResponse { success: false, error: "Validation error: Node element mis
 ```rust
 let query = Query::cypher("my-query")
     .query("MATCH (n) RETURN n")
-    .from_source("my-grpc-source")
+    .from_input("my-grpc-source")
     .build();
 
 drasi.add_query(query).await?;

@@ -14,6 +14,8 @@ mod component_data;
 mod consumer_progress;
 #[doc(hidden)]
 pub mod delivery;
+mod element_image;
+mod element_patch;
 #[doc(hidden)]
 pub mod output_identity;
 pub use admission_messages::*;
@@ -26,17 +28,23 @@ pub mod error;
 pub mod exchange;
 #[doc(hidden)]
 pub mod graph_codec;
+mod graph_view;
 mod identity;
 mod input_position;
 mod internal;
+mod output_follow;
+mod output_read;
+mod port_formats;
 #[doc(hidden)]
 pub mod ports;
+mod primary_ports;
 mod producer_identity;
 mod progress;
 #[doc(hidden)]
 pub mod query_codec;
 mod query_identity;
 mod snapshot;
+mod snapshot_consumer;
 mod source_schema;
 #[doc(hidden)]
 pub mod source_transaction;
@@ -48,15 +56,23 @@ pub use component_data::*;
 pub use consumer_progress::*;
 pub use data::*;
 pub use drasi_core_types::{profiling, schema};
+pub use element_image::{ElementImage, ElementImageError};
+pub use element_patch::{ElementPatch, ElementPatchError, ElementPatchKind};
 pub use envelope::*;
 pub use error::{ContractError, OperationFailures, Result};
 pub use graph_codec::*;
+pub use graph_view::*;
 pub use identity::*;
 pub use input_position::*;
+pub use output_follow::*;
+pub use output_read::*;
+pub use port_formats::*;
 pub use ports::*;
+pub use primary_ports::PortPrimaries;
 pub use progress::*;
 pub use query_codec::*;
 pub use snapshot::*;
+pub use snapshot_consumer::SnapshotConsumer;
 pub use source_schema::SourceSchemaReader;
 pub use source_transaction::*;
 

@@ -61,7 +61,7 @@ impl BridgeSink {
             descriptor.id().clone(),
         )?;
         let codec = PortableEnvelopeCodec::new(
-            config.schema,
+            config.delivery,
             config.namespace.clone(),
             config.limits.clone(),
         )?;

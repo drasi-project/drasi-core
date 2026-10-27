@@ -57,7 +57,7 @@ async fn apply(
         properties: ElementPropertyMap::from(properties),
     };
     let change = if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     };

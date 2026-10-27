@@ -56,7 +56,7 @@ async fn future_notifications_ignore_data_checkpoints_with_colliding_source_id()
                      datetime({epochMillis: item.deadline})
                  ) THEN true ELSE false END AS due",
             )
-            .from_source(source_id)
+            .from_input(source_id)
             .auto_start(true)
             .enable_bootstrap(false)
             .build();

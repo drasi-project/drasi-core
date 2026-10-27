@@ -636,7 +636,7 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
         .with_query(
             drasi_lib::Query::cypher(QUERY_ID)
                 .query(opts.query_text)
-                .from_source(SOURCE_ID)
+                .from_input(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(false)
                 .with_outbox_capacity(opts.outbox_capacity)
@@ -2774,7 +2774,7 @@ async fn seed_query_identity_change_phase(paths: &FixturePaths) -> Result<()> {
 
     let replacement = drasi_lib::Query::cypher(QUERY_ID)
         .query(change.query_text())
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(false)
         .with_outbox_capacity(32)

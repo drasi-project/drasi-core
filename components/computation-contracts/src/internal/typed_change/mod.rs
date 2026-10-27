@@ -30,7 +30,7 @@ pub(crate) use adapters::{
 pub(crate) use canonical::{encode_query_variables, encode_source_change};
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
     sync::{Arc, OnceLock},
 };
@@ -214,6 +214,9 @@ pub(crate) enum UpdateSemantics {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum UpdateMetadata {
     None,
+    GraphPatch {
+        removed_properties: Arc<BTreeSet<String>>,
+    },
     QueryUpdate {
         grouping_keys: Option<Arc<[Arc<str>]>>,
     },
@@ -460,8 +463,25 @@ impl ChangeSet {
             (
                 ChangeSchemaKind::GraphChange,
                 identity,
-                RecordData::Graph(graph @ (GraphRecord::Element(_) | GraphRecord::Future(_))),
+                RecordData::Graph(graph @ GraphRecord::Element(_)),
+            ) if matches!(
+                (record.semantics, &record.metadata),
+                (UpdateSemantics::Patch, UpdateMetadata::GraphPatch { .. })
+                    | (UpdateSemantics::Replace, UpdateMetadata::None)
+            ) && matches!(
+                record.before,
+                None | Some(RecordData::Graph(GraphRecord::Element(_)))
+                    | Some(RecordData::Graph(GraphRecord::Metadata(_)))
+            ) =>
+            {
+                Self::validate_graph_identity("updated", record.ordinal, identity, graph)
+            }
+            (
+                ChangeSchemaKind::GraphChange,
+                identity,
+                RecordData::Graph(graph @ GraphRecord::Future(_)),
             ) if record.semantics == UpdateSemantics::Patch
+                && record.metadata == UpdateMetadata::None
                 && matches!(
                     record.before,
                     None | Some(RecordData::Graph(GraphRecord::Element(_)))

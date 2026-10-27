@@ -135,16 +135,14 @@ pub fn change_event_to_source_change(
                 event.new_row_id.or(event.old_row_id),
             );
 
-            SourceChange::Update {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new(source_id, &element_id),
-                        labels,
-                        effective_from,
-                    },
-                    properties: to_property_map(&values),
+            SourceChange::update(Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source_id, &element_id),
+                    labels,
+                    effective_from,
                 },
-            }
+                properties: to_property_map(&values),
+            })
         }
         Action::SQLITE_DELETE => {
             let values = event.old_values.unwrap_or_default();
@@ -224,8 +222,10 @@ mod tests {
         let change = change_event_to_source_change(event, "sqlite-source", None);
         match change {
             SourceChange::Update {
+                removed_properties,
                 element: Element::Node { metadata, .. },
             } => {
+                assert!(removed_properties.is_empty());
                 assert_eq!(metadata.reference.element_id.as_ref(), "devices:12");
                 assert_eq!(metadata.effective_from, 456);
             }

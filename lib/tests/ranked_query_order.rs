@@ -256,7 +256,7 @@ async fn scenario() {
             .enable_bootstrap(true)
             .auto_start(true);
         for source in sources {
-            query = query.from_source(source);
+            query = query.from_input(source);
         }
         builder = builder.with_query(query.build());
     }
@@ -396,7 +396,7 @@ async fn scheduled_batches_keep_original_source_provenance() {
             .with_source(source.clone())
             .with_query(drasi_lib::Query::cypher("timed")
                 .query("MATCH (n:Item) WHERE drasi.trueFor(n.ready, duration({seconds:5})) RETURN n.name AS name")
-                .from_source("source")
+                .from_input("source")
                 .enable_bootstrap(true)
                 .auto_start(true)
                 .build())

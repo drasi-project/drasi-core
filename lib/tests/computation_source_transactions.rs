@@ -87,7 +87,7 @@ fn change(id: &str, name: &str, update: bool, time: u64) -> SourceChange {
         properties: ElementPropertyMap::from(serde_json::json!({"name": name})),
     };
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }
@@ -258,11 +258,14 @@ async fn transaction_mode_rejects_non_atomic_resources_and_unframed_input() {
     .await
     .is_err());
     let mut query = query(directory.path(), 2).await;
-    assert_ne!(query.descriptor(), &definition().descriptor());
-    assert_eq!(
-        query.descriptor(),
-        &definition().descriptor_with_execution(&execution(2))
-    );
+    // The standard graph schema carries no transaction mode: atomic handling is
+    // explicit configuration, and unmarked input fails at admission instead.
+    assert_eq!(query.descriptor(), &definition().descriptor());
+    assert!(query
+        .descriptor()
+        .ports()
+        .iter()
+        .all(|port| { port.schema() == GraphChangeCodec::schema().descriptor() }));
     query.start().await.expect("start");
     let raw = GraphChangeCodec::encode_changes(
         &[change("one", "one", false, 1000), change("two", "two", false, 1100)],
@@ -275,6 +278,21 @@ async fn transaction_mode_rejects_non_atomic_resources_and_unframed_input() {
         query.transform(input(raw)).await.is_err(),
         "a vector is not proof of a source commit"
     );
+    assert!(names(&query).is_empty());
+
+    // A marker inherited by a transformed change set is not completeness either.
+    let complete = envelope(
+        2,
+        vec![change("one", "one", false, 1000), change("two", "two", false, 1100)],
+    );
+    let transformed = GraphChangeCodec::derive_changes(
+        &complete,
+        &GraphChangeCodec::decode_changes(&complete).expect("changes"),
+        StreamId::try_new("transformed").expect("stream"),
+        1,
+    )
+    .expect("derived");
+    assert!(query.transform(input(transformed)).await.is_err());
     assert!(names(&query).is_empty());
     query.stop().await.expect("cleanup");
 }
@@ -307,6 +325,132 @@ impl SourceMiddleware for Wait {
 }
 
 #[tokio::test]
+async fn event_mode_keeps_per_event_results_while_transaction_mode_publishes_the_net_result() {
+    let changes = || {
+        vec![
+            change("one", "first", false, 1000),
+            change("one", "middle", true, 1100),
+            change("one", "last", true, 1200),
+        ]
+    };
+    let operations = |outputs: &[OutputEnvelope]| {
+        outputs
+            .iter()
+            .map(|output| output.envelope.changes().operations().len())
+            .sum::<usize>()
+    };
+
+    let atomic_directory = tempfile::tempdir().expect("directory");
+    let mut atomic = query(atomic_directory.path(), 3).await;
+    atomic.start().await.expect("start");
+    let net = atomic
+        .transform(input(envelope(1, changes())))
+        .await
+        .expect("complete transaction");
+    assert_eq!(operations(&net), 1, "one net result change");
+    assert_eq!(names(&atomic), ["last"]);
+    atomic.stop().await.expect("cleanup");
+
+    // The identical standard records without a marker, in ordinary event mode,
+    // keep each event's own result change.
+    let event_directory = tempfile::tempdir().expect("directory");
+    let mut event = ContinuousQueryTransformer::new_configured(
+        definition(),
+        provider(event_directory.path()),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await
+    .expect("event query");
+    event.start().await.expect("start");
+    let batch = GraphChangeCodec::encode_changes(
+        &changes(),
+        StreamId::try_new("source-output").expect("stream"),
+        1,
+        Some(chrono::DateTime::from_timestamp_millis(1000).expect("timestamp")),
+    )
+    .expect("ordinary batch");
+    let each = event.transform(input(batch)).await.expect("event batch");
+    assert_eq!(operations(&each), 3, "an add and two updates");
+    assert_eq!(names(&event), ["last"]);
+    event.stop().await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn transaction_applies_removal_replacement_and_updates_in_commit_order() {
+    let directory = tempfile::tempdir().expect("directory");
+    let person = |time: u64, properties: serde_json::Value| Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("source", "one"),
+            labels: Arc::from([Arc::from("Person")]),
+            effective_from: time,
+        },
+        properties: ElementPropertyMap::from(properties),
+    };
+    let remove_name = |time| {
+        SourceChange::update_with_removals(
+            person(time, serde_json::json!({})),
+            ["name".to_string()].into(),
+        )
+        .expect("removal")
+    };
+    let values = |query: &ContinuousQueryTransformer| {
+        query
+            .results()
+            .snapshot()
+            .expect("snapshot")
+            .rows
+            .values()
+            .map(|record| {
+                let row = QueryChangeCodec::decode_row(record).expect("row");
+                QueryChangeCodec::row_values_to_json(&row.values)["name"].clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut query = query(directory.path(), 4).await;
+    query.start().await.expect("start");
+    let steps = [
+        (
+            vec![change("one", "a", false, 1000)],
+            serde_json::json!("a"),
+        ),
+        (vec![remove_name(1100)], serde_json::Value::Null),
+        // A replacement drops everything it omits, then a later update sets again.
+        (
+            vec![
+                SourceChange::replace(person(1200, serde_json::json!({"name": "c"}))),
+                SourceChange::update(person(1300, serde_json::json!({"other": 1}))),
+            ],
+            serde_json::json!("c"),
+        ),
+        // The last change in the group wins: set, then remove.
+        (
+            vec![change("one", "d", true, 1400), remove_name(1500)],
+            serde_json::Value::Null,
+        ),
+        // Remove, then set again.
+        (
+            vec![remove_name(1600), change("one", "e", true, 1700)],
+            serde_json::json!("e"),
+        ),
+        (
+            vec![SourceChange::replace(person(1800, serde_json::json!({"other": 2})))],
+            serde_json::Value::Null,
+        ),
+    ];
+    for (index, (changes, expected)) in steps.into_iter().enumerate() {
+        let sequence = index as u64 + 1;
+        query
+            .transform(input(envelope(sequence, changes)))
+            .await
+            .expect("group");
+        assert_eq!(values(&query), [expected], "after transaction {sequence}");
+    }
+    query.stop().await.expect("cleanup");
+}
+
+#[tokio::test]
 async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_whole_group() {
     let directory = tempfile::tempdir().expect("directory");
     let gate = Arc::new(tokio::sync::Notify::new());
@@ -315,7 +459,7 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
     let registry = Arc::new(registry);
     let config = drasi_lib::Query::cypher("query")
         .query(definition().query)
-        .from_source_with_pipeline("source", vec!["waiting".into()])
+        .from_input_with_pipeline("source", vec!["waiting".into()])
         .with_middleware(SourceMiddlewareConfig::new(
             "wait",
             "waiting",
@@ -551,7 +695,7 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
             let factory = Arc::new(ContinuousQueryFactory::default());
             let indexes = ResourceId::try_new("indexes").unwrap();
             let mut specification = ComponentSpecification {
-                descriptor: definition().descriptor_with_execution(&execution(3)),
+                descriptor: definition().descriptor(),
                 role: ComponentRole::Query,
                 completion: None,
                 implementation: factory.descriptor().implementation.clone(),
@@ -577,11 +721,10 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
             };
             factory.validate(&specification).unwrap();
             specification.descriptor = definition().descriptor();
-            assert!(
-                factory.validate(&specification).is_err(),
-                "grouping cannot bind an ordinary source port"
-            );
-            specification.descriptor = definition().descriptor_with_execution(&execution(3));
+            factory
+                .validate(&specification)
+                .expect("one graph schema serves both modes; the marker selects nothing");
+            specification.descriptor = definition().descriptor();
             graph
                 .declare_resource(ResourceSpecification {
                     id: indexes.clone(),

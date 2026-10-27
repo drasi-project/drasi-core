@@ -312,20 +312,15 @@ async fn native_configuration_and_factory_reject_incompatible_bounds_and_resourc
         )]),
     };
     factory.validate(&specification)?;
-    for invalid in [
-        "schema",
-        "progress",
-        "snapshot",
-        "flag",
-        "rest-shape",
-        "rest-host",
-    ] {
+    // Both outputs publish the standard graph schema, so the descriptor cannot
+    // select (or contradict) transaction mode; the configured output does.
+    let mut same_schema = specification.clone();
+    same_schema.descriptor =
+        SqliteSource::describe(ComponentId::try_new("sqlite")?, SqliteOutput::Changes)?;
+    factory.validate(&same_schema)?;
+    for invalid in ["progress", "snapshot", "flag", "rest-shape", "rest-host"] {
         let mut specification = specification.clone();
         match invalid {
-            "schema" => {
-                specification.descriptor =
-                    SqliteSource::describe(ComponentId::try_new("sqlite")?, SqliteOutput::Changes)?
-            }
             "progress" => {
                 specification.dependencies.insert(
                     Arc::from("source_progress"),
@@ -564,7 +559,7 @@ async fn configured_keys() -> Result<()> {
                 handle.execute("UPDATE items SET id=2").await?;
                 let updated = decode(next(&mut source).await?)?;
                 assert!(matches!(&updated[..],
-                    [SourceChange::Update { element }] if element.get_reference() == &reference));
+                    [SourceChange::Update { element, .. }] if element.get_reference() == &reference));
                 handle.execute("UPDATE items SET code='second:key'").await?;
                 let changed = decode(next(&mut source).await?)?;
                 assert!(matches!(&changed[..], [
@@ -659,7 +654,7 @@ async fn keyless_rowids() -> Result<()> {
             let first = metadata.reference.clone();
             handle.execute("UPDATE items SET id=2,value='after'").await?;
             let updated = decode(next(&mut source).await?)?;
-            assert!(matches!(&updated[..], [SourceChange::Update { element }] if element.get_reference() == &first));
+            assert!(matches!(&updated[..], [SourceChange::Update { element, .. }] if element.get_reference() == &first));
             handle.execute("UPDATE items SET oid=42").await?;
             let moved = decode(next(&mut source).await?)?;
             assert!(matches!(&moved[..], [

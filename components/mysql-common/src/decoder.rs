@@ -80,7 +80,7 @@ impl MySqlDecoder {
         after: &BinlogRow,
     ) -> Result<SourceChange> {
         let (element, _) = self.row_to_element(table, after, Some(before))?;
-        Ok(SourceChange::Update { element })
+        Ok(SourceChange::update(element))
     }
 
     pub fn decode_delete(

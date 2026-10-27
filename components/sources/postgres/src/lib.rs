@@ -117,7 +117,7 @@
 //! | WAL Operation | SourceChange |
 //! |---------------|--------------|
 //! | INSERT | `SourceChange::Insert { element: Node }` |
-//! | UPDATE | `SourceChange::Update { element: Node }` |
+//! | UPDATE | `SourceChange::update(Node)` |
 //! | DELETE | `SourceChange::Delete { metadata }` |
 //!
 //! ## Example Mapping

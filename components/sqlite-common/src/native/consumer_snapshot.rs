@@ -559,6 +559,7 @@ impl SqliteConsumerSnapshot {
             "SQLite shared snapshot is incomplete"
         );
         Ok(vec![BootstrapWatermark {
+            producer: None,
             stream: self.shared.stream.clone(),
             source_id: Some(self.shared.source.to_string()),
             sequence: handover.sequence,

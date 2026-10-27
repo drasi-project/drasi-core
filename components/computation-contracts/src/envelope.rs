@@ -17,6 +17,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 
+pub use drasi_core_types::models::ChangeOrdering;
+
 use super::{
     data::validate_identifier, ChangeSetRef, ComponentId, ContractError, EnvelopeId, Result,
     StreamId,
@@ -104,6 +106,31 @@ impl ProcessingContext {
     }
 }
 
+/// Opaque control directive scoped to one immutable event. The kind is checked;
+/// the payload is uninterpreted bytes and may be empty. It is bounded only by
+/// the enclosing envelope frame limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlMessage {
+    kind: Arc<str>,
+    payload: Bytes,
+}
+
+impl ControlMessage {
+    pub fn try_new(kind: impl Into<Arc<str>>, payload: Bytes) -> Result<Self> {
+        let kind = kind.into();
+        validate_identifier("control kind", &kind)?;
+        Ok(Self { kind, payload })
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn payload(&self) -> &Bytes {
+        &self.payload
+    }
+}
+
 /// Immutable producer metadata. Sequence, not timestamp, is authoritative.
 /// Each stream belongs to one producer/output port. Successful new emissions
 /// have strictly increasing sequences (gaps are legal); the future host enforces
@@ -114,6 +141,8 @@ pub struct SystemMetadata {
     sequence: u64,
     timestamp: Option<DateTime<Utc>>,
     source_position: Option<Bytes>,
+    control: Option<ControlMessage>,
+    ordering: ChangeOrdering,
 }
 
 impl SystemMetadata {
@@ -123,6 +152,8 @@ impl SystemMetadata {
             sequence,
             timestamp: None,
             source_position: None,
+            control: None,
+            ordering: ChangeOrdering::EventTime,
         }
     }
 
@@ -136,6 +167,22 @@ impl SystemMetadata {
     /// Opaque producer position, not proof of durability or a checkpoint.
     pub fn with_source_position(mut self, position: Bytes) -> Self {
         self.source_position = Some(position);
+        self
+    }
+
+    /// Event-local control. Unlike annotations, derived outputs do not inherit
+    /// it; a producer must attach a fresh control to the output metadata.
+    pub fn with_control(mut self, control: ControlMessage) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    /// Immutable stale-admission policy for this event. New metadata defaults to
+    /// `EventTime`; `ProducerSequence` is only valid when the receiver has
+    /// externally validated the producer identity/epoch and accepted sequence.
+    /// Derived outputs do not inherit it: the producer states the policy again.
+    pub fn with_ordering(mut self, ordering: ChangeOrdering) -> Self {
+        self.ordering = ordering;
         self
     }
 
@@ -153,6 +200,14 @@ impl SystemMetadata {
 
     pub fn source_position(&self) -> Option<&Bytes> {
         self.source_position.as_ref()
+    }
+
+    pub fn control(&self) -> Option<&ControlMessage> {
+        self.control.as_ref()
+    }
+
+    pub const fn ordering(&self) -> ChangeOrdering {
+        self.ordering
     }
 }
 
@@ -247,6 +302,7 @@ pub type Envelope = ChangeEnvelope;
 
 impl ChangeEnvelope {
     /// Replay committed logical content without changing its provenance.
+    /// Event metadata, including any control, is retained.
     pub fn reemit(&self, sequence: u64) -> Result<Self> {
         let mut system = self.system().as_ref().clone();
         system.sequence = sequence;
@@ -324,6 +380,8 @@ impl ChangeEnvelope {
     /// Emit a new event from this input, preserving context and input metadata
     /// in lineage. The producer supplies its own output-stream identity/sequence.
     /// An input sequence must not be reused as the sequence of multiple outputs.
+    /// Context is inherited, but the input's control is not: the output has only
+    /// the supplied metadata, while the input's control remains historical lineage.
     pub fn derive(&self, id: EnvelopeId, changes: ChangeSetRef, system: SystemMetadata) -> Self {
         Self {
             event: Arc::new(ChangeEvent {
@@ -372,6 +430,179 @@ impl ChangeEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        ChangeSet, RecordId, RecordImage, RecordValidationError, RecordValidator, Schema,
+        SchemaDescriptor, SchemaId, SchemaVersion,
+    };
+
+    struct NoRecords;
+
+    impl RecordValidator for NoRecords {
+        fn validate_identity(
+            &self,
+            _: &SchemaDescriptor,
+            _: &RecordId,
+        ) -> std::result::Result<(), RecordValidationError> {
+            Err(RecordValidationError::new("identity", "no records"))
+        }
+
+        fn validate(
+            &self,
+            schema: &SchemaDescriptor,
+            id: &RecordId,
+            _: RecordImage,
+            _: &[u8],
+        ) -> std::result::Result<(), RecordValidationError> {
+            self.validate_identity(schema, id)
+        }
+    }
+
+    fn fixture_changes() -> ChangeSetRef {
+        let schema = Schema::new(
+            SchemaDescriptor::try_new(
+                SchemaId::try_new("test.control").unwrap(),
+                SchemaVersion::try_new(1).unwrap(),
+                "none",
+                Bytes::from_static(b"empty"),
+            )
+            .unwrap(),
+            Arc::new(NoRecords),
+        );
+        ChangeSet::try_new(
+            crate::ChangeSetId::try_new("changes", Bytes::from_static(b"empty")).unwrap(),
+            schema.descriptor().clone(),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn control(kind: &str, payload: &'static [u8]) -> ControlMessage {
+        ControlMessage::try_new(kind, Bytes::from_static(payload)).unwrap()
+    }
+
+    fn metadata(stream: &str, sequence: u64) -> SystemMetadata {
+        SystemMetadata::new(StreamId::try_new(stream).unwrap(), sequence)
+    }
+
+    #[test]
+    fn control_messages_check_kind_and_keep_arbitrary_payloads() {
+        for kind in ["", " ", "a b", "a\tb", "a\nb", "a\u{0}b", "\u{7f}"] {
+            assert!(
+                matches!(
+                    ControlMessage::try_new(kind, Bytes::new()),
+                    Err(ContractError::InvalidIdentifier {
+                        kind: "control kind",
+                        ..
+                    })
+                ),
+                "{kind:?}"
+            );
+        }
+        let empty = ControlMessage::try_new("custom/reevaluate", Bytes::new()).unwrap();
+        assert_eq!(empty.kind(), "custom/reevaluate");
+        assert!(empty.payload().is_empty());
+        let bytes = control("opaque", &[255, 0, 128]);
+        assert_eq!(bytes.payload().as_ref(), [255, 0, 128]);
+        assert_eq!(bytes.clone(), bytes);
+        assert_ne!(bytes, control("opaque", &[255, 0]));
+        assert_ne!(bytes, control("other", &[255, 0, 128]));
+    }
+
+    #[test]
+    fn metadata_control_is_absent_by_default_and_reemit_retains_it() {
+        assert!(metadata("source", 1).control().is_none());
+        let expected = control("custom/due", &[0, 1, 2]);
+        let original = ChangeEnvelope::new(
+            EnvelopeId::try_new("source", Bytes::from_static(b"event")).unwrap(),
+            fixture_changes(),
+            metadata("source", 1).with_control(expected.clone()),
+        );
+        assert_eq!(original.system().control(), Some(&expected));
+        let replay = original.reemit(9).unwrap();
+        assert_eq!(replay.system().sequence(), 9);
+        assert_eq!(replay.system().control(), Some(&expected));
+        assert_eq!(original.system().sequence(), 1);
+    }
+
+    #[test]
+    fn derive_uses_fresh_metadata_and_keeps_input_control_only_in_lineage() {
+        let input_control = control("custom/due", &[7]);
+        let mut input = ChangeEnvelope::new(
+            EnvelopeId::try_new("source", Bytes::from_static(b"event")).unwrap(),
+            fixture_changes(),
+            metadata("source", 1).with_control(input_control.clone()),
+        );
+        input
+            .append_annotation(
+                ContextEntry::try_new(
+                    ComponentId::try_new("source").unwrap(),
+                    "inherited",
+                    ContextValue::Bool(true),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let output = input.derive(
+            EnvelopeId::try_new("output", Bytes::from_static(b"event")).unwrap(),
+            input.changes().clone(),
+            metadata("output", 1),
+        );
+        assert!(output.system().control().is_none());
+        assert_eq!(output.annotations().len(), 1);
+        let lineage = output.lineage().unwrap();
+        assert_eq!(lineage.system().control(), Some(&input_control));
+
+        let replacement = control("custom/replacement", &[]);
+        let next = output.derive(
+            EnvelopeId::try_new("next", Bytes::from_static(b"event")).unwrap(),
+            output.changes().clone(),
+            metadata("next", 1).with_control(replacement.clone()),
+        );
+        assert_eq!(next.system().control(), Some(&replacement));
+        let parent = next.lineage().unwrap();
+        assert!(parent.system().control().is_none());
+        assert_eq!(
+            parent.parent().unwrap().system().control(),
+            Some(&input_control)
+        );
+        let replay = next.reemit(2).unwrap();
+        assert_eq!(replay.system().control(), Some(&replacement));
+        assert!(replay.lineage().unwrap().system().control().is_none());
+    }
+
+    #[test]
+    fn ordering_defaults_to_event_time_and_is_replay_retained_but_not_derived() {
+        assert_eq!(metadata("source", 1).ordering(), ChangeOrdering::EventTime);
+        let input = ChangeEnvelope::new(
+            EnvelopeId::try_new("source", Bytes::from_static(b"event")).unwrap(),
+            fixture_changes(),
+            metadata("source", 1).with_ordering(ChangeOrdering::ProducerSequence),
+        );
+        assert_eq!(input.system().ordering(), ChangeOrdering::ProducerSequence);
+        let replay = input.reemit(9).unwrap();
+        assert_eq!(replay.system().ordering(), ChangeOrdering::ProducerSequence);
+        assert_eq!(input.system().ordering(), ChangeOrdering::ProducerSequence);
+
+        let output = input.derive(
+            EnvelopeId::try_new("output", Bytes::from_static(b"event")).unwrap(),
+            input.changes().clone(),
+            metadata("output", 1),
+        );
+        assert_eq!(output.system().ordering(), ChangeOrdering::EventTime);
+        assert_eq!(
+            output.lineage().unwrap().system().ordering(),
+            ChangeOrdering::ProducerSequence
+        );
+        let explicit = input.derive(
+            EnvelopeId::try_new("explicit", Bytes::from_static(b"event")).unwrap(),
+            input.changes().clone(),
+            metadata("explicit", 1).with_ordering(input.system().ordering()),
+        );
+        assert_eq!(
+            explicit.system().ordering(),
+            ChangeOrdering::ProducerSequence
+        );
+    }
 
     #[test]
     fn copied_annotation_entries_share_immutable_storage() {

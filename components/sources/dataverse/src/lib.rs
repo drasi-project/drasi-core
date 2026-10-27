@@ -500,12 +500,10 @@ impl DataverseSource {
                     effective_from,
                 };
 
-                SourceChange::Update {
-                    element: Element::Node {
-                        metadata,
-                        properties,
-                    },
-                }
+                SourceChange::update(Element::Node {
+                    metadata,
+                    properties,
+                })
             }
             DataverseChange::Deleted { id, entity_name } => {
                 let element_id = format!("{entity_name}:{id}");
@@ -1397,7 +1395,7 @@ mod tests {
 
             let source_change = DataverseSource::convert_to_source_change("test-source", &change);
             match source_change {
-                SourceChange::Update { element } => match element {
+                SourceChange::Update { element, .. } => match element {
                     Element::Node {
                         metadata,
                         properties,

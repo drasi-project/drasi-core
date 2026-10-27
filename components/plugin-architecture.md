@@ -117,7 +117,9 @@ dependency checks for the existing non-query components.
 A native library can expose factories for `NativeSource`, `NativeTransformer`,
 `NativeSink` and `NativeService`. Each also implements `NativeComponent`.
 The factory describes its configuration, ports, schemas, completion behavior
-and actually implemented capabilities. Construction is configuration-only;
+and actually implemented capabilities. Snapshot replacement is declared per sink
+input port and must match the handlers the constructed sink actually registers.
+Construction is configuration-only;
 activation and I/O belong to lifecycle operations.
 
 Native bootstrap providers are negotiated through the bootstrap extension,
@@ -189,7 +191,7 @@ the same two symbols.
 
 | Family | Base metadata / entry point | Additional interfaces |
 |---|---|---|
-| Native | `drasi_computation_plugin_metadata` / `drasi_computation_plugin_entry` | Separately negotiated configuration, admission, recovery, bootstrap, consumer, batching and query-snapshot extensions |
+| Native | `drasi_computation_plugin_metadata` / `drasi_computation_plugin_entry` | Separately negotiated configuration, admission, recovery, bootstrap, consumer, batching, query-snapshot, output-read and output-follow extensions |
 | Ordinary compatibility | `drasi_plugin_metadata` / `drasi_plugin_init` | The selected ordinary SDK's registration and callback interfaces |
 
 Use the corresponding SDK export macro rather than writing these interfaces by
@@ -202,14 +204,15 @@ serve different purposes. Do not substitute one for another.
 
 | Host interface | Accepted plugin interface |
 |---|---|
-| Native computation ABI 1.0.0 | Compatible native tables, matching target and wire version 2; supported extensions are validated separately |
+| Native computation ABI 1.0.0 | Compatible native tables, matching target and wire version 1; supported extensions are validated separately |
 | Ordinary ABI 0.17.x | Ordinary 0.17.x on the same target |
 | Ordinary ABI 0.17.x loading 0.16.x | The explicitly supported older behavior/prefix; no automatic upgrade to new recovery capabilities |
 | Missing metadata, wrong target, incompatible or unknown interface | Reject; never guess a compatible layout |
 
-Native base tables and strict metadata are frozen. The older JSON-envelope wire
-prototype is not accepted by wire version 2. New capabilities use the existing
-extension pattern rather than changing an old table's layout.
+Native base tables and strict metadata are checked independently of the v1
+MessagePack payload definition. Build hosts and native libraries from matching
+sources. Capabilities use the existing extension pattern rather than changing
+an unrelated table's layout.
 
 In ordinary ABI 0.17, state-store listing can report failure rather than an
 empty result. A versioned durability callback follows the 0.16 table prefix.
@@ -227,7 +230,7 @@ built libraries. Rust memory layouts are not part of that contract.
 
 ### Serialized Payload Pattern
 
-Native metadata/configuration are JSON. Native wire version 2 carries typed
+Native metadata/configuration are JSON. Native wire version 1 carries typed
 envelopes and bulk byte buffers as named MessagePack records. The persisted
 envelope representation is a separate contract; changing transport encoding
 does not authorize rewriting saved state.
@@ -281,6 +284,7 @@ or arbitrary storage owners. Current native extension contracts include:
 | Bootstrap | Query-owned providers, bounded snapshot polling and borrowed initialization-state requests | A second bootstrap executor or partial snapshots treated as complete |
 | Source/bootstrap coordination | One actual source-owned initialization engine and query-scoped bootstrap handles, with graph-owned resource lifetime | Application SQL access, a path-global registry or a separate copied database worker |
 | Source data schema | Bounded reads of the active source's actual catalog, independent of pending data processing | SQL reads/writes or substitution of factory configuration metadata |
+| Output snapshot/replay/follow | Per-output providers over the component's own state, bounded typed answers and leases that end on stop, restart and release | A shared row store, streaming of unbounded data, crash-durable handover or a generic live-follow coordinator |
 | Handled consumers | Existing delivery runner, retries and completion state; borrowed transactional state when selected | An independent plugin commit or atomic remote effects |
 
 The current transactional participant has no commit operation. The actual

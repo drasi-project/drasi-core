@@ -149,7 +149,7 @@ mod integration_tests {
     // 3. Create query
     let query = Query::cypher("test-query")
       .query("MATCH (n:test_table) RETURN n.id AS id, n.name AS name")
-      .from_source("test-source")
+      .from_input("test-source")
       .auto_start(true)
       // Query-level recovery options (controls source resume behavior):
       // .with_recovery_policy(RecoveryPolicy::AutoReset)
@@ -239,7 +239,7 @@ mod integration_tests {
     // 3. Create query
     let query = Query::cypher("test-query")
       .query("MATCH (n:test_table) RETURN n.id AS id, n.name AS name")
-      .from_source("test-source")
+      .from_input("test-source")
       .auto_start(true)
       // Query-level recovery options (use as appropriate):
       // .with_recovery_policy(RecoveryPolicy::AutoReset)

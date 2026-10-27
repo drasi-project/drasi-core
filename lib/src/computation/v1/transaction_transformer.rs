@@ -565,12 +565,16 @@ impl LinearTransaction {
                         current.changes().schema().clone(),
                         current.changes().operations().to_vec(),
                     )?;
-                    let mut system = SystemMetadata::new(stream.clone(), emission);
+                    let mut system = SystemMetadata::new(stream.clone(), emission)
+                        .with_ordering(current.system().ordering());
                     if let Some(timestamp) = envelope.system().timestamp() {
                         system = system.with_timestamp(timestamp);
                     }
                     if let Some(position) = envelope.system().source_position() {
                         system = system.with_source_position(position.clone());
+                    }
+                    if let Some(control) = current.system().control() {
+                        system = system.with_control(control.clone());
                     }
                     Ok(current.derive(emission_id(&stream, emission)?, changes, system))
                 },

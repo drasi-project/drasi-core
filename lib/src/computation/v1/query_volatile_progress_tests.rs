@@ -64,6 +64,39 @@ async fn query() -> anyhow::Result<(ContinuousQueryTransformer, Arc<QuerySourceP
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn failed_input_does_not_bind_a_volatile_producer_epoch() -> anyhow::Result<()> {
+    let mut query = ContinuousQueryTransformer::new(
+        ContinuousQueryDefinition {
+            graph_id: "volatile".into(),
+            id: ComponentId::try_new("query")?,
+            query: "MATCH (n:Person) RETURN abs(n.name) AS invalid".into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out")?,
+            outbox_capacity: NonZeroUsize::new(8).unwrap(),
+        },
+        Arc::new(InMemoryComputationProvider),
+    )
+    .await?;
+    query.start().await?;
+    let mut input = event(1, 1, b"uncommitted")?;
+    let producer = crate::computation::v1::GraphProducerIdentity::volatile(
+        "volatile".into(),
+        "volatile".into(),
+        ComponentId::try_new("source")?,
+        input.envelope.system().stream().clone(),
+    )?;
+    crate::computation::v1::GraphProducerProgress::annotate(&mut input.envelope, &producer, 1)?;
+    query
+        .transform(input)
+        .await
+        .expect_err("abs cannot evaluate a string");
+    assert!(query.input_producers.lock().unwrap().is_empty());
+    assert!(query.watermarks.lock().unwrap().is_empty());
+    query.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transport(
 ) -> anyhow::Result<()> {
     let (mut query, owner) = query().await?;
@@ -102,6 +135,7 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
             None,
             &ComponentId::try_new("foreign")?,
             SystemMetadata::new(StreamId::try_new("foreign/out")?, 100),
+            &crate::computation::v1::ResultNodeProjector::try_new("test/foreign/out", None)?,
             &[drasi_core::evaluation::context::QueryPartEvaluationContext::Adding {
                 after: BTreeMap::new(),
                 row_signature: 1,
@@ -114,7 +148,7 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
                 profiling: None,
             },
         )?
-        .ok_or_else(|| anyhow::anyhow!("missing invalid-schema input"))?,
+        .ok_or_else(|| anyhow::anyhow!("missing unstamped producer input"))?,
     };
     assert!(query.transform(invalid).await.is_err());
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 1);
@@ -226,6 +260,7 @@ impl ComputationBootstrapProvider for Snapshot {
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(first.chain(end)),
             watermarks: vec![BootstrapWatermark {
+                producer: None,
                 stream: StreamId::try_new("source/out")?,
                 source_id: Some("source".into()),
                 sequence: 7,

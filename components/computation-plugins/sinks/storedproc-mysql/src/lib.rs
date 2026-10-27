@@ -10,7 +10,7 @@ mod tests;
 
 use anyhow::Result;
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, ImplementationIdentity, QueryChangeCodec, SinkCompletion,
+    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
 };
 use drasi_computation_plugin_sdk::{
     ActivationCredentialContext, Capabilities, Component, ConfigSchema, ConfigType, ControlSender,
@@ -37,7 +37,7 @@ pub fn plugin() -> Result<PluginDefinition> {
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
         vec![Arc::new(MySqlStoredProcFactory)],
-        vec![QueryChangeCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 #[cfg(feature = "dynamic-plugin")]
@@ -77,7 +77,10 @@ impl Factory for MySqlStoredProcFactory {
                 .ports()
                 .to_vec(),
             completion: Some(SinkCompletion::Handled),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                binds_inputs: true,
+                ..Capabilities::default()
+            },
         }
     }
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
@@ -90,6 +93,7 @@ impl Factory for MySqlStoredProcFactory {
                 request.id.clone(),
                 config.settings,
                 request.activation_credentials_bound,
+                &request.inputs,
             )?,
         ))
         .into())

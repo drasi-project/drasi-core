@@ -124,7 +124,7 @@ async fn clean_restart_preserves_query_generation_and_strict_reaction_checkpoint
             .with_query(
                 crate::Query::cypher("query")
                     .query("MATCH (n:Person) RETURN n.name AS name")
-                    .from_source("source")
+                    .from_input("source")
                     .build(),
             )
             .with_reaction(reaction)
@@ -223,7 +223,7 @@ async fn query_component_ownership() {
     let query = |id| {
         crate::Query::cypher(id)
             .query("MATCH (n:Person) RETURN n.name AS name")
-            .from_source("source")
+            .from_input("source")
             .enable_bootstrap(false)
             .build()
     };

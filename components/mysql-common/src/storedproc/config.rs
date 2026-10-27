@@ -6,11 +6,11 @@ use crate::{
     storedproc,
 };
 use anyhow::Result;
-use drasi_computation_contracts::ComponentId;
+use drasi_computation_contracts::{OutputAliases, SinkOutputs};
 use drasi_reaction_common::{OperationType, QueryConfig};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
 };
 
@@ -52,7 +52,10 @@ pub struct MySqlStoredProcConfig {
     pub ssl: bool,
     #[serde(default)]
     pub tls_ca_pem: Option<String>,
-    pub queries: Vec<String>,
+    /// Optional aliases for the incoming outputs; the graph supplies each
+    /// output's producing component, port and stream.
+    #[serde(default, skip_serializing_if = "OutputAliases::is_empty")]
+    pub outputs: OutputAliases,
     #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
     #[serde(default)]
@@ -103,15 +106,7 @@ impl MySqlStoredProcConfig {
             self.ssl || self.tls_ca_pem.is_none(),
             "MySQL CA requires TLS"
         );
-        anyhow::ensure!(
-            !self.queries.is_empty()
-                && self.queries.iter().collect::<BTreeSet<_>>().len() == self.queries.len(),
-            "MySQL sink requires distinct configured queries"
-        );
-        for query in &self.queries {
-            ComponentId::try_new(query.as_str())?;
-        }
-        storedproc::validate_routes(&self.routes, &self.queries)?;
+        self.outputs.validate()?;
         anyhow::ensure!(
             !self.routes.is_empty() || self.default_template.is_some(),
             "MySQL sink needs a command template"
@@ -139,6 +134,14 @@ impl MySqlStoredProcConfig {
             );
         }
         Ok(())
+    }
+    /// Checks that depend on the incoming edges: every route must name an
+    /// output of this sink.
+    pub fn validate_outputs(&self, outputs: &SinkOutputs) -> Result<()> {
+        storedproc::validate_routes(
+            &self.routes,
+            &outputs.aliases().map(str::to_owned).collect::<Vec<_>>(),
+        )
     }
     pub fn template(&self, query: &str, operation: OperationType) -> Option<&str> {
         storedproc::resolve_template(

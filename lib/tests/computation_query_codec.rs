@@ -34,6 +34,10 @@ use drasi_core::{
 use drasi_lib::{channels::ResultDiff, computation::v1::*};
 use drasi_query_ast::ast::{self, BinaryExpression, Literal, UnaryExpression};
 
+fn test_projector(dataset: &str) -> ResultNodeProjector {
+    ResultNodeProjector::try_new(dataset, None).expect("test output scope")
+}
+
 fn variables(value: VariableValue) -> QueryVariables {
     BTreeMap::from([(Box::<str>::from("value"), value)])
 }
@@ -110,24 +114,24 @@ fn query_rows_retain_all_value_kinds_instead_of_using_lossy_legacy_json() {
         VariableValue::Expression(expression),
         VariableValue::Awaiting,
     ];
+    let projector = test_projector("test/query-codec-value-kinds");
     for value in values {
-        let row = QueryChangeCodec::encode_row(
-            "query",
-            17,
-            &variables(value),
-            QueryRowKind::Row,
-            RecordImage::Full,
-        )
-        .expect("encode typed value");
-        let decoded = QueryChangeCodec::decode_row(&row).expect("decode typed value");
+        let row = QueryChangeCodec::encode_row(&projector, 17, &variables(value), 123)
+            .expect("encode typed value");
+        let decoded =
+            QueryChangeCodec::decode_row_in(&projector, &row).expect("decode typed value");
+        assert_eq!(decoded.dataset, projector.dataset());
+        assert_eq!(decoded.label, projector.label());
         let reencoded = QueryChangeCodec::encode_row(
-            &decoded.query_id,
-            decoded.signature,
+            &projector,
+            decoded
+                .signature
+                .expect("an evaluator row identity carries its signature"),
             &decoded.values,
-            decoded.kind,
-            RecordImage::Full,
+            123,
         )
         .expect("re-encode typed value");
+        assert_eq!(row.identity(), reencoded.identity());
         assert_eq!(
             row.payload(),
             reencoded.payload(),
@@ -173,6 +177,7 @@ fn query_envelopes_preserve_order_aggregation_flags_and_legacy_projection() {
         None,
         &ComponentId::try_new("query").expect("id"),
         SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), 7),
+        &test_projector("test/query-codec-envelopes"),
         &results,
         metadata,
     )
@@ -223,52 +228,50 @@ fn query_envelopes_preserve_order_aggregation_flags_and_legacy_projection() {
 }
 
 #[test]
-fn row_identity_is_scoped_by_query_and_metadata_cannot_relabel_a_foreign_set() {
+fn row_identity_is_scoped_by_dataset_and_a_foreign_projection_cannot_relabel_a_set() {
     let values = variables(VariableValue::from(1));
-    let first =
-        QueryChangeCodec::encode_row("first", 1, &values, QueryRowKind::Row, RecordImage::Full)
-            .expect("first");
-    let second =
-        QueryChangeCodec::encode_row("second", 1, &values, QueryRowKind::Row, RecordImage::Full)
-            .expect("second");
+    let first_scope = test_projector("test/query-codec-first");
+    let second_scope = test_projector("test/query-codec-second");
+    let first = QueryChangeCodec::encode_row(&first_scope, 1, &values, 1).expect("first");
+    let second = QueryChangeCodec::encode_row(&second_scope, 1, &values, 1).expect("second");
     assert_ne!(first.identity(), second.identity());
-    let mut envelope = QueryChangeCodec::encode_evaluation(
-        None,
-        &ComponentId::try_new("first").expect("id"),
-        SystemMetadata::new(StreamId::try_new("first/out").expect("stream"), 1),
-        &[QueryPartEvaluationContext::Adding {
-            after: values,
-            row_signature: 1,
-        }],
-        QueryOutputMetadata {
-            query_id: "first".into(),
-            source_id: None,
-            timestamp: chrono::Utc::now(),
-            metadata: HashMap::new(),
-            profiling: None,
-        },
-    )
-    .expect("encode")
-    .expect("event");
-    envelope
-        .append_annotation(
-            ContextEntry::try_new(
-                ComponentId::try_new("other").expect("id"),
-                "drasi.query-output.v1",
-                ContextValue::Bytes(Arc::from(
-                    serde_json::to_vec(&QueryOutputMetadata {
-                        query_id: "second".into(),
-                        source_id: None,
-                        timestamp: chrono::Utc::now(),
-                        metadata: HashMap::new(),
-                        profiling: None,
-                    })
-                    .expect("metadata"),
-                )),
-            )
-            .expect("entry"),
+    assert_eq!(
+        QueryChangeCodec::decode_row_in(&first_scope, &first)
+            .expect("same scope")
+            .signature,
+        Some(1)
+    );
+    assert!(QueryChangeCodec::decode_row_in(&second_scope, &first).is_err());
+
+    let encode = |projector: &ResultNodeProjector, query: &str| {
+        QueryChangeCodec::encode_evaluation(
+            None,
+            &ComponentId::try_new("first").expect("id"),
+            SystemMetadata::new(StreamId::try_new("first/out").expect("stream"), 1),
+            projector,
+            &[QueryPartEvaluationContext::Adding {
+                after: values.clone(),
+                row_signature: 1,
+            }],
+            QueryOutputMetadata {
+                query_id: query.into(),
+                source_id: None,
+                timestamp: chrono::Utc::now(),
+                metadata: HashMap::new(),
+                profiling: None,
+            },
         )
-        .expect("append");
+        .expect("encode")
+        .expect("event")
+    };
+    let mut envelope = encode(&first_scope, "first");
+    let foreign = encode(&second_scope, "first");
+    let projection = foreign
+        .annotations()
+        .entries()
+        .find(|entry| entry.key() == "drasi.query-projection.v1")
+        .expect("foreign projection");
+    envelope.append_annotation(projection).expect("append");
     assert!(matches!(
         QueryChangeCodec::to_legacy_result(&envelope),
         Err(QueryCodecError::InvalidRow)
@@ -292,6 +295,7 @@ fn direct_network_row_projection_matches_the_existing_result_json_contract() {
             None,
             &ComponentId::try_new("query").expect("id"),
             SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), 1),
+            &test_projector("test/query-codec-network-json"),
             &[QueryPartEvaluationContext::Adding {
                 after: values.clone(),
                 row_signature: 42,

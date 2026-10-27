@@ -486,6 +486,16 @@ impl Component {
         }
     }
 
+    fn output_readers(&self) -> super::OutputReaders {
+        match self {
+            Self::Source(component) => component.output_readers(),
+            Self::Transformer(component) | Self::Query(component) => component.output_readers(),
+            Self::Sink(component) => component.output_readers(),
+            Self::Service(component) => component.output_readers(),
+            Self::Deferred { .. } | Self::Unresolved(_) => super::OutputReaders::default(),
+        }
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         match self {
             Self::Source(component) => component.descriptor(),
@@ -529,6 +539,26 @@ impl Component {
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 Err(anyhow::anyhow!("component has not been constructed"))
             }
+        }
+    }
+
+    fn binds_inputs(&self) -> bool {
+        match self {
+            Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => false,
+            Self::Transformer(component) | Self::Query(component) => component.binds_inputs(),
+            Self::Sink(component) => component.binds_inputs(),
+            Self::Service(component) => component.binds_inputs(),
+        }
+    }
+
+    async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
+        match self {
+            Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => Ok(()),
+            Self::Transformer(component) | Self::Query(component) => {
+                component.bind_inputs(bindings).await
+            }
+            Self::Sink(component) => component.bind_inputs(bindings).await,
+            Self::Service(component) => component.bind_inputs(bindings).await,
         }
     }
 
@@ -888,6 +918,10 @@ impl ComputationGraphBuilder {
                 return Err(topology(format!("duplicate component {}", descriptor.id())));
             }
             validate_role(descriptor, component.role(), component.completion())?;
+            component
+                .output_readers()
+                .validate(descriptor)
+                .map_err(|error| topology(error.to_string()))?;
             nodes.push(NodeSnapshot {
                 descriptor: descriptor.clone(),
                 role: component.role(),
@@ -1226,6 +1260,14 @@ impl ComputationGraphBuilder {
                         .map(|reader| (id.clone(), reader))
                 })
                 .collect(),
+            ids.iter()
+                .filter_map(|(id, index)| {
+                    components[*index]
+                        .output_readers()
+                        .map(|readers| (id.clone(), readers))
+                })
+                .collect(),
+            &factories,
             BTreeSet::new(),
         )))
         .0;
@@ -1370,6 +1412,10 @@ pub struct GraphControl {
 }
 
 impl GraphControl {
+    pub(crate) fn output_catalogue(&self) -> super::OutputCatalogue {
+        super::OutputCatalogue::from_publications(self.registry.clone(), self.state.clone())
+    }
+
     pub(crate) fn protect_configuration(&self) {
         self.management_protected
             .store(true, std::sync::atomic::Ordering::Release);
@@ -2187,6 +2233,34 @@ fn output_bindings(
     result.map_err(|error| component_error(node, "validate output destinations", error))
 }
 
+/// Supply an opted-in component with the graph's declared incoming bindings.
+async fn bind_inputs(
+    component: &mut Component,
+    node: &NodeSnapshot,
+    snapshot: &GraphSnapshot,
+) -> GraphResult<()> {
+    if !component.binds_inputs() {
+        return Ok(());
+    }
+    let bindings = specification::snapshot_input_bindings(snapshot, node.descriptor.id()).map_err(
+        |endpoint| {
+            component_error(
+                node,
+                "bind inputs",
+                anyhow::anyhow!(
+                    "input '{}:{}' has no declared output stream",
+                    endpoint.component,
+                    endpoint.port
+                ),
+            )
+        },
+    )?;
+    component
+        .bind_inputs(&bindings)
+        .await
+        .map_err(|error| component_error(node, "bind inputs", error))
+}
+
 async fn bind_output_destinations(
     component: &mut Component,
     node: &NodeSnapshot,
@@ -2356,6 +2430,9 @@ fn check_descriptor(component: &Component, node: &NodeSnapshot) -> GraphResult<(
             node,
             "descriptor or sink completion changed",
         ));
+    }
+    if let Err(error) = component.output_readers().validate(&node.descriptor) {
+        return Err(emission_error(node, error.to_string()));
     }
     Ok(())
 }

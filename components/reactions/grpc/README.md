@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
                    s.humidity    AS humidity
             "#,
         )
-        .from_source("sensor-source")
+        .from_input("sensor-source")
         .enable_bootstrap(true)
         .auto_start(true)
         .build();

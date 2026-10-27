@@ -45,19 +45,20 @@ mod query_joins_tests {
         sources: Vec<String>,
         joins: Vec<QueryJoinConfig>,
     ) -> QueryConfig {
-        use crate::config::SourceSubscriptionConfig;
+        use crate::config::QueryInputConfig;
         QueryConfig {
             id: id.to_string(),
             query: query.to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: false,
@@ -70,6 +71,7 @@ mod query_joins_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -391,6 +393,7 @@ mod query_joins_tests {
         );
         orders_source
             .inject_event(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: updated_order,
             })
             .await

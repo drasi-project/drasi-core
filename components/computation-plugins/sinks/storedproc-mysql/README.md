@@ -1,6 +1,6 @@
 # Native MySQL stored procedures
 
-`drasi.mysql/storedproc` is an awaited native sink for query changes. It uses the
+`drasi.mysql/storedproc` is an awaited native sink for standard graph changes from any source, transformer or query. It uses the
 legacy family's command renderer, route precedence and typed parameter mapping,
 with the shared directly owned MySQL connection/session implementation rather
 than the legacy pool's detached cleanup paths.
@@ -14,7 +14,7 @@ Configure one secret-referenced `settings` object:
   "database": "application",
   "user": "procedure_user",
   "password": "resolved-by-the-host",
-  "queries": ["people"],
+  "outputs": {"people": {"component": "people", "port": "out"}},
   "default_template": {
     "added": {"template": "CALL add_person({{param after.id}}, {{param after.name}})"},
     "updated": {"template": "CALL update_person({{param after.id}}, {{param after.name}})"},
@@ -46,10 +46,8 @@ is transient, retained through accepted work and cleanup; it never replaces the
 captured configuration returned by `configuration()`. Without an identity
 binding, existing literal authentication is unchanged.
 
-Routes resolve by full query ID, last dotted segment, then default. Empty
-templates mean no command for that operation. Standard `query_id`, `query_name`,
-`operation`, `timestamp`, `metadata`, `before`, `after` and `data` contexts are
-preserved, including aggregation's UPDATE routing. Missing fields fail strictly.
+Routes resolve by full output alias, last dotted segment, then default. The graph supplies each incoming output; optional `outputs` maps an alias to `{component, port?}`; an input on a stream that is not a declared edge fails. Empty
+templates mean no command for that operation. The template context is the truthful change context: `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output` (`alias`, `component`, `port`), `sequence`, `timestamp` (only when the envelope has one), `identity` (`namespace`, `id`) and only the `element`, `before`, `after`, `removedProperties` and `effectiveFrom` that the record carries. A patch's `after` holds only the properties it sets, an unknown `before` is absent (not null), and a template that reads an absent field fails strictly. `updated` covers `REPLACE` and `PATCH`. A scheduling control or recovery frame fails. See the [sink input contract](../../SINKS.md).
 Only `{{param ...}}` may emit dynamic SQL values; control blocks are permitted,
 but raw output, inline `{{json ...}}`, partials and decorators are rejected.
 Parameters use MySQL prepared statements, including exact unsigned integers,

@@ -537,6 +537,25 @@ pub(super) fn preview(
                 desired
                     .boundary_relationships
                     .retain(|prior| prior.definition != edge.definition);
+                let endpoints_exist =
+                    [&edge.definition.from.component, &edge.definition.to.component]
+                        .iter()
+                        .all(|id| {
+                            desired
+                                .components
+                                .iter()
+                                .any(|node| node.descriptor.id() == *id)
+                        });
+                if !endpoints_exist {
+                    if matches!(&edge.pipe, DesiredPipe::External { .. }) {
+                        return Err(topology("opaque pipe bindings require declared endpoints"));
+                    }
+                    desired
+                        .relationships
+                        .retain(|prior| prior.definition != edge.definition);
+                    desired.boundary_relationships.push(edge.clone());
+                    continue;
+                }
                 if let Some(prior) = desired
                     .relationships
                     .iter_mut()
@@ -815,6 +834,41 @@ pub(super) fn preview(
             replace.insert(id.clone());
         }
         if node.input_merge != old.input_merge || definition_changed {
+            pause.insert(id.clone());
+        }
+    }
+    for (id, node) in &new_nodes {
+        let binds_inputs = match &node.construction {
+            ComponentConstruction::Factory(specification) => graph
+                .factories
+                .get(&specification.implementation)
+                .is_some_and(|factory| factory.binds_inputs()),
+            _ => false,
+        };
+        if !binds_inputs || !old_nodes.contains_key(id) || replace.contains(id) {
+            continue;
+        }
+        let bindings = |relationships: &[DesiredRelationship],
+                        nodes: &BTreeMap<ComponentId, &DesiredComponent>| {
+            super::super::specification::collect_input_bindings(
+                id,
+                relationships.iter().map(|edge| &edge.definition),
+                |endpoint| {
+                    nodes
+                        .get(&endpoint.component)
+                        .and_then(|node| node.streams.get(&endpoint.port))
+                        .cloned()
+                },
+            )
+        };
+        if bindings(&old.relationships, &old_nodes) != bindings(&desired.relationships, &new_nodes)
+        {
+            if updating.contains(id) {
+                return Err(topology(
+                    "in-place update cannot change the inputs of a component that binds them",
+                ));
+            }
+            replace.insert(id.clone());
             pause.insert(id.clone());
         }
     }
@@ -1651,6 +1705,11 @@ fn prepare(
                 {
                     return Err(topology("external component interface mismatch"));
                 }
+                component
+                    .0
+                    .output_readers()
+                    .validate(&node.descriptor)
+                    .map_err(|error| topology(error.to_string()))?;
                 components.insert(id.clone(), component.0);
             }
             ComponentConstruction::External { .. } => {}

@@ -114,7 +114,7 @@ async fn run_source_query_diff_cycle(instance_id: &str) {
 
     let query = Query::cypher("flavor-query")
         .query("MATCH (i:Item) RETURN i.name AS name")
-        .from_source("flavor-source")
+        .from_input("flavor-source")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();
@@ -198,7 +198,7 @@ async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()
         let query = |id| {
             Query::cypher(id)
                 .query("MATCH (i:Item) RETURN i.name AS name")
-                .from_source("source")
+                .from_input("source")
                 .auto_start(true)
                 .enable_bootstrap(false)
                 .build()

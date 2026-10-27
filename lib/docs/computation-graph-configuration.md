@@ -96,8 +96,11 @@ a replacement for Server's configuration DTOs.
 |---|---|---|
 | `Query::cypher(id)` / `Query::gql(id)` | `id`, `queryLanguage` | ID required; default language `Cypher`, alternative `GQL` |
 | `query(text)` | `query` | Required query text |
-| `from_source(id)` | `sources[].source_id` | Ordered list; position determines source rank |
-| `from_source_with_pipeline(id, names)` | `sources[].pipeline` | No per-source middleware pipeline by default |
+| `from_input(id)` | `inputs[].component` (or the bare `inputs[]` name) | Ordered list of upstream components; position determines input rank |
+| `from_input_port(id, port)` | `inputs[].port` | Consume a named output port; otherwise the component's primary (or only) output is used |
+| `from_input_with_pipeline(id, names)` | `inputs[].pipeline` | No per-input middleware pipeline by default |
+| `with_input(input)` | `inputs[]` | Fully specified input with port, label selectors and pipeline |
+| `with_result_label(label)` | `result.label` | Optional non-empty node label for published results; the output schema stays graph-change |
 | `with_middleware(item)` | `middleware` | Empty; each call adds one middleware definition |
 | `with_joins(items)` | `joins` | None |
 | `auto_start(value)` | `auto_start` | `true`; startup still needs creation and dependencies to succeed |
@@ -110,9 +113,20 @@ a replacement for Server's configuration DTOs.
 | `with_outbox_capacity(n)` | `outboxCapacity` | 1,000 recent result emissions; minimum retained count is 1 |
 | `with_bootstrap_timeout_secs(n)` | `bootstrapTimeoutSecs` | 300 seconds for snapshot/history fetches waiting for readiness |
 
-`SourceSubscriptionConfig` also exposes `nodes` and `relations` label mappings.
+`QueryInputConfig` also exposes `nodes` and `relations` label mappings. A query input
+serializes as a bare component name when it sets only the component, otherwise as an
+object with `component`, optional `port`, `nodes`, `relations` and `pipeline`; any
+other key (including the removed `sources`/`source_id`) is rejected.
 An omitted mapping does not mean that all data will match the query; the query
 and source still perform their normal label filtering.
+
+Native query updates can wait for an undeclared input producer. An existing
+explicit boundary endpoint is retained; a new input with an omitted port stays
+unresolved until the producer's declared ports and factory primary are available.
+The graph's declaration refresh then resolves the actual primary without guessing
+`out`, while preserving the query's native catalogue, middleware, index provider,
+and explicit bootstrap bindings. Internal pending boundaries are construction
+dependencies, not producer ports or additional executing components.
 
 Use `priority_queue_capacity` for live events queued while the query
 bootstraps. There is no separate bootstrap-buffer setting. Unknown query
@@ -125,8 +139,8 @@ use drasi_lib::{channels::DispatchMode, Query, RecoveryPolicy};
 
 let query = Query::cypher("order-names")
     .query("MATCH (o:Order) RETURN o.name AS name")
-    .from_source("primary")
-    .from_source("secondary")
+    .from_input("primary")
+    .from_input("secondary")
     .enable_bootstrap(false)
     .auto_start(true)
     .with_priority_queue_capacity(10_000)
@@ -144,9 +158,9 @@ The corresponding library query configuration is:
 id: order-names
 query: "MATCH (o:Order) RETURN o.name AS name"
 queryLanguage: Cypher
-sources:
-  - source_id: primary
-  - source_id: secondary
+inputs:
+  - primary
+  - secondary
 enableBootstrap: false
 auto_start: true
 priority_queue_capacity: 10000

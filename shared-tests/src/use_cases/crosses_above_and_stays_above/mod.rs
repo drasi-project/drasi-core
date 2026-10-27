@@ -71,6 +71,7 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
     // Add an initial sensor value below 32.
     {
         let node_change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -97,6 +98,7 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
     {
         for i in 1..16 {
             let node_change = SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -123,6 +125,7 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
     // Add a 15th sensor value above 32, this should add a result to the query result.
     {
         let node_change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -161,6 +164,7 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
     // Add a 16th sensor value below 32, this should remove a result from the query result.
     {
         let node_change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),

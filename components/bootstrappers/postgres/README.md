@@ -319,7 +319,7 @@ let bootstrap = PostgresBootstrapProvider::builder()
 // Create query that will be bootstrapped
 let query = Query::cypher("user-monitor")
     .query("MATCH (u:User) WHERE u.active = true RETURN u")
-    .from_source("postgres-source")
+    .from_input("postgres-source")
     .build();
 
 // Bootstrap provider will populate initial state when query starts

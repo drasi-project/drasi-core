@@ -30,6 +30,7 @@ fn input(
         None,
         &id(query),
         SystemMetadata::new(stream(query), sequence),
+        &ResultNodeProjector::try_new(&format!("test/native-mssql-sink/{query}"), None)?,
         &results,
         QueryOutputMetadata {
             query_id: query.into(),
@@ -88,12 +89,16 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
         "{{param (json before)}}",
         "{{param before.nullable}}",
     );
-    let mut sink = factory.create_component(id("sink"),json!({"settings":{
-        "connection":db.settings()["connection"],"queries":["source.q","other.q","unmatched"],
-        "routes":{"source.q":{"added":{"template":add("N'full'")}},
-            "q":{"added":{"template":add("N'short'")},"updated":{"template":update}}},
-        "default_template":{"added":{"template":add("N'default'")},"deleted":{"template":delete}}
-    }}))?;
+    let mut sink = crate::sink_inputs::create(
+        factory,
+        id("sink"),
+        json!({"settings":{
+            "connection":db.settings()["connection"],"outputs":{"source.q":{"component":"source.q","port":"out"},"other.q":{"component":"other.q","port":"out"},"unmatched":{"component":"unmatched","port":"out"}},
+            "routes":{"source.q":{"added":{"template":add("N'full'")}},
+                "q":{"added":{"template":add("N'short'")},"updated":{"template":update}}},
+            "default_template":{"added":{"template":add("N'default'")},"deleted":{"template":delete}}
+        }}),
+    )?;
     sink.start().await?;
     let proof = async {
         for (index,query) in ["source.q","other.q","unmatched"].into_iter().enumerate() {
@@ -120,7 +125,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
             ensure!(row["u"]=="18446744073709551615" && row["nullable"].is_null(),"exact unsigned/null binding changed");
             ensure!(serde_json::from_str::<Value>(row["payload"].as_str().context("JSON value")?)?==data["payload"],"JSON parameter altered");
             ensure!(row["text"]=="雪💾 O'Brien" || row["text"]=="updated 雪","Unicode/quotes altered");
-            if row["kind"]=="UPDATE" || row["kind"]=="DELETE" {
+            if row["kind"]=="REPLACE" || row["kind"]=="DELETE" {
                 ensure!(serde_json::from_str::<Value>(row["before_json"].as_str().context("missing before context")?)?==data,
                     "update/delete/aggregation before context changed");
             }
@@ -139,10 +144,14 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
     proof?;
     cleanup?;
 
-    let mut scalar = factory.create_component(id("scalars"),json!({"settings":{
-        "connection":db.settings()["connection"],"queries":["scalars"],
-        "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.BindScalars {{param after.flag}},{{param after.signed}},{{param after.floating}},{{param (json after.payload)}}")}}
-    }}))?;
+    let mut scalar = crate::sink_inputs::create(
+        factory,
+        id("scalars"),
+        json!({"settings":{
+            "connection":db.settings()["connection"],"outputs":{"scalars":{"component":"scalars","port":"out"}},
+            "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.BindScalars {{param after.flag}},{{param after.signed}},{{param after.floating}},{{param (json after.payload)}}")}}
+        }}),
+    )?;
     scalar.start().await?;
     let proof = async {
         scalar.handle(added("scalars",1,json!({
@@ -160,10 +169,14 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
     proof?;
     cleanup?;
 
-    let mut failing = factory.create_component(id("failure"),json!({"settings":{
-        "connection":db.settings()["connection"],"queries":["q"],
-        "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.PartialFailure {{param after.id}}")}}
-    }}))?;
+    let mut failing = crate::sink_inputs::create(
+        factory,
+        id("failure"),
+        json!({"settings":{
+            "connection":db.settings()["connection"],"outputs":{"q":{"component":"q","port":"out"}},
+            "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.PartialFailure {{param after.id}}")}}
+        }}),
+    )?;
     failing.start().await?;
     ensure!(
         failing
@@ -209,10 +222,14 @@ pub(super) async fn retained_work(dynamic: bool) -> Result<()> {
     for cancellation in [false, true] {
         db.sql("DELETE FROM {{schema}}.Signals WHERE name=N'release-procedure'")?;
         let row = if cancellation { 202 } else { 201 };
-        let mut sink = factory.create_component(id("retained"),json!({"settings":{
-            "connection":db.settings()["connection"],"queries":["q"],"command_timeout_ms":if cancellation {15000}else{1000},
-            "shutdown_timeout_ms":50,"default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.DelayedEffect {{param after.id}}")}}
-        }}))?;
+        let mut sink = crate::sink_inputs::create(
+            factory,
+            id("retained"),
+            json!({"settings":{
+                "connection":db.settings()["connection"],"outputs":{"q":{"component":"q","port":"out"}},"command_timeout_ms":if cancellation {15000}else{1000},
+                "shutdown_timeout_ms":50,"default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.DelayedEffect {{param after.id}}")}}
+            }}),
+        )?;
         sink.start().await?;
         let proof = async {
             let mut handle = Box::pin(sink.handle(added("q",1,json!({"id":row}))?));

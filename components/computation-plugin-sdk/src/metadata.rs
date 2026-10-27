@@ -10,7 +10,8 @@ use std::{
 
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ComponentRole, ComponentSemanticKind, ImplementationIdentity,
-    PluginIdentity, PortDescriptor, PortDirection, SchemaDescriptor, SinkCompletion,
+    PluginIdentity, PortDescriptor, PortDirection, PortFormatAlternative, PortId, PortPrimaries,
+    SchemaDescriptor, SinkCompletion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -109,7 +110,35 @@ impl ConfigSchema {
 /// Only implemented capabilities have fields. Unknown fields are rejected, not
 /// ignored. Source recovery, reconfiguration and dynamic query snapshot/outbox
 /// interfaces are deliberately absent from ABI 1.0.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `snapshot_inputs` lists the sink input ports whose registered handler can
+/// replace consumer state from a snapshot. It must match the constructed sink's
+/// actual per-port handlers exactly; an empty list means no input supports it.
+///
+/// `output_snapshots` and `output_replays` list the output ports for which the
+/// constructed component registered a snapshot or replay provider
+/// (`NativeComponent::output_readers`). Each list must match the actual
+/// registrations exactly and the two are independent; empty lists are omitted
+/// from the manifest. `output_follows` lists the output ports whose constructed
+/// component registered a snapshot-follow provider (bounded lease: coherent
+/// snapshot plus live tail); it is independent of the other two and needs the
+/// separately negotiated output-follow extension.
+///
+/// `port_formats` lists the non-default schemas each existing port actually
+/// implements; `FactoryMetadata::ports` stay the defaults. Configuration selects
+/// one per port through the optional object field `ports`
+/// (`{"out": {"format": "<schema id>-v<version>"}}`). Every alternative schema
+/// must also be in the plugin's `schemas`, and the plugin must construct a
+/// component whose descriptor matches the selection
+/// (`FactoryMetadata::for_configuration`).
+///
+/// `binds_inputs` is only valid for a sink or transformer, which have inputs.
+///
+/// `primary_ports` optionally designates one primary input and one primary
+/// output by port id, for shorthand endpoints that name a component without a
+/// port. Each must name an existing port of that direction (checked in
+/// `FactoryMetadata::validate`); it is unaffected by format selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
     pub control: bool,
@@ -117,7 +146,32 @@ pub struct Capabilities {
     pub transactional: bool,
     pub continuations: bool,
     pub wakeups: bool,
-    pub snapshot: bool,
+    pub snapshot_inputs: Vec<PortId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_snapshots: Vec<PortId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_replays: Vec<PortId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_follows: Vec<PortId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_formats: Vec<PortFormatAlternative>,
+    #[serde(default, skip_serializing_if = "PortPrimaries::is_empty")]
+    pub primary_ports: PortPrimaries,
+    /// The component consumes `CreateRequest::inputs`. The graph then holds
+    /// its creation until every incoming output has a declared stream and
+    /// reconstructs it when those bindings change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binds_inputs: bool,
+}
+
+impl Capabilities {
+    pub fn declares_output_reads(&self) -> bool {
+        !self.output_snapshots.is_empty() || !self.output_replays.is_empty()
+    }
+
+    pub fn declares_output_follows(&self) -> bool {
+        !self.output_follows.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,15 +244,53 @@ impl FactoryMetadata {
                 )?;
             }
         }
-        let c = self.capabilities;
+        self.validate_port_formats(schemas)?;
+        let c = &self.capabilities;
         anyhow::ensure!(
             !c.readiness || c.control,
             "native readiness requires the control interface"
         );
         anyhow::ensure!(
-            !c.snapshot || self.role == ComponentRole::Sink,
+            !c.binds_inputs
+                || matches!(self.role, ComponentRole::Sink | ComponentRole::Transformer),
+            "binding inputs requires a native sink or transformer"
+        );
+        anyhow::ensure!(
+            c.snapshot_inputs.is_empty() || self.role == ComponentRole::Sink,
             "snapshot capability requires a native sink"
         );
+        let mut snapshot_inputs = BTreeSet::new();
+        for port in &c.snapshot_inputs {
+            anyhow::ensure!(
+                snapshot_inputs.insert(port),
+                "duplicate native snapshot input {port}"
+            );
+            anyhow::ensure!(
+                self.ports
+                    .iter()
+                    .any(|p| p.id() == port && p.direction() == PortDirection::Input),
+                "native snapshot input {port} is not a declared input port"
+            );
+        }
+        for (kind, ports) in [
+            ("snapshot", &c.output_snapshots),
+            ("replay", &c.output_replays),
+            ("follow", &c.output_follows),
+        ] {
+            let mut declared = BTreeSet::new();
+            for port in ports {
+                anyhow::ensure!(
+                    declared.insert(port),
+                    "duplicate native output {kind} port {port}"
+                );
+                anyhow::ensure!(
+                    self.ports
+                        .iter()
+                        .any(|p| p.id() == port && p.direction() == PortDirection::Output),
+                    "native output {kind} port {port} is not a declared output port"
+                );
+            }
+        }
         anyhow::ensure!(
             !(c.continuations || c.wakeups || c.transactional)
                 || self.role == ComponentRole::Transformer,

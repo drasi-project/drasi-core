@@ -19,7 +19,7 @@ use std::{collections::BTreeMap, sync::Arc};
 pub use component::BridgeSource;
 pub use drasi_computation_bridge_common::{
     BridgeConfig, BridgeError, BridgeIngressControl, ErrorCode, IngressCut, IngressDrainStatus,
-    Limits, LinkStatus, Namespace, PortableSchema, Profile, TlsRecipeKind, TlsResource,
+    Limits, LinkStatus, Namespace, PortableDelivery, Profile, TlsRecipeKind, TlsResource,
     TlsResourceRecipe, TlsRole, Transport, SOURCE_FACTORY,
 };
 

@@ -478,7 +478,7 @@ async fn test_source_remove_stopped_with_cleanup() {
 async fn test_reaction_remove_with_cleanup_calls_deprovision() {
     let source = TestSource::new("deprov-rxn-src-1").unwrap();
     let query = Query::cypher("deprov-rxn-q-1")
-        .from_source("deprov-rxn-src-1")
+        .from_input("deprov-rxn-src-1")
         .query("MATCH (n) RETURN n")
         .build();
     let reaction = TestReaction::new("deprov-rxn-1", vec!["deprov-rxn-q-1".to_string()]);
@@ -510,7 +510,7 @@ async fn test_reaction_remove_with_cleanup_calls_deprovision() {
 async fn test_reaction_remove_without_cleanup_skips_deprovision() {
     let source = TestSource::new("deprov-rxn-src-2").unwrap();
     let query = Query::cypher("deprov-rxn-q-2")
-        .from_source("deprov-rxn-src-2")
+        .from_input("deprov-rxn-src-2")
         .query("MATCH (n) RETURN n")
         .build();
     let reaction = TestReaction::new("deprov-rxn-2", vec!["deprov-rxn-q-2".to_string()]);
@@ -638,7 +638,7 @@ async fn test_source_update_stopped_replaces_without_restart() {
 async fn test_reaction_update_running_stops_and_restarts() {
     let source = TestSource::new("reconfig-rxn-src-1").unwrap();
     let query = Query::cypher("reconfig-rxn-q-1")
-        .from_source("reconfig-rxn-src-1")
+        .from_input("reconfig-rxn-src-1")
         .query("MATCH (n) RETURN n")
         .build();
     let reaction = TestReaction::new("reconfig-rxn-1", vec!["reconfig-rxn-q-1".to_string()]);
@@ -739,7 +739,7 @@ async fn test_source_update_emits_reconfiguring_event() {
 async fn test_reaction_update_emits_reconfiguring_event() {
     let source = TestSource::new("reconfig-evt-rxn-src").unwrap();
     let query = Query::cypher("reconfig-evt-rxn-q")
-        .from_source("reconfig-evt-rxn-src")
+        .from_input("reconfig-evt-rxn-src")
         .query("MATCH (n) RETURN n")
         .build();
     let reaction = TestReaction::new("reconfig-evt-rxn", vec!["reconfig-evt-rxn-q".to_string()]);

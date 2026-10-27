@@ -196,6 +196,10 @@ impl WalProvider for RedbWalProvider {
 
         let state = self.get_state(source_id).await?;
 
+        event
+            .validate()
+            .map_err(|e| WalError::InvalidEvent(e.to_string()))?;
+
         // Serialize via DTO before entering the blocking closure
         let dto: SourceChangeDto = event.into();
         let record = WalRecord {
@@ -377,7 +381,11 @@ impl WalProvider for RedbWalProvider {
                         record.version
                     )));
                 }
-                results.push((seq, record.change.into()));
+                let change: SourceChange = record.change.into();
+                change.validate().map_err(|e| {
+                    WalError::SerializationError(format!("invalid WAL change for seq {seq}: {e}"))
+                })?;
+                results.push((seq, change));
             }
 
             Ok(results)

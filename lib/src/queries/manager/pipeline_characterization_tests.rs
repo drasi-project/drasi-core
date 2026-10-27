@@ -62,7 +62,7 @@ use crate::{
         SubscriptionResponse,
     },
     computation::v1::{progress_key, EnvelopeCodec, QueryChangeCodec},
-    config::{QueryLanguage, SourceSubscriptionConfig},
+    config::{QueryInputConfig, QueryLanguage},
     indexes::config::StorageBackendRef,
     profiling::ProfilingMetadata,
     sources::{Source, SourceBase, SourceBaseParams},
@@ -1114,11 +1114,12 @@ fn query_config() -> QueryConfig {
         query: "MATCH (n:Person) RETURN n.name AS name".to_string(),
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
-        sources: vec![SourceSubscriptionConfig {
-            source_id: SOURCE_ID.to_string(),
+        inputs: vec![QueryInputConfig {
+            component: SOURCE_ID.to_string(),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
+            port: None,
         }],
         auto_start: false,
         joins: None,
@@ -1130,6 +1131,7 @@ fn query_config() -> QueryConfig {
         recovery_policy: None,
         outbox_capacity: 16,
         bootstrap_timeout_secs: 5,
+        result: Default::default(),
     }
 }
 
@@ -1367,6 +1369,8 @@ fn assert_native_evaluation_codec() {
         None,
         &ComponentId::try_new("query-a").unwrap(),
         SystemMetadata::new(StreamId::try_new("query-a/out").unwrap(), 1),
+        &crate::computation::v1::ResultNodeProjector::try_new("test/pipeline/query-a", None)
+            .unwrap(),
         &contexts,
         QueryOutputMetadata {
             query_id: "query-a".into(),

@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 use anyhow::{ensure, Result};
-use drasi_computation_contracts::StreamId;
+use drasi_computation_contracts::{OutputAliases, SinkOutputs};
 pub use drasi_computation_network_common::config::{backoff, duration, FailurePolicy};
-use drasi_computation_network_common::config::{input_stream, normalized_headers, timeout_ms};
+use drasi_computation_network_common::config::{normalized_headers, timeout_ms};
 pub use drasi_grpc_common::output::config::{
     BatchingConfig, GrpcReactionConfig, OutputFormat, OutputTemplates,
 };
@@ -39,14 +39,13 @@ fn request_bytes() -> usize {
     4 * 1024 * 1024
 }
 
-/// Settings and validation for the native gRPC query-output sink.
+/// Settings and validation for the native gRPC graph-change sink. Each bound
+/// output may be a source, a transformer or a query port.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GrpcSinkConfig {
-    pub query_id: String,
-    pub stream: StreamId,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub query_streams: BTreeMap<String, StreamId>,
+    #[serde(default, skip_serializing_if = "OutputAliases::is_empty")]
+    pub outputs: OutputAliases,
     #[serde(default = "endpoint")]
     pub endpoint: String,
     #[serde(default)]
@@ -84,11 +83,9 @@ impl GrpcSinkConfig {
         };
         use serde_json::json;
         ConfigDefinition::try_new([
-            Field::new("queryId", String, false, "Query whose result changes this sink accepts; required unless queryStreams is supplied."),
-            Field::new("stream", String, false, "Input stream identifier.").default_description("queryId followed by /out."),
-            Field::new("queryStreams", Object, false, "Map of query identifiers to their connected streams."),
+            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in templates."),
             Field::new("endpoint", String, false, "Plaintext grpc:// or http:// destination; TLS endpoints are not supported.").default(endpoint()),
-            Field::new("metadata", Object, false, "ASCII gRPC request metadata; the query identity header is supplied automatically.").default(json!({})),
+            Field::new("metadata", Object, false, "ASCII gRPC request metadata; the x-drasi-component and x-drasi-port identity metadata are supplied automatically and may not be set.").default(json!({})),
             Field::new("timeoutMs", Integer, false, "gRPC request timeout in milliseconds; must be representable by the system clock.").default(timeout_ms()).minimum(1),
             Field::new("maxRetries", Integer, false, "Additional delivery attempts after the first attempt.").default(retries()).minimum(0).maximum(drasi_computation_network_common::config::MAX_RETRIES as u64),
             Field::new("failurePolicy", String, false, "strict reports delivery failure; skip deliberately discards failed output with an error report.").default(json!(FailurePolicy::default())).allowed([json!(FailurePolicy::Strict), json!(FailurePolicy::Skip)]),
@@ -96,8 +93,8 @@ impl GrpcSinkConfig {
             Field::new("initialConnectionTimeoutMs", Integer, false, "Timeout for each startup connection attempt, in milliseconds.").default(connect_timeout()).minimum(1),
             Field::new("batchSize", Integer, false, "Fixed batch item target; may not be combined with batching.").default(batch_size()).minimum(1).maximum(65536),
             Field::new("batchFlushTimeoutMs", Integer, false, "Host collection deadline in fixed mode; sparse batches flush without acknowledging early.").default(flush_timeout()).minimum(1).maximum(60000),
-            Field::new("batching", Object, false, "Legacy fixed or adaptive batching configuration; mutually exclusive with flat batchSize/batchFlushTimeoutMs."),
-            Field::new("outputTemplates", Object, false, "Legacy per-query/default body and request-metadata templates; typed row images remain unchanged."),
+            Field::new("batching", Object, false, "Fixed or adaptive batching configuration; mutually exclusive with flat batchSize/batchFlushTimeoutMs."),
+            Field::new("outputTemplates", Object, false, "Per-output-alias/default body and request-metadata templates; the row images remain unchanged and the element identity and update semantics are in `metadata`."),
             Field::new("maxBatchBytes", Integer, false, "Host collection byte bound; larger individual inputs use direct handling.").default(batch_bytes()).minimum(1).maximum(64 * 1024 * 1024),
             Field::new("maxRequestBytes", Integer, false, "Maximum encoded protobuf request; compatible item groups split before this limit.").default(request_bytes()).minimum(1).maximum(32 * 1024 * 1024),
             Field::new("outputFormat", String, false, "canonicalJson includes the canonical JSON payload; proto sends the typed before/after fields without that payload.").default(json!(OutputFormat::default())).allowed([json!(OutputFormat::CanonicalJson), json!(OutputFormat::Proto)]),
@@ -111,8 +108,8 @@ impl GrpcSinkConfig {
                 || (value.get("batchSize").is_none() && value.get("batchFlushTimeoutMs").is_none()),
             "batching cannot be combined with flat batch settings"
         );
-        input_stream(&mut value)?;
         let mut config: Self = serde_json::from_value(value)?;
+        config.outputs.validate()?;
         let url = reqwest::Url::parse(&config.connection_uri())?;
         ensure!(
             url.scheme() == "http"
@@ -152,14 +149,14 @@ impl GrpcSinkConfig {
             let _: tonic::metadata::MetadataKey<tonic::metadata::Ascii> = key.parse()?;
             let _: tonic::metadata::MetadataValue<tonic::metadata::Ascii> = value.parse()?;
         }
-        config.metadata = normalized_headers(&config.metadata, &config.query_id)?;
+        config.metadata = normalized_headers(&config.metadata)?;
         let legacy = config.reaction_config();
-        let queries = if config.query_streams.is_empty() {
-            vec![config.query_id.clone()]
-        } else {
-            config.query_streams.keys().cloned().collect()
-        };
-        legacy.validate(&queries)?;
+        let routes: Vec<String> = config
+            .output_templates
+            .iter()
+            .flat_map(|templates| templates.routes.keys().cloned())
+            .collect();
+        legacy.validate(&routes)?;
         match legacy.batching {
             BatchingConfig::Fixed {
                 batch_size,
@@ -181,6 +178,13 @@ impl GrpcSinkConfig {
             ),
         }
         Ok(config)
+    }
+
+    /// Checks that depend on the incoming edges: template routes must name an
+    /// output of this sink.
+    pub fn validate_outputs(&self, outputs: &SinkOutputs) -> Result<()> {
+        let aliases: Vec<String> = outputs.aliases().map(str::to_owned).collect();
+        self.reaction_config().validate(&aliases)
     }
 
     pub fn reaction_config(&self) -> GrpcReactionConfig {
@@ -213,15 +217,32 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn outputs() -> Value {
+        json!({"q": {"component": "q", "port": "out"}})
+    }
+
     #[test]
-    fn defaults_and_metadata_remain_compatible() -> Result<()> {
-        let config = GrpcSinkConfig::parse(json!({"queryId":"q"}))?;
+    fn stale_producer_keys_and_implicit_ports_are_rejected() {
+        for stale in [
+            json!({"producer": "q"}),
+            json!({"producers": {"q": "q/out"}}),
+            json!({"outputs": {"q": {"component": "q", "stream": "q/out"}}}),
+            json!({"outputs": {"bad id": {"component": "q"}}}),
+        ] {
+            assert!(GrpcSinkConfig::parse(stale.clone()).is_err(), "{stale}");
+        }
+    }
+
+    #[test]
+    fn defaults_and_metadata_are_producer_neutral() -> Result<()> {
+        let config = GrpcSinkConfig::parse(json!({"outputs": outputs()}))?;
+        assert!(GrpcSinkConfig::parse(json!({}))?.outputs.is_empty());
         assert_eq!(config.connection_uri(), "http://localhost:50052");
         assert_eq!(
             serde_json::to_value(config)?,
             json!({
-                "queryId":"q", "stream":"q/out", "endpoint":"grpc://localhost:50052",
-                "metadata":{"x-query-sequence":"q"}, "timeoutMs":60000, "maxRetries":5,
+                "outputs": outputs(), "endpoint":"grpc://localhost:50052",
+                "metadata":{}, "timeoutMs":60000, "maxRetries":5,
                 "failurePolicy":"strict", "connectionRetryAttempts":10,
                 "initialConnectionTimeoutMs":15000, "batchSize":1,
                 "batchFlushTimeoutMs":100, "outputFormat":"canonicalJson",
@@ -234,7 +255,8 @@ mod tests {
     #[test]
     fn validates_grpc_metadata_and_options_in_this_component() {
         for field in [
-            json!({"metadata":{"x-query-sequence":"other"}}),
+            json!({"metadata":{"x-drasi-component":"other"}}),
+            json!({"metadata":{"x-drasi-port":"other"}}),
             json!({"metadata":{"x-custom":"line\nbreak"}}),
             json!({"metadata":{"custom-bin":"text"}}),
             json!({"endpoint":"https://localhost:50052"}),
@@ -245,7 +267,7 @@ mod tests {
             json!({"outputTemplates":{"defaultTemplate":{"added":{"templat":"bad"}}}}),
             json!({"outputTemplates":{"routes":{"q":{"added":{"url":"not-a-grpc-option"}}}}}),
         ] {
-            let mut value = json!({"queryId":"q"});
+            let mut value = json!({"outputs": outputs()});
             value
                 .as_object_mut()
                 .expect("object")

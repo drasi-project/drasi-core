@@ -857,7 +857,7 @@ fn convert_proto_to_source_change(
             if change_type == proto::ChangeType::Insert {
                 Ok(SourceChange::Insert { element })
             } else {
-                Ok(SourceChange::Update { element })
+                Ok(SourceChange::update(element))
             }
         }
         (proto::ChangeType::Delete, Some(Change::Metadata(proto_metadata))) => {

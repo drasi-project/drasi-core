@@ -227,6 +227,8 @@ mod tests {
             None,
             &ComponentId::try_new("query").expect("id"),
             SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), sequence),
+            &crate::computation::v1::ResultNodeProjector::try_new("test/reaction/query", None)
+                .unwrap(),
             &[QueryPartEvaluationContext::Adding {
                 after: BTreeMap::from([(Box::<str>::from("value"), VariableValue::from(1))]),
                 row_signature: 1,

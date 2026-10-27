@@ -85,7 +85,7 @@ impl Paths {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct DurableObservation {
     result_sequence: Option<u64>,
     outbox_sequences: Vec<u64>,
@@ -125,7 +125,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
 fn query_config(text: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(QUERY_ID)
         .query(text)
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(false)
         .with_outbox_capacity(32)
@@ -688,6 +688,42 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
             CoreOpts {
                 query_text: QUERY_TEXT_V2,
                 wal: wal_b,
+                state: None,
+                reaction: None,
+            },
+        )
+        .await?;
+        core.start().await?;
+        wait_for_status(&core, QUERY_ID, ComponentStatus::Error).await?;
+        let observed = core.computation_component(QUERY_ID)?.observed()?;
+        let failure = observed
+            .failure
+            .context("missing source history must fail")?;
+        assert!(
+            matches!(
+                failure.cause.as_ref(),
+                drasi_lib::computation::v1::GraphError::Component { source, .. }
+                    if matches!(
+                        source.downcast_ref::<drasi_lib::computation::v1::QueryRecoveryError>(),
+                        Some(drasi_lib::computation::v1::QueryRecoveryError::SourceResetRequired)
+                    )
+            ),
+            "{failure:?}"
+        );
+        core.shutdown().await?;
+    }
+    assert_eq!(
+        inspect_durable(&paths.rocks).await?,
+        durable,
+        "a missing source WAL must not reset committed query output under Strict"
+    );
+
+    {
+        let (core, _source) = build_core(
+            &paths,
+            CoreOpts {
+                query_text: QUERY_TEXT_V2,
+                wal: paths.wal.clone(),
                 state: None,
                 reaction: None,
             },

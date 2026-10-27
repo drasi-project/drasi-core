@@ -65,6 +65,20 @@ impl EnvelopeReceiver for GateReceiver {
 fn id(value: &str) -> ComponentId {
     ComponentId::try_new(value).expect("id")
 }
+fn procedure_inputs(outputs: &[&str]) -> Vec<drasi_lib::computation::v1::InputBinding> {
+    outputs
+        .iter()
+        .map(|name| drasi_lib::computation::v1::InputBinding {
+            input_port: PortId::try_new("in").unwrap(),
+            output: drasi_lib::computation::v1::OutputEndpoint::new(
+                id(name),
+                PortId::try_new("out").unwrap(),
+            ),
+            stream: stream(&format!("{name}/out")),
+        })
+        .collect()
+}
+
 fn stream(value: &str) -> StreamId {
     StreamId::try_new(value).expect("stream")
 }
@@ -204,13 +218,14 @@ async fn memory_rows() -> Result<()> {
         drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink::new(id("procedures"),
             serde_json::from_value(json!({
                 "hostname":"127.0.0.1","port":settings.connection.port,
-                "database":"test","user":"root","password":"root","queries":["left","right"],
+                "database":"test","user":"root","password":"root",
                 "default_template":{
-                    "added":{"template":"CALL apply_effect({{param query_id}},{{param operation}},{{param after.id}},{{param after.value}})"},
-                    "updated":{"template":"CALL apply_effect({{param query_id}},{{param operation}},{{param after.id}},{{param after.value}})"},
-                    "deleted":{"template":"CALL apply_effect({{param query_id}},{{param operation}},{{param before.id}},NULL)"}
+                    "added":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
+                    "updated":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
+                    "deleted":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param before.id}},NULL)"}
                 }
-            }))?)?
+            }))?,
+            &procedure_inputs(&["left", "right"]))?
     )));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
@@ -414,13 +429,13 @@ async fn memory_rows() -> Result<()> {
             use drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink;
             let config = |template: &str, stop_ms: u64| serde_json::from_value(json!({
                 "hostname":"127.0.0.1","port":port,"database":"test","user":"root","password":"root",
-                "queries":["left"],"command_timeout_ms":5000,"shutdown_timeout_ms":stop_ms,
+                "command_timeout_ms":5000,"shutdown_timeout_ms":stop_ms,
                 "default_template":{
                     "added":{"template":template},"updated":{"template":template},"deleted":{"template":template}
                 }
             }));
             let input = || InputEnvelope { port:PortId::try_new("in").unwrap(), envelope:envelope.clone() };
-            let mut sink = MySqlStoredProcSink::new(id("owned-call"),config("CALL wait_effect({{param query_id}})",50)?)?;
+            let mut sink = MySqlStoredProcSink::new(id("owned-call"),config("CALL wait_effect({{param output.alias}})",50)?,&procedure_inputs(&["left","right"]))?;
             sink.start().await?;
             let mut handle = Box::pin(sink.handle(input()));
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -442,7 +457,7 @@ async fn memory_rows() -> Result<()> {
             sink.stop().await?;
             let count = admin.query("SELECT COUNT(*) FROM audit WHERE operation='wait'").await?;
             assert_eq!(catalog::field(&count.values[0],0)?,"1");
-            let mut failing = MySqlStoredProcSink::new(id("failed-call"),config("CALL fail_effect({{param query_id}})",5000)?)?;
+            let mut failing = MySqlStoredProcSink::new(id("failed-call"),config("CALL fail_effect({{param output.alias}})",5000)?,&procedure_inputs(&["left","right"]))?;
             failing.start().await?;
             assert!(failing.handle(input()).await.is_err());
             assert!(failing.handle(input()).await.is_err(), "failed submitted calls are not retried automatically");

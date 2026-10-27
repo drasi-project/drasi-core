@@ -9,8 +9,7 @@ mod tests;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, SourceTransactionCodec,
-    StreamId,
+    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
@@ -111,7 +110,7 @@ pub fn plugin() -> Result<PluginDefinition> {
             Arc::new(MySqlPositionalChangesFactory),
             Arc::new(MySqlSharedPositionalChangesFactory),
         ],
-        vec![GraphChangeCodec::schema(), SourceTransactionCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 

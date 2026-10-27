@@ -55,6 +55,7 @@ pub(crate) fn native_query_value(
         None,
         &query,
         SystemMetadata::new(StreamId::try_new("codec-parity/out").unwrap(), 1),
+        &ResultNodeProjector::try_new("test/codec-parity/out", None).unwrap(),
         &[QueryPartEvaluationContext::Adding {
             after: [("value".into(), value.clone())].into_iter().collect(),
             row_signature: 1,

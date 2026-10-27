@@ -26,10 +26,13 @@ pub(crate) struct GraphRegistrySnapshot {
     query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
     source_schema_readers:
         BTreeMap<ComponentId, std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>>,
+    output_readers: BTreeMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
+    primary_ports: BTreeMap<ComponentId, crate::computation::v1::PortPrimaries>,
     deferred_activation: BTreeSet<ComponentId>,
 }
 
 impl GraphRegistrySnapshot {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         desired: &GraphSnapshot,
         observed: Arc<ObservedGraph>,
@@ -40,6 +43,8 @@ impl GraphRegistrySnapshot {
             ComponentId,
             std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>,
         >,
+        output_readers: BTreeMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
+        factories: &BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
         deferred_activation: BTreeSet<ComponentId>,
     ) -> Self {
         Self {
@@ -48,6 +53,16 @@ impl GraphRegistrySnapshot {
             configurations,
             query_apis,
             source_schema_readers,
+            output_readers,
+            primary_ports: desired
+                .specifications
+                .iter()
+                .filter_map(|(id, specification)| {
+                    factories
+                        .get(&specification.implementation)
+                        .map(|factory| (id.clone(), factory.primary_ports()))
+                })
+                .collect(),
             deferred_activation,
             resources: resources
                 .iter()
@@ -89,8 +104,36 @@ impl GraphRegistrySnapshot {
         self.query_apis.get(id).and_then(std::sync::Weak::upgrade)
     }
 
+    /// The providers published for one component generation, if it registered any.
+    pub(crate) fn output_readers(
+        &self,
+        id: &ComponentId,
+    ) -> Option<&crate::computation::v1::WeakOutputReaders> {
+        self.output_readers.get(id)
+    }
+
     pub(crate) fn activation_is_deferred(&self, id: &ComponentId) -> bool {
         self.deferred_activation.contains(id)
+    }
+
+    pub(crate) fn output_endpoint(
+        &self,
+        component: &ComponentId,
+        explicit: Option<&PortId>,
+    ) -> GraphResult<Endpoint> {
+        let node = self
+            .desired
+            .nodes
+            .iter()
+            .find(|node| node.descriptor.id() == component)
+            .ok_or_else(|| topology(format!("unknown input component {component}")))?;
+        let primaries = self
+            .primary_ports
+            .get(component)
+            .cloned()
+            .unwrap_or_default();
+        let port = primaries.resolve(node.descriptor.ports(), PortDirection::Output, explicit)?;
+        Ok(Endpoint::new(component.clone(), port))
     }
 
     pub(crate) fn source_schema_reader(
@@ -134,6 +177,16 @@ pub(super) fn publish(graph: &ComputationGraph) {
                         .map(|reader| (id.clone(), reader))
                 })
                 .collect(),
+            graph
+                .ids
+                .iter()
+                .filter_map(|(id, index)| {
+                    graph.components[*index]
+                        .output_readers()
+                        .map(|readers| (id.clone(), readers))
+                })
+                .collect(),
+            &graph.factories,
             graph.deferred_activation.clone(),
         )));
 }
@@ -199,6 +252,47 @@ mod tests {
             )))
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn component_waits_require_the_coherent_registry_publication() {
+        for (started, unpublished_component) in [(false, true), (true, true), (true, false)] {
+            let mut graph = graph();
+            let observed = graph.observed.clone();
+            let registry = graph.registry.clone();
+            let run = graph.start().unwrap();
+            let control = run.control();
+            let id = ComponentId::try_new("component").unwrap();
+            let handle = control.component_handle(&id).unwrap();
+            if unpublished_component {
+                let mut prior = (*control.registry_snapshot().observed).clone();
+                prior.components.remove(&id);
+                publish_observed(&registry, Arc::new(prior));
+            }
+            observed.send_modify(|snapshot| {
+                let component = Arc::make_mut(snapshot).components.get_mut(&id).unwrap();
+                component.realization = RealizationState::Created;
+                component.started = started;
+            });
+            let mut waiting = Box::pin(async {
+                if started {
+                    handle.wait_started().await
+                } else {
+                    handle.wait_created().await
+                }
+            });
+            assert!(
+                futures::poll!(&mut waiting).is_pending(),
+                "a component observation must not precede its public read/configuration facets"
+            );
+            publish_observed(&registry, observed.borrow().clone());
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(run);
+            graph.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test]

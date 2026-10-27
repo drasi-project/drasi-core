@@ -440,6 +440,7 @@ impl SqliteSnapshot {
             .context("SQLite snapshot handover is missing")?;
         anyhow::ensure!(handover.completed, "native SQLite snapshot is incomplete");
         Ok(vec![BootstrapWatermark {
+            producer: None,
             stream: self.stream.clone(),
             source_id: Some(self.source.to_string()),
             sequence: 0,

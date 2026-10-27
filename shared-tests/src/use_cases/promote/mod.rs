@@ -77,6 +77,7 @@ fn create_node_update_change(id: &str, props_json: serde_json::Value) -> SourceC
         }
     }
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test_source", id),

@@ -27,7 +27,7 @@ fn node(id: &str, label: &str, value: &str, update: bool) -> SourceChange {
         properties: ElementPropertyMap::from(json!({"value":value})),
     };
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }

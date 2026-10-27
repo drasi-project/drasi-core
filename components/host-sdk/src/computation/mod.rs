@@ -20,9 +20,11 @@ mod control;
 mod factory;
 mod input_position;
 mod loader;
+mod output_follow;
+mod output_reads;
+mod output_snapshots;
 mod progress;
 mod proxy;
-mod query_snapshots;
 mod source_schema;
 mod transaction;
 
@@ -46,8 +48,8 @@ pub(crate) use factory::runtime_configuration_schema;
 pub use factory::NativeFactory;
 pub use loader::{load, try_load, NativePlugin};
 pub(crate) use loader::{try_load_library, try_read_metadata};
+pub use output_snapshots::{NativeOutputSnapshotsResource, OutputSelector, OutputSnapshotsService};
 pub use proxy::NativeComponentProxy;
-pub use query_snapshots::NativeQuerySnapshotsResource;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NativeConsumerFactoryMetadata {

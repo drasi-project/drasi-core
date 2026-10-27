@@ -48,7 +48,7 @@ let queries = drasi.computation_pipeline()?
     .query_bootstrap("temperatures", Arc::new(bootstrap))?
     .query(Query::cypher("temperatures")
         .query("MATCH (s:sensors) RETURN s.name AS name,s.temp AS temperature")
-        .from_source("sqlite")
+        .from_input("sqlite")
         .build())
     .build()?;
 drasi.add_components(queries).await?;

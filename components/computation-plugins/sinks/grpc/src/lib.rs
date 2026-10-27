@@ -3,11 +3,10 @@
 
 mod component;
 pub mod config;
-mod wire;
 
 use drasi_computation_contracts::{
-    ComponentRole, ImplementationIdentity, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    QueryChangeCodec, SinkCompletion,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
@@ -17,7 +16,6 @@ use std::sync::Arc;
 
 pub use config::{FailurePolicy, GrpcSinkConfig, OutputFormat};
 pub use drasi_computation_network_common::proto;
-pub use wire::proto_item;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const GRPC_SINK: &str = "drasi.network/grpc-sink";
@@ -29,7 +27,7 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
         vec![Arc::new(GrpcSinkFactory)],
-        vec![QueryChangeCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 
@@ -53,11 +51,14 @@ impl Factory for GrpcSinkFactory {
             ports: vec![PortDescriptor::new(
                 PortId::try_new("in").expect("constant"),
                 PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             )],
             completion: Some(SinkCompletion::Handled),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                binds_inputs: true,
+                ..Capabilities::default()
+            },
         }
     }
 
@@ -66,9 +67,13 @@ impl Factory for GrpcSinkFactory {
         request: &CreateRequest,
         _control: ControlSender,
     ) -> anyhow::Result<CreatedComponent> {
+        let config = GrpcSinkConfig::parse(request.configuration.clone())?;
+        let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
+        config.validate_outputs(&outputs)?;
         Ok(Component::Sink(Box::new(component::GrpcSink::new(
             self.metadata().descriptor(request.id.clone())?,
-            GrpcSinkConfig::parse(request.configuration.clone())?,
+            config,
+            outputs,
         )?))
         .into())
     }

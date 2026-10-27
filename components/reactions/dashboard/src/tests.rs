@@ -713,11 +713,10 @@ async fn test_snapshot_store_add_rows() {
     store.apply(&qr).await;
     let snapshot = store.get_snapshot("q1").await;
     assert_eq!(snapshot.rows.len(), 2);
-    assert!(snapshot.aggregation.is_none());
 }
 
 #[tokio::test]
-async fn test_snapshot_store_aggregation_separated_from_rows() {
+async fn test_snapshot_store_aggregation_is_an_ordinary_row() {
     let store = QuerySnapshotStore::new();
     let qr = make_query_result(
         "q1",
@@ -737,12 +736,12 @@ async fn test_snapshot_store_aggregation_separated_from_rows() {
     let snapshot = store.get_snapshot("q1").await;
     assert_eq!(
         snapshot.rows.len(),
-        1,
-        "aggregation must not appear in rows"
+        2,
+        "aggregation must appear in the same row collection"
     );
     assert_eq!(
-        snapshot.aggregation,
-        Some(serde_json::json!({"avg_temp": 22.5, "count": 1}))
+        snapshot.rows[1].data,
+        serde_json::json!({"avg_temp": 22.5, "count": 1})
     );
 }
 
@@ -770,8 +769,55 @@ async fn test_snapshot_store_aggregation_update_replaces() {
         ))
         .await;
     let snapshot = store.get_snapshot("q1").await;
-    assert!(snapshot.rows.is_empty());
-    assert_eq!(snapshot.aggregation, Some(serde_json::json!({"count": 2})));
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].data, serde_json::json!({"count": 2}));
+}
+
+#[tokio::test]
+async fn test_seeded_grouped_aggregates_update_and_delete_by_identity() {
+    let store = QuerySnapshotStore::new();
+    let row = serde_json::json!({"count": 1});
+    store
+        .seed_rows("groups", vec![(11, row.clone()), (12, row.clone())])
+        .await;
+    assert_eq!(
+        store.get_snapshot("groups").await.rows.len(),
+        2,
+        "equal-valued groups remain separate"
+    );
+    store
+        .apply(&make_query_result(
+            "groups",
+            vec![ResultDiff::Aggregation {
+                before: Some(row.clone()),
+                after: serde_json::json!({"count": 2}),
+                row_signature: 11,
+            }],
+        ))
+        .await;
+    let snapshot = store.get_snapshot("groups").await;
+    assert_eq!(snapshot.rows.len(), 2);
+    assert_eq!(snapshot.rows[0].row_signature, 11);
+    assert_eq!(snapshot.rows[0].data["count"], 2);
+    assert_eq!(snapshot.rows[1].row_signature, 12);
+    assert_eq!(snapshot.rows[1].data["count"], 1);
+    store
+        .apply(&make_query_result(
+            "groups",
+            vec![
+                ResultDiff::Delete {
+                    data: row,
+                    row_signature: 12,
+                },
+                ResultDiff::Delete {
+                    data: serde_json::json!({"count": 2}),
+                    row_signature: 11,
+                },
+            ],
+        ))
+        .await;
+    assert!(!store.has_data("groups").await);
+    assert!(store.get_snapshot("groups").await.rows.is_empty());
 }
 
 #[tokio::test]
@@ -836,7 +882,7 @@ async fn test_snapshot_store_update_row() {
 }
 
 #[tokio::test]
-async fn test_snapshot_store_fifo_eviction_rows_only() {
+async fn test_snapshot_store_fifo_eviction_includes_aggregate_rows() {
     let store = QuerySnapshotStore::with_max_rows(2);
     store
         .apply(&make_query_result(
@@ -863,12 +909,10 @@ async fn test_snapshot_store_fifo_eviction_rows_only() {
         ))
         .await;
     let snapshot = store.get_snapshot("q1").await;
-    // Should keep only 2 newest rows (evict id:1)
+    // Keep the two newest result rows, including the aggregate.
     assert_eq!(snapshot.rows.len(), 2);
-    assert_eq!(snapshot.rows[0].data["id"], 2);
-    assert_eq!(snapshot.rows[1].data["id"], 3);
-    // Aggregation must NOT be evicted
-    assert_eq!(snapshot.aggregation, Some(serde_json::json!({"total": 6})));
+    assert_eq!(snapshot.rows[0].data["id"], 3);
+    assert_eq!(snapshot.rows[1].data, serde_json::json!({"total": 6}));
 }
 
 #[tokio::test]
@@ -876,7 +920,6 @@ async fn test_snapshot_store_empty_query() {
     let store = QuerySnapshotStore::new();
     let snapshot = store.get_snapshot("nonexistent").await;
     assert!(snapshot.rows.is_empty());
-    assert!(snapshot.aggregation.is_none());
 }
 
 #[tokio::test]
@@ -920,10 +963,11 @@ async fn test_snapshot_serialization_format() {
     // Verify the JSON structure the frontend expects: rows are { k, v } envelopes
     // carrying the row_signature so the client can key by identity.
     assert!(json["rows"].is_array());
-    assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(json["rows"].as_array().unwrap().len(), 2);
     assert_eq!(json["rows"][0]["v"]["id"], 1);
     assert_eq!(json["rows"][0]["k"], "0");
-    assert_eq!(json["aggregation"]["total"], 42);
+    assert_eq!(json["rows"][1]["v"]["total"], 42);
+    assert!(json.get("aggregation").is_none());
 }
 
 #[tokio::test]

@@ -2,9 +2,9 @@
 
 This is a separate plugin family, not a replacement or layout change to the
 Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **1.0.0**
-with native **wire version 2**, independent of workspace package versions.
-Legacy ABI **0.17.0** (also accepting 0.16 fast-mode plugins) is independently versioned. Rebuild native plugins with this SDK; the
-unreleased JSON-envelope wire prototype (version 1) is explicitly rejected.
+with native **wire version 1**, independent of workspace package versions.
+Legacy ABI **0.17.0** (also accepting 0.16 fast-mode plugins) is independently versioned. Rebuild native plugins with a matching SDK; binaries built for a different
+wire version are rejected.
 
 ## Authoring
 
@@ -21,6 +21,12 @@ evaluator, query parsers or legacy plugin SDK.
    completion and explicit `Capabilities`. Its synchronous `create()` receives a
    `CreateRequest` and `ControlSender`, returning a `CreatedComponent`.
 3. Register factories and executable schemas in `PluginDefinition::new`.
+   A sink that can replace its state from a snapshot returns a
+   `SnapshotConsumer` from `NativeSink::snapshot_consumer(port)` for each such
+   input (no I/O, fixed at construction) and lists exactly those ports in
+   `Capabilities::snapshot_inputs`. Export rejects duplicate, unknown,
+   output-direction or non-sink claims, and any construction whose handlers
+   differ from the list; snapshots on an input without a handler fail.
 4. Export only behind the plugin's `dynamic-plugin` feature:
 
 ```rust,ignore
@@ -41,7 +47,7 @@ fn definition() -> anyhow::Result<PluginDefinition> {
 export_computation_plugin!(definition());
 ```
 
-### Migrating native Rust implementations
+### Runtime-independent implementations
 
 Replace runtime-only imports with `drasi-computation-contracts` data types and
 the SDK's `NativeComponent`/processing traits. A native source receives only a
@@ -53,9 +59,9 @@ query APIs and construction contexts are intentionally absent from these
 plugin-side traits.
 
 The Host SDK adapts the existing binary operations to graph-owned interfaces.
-No second executor or legacy compatibility layer is introduced. This is a Rust
-source migration, not an ABI or wire-format change: existing native ABI 1.0
-libraries remain loadable.
+No second executor or legacy compatibility layer is introduced. Build the host
+and native libraries from matching sources; the ABI layout version alone does
+not establish compatibility with the current data definitions.
 
 Use `make check-native-dependencies` to ensure an independently selected native
 plugin build cannot regain an engine/runtime dependency through a helper crate.
@@ -110,7 +116,7 @@ the metadata schema and enforce their conditional requirements in construction.
 annotation. The separately negotiated versioned creation envelope sets it for
 existing factory callbacks, including progress and coordinated-source creation.
 Ordinary Rust request literals set it to `false`; the base request encoding,
-base ABI 1.0.0 layouts, and wire version 2 remain unchanged.
+base ABI 1.0.0 layouts, and wire version 1 remain unchanged.
 
 Implement `NativeComponent::start_with_credentials(ActivationCredentials)` for
 the bound path. It runs **inside the normal START operation**, with the same
@@ -132,7 +138,7 @@ cancellation-safe under the existing operation-ownership contract.
 
 The optional `configuration-v1` entry point publishes field descriptions, defaults,
 integer limits and allowed values without changing the frozen ABI 1.0 metadata or
-wire version 2. Older hosts ignore it; newer hosts continue loading older plugins
+wire version 1. Older hosts ignore it; newer hosts continue loading older plugins
 without inventing missing descriptions. A present but malformed extension is an
 error, including during metadata-only discovery.
 
@@ -167,35 +173,99 @@ source processing lock. Reads must remain possible while `next()` is pending.
 This is data-schema discovery, not the factory's configuration schema.
 
 The optional `source_schema_v1` extension carries a bounded MessagePack
-`Option<SourceSchema>` without changing ABI 1.0.0 or envelope wire version 2.
+`Option<SourceSchema>` without changing ABI 1.0.0 or envelope wire version 1.
 The SDK permits one schema read per source at a time, limits replies to 1 MiB
 and reads to 30 seconds, and rejects results from stopped or replaced
 activations. Cancellation releases the read slot. Actual failures remain errors;
 older libraries without the extension simply have no native schema reader.
 This interface exposes no SQL execution, database query or transaction methods.
 
-## Read-only query snapshots
+## Optional per-output snapshot, replay and follow providers
 
-A factory may opt in to the `query-snapshots-v1` extension through
-`supports_query_snapshots()` and `create_with_query_snapshots()`. The host supplies
-an optional `NativeQuerySnapshots` capability scoped to its existing query
-catalogue and an explicit set of allowed query IDs. The plugin cannot register
-queries, obtain graph ownership or mutate query state through this capability.
+`NativeComponent::output_readers()` returns the component's `OutputReaders`: a
+`SnapshotProvider`, `ReplayProvider` and/or `SnapshotFollowProvider` for each
+declared **output** port, registered independently (neither implies another, and
+none implies persistence). The default registers nothing. Obtaining them is
+configuration-only, performs no I/O and takes no processing lock; every provider
+reads its own state, so a read is independent of a pending `next()`/`transform()`.
 
-`snapshot(query_id)` returns `NativeQuerySnapshot`: sequence/generation metadata
-and a bounded-operation stream of JSON rows. The host captures the immutable
-query snapshot; each subsequent read returns one row without materializing
-another complete result cache. Admission limits and readiness timeouts are
+Capability is exactly the registration. Factory metadata lists the ports in
+`Capabilities::output_snapshots`, `output_replays` and `output_follows`; at
+construction the SDK rejects any mismatch with the actual registrations, an
+undeclared, duplicate or non-output port, and a registered provider the metadata
+does not list. There are no boolean flags or no-op callbacks. A library
+needs the separately negotiated `output_reads_v1` extension for snapshots/replay
+and `output_follow_v1` for follows; the Host rejects a declaration without it.
+
+Records and envelopes use the existing codecs: snapshot records keep their
+schema-encoded payload, replayed envelopes are binary computation envelopes with
+their logical `GraphProducerProgress` (transport sequences are separate), and a
+cursor is the producer epoch plus committed logical sequence. Typed provider
+results (`NotReady`, `Gap`, `EpochChanged`, `Retired`, `Absent`, `Invalid`,
+`LeaseExpired`) cross as data; they are never converted to an empty snapshot or
+replay. A snapshot above 16 MiB or 16,384 records, a replay above 1,024 envelopes
+or an item above 16 MiB is an explicit `OutputReadLimit` failure, never a
+truncation. At most 16 reads and 16 leases are active per component; excess
+requests report BUSY/`NotReady`.
+
+Reads are served only while the component is started (`NotReady` otherwise).
+Stop, restart, replacement and release fence every read and **close every follow
+lease synchronously**, releasing provider retention even if the Host still holds
+the handle; a handle or lease never serves a later activation or a successor.
+Dropping a read future cancels the operation. A follow `next()` is a separate
+cancellable operation per call that carries the last item the holder observed: the
+producer retains one delivered-but-unacknowledged item per lease and resends it,
+so cancellation racing completion cannot lose an item. Lag (`Gap`) and expiry
+(`LeaseExpired`) are distinct and sticky.
+
+This is not a streaming transfer of large datasets and does not implement a
+generic live-follow coordinator or crash-durable handover; snapshot plus follow
+detects epoch change, lag and expiry within the lease's bounds only.
+
+## Read-only output snapshots
+
+A sink factory may opt in to the `output-snapshots-v1` extension through
+`supports_output_snapshots()` and `create_with_output_snapshots()`. The host
+supplies an optional `NativeOutputSnapshots` capability limited to an explicit
+allow-list of output endpoints (component and port) of sources, transformers or
+queries. The plugin cannot register outputs, obtain graph ownership or mutate
+state through this capability.
+
+`snapshot(&OutputEndpoint, &Schema)` returns a `NativeOutputSnapshot`: the
+output's `OutputCursor` (producer epoch and logical sequence), its dataset and a
+bounded-operation stream of validated full-image `Record`s in the caller's
+schema. The host captures the snapshot through the graph's output catalogue; each
+subsequent read returns one record, so the transport's per-call byte bound
+applies and no whole-table buffer crosses the ABI. A typed `OutputReadError`
+(`Absent` capability, `UnknownOutput`, `NotReady`, `Retired`) is returned as the
+error rather than an empty snapshot. Admission limits and readiness timeouts are
 host-owned. Dropping the stream releases its reader, and component stop revokes
 pending reads. Errors remain errors, including after streaming has begun.
 
 The native SSE sink demonstrates this interface. Its Host resource is a
-`NativeQuerySnapshotsResource` over the actual `QueryResultsCatalog`, bound as
-the factory's `query_snapshots` dependency. Server/Host configurations declare
-`nativeQuerySnapshots` with an explicit catalogue dependency. Snapshot callbacks
-enter the owning host runtime while being polled; no Tokio handle or Rust query
-object crosses the ABI. This read service is distinct from incoming recovery
-snapshot envelopes and does not provide an atomic snapshot/live subscription.
+`NativeOutputSnapshotsResource`, an immutable allow-list and limits policy bound
+as the factory's `output_snapshots` dependency. The native factory combines it
+with the graph's actual output catalogue when it creates the binding. Snapshot
+callbacks enter the owning host runtime while being polled; no Tokio handle,
+catalogue or graph control crosses the ABI. This read service is distinct from
+incoming recovery snapshot envelopes and does not provide an atomic
+snapshot/live subscription.
+
+## Declared input bindings
+
+A sink or transformer that needs to know where its data comes from sets
+`Capabilities::binds_inputs`. The host then fills `CreateRequest::inputs` with
+one `InputBinding { input_port, output: OutputEndpoint { component, port },
+stream }` per validated, declared incoming edge, ordered by input port and
+producer. The host holds creation until every incoming output has a declared
+stream, and reconstructs the component with new bindings when an incoming edge
+or stream changes, so a component never serves stale ones. A component that
+does not opt in receives no inputs, and supplying inputs to one is an error. A
+component must never infer its producer from payloads or stream spelling; a
+sink needing several outputs per producer names them by alias (see the
+`SinkOutputs::from_inputs` helper in `drasi-computation-contracts`). Programmatic
+construction outside a graph passes the bindings to
+`NativeFactory::create_component_with_inputs`.
 
 ## Read-only consumer progress
 
@@ -309,11 +379,12 @@ hot-unload promise. Native plugins are trusted in-process code, not a sandbox.
 
 ## Envelopes and schemas
 
-Metadata and configuration are UTF-8 JSON. Native wire version 2 uses named
+Metadata and configuration are UTF-8 JSON. Native wire version 1 uses named
 MessagePack records and bulk MessagePack binary buffers, not JSON envelopes or
-per-byte integer arrays. `BinaryEnvelopeCodec` encodes the full schema descriptor,
-typed images, sequence, stream, source position, context identity, annotations
-and lineage. It is separate from the unchanged persisted JSON `EnvelopeCodec`;
+per-byte integer arrays. Its binary envelope format is also 1.
+`BinaryEnvelopeCodec` encodes the full schema descriptor, typed images, sequence,
+stream, source position, optional event-local control, context identity,
+annotations and lineage. It is separate from the unchanged persisted JSON `EnvelopeCodec`;
 there is no storage migration. Transaction-transform inputs/outputs are directly
 encoded binary envelopes. Transaction derivation and record-validation RPCs also
 use bulk binary buffers.
@@ -333,15 +404,52 @@ encoding rather than after allocating an oversized message. Framing rejects
 truncation, trailing values, impossible declared lengths and excessive nesting
 before deserialization can reserve collections from untrusted lengths.
 
-The binary envelope is a named map with `format: 2`, `id`, `change_set`, `schema`,
+The binary envelope is a named map with `format: 1`, `id`, `change_set`, `schema`,
 `operations`, `system`, `lineage`, `context_identity` and `annotations`.
 Identities contain `namespace` and binary `value`; schemas contain `id`, `version`,
 `encoding` and binary `definition`. Operations retain the `Add`, `Update` and
 `Delete` variants and their ordinals. Record image kinds are `0` full, `1` patch,
-and `2` partial. Timestamps retain their RFC3339 representation and full precision.
+and `2` partial. System and lineage metadata contain `stream`, `sequence`,
+`timestamp`, `source_position` and optional event-local `control`, whose fields are
+`kind` and binary `payload`. Timestamps retain their RFC3339 representation and full precision.
 Lineage and annotations are transmitted newest first; decoding restores their
 original semantics, including duplicate annotation keys. Unknown fields, tags,
 versions, schemas and invalid record/change-set contracts fail explicitly.
+
+## Optional per-port format selection
+
+`FactoryMetadata::ports` are a factory's default descriptors. A factory that
+genuinely implements more schemas on a port lists them in
+`Capabilities::port_formats` (`PortFormatAlternative { port, schema }`); every
+alternative must also be in `PluginDefinition::new`'s schemas with its executable
+validator, and the factory must declare the optional object field
+`ConfigSchema::with_port_formats()` (`ports`). Empty lists are omitted from the
+manifest. Configuration then selects at most one format per existing port:
+
+```json
+{ "ports": { "out": { "format": "vendor.columnar-batch-v1" } } }
+```
+
+Names are `<schema id>-v<version>`. The default format may be named explicitly.
+Selection is pure and uses no I/O: unknown ports or formats and malformed `ports`
+values are errors, never defaults, and no codec or converter is created. Other
+ports keep their descriptors. Use `FactoryMetadata::for_configuration` (or
+`descriptor_for`) in `create` so the component's descriptor matches the
+selection; the SDK rejects a component whose descriptor differs from the
+resolved one. A factory opts in by declaring alternatives or by declaring `ports`
+as an optional object field (`ConfigSchema::with_port_formats()`); once opted in,
+any invalid selection is an error, and with no alternatives only each port's own
+format is accepted. A factory that does neither keeps `ports` as an ordinary
+plugin field. Changing a persisted port's format is a stopped reconfiguration;
+journals are not reinterpreted.
+
+`Capabilities::primary_ports` (`PortPrimaries`) optionally designates one primary
+input and one primary output by port id for shorthand endpoints.
+`FactoryMetadata::validate` requires each to name an existing port of that
+direction. `FactoryMetadata::resolve_endpoint_port(direction, explicit)` resolves
+an explicit port, else the primary, else a direction's only port; several ports
+without a primary are an error, never a guess. Format selection does not change
+port ids, so a primary is preserved.
 
 ## Control
 
@@ -394,7 +502,7 @@ tracking, make separate stores atomic, or deduplicate external effects.
 ## Optional host-owned consumer completion
 
 The independently negotiated `drasi_computation_plugin_consumer_v1` extension
-leaves base ABI 1.0 and wire 2 unchanged. Declare `Factory::consumer_mode()` as
+leaves base ABI 1.0 and wire 1 unchanged. Declare `Factory::consumer_mode()` as
 `External` or `Transactional`, with a handled, non-snapshot sink descriptor.
 Return `Component::Consumer` for a `NativeComponent + DeliveryHandler`, or
 `Component::TransactionalConsumer` for a `NativeTransactionalConsumer`. Ordinary
@@ -480,7 +588,7 @@ external effects.
 
 The independent `drasi_computation_plugin_recovery_v1` symbol negotiates
 `Factory::supports_source_progress()` and `create_with_progress`. It does not
-extend service-v1, strict base metadata, ABI **1.0.0**, or wire version **2**.
+extend service-v1, strict base metadata, ABI **1.0.0**, or wire version **1**.
 Old hosts ignore the symbol; new hosts still load old binaries without granting
 this service. Missing, malformed or unsupported requested services fail explicitly.
 
@@ -566,7 +674,7 @@ reject, and the host validates the complete factory catalogue at load time.
 Metadata-only inspection validates the advertised extension table without
 calling the plugin entry point; catalogue discovery happens during loading.
 This adds no component role and does
-not change base metadata, ABI **1.0.0**, wire **2**, or existing optional tables.
+not change base metadata, ABI **1.0.0**, wire **1**, or existing optional tables.
 The Host SDK exposes the negotiated `NativePlugin::bootstrap_factories()`.
 Plugin-side factories return `NativeBootstrapProvider`; only the host-side
 `NativeBootstrapFactory::create_provider` returns a real

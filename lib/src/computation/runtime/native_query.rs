@@ -643,7 +643,11 @@ impl Runtime {
             self.config.global_priority_queue_capacity.unwrap_or(10_000),
             self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
         )?
-        .with_catalog(catalog.as_ref().clone());
+        .with_catalog(catalog.as_ref().clone())
+        .with_output_catalogue(
+            self.config.id.clone(),
+            OutputCatalogue::new(self.control()?),
+        );
         let reader = SourcePluginAdapterFactory::default()
             .descriptor()
             .implementation
@@ -691,19 +695,31 @@ impl Runtime {
             if spec.is_some_and(|spec| spec.implementation == timer) {
                 continue;
             }
-            let native_rank = original_config
-                .sources
-                .iter()
-                .position(|source| source.source_id == edge.from.component.as_str());
-            if let (Some(rank), DesiredPipe::Ranked(pipe)) = (native_rank, pipe) {
+            let mut native_input = None;
+            for (rank, input) in original_config.inputs.iter().enumerate() {
+                let pending =
+                    ComputationPipelineBuilder::pending_native_endpoint(id, &input.component)?;
+                if input.component == edge.from.component.as_str() || edge.from == pending {
+                    native_input = Some((rank, &input.component, edge.from != pending));
+                    break;
+                }
+            }
+            if let (Some((rank, component, resolved)), DesiredPipe::Ranked(pipe)) =
+                (native_input, pipe)
+            {
                 if pipe.source_id.is_none()
                     && pipe.source_dispatch.is_none()
                     && !pipe.drop_when_full
                     && pipe.source_rank == rank
                     && input_queue.as_ref() == Some(&pipe.queue)
-                    && *policy == RelationshipPolicy::default()
+                    && (*policy == RelationshipPolicy::default()
+                        || *policy
+                            == RelationshipPolicy {
+                                activation: ActivationCoupling::RequiresRunning,
+                                ..Default::default()
+                            })
                 {
-                    native_sources.insert(edge.from.component.to_string(), edge.from.clone());
+                    native_sources.insert(component.clone(), resolved.then(|| edge.from.clone()));
                     continue;
                 }
             }
@@ -725,33 +741,58 @@ impl Runtime {
             );
         }
         let native_only =
-            !native_sources.is_empty() && native_sources.len() == original_config.sources.len();
+            !native_sources.is_empty() && native_sources.len() == original_config.inputs.len();
         let mut native_members: BTreeSet<_> = native_sources
             .values()
+            .flatten()
             .map(|output| output.component.clone())
             .collect();
-        for source in &config.sources {
-            if let Some(output) = native_sources.remove(&source.source_id) {
-                builder = builder.native_source(output)?;
+        for source in &config.inputs {
+            if let Some(output) = native_sources.remove(&source.component) {
+                let component = ComponentId::try_new(source.component.as_str())?;
+                let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
+                let output = if publication
+                    .desired
+                    .nodes
+                    .iter()
+                    .any(|node| node.descriptor.id() == &component)
+                {
+                    Some(publication.output_endpoint(&component, explicit.as_ref())?)
+                } else {
+                    explicit
+                        .map(|port| Endpoint::new(component, port))
+                        .or(output)
+                };
+                builder = match output {
+                    Some(output) => builder.native_source(output)?,
+                    None => builder.pending_native_source(&source.component)?,
+                };
                 continue;
             }
             let native_output = publication.desired.nodes.iter().any(|node| {
-                node.descriptor.id().as_str() == source.source_id
-                    && node.descriptor.ports().iter().any(|port| {
-                        port.id().as_str() == "out" && port.direction() == PortDirection::Output
-                    })
+                node.descriptor.id().as_str() == source.component
+                    && node
+                        .descriptor
+                        .ports()
+                        .iter()
+                        .any(|port| port.direction() == PortDirection::Output)
             });
             if native_output || native_only {
-                builder = builder.native_source(Endpoint::new(
-                    ComponentId::try_new(source.source_id.as_str())?,
-                    PortId::try_new("out")?,
-                ))?;
+                let component = ComponentId::try_new(source.component.as_str())?;
+                let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
+                builder = match (native_output, explicit) {
+                    (false, Some(port)) => builder.native_source(Endpoint::new(component, port))?,
+                    (false, None) => builder.pending_native_source(&source.component)?,
+                    (true, explicit) => builder.native_source(
+                        publication.output_endpoint(&component, explicit.as_ref())?,
+                    )?,
+                };
                 continue;
             }
-            let (mut host, options) = match sources.remove(&source.source_id) {
+            let (mut host, options) = match sources.remove(&source.component) {
                 Some(existing) => existing,
                 None => (
-                    self.source_host(&source.source_id).await?,
+                    self.source_host(&source.component).await?,
                     SourceSubscriptionOptions {
                         borrowed_recovery: true,
                         allow_broadcast_loss: true,
@@ -763,9 +804,9 @@ impl Runtime {
                 .desired
                 .subscriptions
                 .iter()
-                .any(|(from, to)| from.as_str() == source.source_id && to == &query_id)
+                .any(|(from, to)| from.as_str() == source.component && to == &query_id)
             {
-                host = self.source_host(&source.source_id).await?;
+                host = self.source_host(&source.component).await?;
             }
             builder = builder.source(host, options)?;
         }

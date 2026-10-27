@@ -41,12 +41,31 @@ impl GraphProducerIdentity {
         stream: StreamId,
         persistent: bool,
     ) -> anyhow::Result<Self> {
+        Self::for_epoch(
+            scope,
+            graph_id,
+            component_id,
+            stream,
+            uuid::Uuid::new_v4(),
+            persistent,
+        )
+    }
+
+    /// Reconstruct the actual output epoch supplied by its state owner.
+    pub fn for_epoch(
+        scope: String,
+        graph_id: String,
+        component_id: ComponentId,
+        stream: StreamId,
+        incarnation: uuid::Uuid,
+        persistent: bool,
+    ) -> anyhow::Result<Self> {
         let identity = Self {
             construction_scope: scope,
             graph_id,
             component_id,
             stream,
-            incarnation: uuid::Uuid::new_v4(),
+            incarnation,
             persistent,
         };
         identity.validate()?;

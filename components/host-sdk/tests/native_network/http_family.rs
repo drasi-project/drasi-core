@@ -51,8 +51,11 @@ pub(super) fn family_component(
     config: Value,
     linked: bool,
 ) -> Result<NativeComponentProxy> {
-    family_plugin(kind, linked)?.factories()[0]
-        .create_component(ComponentId::try_new(name)?, config)
+    crate::sink_inputs::create(
+        &family_plugin(kind, linked)?.factories()[0],
+        ComponentId::try_new(name)?,
+        config,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -348,10 +351,10 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
             HTTP_SINK,
             "templated",
             json!({
-                "queryId":"q","baseUrl":format!("http://{}",server.address),
+                "outputs":{"q":{"component":"q","port":"out"}},"baseUrl":format!("http://{}",server.address),
                 "outputTemplates":{"routes":{"q":{"added":{"method":"PUT","url":"/row/{{after.value}}",
-                    "headers":{"x-rendered-query":"{{query_id}}"},
-                    "template":"{\"value\":{{after.value}},\"operation\":\"{{operation}}\",\"metadata\":{{json metadata}}}"}}}}
+                    "headers":{"x-rendered-output":"{{output.component}}/{{output.port}}"},
+                    "template":"{\"value\":{{after.value}},\"operation\":\"{{operation}}\",\"identity\":{{json identity}}}"}}}}
             }),
             linked,
         )?;
@@ -368,15 +371,18 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
             .clone();
         assert_eq!(request.0, Method::PUT);
         assert_eq!(request.1, "/row/42");
-        assert_eq!(request.2["x-rendered-query"], "q");
+        assert_eq!(request.2["x-rendered-output"], "q/out");
+        assert_eq!(request.2["x-drasi-component"], "q");
+        assert_eq!(request.2["x-drasi-port"], "out");
         assert_eq!(request.3["value"], 42);
         assert_eq!(request.3["operation"], "ADD");
-        assert_eq!(request.3["metadata"]["source_id"], "facilities-db");
+        assert!(request.3["identity"]["namespace"].as_str().is_some());
+        assert_eq!(request.3["identity"]["id"].as_str().map(str::len), Some(16));
         let mut batch = family_component(
             HTTP_SINK,
             "batch",
             json!({
-                "queryStreams":{"q":"q/out"},"baseUrl":format!("http://{}",server.address),
+                "outputs":{"q":{"component":"q","port":"out"}},"baseUrl":format!("http://{}",server.address),
                 "adaptive":{"adaptiveMinBatchSize":2,"adaptiveMaxBatchSize":2,"adaptiveBatchTimeoutMs":50},
                 "batchEndpoint":"/batch"
             }),
@@ -398,8 +404,8 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
         assert_eq!(request.1, "/batch");
         let items = request.3["batch"].as_array().context("batch body")?;
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["sequenceId"], 2);
-        assert_eq!(items[1]["sequenceId"], 3);
+        assert_eq!(items[0]["sequence"], 2);
+        assert_eq!(items[1]["sequence"], 3);
     }
     server.stop().await
 }
@@ -458,7 +464,7 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
                 .query(
                     drasi_lib::Query::cypher("q")
                         .query("MATCH (r:Room) RETURN elementId(r) AS id,r.value AS value")
-                        .from_source("source")
+                        .from_input("source")
                         .enable_bootstrap(true)
                         .build(),
                 );
@@ -467,7 +473,7 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
                 HTTP_SINK,
                 "sink",
                 json!({
-                    "queryId":"q","url":format!("http://{}/reaction",server.address)
+                    "outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction",server.address)
                 }),
                 linked,
             )?;
@@ -507,7 +513,7 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
                     let delivered = server.state.arrived.notified();
                     let rows = core.get_query_results("q").await?;
                     let effect = server.state.requests.lock().unwrap().iter()
-                        .any(|(_,path,_,body)| path == "/reaction" && body["operation"] == "UPDATE"
+                        .any(|(_,path,_,body)| path == "/reaction" && body["operation"] == "REPLACE"
                             && body["before"]["value"] == 10 && body["after"]["value"] == 99);
                     if rows.len() == 2 && rows.iter().any(|row| row["value"] == 99) && effect {
                         break;

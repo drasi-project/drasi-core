@@ -23,7 +23,7 @@ struct Capture {
 }
 
 impl Capture {
-    fn new(schema: PortableSchema) -> Result<(Self, mpsc::Receiver<ChangeEnvelope>)> {
+    fn new(schema: PortableDelivery) -> Result<(Self, mpsc::Receiver<ChangeEnvelope>)> {
         let (output, receiver) = mpsc::channel(16);
         Ok((
             Self {
@@ -95,7 +95,7 @@ async fn receiver_core_controlled(
     Option<Arc<QosChannel>>,
     mpsc::Receiver<ChangeEnvelope>,
 )> {
-    let (mut capture, captured) = Capture::new(config.schema)?;
+    let (mut capture, captured) = Capture::new(config.delivery)?;
     capture.gate = gate;
     let mut specification = config.specification(ComponentRole::Source)?;
     let mut builder = ComponentBatch::builder().sink(Box::new(capture));
@@ -209,7 +209,7 @@ impl EnvelopeSource for AdmissionOnly {
     }
 }
 
-fn source_descriptor(schema: PortableSchema) -> Result<ComponentDescriptor> {
+fn source_descriptor(schema: PortableDelivery) -> Result<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
         ComponentId::try_new("input")?,
         vec![PortDescriptor::new(
@@ -236,9 +236,12 @@ async fn wait_ack(channel: &QosChannel, subscriber: &str, count: u64) -> Result<
 #[tokio::test(flavor = "current_thread")]
 async fn factories_exchange_each_portable_schema_between_two_normal_instances() -> Result<()> {
     for (schema, envelope) in [
-        (PortableSchema::GraphChange, graph_input(1, 42)?),
-        (PortableSchema::QueryChange, query_input(1)?),
-        (PortableSchema::SourceTransaction, transaction_input(1)?),
+        (PortableDelivery::Events, graph_input(1, 42)?),
+        (PortableDelivery::Events, query_input(1)?),
+        (
+            PortableDelivery::CompleteTransactions,
+            transaction_input(1)?,
+        ),
     ] {
         let directory = Directory::new()?;
         let source_config = configuration(&directory, true, Profile::Volatile, schema);
@@ -297,7 +300,7 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
 async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_transactions(
 ) -> Result<()> {
     let directory = Directory::new()?;
-    let schema = PortableSchema::SourceTransaction;
+    let schema = PortableDelivery::CompleteTransactions;
     let source_config = configuration(&directory, true, Profile::Durable, schema);
     let sink_config = configuration(&directory, false, Profile::Durable, schema);
     let (right, receiver_journal, mut captured) =
@@ -400,13 +403,13 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
         &directory,
         true,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let sink_config = configuration(
         &directory,
         false,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
     let mut sink = BridgeSink::new(sink_config, GRAPH.into(), None, None)?;
@@ -503,17 +506,12 @@ fn replay_transport(envelope: &ChangeEnvelope, sequence: u64) -> Result<ChangeEn
 async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let directory = Directory::new()?;
-    let source_config = configuration(
-        &directory,
-        true,
-        Profile::Durable,
-        PortableSchema::GraphChange,
-    );
+    let source_config = configuration(&directory, true, Profile::Durable, PortableDelivery::Events);
     let mut sink_config = configuration(
         &directory,
         false,
         Profile::Durable,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let real_path = match &source_config.transport {
         Transport::Unix { data_path, .. } => data_path.clone(),
@@ -638,17 +636,12 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
 #[tokio::test(flavor = "current_thread")]
 async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input() -> Result<()> {
     let directory = Directory::new()?;
-    let source_config = configuration(
-        &directory,
-        true,
-        Profile::Durable,
-        PortableSchema::GraphChange,
-    );
+    let source_config = configuration(&directory, true, Profile::Durable, PortableDelivery::Events);
     let sink_config = configuration(
         &directory,
         false,
         Profile::Durable,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let (right, journal, mut captured) =
         receiver_core(&source_config, &directory.path().join("receiver")).await?;
@@ -716,13 +709,13 @@ async fn malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_contro
         &directory,
         true,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let sink_config = configuration(
         &directory,
         false,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
     source.start().await?;
@@ -783,7 +776,7 @@ async fn malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_contro
     drop(stale);
     drop(io);
     let codec = PortableEnvelopeCodec::new(
-        sink_config.schema,
+        sink_config.delivery,
         sink_config.namespace.clone(),
         sink_config.limits.clone(),
     )?;
@@ -838,7 +831,7 @@ async fn transactional_sender_mapping_persists_gaps_rejects_expiry_and_configura
         &directory,
         false,
         Profile::Durable,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let session = ProducerSession {
         incarnation: uuid::Uuid::new_v4(),
@@ -921,13 +914,13 @@ async fn sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifet
         &directory,
         true,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let sink_config = configuration(
         &directory,
         false,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
     let ingress = source.ingress_control();
@@ -987,17 +980,12 @@ async fn sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifet
 #[tokio::test(flavor = "current_thread")]
 async fn durable_cut_waits_for_actual_required_subscriber_acknowledgement() -> Result<()> {
     let directory = Directory::new()?;
-    let source_config = configuration(
-        &directory,
-        true,
-        Profile::Durable,
-        PortableSchema::GraphChange,
-    );
+    let source_config = configuration(&directory, true, Profile::Durable, PortableDelivery::Events);
     let sink_config = configuration(
         &directory,
         false,
         Profile::Durable,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let ingress = Arc::new(crate::BridgeIngressControl::new());
     let release = Arc::new(tokio::sync::Notify::new());

@@ -21,3 +21,35 @@ pub enum ErrorHandling {
     Fail,
     Skip,
 }
+
+/// Settles a derived property against an update's removal set before deriving it.
+///
+/// Returns true when the update removes `target`: nothing can be derived, and the
+/// derived `output` is removed as well unless the update sets it.
+#[cfg(any(feature = "decoder", feature = "parse_json"))]
+pub(crate) fn derive_removes_output(
+    element: &drasi_core_types::models::Element,
+    removed: &mut std::collections::BTreeSet<String>,
+    target: &str,
+    output: &str,
+) -> bool {
+    if !removed.contains(target) {
+        return false;
+    }
+    if output != target && !element.get_properties().contains_key(output) {
+        removed.insert(output.to_string());
+    }
+    true
+}
+
+/// A derived property that the update now sets can no longer also be removed.
+#[cfg(any(feature = "decoder", feature = "parse_json"))]
+pub(crate) fn derived_property_is_set(
+    element: &drasi_core_types::models::Element,
+    removed: &mut std::collections::BTreeSet<String>,
+    output: &str,
+) {
+    if element.get_properties().contains_key(output) {
+        removed.remove(output);
+    }
+}

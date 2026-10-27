@@ -66,13 +66,14 @@ pub(super) async fn rotation(
     let mut settings = database.sink_settings();
     for event in ["added", "updated", "deleted"] {
         settings["default_template"][event]["template"] =
-            json!("CALL credential_effect({{param query_id}})");
+            json!("CALL credential_effect({{param output.alias}})");
     }
     let literal_settings = settings.clone();
     let object = settings.as_object_mut().context("MySQL settings object")?;
     object.remove("user");
     object.remove("password");
-    let mut sink = factory.create_component_with_identity(
+    let mut sink = crate::sink_inputs::create_with_identity(
+        factory,
         id("identity-procedures"),
         json!({"settings":settings}),
         identity.clone(),
@@ -134,7 +135,8 @@ pub(super) async fn rotation(
                 assert_eq!(sink.configuration()?, declared);
 
                 let reads = provider.state()?.contexts.len();
-                let mut fallback = factory.create_component_with_identity(
+                let mut fallback = crate::sink_inputs::create_with_identity(
+                    factory,
                     id("literal-fallback-probe"),
                     json!({"settings":literal_settings}),
                     identity.clone(),

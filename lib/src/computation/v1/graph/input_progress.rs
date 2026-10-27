@@ -150,7 +150,7 @@ impl InputProgress {
         let owner = if let Some(owner) = query_owner {
             Some(InputOwner::Query(owner))
         } else {
-            let producer = if input.changes().schema() == QueryChangeCodec::schema().descriptor() {
+            let producer = if QueryChangeCodec::is_query_output(input) {
                 GraphProducerProgress::from_query_envelope(input)?
             } else {
                 GraphProducerProgress::from_envelope(input)?

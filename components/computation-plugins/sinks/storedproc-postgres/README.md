@@ -3,7 +3,7 @@
 `drasi-computation-sink-storedproc-postgres` exports only
 `drasi.postgres/storedproc`, implementation/configuration version `1`, through
 native ComputationGraph ABI `1.0.0` and the consumer extension. Its `in` port
-accepts `QueryChangeCodec` rows. It runs inside the hosting DrasiLib instance's
+accepts standard graph-change envelopes from any source, transformer or query. It runs inside the hosting DrasiLib instance's
 single graph, statically or as a separately loaded library.
 
 The sink reuses the legacy parameter-only Handlebars renderer, template routing
@@ -53,7 +53,7 @@ resolver reference.
 | `ssl` | Default `false`; `true` requires verified server TLS. |
 | `tls_ca_pem` | Optional additional trusted CA; hostname verification remains enabled. |
 | `tls_client_cert_pem`, `tls_client_key_pem` | Optional PEM certificate/key pair for mutual TLS; both required together with `ssl=true`. Each PEM field is bounded to 64 KiB. |
-| `queries` | Required nonempty, unique list of accepted query IDs. Unexpected query IDs fail. |
+| `outputs` | Optional map from an alias to an incoming output's `{component, port?}`. The graph supplies each incoming source, transformer or query output and its stream; an input on a stream that is not a declared edge fails. |
 | `routes`, `default_template` | Shared `QueryConfig`/`TemplateSpec` command templates. At least one nonempty command is required. |
 | `command_timeout_ms` | Positive, default 30,000; also sets PostgreSQL `statement_timeout`. |
 | `connect_timeout_ms`, `shutdown_timeout_ms` | Positive, default 30,000 each. |
@@ -64,10 +64,7 @@ non-loopback hostname. TLS verifies the server hostname and uses the system
 trust store, plus `tls_ca_pem` when supplied. The selected trust source is logged
 at debug level without logging certificate contents or credentials.
 
-Routing is full query ID, last dotted segment, then default, resolved separately
-for ADD/UPDATE/DELETE. Aggregations use the UPDATE template as in the legacy
-reaction. Context keys are `query_id`, `query_name`, `operation`, RFC3339
-`timestamp`, `metadata`, and applicable `before`, `after`, `data`.
+Routing is full output alias, last dotted segment, then default, resolved separately for `added`/`updated`/`deleted`; `updated` covers `REPLACE` and `PATCH`. The template context is the truthful change context: `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output` (`alias`, `component`, `port`), `sequence`, `timestamp` (only when the envelope has one), `identity` (`namespace`, `id`) and only the `element`, `before`, `after`, `removedProperties` and `effectiveFrom` that the record carries. A patch's `after` holds only the properties it sets, an unknown `before` is absent (not null), and a template that reads an absent field fails strictly. A scheduling control or recovery frame fails. See the [sink input contract](../../SINKS.md).
 
 ```json
 {

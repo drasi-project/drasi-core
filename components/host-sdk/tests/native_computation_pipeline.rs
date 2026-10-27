@@ -498,7 +498,8 @@ fn integer(element: &Element, name: &str) -> Result<i64> {
 }
 fn row(envelope: &ChangeEnvelope) -> Result<Element> {
     let changes = GraphChangeCodec::decode_changes(envelope)?;
-    let [SourceChange::Insert { element } | SourceChange::Update { element }] = changes.as_slice()
+    let [SourceChange::Insert { element } | SourceChange::Update { element, .. }] =
+        changes.as_slice()
     else {
         anyhow::bail!("expected exactly one inserted/updated element");
     };
@@ -949,9 +950,15 @@ async fn actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifec
     let mut bad_port = insert(1, 3)?;
     bad_port.port = PortId::try_new("not-in")?;
     assert!(capture.handle(bad_port).await.is_err());
+    let schema = GraphChangeCodec::schema();
     let changes = ChangeSet::try_new(
         ChangeSetId::try_new("other", bytes::Bytes::from_static(b"other"))?,
-        QueryChangeCodec::schema().descriptor().clone(),
+        SchemaDescriptor::try_new(
+            SchemaId::try_new("not-graph-change")?,
+            schema.descriptor().version(),
+            schema.descriptor().encoding(),
+            schema.descriptor().definition().clone(),
+        )?,
         vec![],
     )?;
     let other = ChangeEnvelope::new(
@@ -1166,6 +1173,7 @@ async fn native_transaction_state_is_isolated_and_committed_output_replays_witho
     let patch = stable_input(
         2,
         SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: metadata(),
                 properties: ElementPropertyMap::from(json!({"tag":"updated"})),

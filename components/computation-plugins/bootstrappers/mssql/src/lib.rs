@@ -286,6 +286,7 @@ impl NativeBootstrapProvider for MsSqlBootstrap {
             .await?
             .map(|boundary| {
                 Ok::<_, anyhow::Error>(BootstrapWatermark {
+                    producer: None,
                     stream: StreamId::try_new(self.config.stream.as_str())?,
                     source_id: Some(self.config.source.clone()),
                     sequence: 0,

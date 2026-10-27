@@ -27,7 +27,7 @@ use super::{
     ComponentDescriptor, ComponentId, ComputationComponent, EnvelopeSink, InputEnvelope,
     OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId, QueryChangeCodec,
     QueryHistoryError, QueryIdentityError, QueryRecoveryIdentity, QueryRecoveryView, QueryResults,
-    SinkCompletion, StreamId, SystemMetadata, Transformer, WakeupSource,
+    SinkCompletion, SnapshotConsumer, StreamId, SystemMetadata, Transformer, WakeupSource,
 };
 
 #[async_trait]
@@ -531,12 +531,14 @@ impl QueryReplayTransformer {
             envelope: envelope.derive(
                 super::emission_id(&self.stream, sequence)?,
                 envelope.changes().clone(),
-                SystemMetadata::new(self.stream.clone(), sequence).with_timestamp(
-                    envelope
-                        .system()
-                        .timestamp()
-                        .unwrap_or_else(chrono::Utc::now),
-                ),
+                SystemMetadata::new(self.stream.clone(), sequence)
+                    .with_ordering(envelope.system().ordering())
+                    .with_timestamp(
+                        envelope
+                            .system()
+                            .timestamp()
+                            .unwrap_or_else(chrono::Utc::now),
+                    ),
             ),
         })
     }
@@ -592,6 +594,7 @@ impl QueryReplayTransformer {
             SystemMetadata::new(self.stream.clone(), sequence).with_timestamp(chrono::Utc::now());
         let mut envelope = match action {
             ConsumerRecoveryAction::ReplaceSnapshot => QueryChangeCodec::snapshot_envelope(
+                &view.snapshot.projector,
                 &self.query_id,
                 &view.snapshot,
                 self.descriptor.id(),
@@ -606,6 +609,7 @@ impl QueryReplayTransformer {
                     target_sequence
                 );
                 QueryChangeCodec::progress_envelope(
+                    &view.snapshot.projector,
                     &self.query_id,
                     target_sequence,
                     view.snapshot.generation,
@@ -906,8 +910,14 @@ impl EnvelopeSink for CheckpointedSink {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
-    fn supports_snapshot(&self) -> bool {
-        self.inner.supports_snapshot()
+    /// Exposed only where the inner sink supports snapshots on `port`; the
+    /// wrapper itself runs the checkpointed replacement workflow.
+    fn snapshot_consumer(&mut self, port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        if self.inner.snapshot_consumer(port).is_some() {
+            Some(self)
+        } else {
+            None
+        }
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         let query = QueryChangeCodec::metadata(&input.envelope)?.query_id;
@@ -973,10 +983,13 @@ impl EnvelopeSink for CheckpointedSink {
             }
             validate_commit(handled.as_ref(), &checkpoint, true)?;
             if decision.action == ConsumerRecoveryAction::ReplaceSnapshot {
-                if !self.inner.supports_snapshot() {
-                    anyhow::bail!("sink does not support explicit snapshot replacement");
-                }
-                self.inner.replace_snapshot(input).await?;
+                let port = input.port.clone();
+                let Some(consumer) = self.inner.snapshot_consumer(&port) else {
+                    anyhow::bail!(
+                        "sink input {port} does not support explicit snapshot replacement"
+                    );
+                };
+                consumer.replace_snapshot(input).await?;
             }
             self.progress
                 .commit_recovery(&query, handled, checkpoint)
@@ -998,6 +1011,21 @@ impl EnvelopeSink for CheckpointedSink {
             self.inner.handle(input).await?;
             self.progress.commit_handled(&query, checkpoint).await
         }
+    }
+}
+
+#[async_trait]
+impl SnapshotConsumer for CheckpointedSink {
+    /// Runs the full checkpointed workflow (decision, conflict and checkpoint
+    /// validation, the inner replacement, then recovery commit); a live or
+    /// progress-only envelope is never accepted as a snapshot.
+    async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            QueryChangeCodec::is_snapshot(&input.envelope)
+                && !QueryChangeCodec::is_progress_only(&input.envelope),
+            "snapshot replacement requires a snapshot envelope"
+        );
+        EnvelopeSink::handle(self, input).await
     }
 }
 

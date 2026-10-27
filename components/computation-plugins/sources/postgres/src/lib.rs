@@ -6,9 +6,7 @@ mod rows;
 mod shared;
 
 use anyhow::{Context, Result};
-use drasi_computation_contracts::{
-    ComponentId, ComponentRole, ImplementationIdentity, SourceTransactionCodec, StreamId,
-};
+use drasi_computation_contracts::{ComponentId, ComponentRole, ImplementationIdentity, StreamId};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
     CreatedComponent, Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress,
@@ -69,10 +67,7 @@ pub fn plugin() -> Result<PluginDefinition> {
             Arc::new(PostgresSharedRowsFactory),
             Arc::new(PostgresSharedTransactionsFactory),
         ],
-        vec![
-            SourceTransactionCodec::schema(),
-            drasi_computation_contracts::GraphChangeCodec::schema(),
-        ],
+        vec![drasi_computation_contracts::GraphChangeCodec::schema()],
     )
 }
 
@@ -339,13 +334,13 @@ mod tests {
     use drasi_computation_plugin_sdk::ExportedPlugin;
 
     #[test]
-    fn source_factory_declares_only_transaction_schema_and_real_progress() -> Result<()> {
+    fn source_factory_declares_only_the_standard_graph_schema_and_real_progress() -> Result<()> {
         ExportedPlugin::new(plugin()?)?;
         let metadata = PostgresSourceFactory.metadata();
         assert_eq!(metadata.ports.len(), 1);
         assert_eq!(
             metadata.ports[0].schema(),
-            SourceTransactionCodec::schema().descriptor()
+            drasi_computation_contracts::GraphChangeCodec::schema().descriptor()
         );
         assert!(metadata.configuration.fields["settings"].secret);
         assert!(PostgresSourceFactory.supports_source_progress());

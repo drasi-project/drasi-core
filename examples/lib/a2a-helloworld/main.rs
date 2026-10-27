@@ -28,8 +28,8 @@ use drasi_state_store_redb::RedbStateStoreProvider;
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let endpoint = std::env::var("A2A_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:9999/".to_string());
+    let endpoint =
+        std::env::var("A2A_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:9999/".to_string());
 
     let _state_dir = tempfile::tempdir()?;
     let state_store = RedbStateStoreProvider::new(_state_dir.path().join("state.redb"))?;
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
                    inv.amount AS amount
             "#,
         )
-        .from_source("invoices")
+        .from_input("invoices")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();

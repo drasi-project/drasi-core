@@ -491,11 +491,11 @@ fn native_consumer_factory_contract_rejects_acceptance_snapshot_and_independent_
         .validate_factory(&metadata)
         .is_err());
     metadata.capabilities.readiness = false;
-    metadata.capabilities.snapshot = true;
+    metadata.capabilities.snapshot_inputs = vec![metadata.ports[0].id().clone()];
     assert!(sdk::ConsumerMode::External
         .validate_factory(&metadata)
         .is_err());
-    metadata.capabilities.snapshot = false;
+    metadata.capabilities.snapshot_inputs.clear();
     metadata.completion = Some(SinkCompletion::Accepted);
     assert!(sdk::ConsumerMode::External
         .validate_factory(&metadata)

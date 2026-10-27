@@ -206,6 +206,55 @@ components, and an input can receive several producers. However, one producer
 output cannot feed multiple input ports on the *same* component: separate queues
 for that stream could undermine its ordering.
 
+### Choosing a port format
+
+A factory's default ports use the standard `drasi.graph-change` schema unless
+it documents otherwise. A factory that genuinely implements more than one schema
+on a port can let configuration select among them with the reserved literal
+`ports` field:
+
+```json
+{ "ports": { "out": { "format": "vendor.columnar-batch-v1" } } }
+```
+
+The format name is `<schema id>-v<version>`. Resolution is pure and happens
+before construction or any I/O:
+
+- Only formats the factory declared for that port are accepted, including its
+  default. An unknown port or format, or a malformed `ports` value, is an error.
+  Nothing falls back to the default, and no codec or converter is created.
+- Unmentioned ports keep their defaults, direction and pipe requirements, so
+  multi-port components keep every other port.
+- The specification's declared ports must be exactly those the configuration
+  resolves to; the graph rejects a mismatch while validating the definition,
+  before any factory `create`.
+- The edge check is unchanged: complete descriptors must match, so connecting a
+  custom format to a default-format port still needs an intentional conversion.
+- Changing the format of a persisted port is a stopped reconfiguration; existing
+  journals are not reinterpreted.
+
+Ordinary factories build a `PortFormatCatalogue` (default ports plus
+`PortFormatAlternative`s), return it from `ComponentFactory::port_formats()`,
+declare the field with `ConfigurationSchema::with_port_formats()`, and use
+`PortFormatCatalogue::describe` in `specification_from_config`. Factories with no
+catalogue behave as before, and the built-in standard factories do not declare
+alternatives: they expose graph-change only and reject a `ports` field as an
+unknown configuration field. Native plugins list alternatives in
+`Capabilities::port_formats`; see the Host and plugin SDK READMEs.
+
+### Primary ports for shorthand endpoints
+
+A shorthand that names a component without a port resolves from actual
+declarations only (`PortPrimaries::resolve`): an explicit port, which must exist
+with the requested direction; otherwise the factory's designated primary port for
+that direction; otherwise the single port of that direction. Zero ports, or
+several without a primary, are errors that list the candidates. A port is never
+chosen by position or by the names `in`/`out`. A factory designates at most one
+primary input and one primary output by port id (`ComponentFactory::primary_ports`,
+native `Capabilities::primary_ports`). Each must name an existing port of that
+direction; the graph and the native manifest check this before construction. A
+primary survives format selection because only the format changes, not the id.
+
 ### What the capability names promise
 
 | Capability | Meaning in the current implementation |

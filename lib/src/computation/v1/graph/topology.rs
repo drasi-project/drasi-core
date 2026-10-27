@@ -168,18 +168,13 @@ impl FactoryRegistry {
         &self,
         max_bytes: NonZeroUsize,
     ) -> GraphResult<crate::computation::v1::EnvelopeCodec> {
-        use crate::computation::v1::{
-            EnvelopeCodec, GraphChangeCodec, QueryChangeCodec, Schema, SchemaId,
-        };
+        use crate::computation::v1::{EnvelopeCodec, GraphChangeCodec, Schema, SchemaId};
         let mut schemas: BTreeMap<(SchemaId, u32), Arc<Schema>> = BTreeMap::new();
-        for schema in [GraphChangeCodec::schema(), QueryChangeCodec::schema()]
-            .into_iter()
-            .chain(
-                self.factories
-                    .values()
-                    .flat_map(|factory| factory.record_schemas()),
-            )
-        {
+        for schema in [GraphChangeCodec::schema()].into_iter().chain(
+            self.factories
+                .values()
+                .flat_map(|factory| factory.record_schemas()),
+        ) {
             let descriptor = schema.descriptor();
             let key = (descriptor.id().clone(), descriptor.version().value());
             if let Some(existing) = schemas.get(&key) {

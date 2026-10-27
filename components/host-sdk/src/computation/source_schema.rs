@@ -6,9 +6,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use drasi_computation_plugin_abi::{self as abi, source_schema::*};
 use drasi_computation_plugin_sdk::transport::{take_reply, take_status, OperationFuture};
-use drasi_lib::computation::v1::{
-    decode_bounded_messagepack, ComponentRole, SourceSchemaReader,
-};
+use drasi_lib::computation::v1::{decode_bounded_messagepack, ComponentRole, SourceSchemaReader};
 use std::sync::{Arc, Weak};
 use tokio::sync::watch;
 

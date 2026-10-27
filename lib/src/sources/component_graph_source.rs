@@ -433,7 +433,7 @@ fn build_status_update_changes(event: &ComponentEvent) -> Vec<SourceChange> {
     }
 
     let node = make_node(&node_id, &[label], props);
-    vec![SourceChange::Update { element: node }]
+    vec![SourceChange::update(node)]
 }
 
 fn component_label_prefix(ct: &ComponentType) -> (&'static str, &'static str) {

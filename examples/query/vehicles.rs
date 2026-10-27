@@ -67,6 +67,7 @@ async fn main() {
         "Result: {:?}",
         query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("", "v1"),

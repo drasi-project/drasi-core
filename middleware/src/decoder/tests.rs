@@ -55,6 +55,7 @@ fn create_node_insert_change(props: Value) -> SourceChange {
 
 fn create_node_update_change(props: Value) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test_source", "node1"),
@@ -104,9 +105,9 @@ fn create_future_change() -> SourceChange {
 
 fn get_props_from_change(change: &SourceChange) -> &ElementPropertyMap {
     match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => {
-            element.get_properties()
-        }
+        SourceChange::Insert { element }
+        | SourceChange::Replace { element }
+        | SourceChange::Update { element, .. } => element.get_properties(),
         _ => panic!("Expected Insert or Update change to get properties"),
     }
 }
@@ -662,7 +663,7 @@ mod process {
             .unwrap();
         assert_eq!(result.len(), 1);
         match &result[0] {
-            SourceChange::Update { element } => {
+            SourceChange::Update { element, .. } => {
                 let props = element.get_properties();
                 assert_eq!(
                     props.get("encoded_value"),
@@ -1230,5 +1231,82 @@ mod factory {
         });
         let mw_config = create_mw_config(config);
         assert!(subject.create(&mw_config).is_ok());
+    }
+}
+
+mod canonical_mutation {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn removing(removed: &[&str], props: Value) -> SourceChange {
+        let SourceChange::Update { element, .. } = create_node_update_change(props) else {
+            panic!("expected update");
+        };
+        SourceChange::update_with_removals(
+            element,
+            removed.iter().map(|name| name.to_string()).collect(),
+        )
+        .unwrap()
+    }
+
+    async fn run(output_property: Option<&str>, change: SourceChange) -> Vec<SourceChange> {
+        let mut config = json!({"encoding_type": "base64", "target_property": "data"});
+        if let Some(output) = output_property {
+            config["output_property"] = json!(output);
+        }
+        DecoderFactory::default()
+            .create(&create_mw_config(config))
+            .unwrap()
+            .process(change, &InMemoryElementIndex::new())
+            .await
+            .unwrap()
+    }
+
+    fn removed_of(changes: &[SourceChange]) -> BTreeSet<String> {
+        let [SourceChange::Update {
+            removed_properties, ..
+        }] = changes
+        else {
+            panic!("an update stays one update: {changes:?}");
+        };
+        removed_properties.clone()
+    }
+
+    #[tokio::test]
+    async fn removing_the_encoded_property_removes_the_decoded_output_too() {
+        let result = run(Some("decoded"), removing(&["data"], json!({"other": 1}))).await;
+        assert_eq!(
+            removed_of(&result),
+            BTreeSet::from(["data".to_string(), "decoded".to_string()])
+        );
+        assert!(get_props_from_change(&result[0]).get("decoded").is_none());
+    }
+
+    #[tokio::test]
+    async fn decoding_an_update_keeps_unrelated_removals_and_replacements() {
+        let result = run(
+            Some("decoded"),
+            removing(&["gone", "decoded"], json!({"data": "aGk="})),
+        )
+        .await;
+        // The decoded output is now set, so it is no longer removed.
+        assert_eq!(removed_of(&result), BTreeSet::from(["gone".to_string()]));
+        assert_eq!(
+            get_props_from_change(&result[0]).get("decoded"),
+            Some(&ElementValue::String("hi".into()))
+        );
+
+        let SourceChange::Insert { element } = create_node_insert_change(json!({"data": "aGk="}))
+        else {
+            panic!("expected insert");
+        };
+        let replaced = run(None, SourceChange::replace(element)).await;
+        let [SourceChange::Replace { element }] = replaced.as_slice() else {
+            panic!("a replacement stays a replacement");
+        };
+        assert_eq!(
+            element.get_properties().get("data"),
+            Some(&ElementValue::String("hi".into()))
+        );
     }
 }

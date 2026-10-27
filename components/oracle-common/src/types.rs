@@ -94,6 +94,9 @@ pub fn value_to_string(value: &ElementValue) -> String {
         ElementValue::ZonedDateTime(value) => value.to_rfc3339(),
         ElementValue::List(value) => format!("{value:?}"),
         ElementValue::Object(value) => format!("{value:?}"),
+        ElementValue::Typed(_) => {
+            drasi_core::evaluation::variable_value::VariableValue::from(value).to_string()
+        }
     }
 }
 
@@ -176,6 +179,11 @@ mod tests {
             value_to_string(&ElementValue::ZonedDateTime(zoned_dt)),
             "2024-06-15T10:30:45+01:00"
         );
+        let unsigned = drasi_core::evaluation::variable_value::VariableValue::Integer(
+            drasi_core::evaluation::variable_value::integer::Integer::from(u64::MAX),
+        );
+        let typed: ElementValue = (&unsigned).try_into().unwrap();
+        assert_eq!(value_to_string(&typed), u64::MAX.to_string());
     }
 
     #[test]

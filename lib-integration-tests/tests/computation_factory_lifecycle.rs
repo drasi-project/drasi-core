@@ -599,10 +599,15 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
         assert!(pending.resource_errors.is_empty(), "{pending:?}");
         let observed = core.computation_control()?.observed();
         assert_eq!(observed.components.len(), 4);
-        assert!(observed.components[&ComponentId::try_new("reaction")?]
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.cause.to_string().contains("not registered")));
+        let reaction = &observed.components[&ComponentId::try_new("reaction")?];
+        assert!(reaction.failure.is_none(), "{reaction:?}");
+        assert_eq!(reaction.realization, RealizationState::Blocked);
+        assert!(
+            reaction.waiting_for.contains(&DependencyWait::Factory {
+                implementation: ReactionFactory::new()?.descriptor().implementation.clone(),
+            }),
+            "{reaction:?}"
+        );
         core.register_component_factory(Arc::new(ReactionFactory::new()?))
             .await?;
         let realized = core.reconcile_desired_state().await?;
@@ -652,6 +657,9 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
     );
     resources.append("left", 6).await?;
     wait_query(&resources, "left", 6).await?;
+    // The stopped sink keeps this journal full: interrupt, rather than request
+    // a drain, to recover the producer's retained output in the next instance.
+    core.computation_control()?.cancel();
     tokio::time::timeout(DEADLINE, core.shutdown()).await??;
     right.shutdown().await?;
     drop((core, right, resources));

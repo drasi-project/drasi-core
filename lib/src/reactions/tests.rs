@@ -966,7 +966,7 @@ pub(crate) mod manager_tests {
             .with_query(
                 crate::Query::cypher("e2e-query")
                     .query("MATCH (n:Person) RETURN n.name, n.age")
-                    .from_source("e2e-src")
+                    .from_input("e2e-src")
                     .build(),
             )
             .with_reaction(reaction)

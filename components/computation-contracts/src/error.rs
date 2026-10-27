@@ -77,6 +77,43 @@ pub enum ContractError {
     },
     #[error("processing context length overflow")]
     ContextOverflow,
+    #[error("invalid port format declaration: {reason}")]
+    InvalidPortFormats { reason: String },
+    #[error("invalid port format override: {reason}")]
+    InvalidPortFormatOverride { reason: String },
+    #[error(
+        "no {direction:?} port {port:?} is declared (declared {direction:?} ports: {known:?})"
+    )]
+    EndpointPortNotFound {
+        port: PortId,
+        direction: PortDirection,
+        known: Vec<PortId>,
+    },
+    #[error("component declares no {direction:?} port")]
+    NoEndpointPort { direction: PortDirection },
+    #[error(
+        "ambiguous {direction:?} port: name one explicitly or designate a primary (candidates: {candidates:?})"
+    )]
+    AmbiguousEndpointPort {
+        direction: PortDirection,
+        candidates: Vec<PortId>,
+    },
+    #[error("port {port:?} is not declared by this component (declared: {known:?})")]
+    UnknownFormatPort { port: PortId, known: Vec<PortId> },
+    #[error(
+        "port {port:?} does not support format {requested:?}; supported formats: {supported:?}"
+    )]
+    UnsupportedPortFormat {
+        port: PortId,
+        requested: String,
+        supported: Vec<String>,
+    },
+    #[error("port {port:?} is declared as {actual} but its configuration resolves to {expected}")]
+    PortFormatMismatch {
+        port: PortId,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// Result of validated construction or compatibility negotiation.

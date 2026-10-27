@@ -1,7 +1,8 @@
 # Native gRPC sink
 
 `GrpcSinkConfig`, `OutputFormat` and their validation live in this crate's
-`config` module. The component also owns its `proto_item` output conversion.
+`config` module. Graph changes are projected to protocol items with the shared
+reaction-protocol renderer; see the [sink input contract](../../SINKS.md).
 
 Published configuration metadata includes the actual defaults and allowed values.
 `batchSize` supports 1 through 65,536 items. `batchFlushTimeoutMs` is an effective
@@ -14,12 +15,16 @@ host collection deadline for multi-item batches, bounded to 60 seconds.
 cargo build -p drasi-computation-sink-grpc --features dynamic-plugin
 ```
 
-Its `in` port consumes `QueryChangeCodec` envelopes. Configuration requires
-`queryId` or a `queryStreams` map. Defaults include `stream="{queryId}/out"`,
+Its `in` port consumes standard graph-change envelopes from any producer: a
+source, a transformer or a query. The graph supplies each incoming output;
+optional `outputs` (alias → `{component, port?}`) names them. Defaults include
 `endpoint="grpc://localhost:50052"`, `timeoutMs=60000`, `maxRetries=5`,
 `connectionRetryAttempts=10`, `initialConnectionTimeoutMs=15000`, `batchSize=1`,
 `batchFlushTimeoutMs=100`, `outputFormat="canonicalJson"`,
-`failurePolicy="strict"`. Default metadata includes `x-query-sequence: {queryId}`.
+`failurePolicy="strict"`. Every RPC carries `x-drasi-component` and `x-drasi-port` metadata naming the
+real producing output; configuring either rejects. The sink calls the
+`drasi.v1.ChangeService/ProcessChanges` RPC with ordered `Change` items; the legacy
+query-result `ReactionService` is not used.
 
 Start establishes the actual connection; exhausted failure is not lazy startup
 success. `Handled` requires both receiver `success=true` and an exact
@@ -35,7 +40,7 @@ object, not both:
 
 ```json
 {
-  "queryId": "rooms",
+  "outputs": {"rooms": {"component": "rooms", "port": "out"}},
   "endpoint": "grpc://localhost:50052",
   "batching": {
     "mode": "adaptive",
@@ -53,7 +58,7 @@ host-owned bounded collection and timers: no input is acknowledged merely for
 entering a private queue. Retained/QoS receivers keep partial collections and
 their pending leases across cancellation; acknowledgements remain contiguous.
 
-Each RPC contains one query and one set of request metadata. Query/metadata
+Each RPC contains one output (alias, component, port) and one set of request metadata. Output/metadata
 changes split requests without reordering items. `maxBatchBytes` (16 MiB by
 default) bounds host collection, and `maxRequestBytes` (4 MiB by default) splits
 protobuf requests at their encoded-byte limit. An individually oversized item
@@ -61,10 +66,14 @@ fails explicitly. Every chunk must finish before its graph inputs complete.
 
 ## Shared output and recovery logic
 
-`outputTemplates.defaultTemplate` and per-query `routes` reuse the legacy
+`outputTemplates.defaultTemplate` and per-alias `routes` reuse the legacy
 renderer, including full-name/last-segment/default routing, `json`, metadata
 templates and logged canonical fallbacks. Templates populate `payload`; typed
-before/after rows, row signatures, sequences and timestamps are not rewritten.
+before/after images, sequences and timestamps are not rewritten. There is no
+`row_signature`: each item states its `operation` (`ADD`, `REPLACE`, `PATCH`,
+`DELETE`), canonical `identity`, optional `element` shape, optional typed
+`before`/`after` (a patch's `after` holds only the properties it sets) and a
+patch's `removed_properties`. `timestamp` is set only when the envelope carries one.
 `outputFormat: "proto"` omits untemplated canonical payloads.
 
 The native path reuses the legacy connection-error classification and batch

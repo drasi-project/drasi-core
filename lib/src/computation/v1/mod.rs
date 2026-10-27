@@ -247,6 +247,16 @@ pub use query_configuration::QueryMiddlewareResource as MiddlewareRegistryResour
 pub use query_configuration::*;
 mod query_catalog;
 pub use query_catalog::*;
+mod output_bootstrap;
+mod output_catalogue;
+pub use output_catalogue::*;
+mod query_output;
+pub use drasi_computation_contracts::{
+    OutputCapability, OutputCursor, OutputEndpoint, OutputFollow, OutputFollowHub,
+    OutputFollowLimits, OutputPortReaders, OutputReadError, OutputReaders, OutputReplay,
+    OutputSnapshot, OutputSnapshotFollow, ReplayProvider, SnapshotFollowProvider, SnapshotProvider,
+    WeakOutputPortReaders, WeakOutputReaders,
+};
 mod inspection;
 pub use inspection::*;
 mod inventory;

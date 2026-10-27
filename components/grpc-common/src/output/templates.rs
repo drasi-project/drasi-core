@@ -67,6 +67,62 @@ impl TemplateEngine {
         Self { handlebars }
     }
 
+    /// Render a body template from an already-built context. A render error or
+    /// non-JSON output yields `None` so the caller falls back to its canonical
+    /// payload. `identity` and `operation` only label the diagnostics.
+    pub(crate) fn render_body_from_context(
+        &self,
+        context: &Map<String, Value>,
+        spec: &TemplateSpec<GrpcTemplateExtension>,
+        identity: &str,
+        operation: &str,
+    ) -> Option<Value> {
+        match self.handlebars.render_template(&spec.template, context) {
+            Ok(rendered) => match serde_json::from_str::<Value>(&rendered) {
+                Ok(value) => Some(value),
+                Err(parse_err) => {
+                    warn!(
+                        "Template for '{identity}' ({operation}) rendered non-JSON output: \
+                         {parse_err}; falling back to canonical payload",
+                    );
+                    None
+                }
+            },
+            Err(render_err) => {
+                warn!(
+                    "Template render failed for '{identity}' ({operation}): {render_err}; \
+                     falling back to canonical payload",
+                );
+                None
+            }
+        }
+    }
+
+    /// Render the per-item request metadata templates from a built context.
+    pub(crate) fn render_metadata_from_context(
+        &self,
+        context: &Map<String, Value>,
+        spec: &TemplateSpec<GrpcTemplateExtension>,
+        identity: &str,
+        operation: &str,
+    ) -> HashMap<String, String> {
+        let mut rendered = HashMap::new();
+        for (key, value_template) in &spec.extension.metadata {
+            match self.handlebars.render_template(value_template, context) {
+                Ok(value) => {
+                    rendered.insert(key.clone(), value);
+                }
+                Err(render_err) => {
+                    warn!(
+                        "Metadata template '{key}' failed for '{identity}' ({operation}): \
+                         {render_err}; omitting rendered metadata entry",
+                    );
+                }
+            }
+        }
+        rendered
+    }
+
     fn render_json_body(
         &self,
         item: &ItemContext<'_>,
@@ -204,7 +260,7 @@ fn build_template_context(item: &ItemContext<'_>) -> Map<String, Value> {
     ctx
 }
 
-fn resolve_spec<'a>(
+pub(crate) fn resolve_spec<'a>(
     cfg: &'a GrpcReactionConfig,
     query_id: &str,
     op: OperationType,

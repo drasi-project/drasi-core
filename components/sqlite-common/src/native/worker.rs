@@ -197,7 +197,7 @@ impl Capture {
                     })?;
                     self.push(SourceChange::Insert { element: after })?;
                 } else {
-                    self.push(SourceChange::Update { element: after })?;
+                    self.push(SourceChange::update(after))?;
                 }
             }
             (None, None) => anyhow::bail!("empty SQLite row change"),

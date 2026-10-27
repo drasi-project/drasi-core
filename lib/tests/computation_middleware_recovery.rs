@@ -225,7 +225,7 @@ fn change(sequence: u64, items: &[&str], update: bool) -> SourceChange {
     let items: Vec<_> = items.iter().map(|id| json!({"id": id})).collect();
     let element = parent("source", "parent", sequence, json!(items));
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }
@@ -913,7 +913,7 @@ async fn nested_unwind_and_patch_properties_survive_reconstruction() {
             "source",
             2,
             2,
-            SourceChange::Update { element: updated },
+            SourceChange::update(updated),
             true,
         )))
         .await

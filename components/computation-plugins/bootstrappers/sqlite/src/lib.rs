@@ -104,6 +104,7 @@ mod tests {
 
     fn request() -> Result<CreateRequest> {
         Ok(CreateRequest {
+            inputs: Vec::new(),
             activation_credentials_bound: false,
             id: ComponentId::try_new("query")?,
             implementation: FileBootstrapFactory.metadata().implementation,

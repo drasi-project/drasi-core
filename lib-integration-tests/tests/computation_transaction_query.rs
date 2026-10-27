@@ -392,7 +392,6 @@ async fn scheduled_query_worker() -> Result<()> {
     assert_eq!(QueryChangeCodec::query_sequence(&output[0].envelope)?, 1);
     query.delivery_completed(&output).await?;
     let repeated_hint = GraphChangeCodec::encode_futures_due(
-        &ComponentId::try_new("clock")?,
         StreamId::try_new("clock/out")?,
         99,
         chrono::DateTime::from_timestamp_millis(2000).unwrap(),
@@ -472,7 +471,7 @@ fn scheduled_named_input(
             if insert {
                 SourceChange::Insert { element }
             } else {
-                SourceChange::Update { element }
+                SourceChange::update(element)
             },
             StreamId::try_new("input/out")?,
             sequence,
@@ -600,7 +599,6 @@ async fn timer_burst_reconstruction() -> Result<()> {
     );
     assert_eq!(query.results().snapshot()?.rows.len(), expected.len());
     let stale = GraphChangeCodec::encode_futures_due(
-        &ComponentId::try_new("clock")?,
         StreamId::try_new("clock/out")?,
         999,
         chrono::DateTime::from_timestamp_millis(2000).context("due")?,
@@ -758,7 +756,6 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
             .complete(HandlingOutcome::Handled)
             .await?;
         let repeated = GraphChangeCodec::encode_futures_due(
-            &ComponentId::try_new("clock")?,
             StreamId::try_new("clock/out")?,
             99,
             chrono::DateTime::from_timestamp_millis(3000).context("due time")?,

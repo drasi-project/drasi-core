@@ -178,6 +178,10 @@ async fn fixture() -> Fixture {
     let (legacy, legacy_control) = ControlledSource::new("legacy");
     *legacy_control.schema.lock().unwrap() = Some(schema("Legacy"));
     let core = Arc::new(builder().with_source(legacy).build().await.unwrap());
+    // Initialization reports resources, which advance the topology revision.
+    bounded(core.computation_component("legacy").unwrap().wait_created())
+        .await
+        .unwrap();
     let sink = core
         .add_computation_component(
             ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink(descriptor(

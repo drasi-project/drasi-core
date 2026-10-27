@@ -183,7 +183,7 @@ impl InspectionAPI {
     /// let query_info = core.get_query_info("my-query").await?;
     /// println!("Query: {}", query_info.query);
     /// println!("Status: {:?}", query_info.status);
-    /// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
+    /// println!("Inputs: {:?}", query_info.inputs);
     /// # Ok(())
     /// # }
     /// ```
@@ -899,7 +899,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("test-source")
+                    .from_input("test-source")
                     .auto_start(false)
                     .build(),
             )

@@ -220,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
         .with_query(
             Query::cypher("high-temp")
                 .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id, s.temperature")
-                .from_source("sensors")
+                .from_input("sensors")
                 .build()
         )
         .build()
@@ -318,7 +318,7 @@ let config = Query::cypher("active-orders")
         WHERE o.status = 'active' AND o.total > 100
         RETURN o.id, o.customer, o.total
     "#)
-    .from_source("orders-db")
+    .from_input("orders-db")
     .build();
 ```
 
@@ -327,7 +327,7 @@ For GQL (ISO 9074:2024 graph query language — not GraphQL):
 ```rust
 let config = Query::gql("active-orders")
     .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o.id, o.total")
-    .from_source("orders-db")
+    .from_input("orders-db")
     .build();
 ```
 
@@ -336,8 +336,11 @@ let config = Query::gql("active-orders")
 | Method | Description | Default |
 |--------|-------------|---------|
 | `query(impl Into<String>)` | Cypher or GQL query string | **Required** |
-| `from_source(impl Into<String>)` | Subscribe to a source by ID | **Required** (at least one) |
-| `from_source_with_pipeline(id, Vec<String>)` | Subscribe with named middleware pipeline | — |
+| `from_input(impl Into<String>)` | Consume an upstream component (a source, another query or a transformer) by ID | **Required** (at least one) |
+| `from_input_port(id, port)` | Consume a named output port of an upstream component | — |
+| `from_input_with_pipeline(id, Vec<String>)` | Consume with a named middleware pipeline | — |
+| `with_input(QueryInputConfig)` | Add a fully specified input (port, label selectors, pipeline) | — |
+| `with_result_label(impl Into<String>)` | Label published result nodes (the output schema is unchanged) | `Result` |
 | `auto_start(bool)` | Start with `core.start()` | `true` |
 | `enable_bootstrap(bool)` | Load initial data from sources | `true` |
 | `with_joins(Vec<QueryJoinConfig>)` | Synthetic joins for multi-source queries | `None` |
@@ -365,8 +368,8 @@ let config = Query::cypher("orders-with-customers")
         WHERE o.status = 'pending'
         RETURN o.id, c.name, c.email, o.total
     "#)
-    .from_source("orders-db")
-    .from_source("customers-db")
+    .from_input("orders-db")
+    .from_input("customers-db")
     .with_joins(vec![QueryJoinConfig {
         id: "PLACED_BY".to_string(),
         keys: vec![
@@ -666,7 +669,7 @@ let core = DrasiLib::builder()
     .with_query(
         Query::cypher("my-query")
             .query("MATCH (n:Sensor) RETURN n")
-            .from_source("sensors")
+            .from_input("sensors")
             // 2. Assign the backend to a specific query by name
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
             .build()
@@ -807,7 +810,7 @@ use serde_json::json;
 
 let config = Query::cypher("my-query")
     .query("MATCH (n:Device) RETURN n")
-    .from_source("iot-source")
+    .from_input("iot-source")
     .with_middleware(SourceMiddlewareConfig {
         kind: "promote".into(),
         name: "extract-location".into(),
@@ -1036,7 +1039,7 @@ The outbox is a bounded ring buffer on the query side:
 ```rust
 let query = Query::cypher("q1")
     .query("MATCH (n:Sensor) RETURN n.id, n.value")
-    .from_source("sensors")
+    .from_input("sensors")
     .with_outbox_capacity(5000)   // retain last 5000 results (default: 1000)
     .build();
 ```
@@ -1091,8 +1094,8 @@ queries:
       WHERE s.temperature > 75
       RETURN s.id, s.temperature, s.location
     queryLanguage: Cypher
-    sources:
-      - source_id: sensors
+    inputs:
+      - sensors
     auto_start: true
     enableBootstrap: true
 
@@ -1101,9 +1104,9 @@ queries:
       MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
       WHERE o.status = 'pending'
       RETURN o.id, c.email, o.total
-    sources:
-      - source_id: orders
-      - source_id: customers
+    inputs:
+      - orders
+      - customers
     joins:
       - id: PLACED_BY
         keys:
@@ -1166,7 +1169,8 @@ see the [ComputationGraph configuration reference](docs/computation-graph-config
 | `id` | `id` | `String` | **Required** |
 | `query` | `query` | `String` | **Required** |
 | `query_language` | `queryLanguage` | `Cypher` or `GQL` | `Cypher` |
-| `sources` | `sources` | `Vec<SourceSubscriptionConfig>` | `[]` |
+| `inputs` | `inputs` | `Vec<QueryInputConfig>` (a component name or `{component, port, nodes, relations, pipeline}`) | `[]` |
+| `result` | `result` | `QueryResultConfig` (`{label}`) | `{}` |
 | `middleware` | `middleware` | `Vec<SourceMiddlewareConfig>` | `[]` |
 | `auto_start` | `auto_start` | `bool` | `true` |
 | `enable_bootstrap` | `enableBootstrap` | `bool` | `true` |
@@ -1266,9 +1270,28 @@ bash lib/tests/run-runtime-parity.sh target/runtime-conformance
 The runner checks historical case mappings, named requirements, discovery and
 actual results across default, no-default, additional recovery/middleware,
 integration, plugin-factory, Host SDK and Redis-compatible backend profiles.
+The matrix has 35 profiles: the original 32, including the source/database
+profiles, plus explicit unit-test profiles for extracted PostgreSQL/MySQL code:
+
+| Profile | Package | Selection |
+| --- | --- | --- |
+| `postgres-common` | `drasi-postgres-common` | `--no-default-features --features replication --lib` |
+| `postgres-native` | `drasi-computation-source-postgres` | `--no-default-features --lib` |
+| `mysql-common` | `drasi-mysql-common` | `--no-default-features --features native --lib` |
+
+These profiles run serially within each test binary. `mysql-common` includes
+ignored tests so its real MySQL authentication/TLS/connection-retirement case
+must execute, not count as a quarantine. A source crate's `--lib` does not execute
+its dependencies' unit tests. Keep each contract bound to its actual owning
+package, binary, case and profile when moving code.
+
 Backend cases are explicitly selected, not silently left ignored. Ignored
 subprocess workers require a passing parent driver. The sole existing DLL stress
 quarantine has an owner and expiry and cannot qualify resource-lifetime safety.
+Quarantine validation uses the local calendar date at startup, during profile
+checks and at final reporting. An expiry remains valid on that date, but a run
+crossing into the following day fails validation; a separate successful manual
+execution does not renew it or qualify other platforms.
 Redis compatibility is not a claim of retained-volume Garnet product recovery.
 
 The integration profile includes live replacement with full persistent multicast

@@ -40,6 +40,7 @@ fn limits() -> SourceTransactionLimits {
 }
 fn request(factory: &NativeFactory, configuration: serde_json::Value) -> CreateRequest {
     CreateRequest {
+        inputs: Vec::new(),
         activation_credentials_bound: false,
         id: id("source"),
         implementation: factory.metadata.implementation.clone(),

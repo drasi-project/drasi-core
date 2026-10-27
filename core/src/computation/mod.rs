@@ -46,7 +46,7 @@ pub use indexes::{
     ComputationIndexProvider, ComputationIndexes, ComputationResource, ComputationResourceCleanup,
     InMemoryComputationProvider,
 };
-pub use query_adapter::ComputationQuery;
+pub use query_adapter::{ComputationQuery, QueryInputBatch};
 pub use query_results::TransactionResultError;
 pub use transaction::{AtomicResultTransaction, TransactionDomain};
 pub use transaction_group::{

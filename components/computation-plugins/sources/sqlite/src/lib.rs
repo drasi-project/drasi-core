@@ -6,8 +6,7 @@ mod coordinator;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, SourceTransactionCodec,
-    StreamId,
+    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
     Component, ConfigField, ConfigSchema, ConfigType, ControlSender, CreateRequest,
@@ -65,7 +64,7 @@ pub fn plugin() -> Result<PluginDefinition> {
         .into_iter()
         .map(|mode| Arc::new(SqliteFactory(mode)) as Arc<dyn Factory>)
         .collect(),
-        vec![GraphChangeCodec::schema(), SourceTransactionCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 

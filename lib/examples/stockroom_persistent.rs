@@ -50,7 +50,7 @@ async fn stockroom(directory: &Path, write: bool) -> anyhow::Result<()> {
                     "MATCH (p:Product) WHERE p.quantity < p.minimum
                      RETURN p.sku AS sku, p.quantity AS quantity",
                 )
-                .from_source("inventory")
+                .from_input("inventory")
                 .enable_bootstrap(false)
                 .with_storage_backend(StorageBackendRef::Named("local".into()))
                 .with_recovery_policy(RecoveryPolicy::Strict)

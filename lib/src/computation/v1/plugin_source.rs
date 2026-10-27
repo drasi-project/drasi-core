@@ -912,6 +912,18 @@ impl LegacySourceBootstrap {
 }
 #[async_trait]
 impl ComputationBootstrapProvider for LegacySourceBootstrap {
+    fn input_origin(&self, stream: &StreamId) -> anyhow::Result<Option<super::OutputEndpoint>> {
+        for subscription in &self.subscriptions {
+            if stream == &StreamId::try_new(format!("{}/bootstrap", subscription.stream))? {
+                return Ok(Some(super::OutputEndpoint::new(
+                    ComponentId::try_new(subscription.host.id())?,
+                    PortId::try_new("out")?,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
         for subscription in &self.subscriptions {
             let state = subscription
@@ -1009,6 +1021,7 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
                     continue;
                 }
                 watermarks.push(BootstrapWatermark {
+                    producer: None,
                     stream: subscription.stream.clone(),
                     source_id: Some(subscription.host.id().to_owned()),
                     sequence: 0,

@@ -637,13 +637,14 @@ operations cross the boundary as poll/wake/cancel handles and owned serialized
 buffers. Control notifications do not wait behind mutable data processing.
 Libraries remain loaded for the process lifetime.
 
-Native wire version 2 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
+Native wire version 1 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
 The binary transport preserves the complete envelope and runs the same registered
 record validators; it does not strip context, lineage or recovery metadata.
 Producer-owned reply buffers remain alive during decoding and are released
 exactly once by their producer. Borrowed asynchronous inputs still require an
-owned copy. The stored JSON `EnvelopeCodec` format and legacy ABI 0.15 are unchanged.
-The initial native wire-version-1 prototype is rejected; rebuild native libraries.
+owned copy. The JSON `EnvelopeCodec` is a separate v1 storage representation.
+Both codecs preserve current event-local controls separately from historical
+lineage. Build hosts and native libraries from matching sources.
 
 The SDK's optional `TransactionalComponent` interface adds a borrowed
 `NativeTransactionContext`. It exposes step-local values/elements through the
@@ -792,11 +793,11 @@ dropping a test file, losing a mapped replacement, or filtering required tests
 out of execution fails the run. The only
 [permitted ignores](../tests/runtime_parity/allowed-ignored.tsv) are the existing
 manual serialization benchmark and subprocess workers whose crash drivers must
-pass, plus explicitly owned, expiring environment/quarantine exceptions. The
+pass, plus explicitly owned, expiring environment exceptions. The
 macOS/Linux network case runs when its Linux peer is prepared; its unprepared
-exception does not establish network acceptance. The existing Host SDK
-subscribe/drop flake remains a separate finite quarantine and does not qualify
-DLL ownership. The
+exception does not establish network acceptance. The Host SDK subscribe/drop
+stress case runs as an ordinary test; its bounded cycles do not qualify
+sustained DLL ownership. The
 [runner self-check](../tests/runtime_parity/check-runner.sh) exercises these
 failure paths without compiling Rust.
 

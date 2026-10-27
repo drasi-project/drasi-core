@@ -21,8 +21,8 @@ mod native;
 pub use bootstrap_coordination::NativeSourceBootstrapConfig;
 pub use identity::NativeIdentityConfig;
 pub use native::{
-    CompositeBootstrapConfig, ConsumerProgressConfig, NativeBootstrapConfig,
-    NativeQuerySnapshotsConfig,
+    CompositeBootstrapConfig, ConsumerProgressConfig, NativeBootstrapConfig, NativeOutputSelector,
+    NativeOutputSnapshotsConfig,
 };
 
 #[derive(Deserialize)]
@@ -45,7 +45,7 @@ enum Recipe {
     NativeBootstrap(NativeBootstrapConfig),
     NativeSourceBootstrap(NativeSourceBootstrapConfig),
     CompositeBootstrap(CompositeBootstrapConfig),
-    NativeQuerySnapshots(NativeQuerySnapshotsConfig),
+    NativeOutputSnapshots(NativeOutputSnapshotsConfig),
     ConsumerProgress(ConsumerProgressConfig),
     NativeIdentity(NativeIdentityConfig),
     Middleware,
@@ -405,7 +405,9 @@ impl ManagementResourceResolver for HostManagementResources {
                 Recipe::NativeConsumer(config) => {
                     config.validate_dependencies(resource, &dependencies)?
                 }
-                Recipe::NativeQuerySnapshots(config) => config.validate(resource, &dependencies)?,
+                Recipe::NativeOutputSnapshots(config) => {
+                    config.validate(resource, &dependencies)?
+                }
                 Recipe::ConsumerProgress(config) => config.validate(resource, &dependencies)?,
                 Recipe::NativeIdentity(config) => config.validate(resource, &dependencies)?,
                 _ => {}
@@ -498,8 +500,8 @@ impl ManagementResourceResolver for HostManagementResources {
         if let Recipe::CompositeBootstrap(config) = recipe {
             return config.resolve(instance, graph, specification, dependencies);
         }
-        if let Recipe::NativeQuerySnapshots(config) = recipe {
-            return config.resolve(graph, specification, dependencies);
+        if let Recipe::NativeOutputSnapshots(config) = recipe {
+            return config.resolve(specification, dependencies);
         }
         if let Recipe::ConsumerProgress(config) = recipe {
             return config.resolve(graph, specification, dependencies);
@@ -573,8 +575,8 @@ impl ManagementResourceResolver for HostManagementResources {
             Recipe::CompositeBootstrap(_) => {
                 unreachable!("composite bootstrap resolved with dependencies")
             }
-            Recipe::NativeQuerySnapshots(_) => {
-                unreachable!("native query snapshots resolved with dependencies")
+            Recipe::NativeOutputSnapshots(_) => {
+                unreachable!("native output snapshots resolved separately")
             }
             Recipe::ConsumerProgress(_) => {
                 unreachable!("consumer progress resolved with dependencies")

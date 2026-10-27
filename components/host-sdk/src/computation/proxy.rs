@@ -206,8 +206,9 @@ pub struct NativeComponentProxy {
     pending: bool,
     bindings: SourceBindings,
     batching: Option<abi::batching::PluginBatchingV1>,
-    query_snapshots: Option<super::query_snapshots::QuerySnapshotsBinding>,
+    output_snapshots: Option<super::output_snapshots::OutputSnapshotsBinding>,
     source_schema: Option<Arc<super::source_schema::NativeSourceSchemaReader>>,
+    output_reads: Option<super::output_reads::NativeOutputReads>,
     identity: Option<(
         Arc<super::NativeIdentityResource>,
         drasi_computation_plugin_sdk::ActivationCredentialContext,
@@ -474,8 +475,9 @@ impl NativeComponentProxy {
             pending: false,
             bindings,
             batching: None,
-            query_snapshots: None,
+            output_snapshots: None,
             source_schema: None,
+            output_reads: None,
             identity: None,
             stop: tokio::sync::Mutex::new(StopState::default()),
         })
@@ -496,6 +498,24 @@ impl NativeComponentProxy {
             .flatten();
         Ok(self)
     }
+    /// Open the declared providers. The extension is required exactly when
+    /// factory metadata declares output reads.
+    pub(super) fn with_output_reads(
+        mut self,
+        extension: Option<abi::output_reads::PluginOutputReadsV1>,
+        follow: Option<abi::output_follow::PluginOutputFollowV1>,
+    ) -> anyhow::Result<Self> {
+        self.output_reads = super::output_reads::NativeOutputReads::bind(
+            extension,
+            follow,
+            &self.inner,
+            &self.descriptor,
+            &self.metadata,
+            &self.schemas,
+            &self.codec,
+        )?;
+        Ok(self)
+    }
     pub(super) fn with_identity(
         mut self,
         identity: Option<(
@@ -506,11 +526,11 @@ impl NativeComponentProxy {
         self.identity = identity;
         self
     }
-    pub(super) fn with_query_snapshots(
+    pub(super) fn with_output_snapshots(
         mut self,
-        snapshots: Option<super::query_snapshots::QuerySnapshotsBinding>,
+        snapshots: Option<super::output_snapshots::OutputSnapshotsBinding>,
     ) -> Self {
-        self.query_snapshots = snapshots;
+        self.output_snapshots = snapshots;
         self
     }
     pub(super) fn with_batching(
@@ -603,7 +623,10 @@ impl Drop for NativeComponentProxy {
         if let Some(schema) = self.source_schema.take() {
             schema.retire();
         }
-        self.query_snapshots.take();
+        if let Some(reads) = self.output_reads.take() {
+            reads.retire();
+        }
+        self.output_snapshots.take();
         self.bindings.admission.take();
         self.bindings.progress.take();
         self.bindings.consumer_progress.take();
@@ -620,6 +643,11 @@ impl ComputationComponent for NativeComponentProxy {
         self.source_schema
             .as_ref()
             .map(|reader| reader.clone() as Arc<dyn SourceSchemaReader>)
+    }
+    fn output_readers(&self) -> OutputReaders {
+        self.output_reads
+            .as_ref()
+            .map_or_else(OutputReaders::default, |reads| reads.readers())
     }
     fn recovery_contract(&self) -> ComponentRecovery {
         let recovery = if let Some(progress) = &self.bindings.consumer_progress {
@@ -700,12 +728,12 @@ impl ComputationComponent for NativeComponentProxy {
             .as_ref()
             .map(|progress| progress.binding.activate())
             .transpose()?;
-        if let Some(binding) = &self.query_snapshots {
+        if let Some(binding) = &self.output_snapshots {
             binding.activate()?;
         }
         let result = self.inner.unit(abi::operation::START, &credentials).await;
         if result.is_err() {
-            if let Some(binding) = &self.query_snapshots {
+            if let Some(binding) = &self.output_snapshots {
                 binding.deactivate();
             }
         } else if let Some(activation) = activation {
@@ -714,6 +742,9 @@ impl ComputationComponent for NativeComponentProxy {
         result
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
+        if let Some(reads) = &self.output_reads {
+            reads.advance();
+        }
         self.inner.stopping.store(true, Ordering::Release);
         if !self.stop.get_mut().completed {
             if self.stop.get_mut().operation.is_none() {
@@ -739,10 +770,10 @@ impl ComputationComponent for NativeComponentProxy {
         if let Some(progress) = &self.bindings.consumer_progress {
             progress.binding.deactivate();
         }
-        if let Some(binding) = &self.query_snapshots {
+        if let Some(binding) = &self.output_snapshots {
             binding.deactivate();
         }
-        if let Some(binding) = &self.query_snapshots {
+        if let Some(binding) = &self.output_snapshots {
             binding.ensure_quiesced()?;
         }
         if let Some(progress) = &self.bindings.consumer_progress {
@@ -851,13 +882,14 @@ impl EnvelopeSink for NativeComponentProxy {
             .unit(abi::operation::HANDLE_BATCH, &wire::encode(&batch)?)
             .await
     }
-    fn supports_snapshot(&self) -> bool {
-        self.metadata.capabilities.snapshot
-    }
-    async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        self.inner
-            .unit(abi::operation::SNAPSHOT, &self.input(&input)?)
-            .await
+    /// Exposed only for the input ports the factory metadata lists, which the
+    /// plugin validated against its actual handlers at construction.
+    fn snapshot_consumer(&mut self, port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        if self.metadata.capabilities.snapshot_inputs.contains(port) {
+            Some(self)
+        } else {
+            None
+        }
     }
     fn completion(&self) -> SinkCompletion {
         self.metadata.completion.expect("native sink role")
@@ -865,6 +897,22 @@ impl EnvelopeSink for NativeComponentProxy {
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         self.inner
             .unit(abi::operation::HANDLE, &self.input(&input)?)
+            .await
+    }
+}
+#[async_trait]
+impl SnapshotConsumer for NativeComponentProxy {
+    async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.metadata
+                .capabilities
+                .snapshot_inputs
+                .contains(&input.port),
+            "native sink input {} does not support snapshot replacement",
+            input.port
+        );
+        self.inner
+            .unit(abi::operation::SNAPSHOT, &self.input(&input)?)
             .await
     }
 }
@@ -900,6 +948,9 @@ impl ComputationComponent for NativeTransactionalProxy {
     }
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         self.component.configuration()
+    }
+    fn output_readers(&self) -> OutputReaders {
+        self.component.output_readers()
     }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.component.start().await

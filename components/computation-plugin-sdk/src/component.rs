@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ConsumerProgressView, InputEnvelope, InputPositionPolicy,
-    OutputEnvelope, SinkBatching, SinkCompletion, SourceProgressView, SourceSchemaReader,
-    WakeupSource,
+    OutputEnvelope, OutputReaders, PortId, SinkBatching, SinkCompletion, SnapshotConsumer,
+    SourceProgressView, SourceSchemaReader, WakeupSource,
 };
 use drasi_core_types::interface::StorageDurability;
 use std::sync::Arc;
@@ -24,6 +24,17 @@ pub trait NativeComponent: Send + Sync {
     }
     fn requires_readiness_confirmation(&self) -> bool {
         false
+    }
+    /// Snapshot and/or replay providers for this component's declared output
+    /// ports. Obtaining them performs no I/O and does not take the component's
+    /// processing slot; each provider must read its own state independently of
+    /// pending `next`/`transform` work and return a typed error when it cannot
+    /// answer. Registration is fixed at construction: factory metadata lists
+    /// exactly the output ports with a snapshot (`output_snapshots`) and replay
+    /// (`output_replays`) provider, and activation cannot add or remove them.
+    /// Reads are served only while the component is started.
+    fn output_readers(&self) -> OutputReaders {
+        OutputReaders::default()
     }
     fn consumer_progress_reader(&self) -> Option<ConsumerProgressView> {
         None
@@ -95,11 +106,12 @@ pub trait NativeSink: NativeComponent {
     async fn handle_batch(&mut self, _inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
         anyhow::bail!("this sink does not implement host-owned batching")
     }
-    fn supports_snapshot(&self) -> bool {
-        false
-    }
-    async fn replace_snapshot(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
-        anyhow::bail!("this sink does not support replacing its state from a snapshot")
+    /// The handler that replaces this sink's state from a snapshot on `port`, if
+    /// that input registered one. Obtaining it performs no I/O and its presence
+    /// is fixed at construction: factory metadata lists exactly the input ports
+    /// that return a handler, and activation cannot add or remove support.
+    fn snapshot_consumer(&mut self, _port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        None
     }
     fn completion(&self) -> SinkCompletion;
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()>;

@@ -287,13 +287,13 @@ async fn query_progress_tracks_commits_not_output_counts() -> Result<()> {
     let (source, handle) = MockSource::new("progress-source")?;
     let query = Query::cypher("progress-query")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("progress-source")
+        .from_input("progress-source")
         .enable_bootstrap(false)
         .auto_start(true)
         .build();
     let waiting = Query::cypher("waiting-query")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("missing-source")
+        .from_input("missing-source")
         .auto_start(true)
         .build();
     let core = runtime_support::builder()
@@ -405,7 +405,7 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -482,7 +482,7 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -553,7 +553,7 @@ async fn lifecycle_metrics_count_startup_rejections() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -606,7 +606,7 @@ async fn query_output_metrics_error_for_nonexistent() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -634,7 +634,7 @@ async fn reaction_metrics_error_for_nonexistent() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -662,7 +662,7 @@ async fn lifecycle_metrics_reject_snapshot_skip_gap() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -710,7 +710,7 @@ async fn lifecycle_metrics_reject_no_snapshot_auto_reset() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();

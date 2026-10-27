@@ -243,7 +243,7 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .build();
@@ -822,7 +822,7 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
                        t.DateTimeOffsetVal AS datetimeoffset_val
             "#,
             )
-            .from_source(TYPES_SOURCE_ID)
+            .from_input(TYPES_SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .build();
@@ -1159,7 +1159,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1312,7 +1312,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1471,7 +1471,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1652,7 +1652,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1665,7 +1665,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -2010,7 +2010,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -2496,7 +2496,7 @@ async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
                 RETURN p.ProductId AS id, p.Name AS name, drasi.changeDateTime(p) AS cdt
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .build();

@@ -212,7 +212,9 @@ fn next_continue_token(continue_token: Option<&str>) -> Option<&str> {
 
 fn matches_labels(request: &BootstrapRequest, change: &SourceChange) -> bool {
     match change {
-        SourceChange::Insert { element } | SourceChange::Update { element, .. } => match element {
+        SourceChange::Insert { element }
+        | SourceChange::Replace { element }
+        | SourceChange::Update { element, .. } => match element {
             drasi_core::models::Element::Node { metadata, .. } => {
                 request.node_labels.is_empty()
                     || metadata.labels.iter().any(|label| {

@@ -65,7 +65,7 @@ fn source_input(sequence: u64, update: bool, raw_metadata: bool) -> Result<Input
         }),
     };
     let change = if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     };

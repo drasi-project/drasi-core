@@ -89,7 +89,7 @@ impl Fixture {
         for (id, text, persistent) in queries {
             let mut query = drasi_lib::Query::cypher(*id)
                 .query(*text)
-                .from_source("source")
+                .from_input("source")
                 .enable_bootstrap(false)
                 .auto_start(true)
                 .with_outbox_capacity(64);
@@ -604,7 +604,7 @@ async fn ordinary_auto_skip_recovers_a_query_configuration_reset_but_strict_reje
         fixture.core.stop_reaction("reaction").await.unwrap();
         let updated = drasi_lib::Query::cypher("q")
             .query("MATCH (n:Item) RETURN n.value AS value, true AS updated")
-            .from_source("source")
+            .from_input("source")
             .enable_bootstrap(false)
             .auto_start(true)
             .with_outbox_capacity(64)

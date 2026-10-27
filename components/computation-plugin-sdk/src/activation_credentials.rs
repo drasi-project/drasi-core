@@ -115,6 +115,7 @@ mod tests {
     fn activation_credentials_creation_marker_is_never_in_base_wire_or_configuration(
     ) -> anyhow::Result<()> {
         let request = crate::CreateRequest {
+            inputs: Vec::new(),
             id: ComponentId::try_new("component")?,
             implementation: ImplementationIdentity::try_new("fixture/credentials", "1")?,
             configuration_version: 1,

@@ -10,7 +10,7 @@ struct GrpcState {
     requests: Mutex<
         Vec<(
             tonic::metadata::MetadataMap,
-            reaction::ProcessResultsRequest,
+            reaction::ProcessChangesRequest,
         )>,
     >,
     failures: AtomicUsize,
@@ -22,16 +22,16 @@ struct GrpcState {
 }
 struct Recorder(Arc<GrpcState>);
 #[tonic::async_trait]
-impl reaction::reaction_service_server::ReactionService for Recorder {
-    async fn process_results(
+impl reaction::change_service_server::ChangeService for Recorder {
+    async fn process_changes(
         &self,
-        request: tonic::Request<reaction::ProcessResultsRequest>,
+        request: tonic::Request<reaction::ProcessChangesRequest>,
     ) -> std::result::Result<tonic::Response<reaction::ProcessResultsResponse>, tonic::Status> {
         let count = request
             .get_ref()
-            .results
+            .changes
             .as_ref()
-            .map_or(0, |results| results.results.len());
+            .map_or(0, |batch| batch.changes.len());
         self.0
             .requests
             .lock()
@@ -83,7 +83,7 @@ async fn server() -> Result<Server> {
     let address = listener.local_addr()?;
     let state = Arc::new(GrpcState::default());
     let service =
-        reaction::reaction_service_server::ReactionServiceServer::new(Recorder(state.clone()));
+        reaction::change_service_server::ChangeServiceServer::new(Recorder(state.clone()));
     let cancel = state.cancel.clone();
     let task = tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -124,6 +124,7 @@ fn input(query: &str, sequence: u64, routes: &[&str]) -> Result<InputEnvelope> {
             None,
             &ComponentId::try_new(query)?,
             SystemMetadata::new(stream(&format!("{query}/out")), sequence),
+            &ResultNodeProjector::try_new(&format!("test/native-grpc-family/{query}/out"), None)?,
             &results,
             QueryOutputMetadata {
                 query_id: query.into(),
@@ -207,10 +208,10 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
             GRPC_SINK,
             "routed",
             json!({
-                "queryStreams":{"a":"a/out","b":"b/out"},"endpoint":format!("grpc://{}",receiver.address),
+                "outputs":{"a":{"component":"a","port":"out"},"b":{"component":"b","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
                 "batching":{"mode":"fixed","batchSize":3,"batchFlushTimeoutMs":30},
                 "outputTemplates":{"defaultTemplate":{"added":{
-                    "template":"{\"query\":\"{{query_id}}\",\"sequence\":{{sequence_id}},\"signature\":{{row_signature}}}",
+                    "template":"{\"alias\":\"{{output.alias}}\",\"port\":\"{{output.port}}\",\"sequence\":{{sequence}},\"key\":\"{{identity.id}}\"}",
                     "metadata":{"x-route":"{{after.route}}"}
                 }}}
             }),
@@ -235,32 +236,42 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
         assert_eq!(
             calls
                 .iter()
-                .map(|(_, request)| request.results.as_ref().unwrap().results.len())
+                .map(|(_, request)| request.changes.as_ref().unwrap().changes.len())
                 .collect::<Vec<_>>(),
             [2, 1, 1, 1]
         );
         for (headers, request) in calls {
-            let results = request.results.as_ref().unwrap();
+            let batch = request.changes.as_ref().unwrap();
+            let output = batch.output.as_ref().context("output identity")?;
             assert_eq!(
                 headers
-                    .get("x-query-sequence")
-                    .context("query header")?
+                    .get("x-drasi-component")
+                    .context("component header")?
                     .to_str()?,
-                results.query_id.as_str()
+                output.component
             );
+            assert_eq!(
+                headers
+                    .get("x-drasi-port")
+                    .context("port header")?
+                    .to_str()?,
+                output.port
+            );
+            assert_eq!(output.port, "out");
+            assert_eq!(output.alias, output.component);
             assert_eq!(
                 headers.get("x-route").context("route header")?.to_str()?,
                 request.metadata["x-route"].as_str()
             );
-            for item in &results.results {
+            for item in &batch.changes {
                 assert!(
                     item.after.as_ref().unwrap().fields.contains_key("value"),
                     "templating must not rewrite the typed row"
                 );
                 let payload = item.payload.as_ref().unwrap();
-                assert!(payload.fields.contains_key("signature"));
-                assert_eq!(item.item_type, reaction::QueryResultItemType::Add as i32);
-                assert!(item.row_signature >= 10);
+                assert!(payload.fields.contains_key("key"));
+                assert_eq!(item.operation, reaction::ChangeOperation::Add as i32);
+                assert!(item.identity.as_ref().unwrap().id.len() == 16);
             }
         }
     }
@@ -275,7 +286,7 @@ async fn native_grpc_retries_the_same_batch_and_requires_exact_acknowledgement()
             GRPC_SINK,
             "retry-batch",
             json!({
-                "queryId":"q","endpoint":format!("grpc://{}",receiver.address),
+                "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
                 "batchSize":3,"batchFlushTimeoutMs":25,"maxRetries":1,
             }),
             linked,
@@ -293,7 +304,7 @@ async fn native_grpc_retries_the_same_batch_and_requires_exact_acknowledgement()
                 requests[start + 1].1,
                 "retry identity/body must be unchanged"
             );
-            assert_eq!(requests[start].1.results.as_ref().unwrap().results.len(), 3);
+            assert_eq!(requests[start].1.changes.as_ref().unwrap().changes.len(), 3);
         }
         receiver.state.partial.store(1, Ordering::SeqCst);
         let failure = sink
@@ -334,7 +345,7 @@ async fn native_grpc_adaptive_and_request_byte_limits_split_without_losing_items
             GRPC_SINK,
             "adaptive",
             json!({
-                "queryId":"q","endpoint":format!("grpc://{}",receiver.address),
+                "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
                 "batching":{"mode":"adaptive","adaptiveMinBatchSize":10,"adaptiveMaxBatchSize":10,
                     "adaptiveWindowSize":10,"adaptiveBatchTimeoutMs":40},
                 "maxRequestBytes":1800,"maxRetries":0,
@@ -352,19 +363,24 @@ async fn native_grpc_adaptive_and_request_byte_limits_split_without_losing_items
             calls.len() > 1,
             "encoded-byte limit must split an otherwise compatible batch"
         );
-        let signatures: Vec<_> = calls
+        let elements: Vec<_> = calls
             .iter()
             .flat_map(|(_, request)| {
                 request
-                    .results
+                    .changes
                     .as_ref()
                     .unwrap()
-                    .results
+                    .changes
                     .iter()
-                    .map(|item| item.row_signature)
+                    .map(|item| item.identity.as_ref().unwrap().id.clone())
             })
             .collect();
-        assert_eq!(signatures, (10..20).collect::<Vec<_>>());
+        assert_eq!(
+            elements,
+            (10..20)
+                .map(|row| format!("{row:016x}"))
+                .collect::<Vec<_>>()
+        );
     }
     receiver.stop().await
 }
@@ -401,7 +417,7 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
             let pipeline = core.computation_pipeline()?.native_source(output)?.query(
                 drasi_lib::Query::cypher("q")
                     .query("MATCH (r:Room) RETURN r.value AS value")
-                    .from_source("facilities-db")
+                    .from_input("facilities-db")
                     .enable_bootstrap(false)
                     .build(),
             );
@@ -410,7 +426,7 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
                 GRPC_SINK,
                 "sink",
                 json!({
-                    "queryId":"q","endpoint":format!("grpc://{}",receiver.address),"batchSize":3,
+                    "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),"batchSize":3,
                     "batchFlushTimeoutMs":50,"maxRetries":0,
                 }),
                 linked,
@@ -454,7 +470,7 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
                         .lock()
                         .unwrap()
                         .iter()
-                        .map(|(_, request)| request.results.as_ref().unwrap().results.len())
+                        .map(|(_, request)| request.changes.as_ref().unwrap().changes.len())
                         .sum();
                     if count == 7 {
                         return Result::<()>::Ok(());
@@ -470,7 +486,7 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|(_, request)| request.results.as_ref().unwrap().results.len() > 1));
+                .any(|(_, request)| request.changes.as_ref().unwrap().changes.len() > 1));
             Ok::<_, anyhow::Error>(())
         }
         .await;

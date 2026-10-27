@@ -138,6 +138,10 @@ Optional: `nodeLabelField` / `connectsToLabelField` (display name), `nodeCategor
 
 The `aggregation` field controls how multiple rows are reduced to a single value:
 
+Query aggregates are ordinary result rows, keyed by their query row identity.
+Snapshots and live updates use the same row collection, so grouped aggregates
+work in tables, charts and filtered gauges without a separate aggregate value.
+
 | Mode | Description |
 |---|---|
 | `"last"` | Last updated row (default) |
@@ -158,8 +162,7 @@ Available context:
 |---|---|
 | `rows` | Array of all result rows |
 | `count` | Number of rows |
-| `latest` | Last updated row |
-| `aggregation` | Query-level aggregation value (if any) |
+| `latest` | Last updated row, including a query aggregate |
 
 Built-in helpers:
 
@@ -271,7 +274,7 @@ The frontend performs **live state accumulation** per widget:
 - `add` inserts rows
 - `update` replaces matching rows
 - `delete` removes matching rows
-- `aggregation` updates aggregate values
+- `aggregation` updates the result row with the supplied row identity
 
 This keeps the server simple: it forwards query diffs directly to clients.
 

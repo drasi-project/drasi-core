@@ -71,6 +71,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     // Add an initial daily revenue of $100K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -96,6 +97,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     // Add a greater daily revenue of $105K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -121,6 +123,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     // Add a lesser revenue of $101K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -146,6 +149,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     // Add a lesser revenue of $90K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -184,6 +188,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     // Add a lower revenue of $75K. Result will be updated in the query result.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -228,6 +233,7 @@ pub async fn decrease_by_ten(config: &(impl QueryTestConfig + Send)) {
     // Add a same revenue of $75K. Result will be removed from the query result.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -279,6 +285,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     // Add an initial daily revenue of $100K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -304,6 +311,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     // Add a greater daily revenue of $105K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -329,6 +337,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     // Add a lesser revenue of $101K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -354,6 +363,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     // Add a lesser revenue of $90K.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -392,6 +402,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     // Add a lower revenue of $75K. Result will be updated in the query result.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),
@@ -436,6 +447,7 @@ pub async fn decrease_by_ten_percent(config: &(impl QueryTestConfig + Send)) {
     // Add a same revenue of $75K. Result will be removed from the query result.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.Dales", "prod_01_daily_revenue"),

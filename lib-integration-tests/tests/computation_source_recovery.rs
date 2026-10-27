@@ -283,7 +283,7 @@ impl Fixture {
                 observations: observations.clone(),
                 dispatch_mode,
             });
-            query = query.from_source(*id);
+            query = query.from_input(*id);
             inputs.insert(
                 (*id).to_owned(),
                 Input {

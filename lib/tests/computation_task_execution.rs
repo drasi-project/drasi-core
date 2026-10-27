@@ -1040,21 +1040,31 @@ both_flavors!(
 
 #[test]
 fn native_cpu_work_is_parallel_with_external_watchdog() {
+    let output = tempfile::NamedTempFile::new().unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "native_cpu_parallel_probe", "--nocapture"])
         .env("DRASI_CPU_PARALLEL_PROBE", "1")
+        .stdout(output.as_file().try_clone().unwrap())
+        .stderr(output.as_file().try_clone().unwrap())
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success(), "CPU parallel probe failed: {status}");
+            assert!(
+                status.success(),
+                "CPU parallel probe failed: {status}\n{}",
+                std::fs::read_to_string(output.path()).unwrap()
+            );
             break;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("native CPU work was serialized; external watchdog terminated the probe");
+            panic!(
+                "native CPU work was serialized; external watchdog terminated the probe\n{}",
+                std::fs::read_to_string(output.path()).unwrap()
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }

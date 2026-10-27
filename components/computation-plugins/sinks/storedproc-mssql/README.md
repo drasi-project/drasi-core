@@ -4,12 +4,12 @@
 
 `drasi.mssql/storedproc` is a native sink, not a legacy reaction queue or adapter.
 `plugin()` and the gated dynamic entrypoint use the same implementation with
-computation ABI 1.0.0 / wire 2.
+computation ABI 1.0.0 / wire 1.
 
 The required secret-bearing `settings` object contains:
 
 * `connection`: the shared SQL Server connection configuration;
-* `queries`: explicit accepted query IDs;
+* `outputs`: optional map from an alias to an incoming output's `{component, port?}`; the graph supplies each incoming source, transformer or query output and its stream;
 * `routes` and/or `default_template`: existing `QueryConfig` / `TemplateSpec`;
 * `command_timeout_ms`, `shutdown_timeout_ms` (default 30000, positive/bounded).
 
@@ -17,7 +17,7 @@ For example:
 
 ```json
 {
-  "queries": ["all"],
+  "outputs": {"all": {"component": "all", "port": "out"}},
   "default_template": {
     "added": {"template":"EXEC dbo.ApplyEffect {{param operation}},{{param after.id}}"},
     "updated": {"template":"EXEC dbo.ApplyEffect {{param operation}},{{param after.id}}"},
@@ -33,8 +33,8 @@ putting literal credentials in a persisted Server definition.
 
 | Capability | Native behavior |
 |---|---|
-| Rendering/routing | The extracted legacy `mssql-common::sql` implementation, including unchanged original renderer assertions. Full query ID → last dotted segment → per-operation default. |
-| Contexts | ADD/UPDATE/DELETE, aggregation before/after, query ID/name, timestamp and metadata. Noop/unconfigured operation/empty rendered command emits nothing. |
+| Rendering/routing | The extracted legacy `mssql-common::sql` implementation, including unchanged original renderer assertions. Full output alias → last dotted segment → per-operation default. |
+| Contexts | the truthful change context: `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output` (`alias`, `component`, `port`), `sequence`, `timestamp` (only when the envelope has one), `identity` (`namespace`, `id`) and only the `element`, `before`, `after`, `removedProperties` and `effectiveFrom` that the record carries. A patch's `after` holds only the properties it sets, an unknown `before` is absent (not null), and a template that reads an absent field fails strictly. `updated` covers `REPLACE` and `PATCH`; unconfigured operation/empty rendered command emits nothing. |
 | Values | Strict missing fields; exact positional Tiberius binding. Unsigned values beyond i64 bind as decimal text; null, Unicode, JSON objects/arrays preserve renderer semantics. |
 | Execution | Pre-render the entire input before any effect; execute commands in order and drain every result set. |
 | Errors | Render, connect and procedure errors propagate. No legacy log-and-drop while reporting success. |

@@ -112,7 +112,7 @@ async fn graph_snapshots_and_events_follow_the_controller_without_a_mutable_shad
             .with_query(
                 Query::cypher("query")
                     .query("MATCH (n:Item) RETURN n.name AS name")
-                    .from_source("source")
+                    .from_input("source")
                     .enable_bootstrap(false)
                     .build(),
             )
@@ -241,15 +241,15 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
             .with_query(
                 Query::cypher("query-1")
                     .query("MATCH (n:Item) RETURN n.name AS name")
-                    .from_source("source-1")
-                    .from_source("source-2")
+                    .from_input("source-1")
+                    .from_input("source-2")
                     .enable_bootstrap(false)
                     .build(),
             )
             .with_query(
                 Query::cypher("query-2")
                     .query("MATCH (n:Item) RETURN n")
-                    .from_source("source-1")
+                    .from_input("source-1")
                     .enable_bootstrap(false)
                     .build(),
             )

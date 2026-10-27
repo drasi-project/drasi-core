@@ -17,13 +17,15 @@ load the HTTP sink plugin.
 cargo build -p drasi-computation-sink-http --features dynamic-plugin
 ```
 
-Its `in` port consumes `QueryChangeCodec` envelopes. Supply `queryId` (with
-`stream` defaulting to `{queryId}/out`) or a `queryStreams` map, and a complete
-`url` or `baseUrl`. With only `baseUrl`, the default destination is
-`/changes/{queryId}`. Defaults are
-`timeoutMs=60000`, `maxRetries=3`, `failurePolicy="strict"`. Default headers are
-`content-type: application/json` and `x-query-sequence: {queryId}`. Header names
-are normalized; duplicate names and conflicting query identities reject.
+Its `in` port consumes standard graph-change envelopes from any producer: a
+source, a transformer or a query ([sink input contract](../../SINKS.md)). Supply
+a complete `url` or `baseUrl`; the graph supplies each incoming output and optional
+`outputs` (alias → `{component, port?}`) names them. With only `baseUrl`, the default destination is
+`/changes/{alias}`. Defaults are
+`timeoutMs=60000`, `maxRetries=3`, `failurePolicy="strict"`. The default header is
+`content-type: application/json`; every request also carries `x-drasi-component`
+and `x-drasi-port` naming the real producing output, and configuring either
+rejects. Header names are normalized; duplicate names reject.
 Explicit content types are allowed for custom bodies. Redirects are disabled.
 
 `Handled` means the notification attempts completed successfully, or an explicit
@@ -41,20 +43,24 @@ No HTTP source or gRPC/SSE sink component is loaded.
 
 `token`, `outputTemplates.defaultTemplate` and `outputTemplates.routes` use the
 same HTTP configuration and rendering helpers as `drasi-reaction-http`.
-Full query names take precedence over their last dotted segment and then the
+Full output aliases take precedence over their last dotted segment and then the
 default operation template. Each `added`/`updated`/`deleted` entry supports a
 body `template`, `url`, `method` and `headers`. URL and header values can use
 Handlebars; absolute URLs must stay on the configured base origin.
 
-The shared context includes query identity, operation, timestamp, metadata and
-before/after/data images, with the same `json` helper and logged render-error
-fallbacks. Invalid rendered destinations cannot become a successful strict
+`updated` covers both `REPLACE` and `PATCH`; the context's `operation` tells them
+apart. The shared context is the default body: `operation`, `output` (`alias`,
+`component`, `port`), `sequence`, `timestamp` (only when the envelope has one),
+`identity` and only the `element`, `before`, `after` (a patch's `after` holds just
+the properties it sets), `removedProperties` and `effectiveFrom` that the record
+carries. A template that reads an absent field fails strictly. The `json` helper
+and logged render-error fallbacks are unchanged. Invalid rendered destinations cannot become a successful strict
 delivery. Bearer tokens and configured headers remain in privileged
 configuration snapshots, as required for reconstruction.
 
 ```json
 {
-  "queryId": "rooms",
+  "outputs": {"rooms": {"component": "rooms", "port": "out"}},
   "baseUrl": "https://receiver.example",
   "outputTemplates": {
     "routes": {"rooms": {
@@ -75,8 +81,8 @@ Set `adaptive` and `batchEndpoint` to send ordered `{"batch":[...]}` requests.
 The `adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize` and
 `adaptiveBatchTimeoutMs` settings retain the legacy throughput policy. Only body
 templates apply to individual batch items; the outer call is one POST to the
-batch endpoint. Query changes split batches so each request's identity header
-remains correct.
+batch endpoint. Changes of another output split batches so each request's identity headers
+remain correct.
 
 The host owns collection and timers through the optional native batching
 extension. It retains every input and receipt through delivery, cancellation and

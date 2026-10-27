@@ -11,8 +11,9 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    exchange::ResultDiff, ComponentDescriptor, ComponentId, InputEnvelope, OperationFailures,
-    PipeRequirements, PortDescriptor, PortDirection, PortId, QueryChangeCodec, SinkCompletion,
+    ChangeRoute, ComponentDescriptor, ComponentId, GraphChangeBatch, GraphChangeCodec,
+    InputBinding, InputEnvelope, OperationFailures, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, SinkCompletion, SinkOutputs,
 };
 use drasi_reaction_common::OperationType;
 use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc, time::Duration};
@@ -25,6 +26,7 @@ type Pending = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub struct MySqlStoredProcSink {
     descriptor: ComponentDescriptor,
     config: Arc<MySqlStoredProcConfig>,
+    outputs: SinkOutputs,
     activation_credentials_bound: bool,
     active_config: Option<Arc<MySqlStoredProcConfig>>,
     pending: Mutex<Option<Pending>>,
@@ -34,18 +36,28 @@ pub struct MySqlStoredProcSink {
 }
 
 impl MySqlStoredProcSink {
-    pub fn new(id: ComponentId, config: MySqlStoredProcConfig) -> Result<Self> {
-        Self::new_with_activation_credentials(id, config, false)
+    /// `inputs` are the graph's declared incoming edges; they define the
+    /// outputs this sink accepts.
+    pub fn new(
+        id: ComponentId,
+        config: MySqlStoredProcConfig,
+        inputs: &[InputBinding],
+    ) -> Result<Self> {
+        Self::new_with_activation_credentials(id, config, false, inputs)
     }
     pub fn new_with_activation_credentials(
         id: ComponentId,
         config: MySqlStoredProcConfig,
         activation_credentials_bound: bool,
+        inputs: &[InputBinding],
     ) -> Result<Self> {
         config.validate_with_activation_credentials(activation_credentials_bound)?;
+        let outputs = SinkOutputs::from_inputs(inputs, &config.outputs)?;
+        config.validate_outputs(&outputs)?;
         Ok(Self {
             descriptor: Self::describe(id)?,
             config: Arc::new(config),
+            outputs,
             activation_credentials_bound,
             active_config: None,
             pending: Mutex::new(None),
@@ -60,7 +72,7 @@ impl MySqlStoredProcSink {
             vec![PortDescriptor::new(
                 PortId::try_new("in")?,
                 PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             )],
         )?)
@@ -77,53 +89,34 @@ impl MySqlStoredProcSink {
     }
     fn commands(&self, input: &InputEnvelope) -> Result<Vec<RenderedCommand>> {
         anyhow::ensure!(input.port.as_str() == "in", "unknown MySQL sink input");
-        let result = QueryChangeCodec::to_legacy_result(&input.envelope)?;
+        let output = self.outputs.output_for(input.envelope.system().stream())?;
+        let batch = GraphChangeBatch::from_envelope(&input.envelope)?;
         anyhow::ensure!(
-            self.config.queries.contains(&result.query_id),
-            "MySQL sink received an unconfigured query"
+            batch.changes().len() <= 4096,
+            "MySQL graph change set exceeds operation bound"
         );
-        anyhow::ensure!(
-            result.results.len() <= 4096,
-            "MySQL query result exceeds operation bound"
-        );
-        let timestamp = result.timestamp.to_rfc3339();
         let mut commands = Vec::new();
         let mut bytes = 0usize;
-        for diff in &result.results {
-            let (operation, before, after, data) = match diff {
-                ResultDiff::Add { data, .. } => (OperationType::Add, None, Some(data), None),
-                ResultDiff::Update {
-                    data,
-                    before,
-                    after,
-                    ..
-                } => (OperationType::Update, Some(before), Some(after), Some(data)),
-                ResultDiff::Delete { data, .. } => (OperationType::Delete, Some(data), None, None),
-                ResultDiff::Aggregation { before, after, .. } => {
-                    (OperationType::Update, before.as_ref(), Some(after), None)
-                }
-                ResultDiff::Noop => continue,
+        for notification in batch.notifications(output) {
+            let operation = match notification.change().route() {
+                ChangeRoute::Added => OperationType::Add,
+                ChangeRoute::Updated => OperationType::Update,
+                ChangeRoute::Deleted => OperationType::Delete,
             };
-            let Some(template) = self.config.template(&result.query_id, operation) else {
+            let Some(template) = self.config.template(output.alias, operation) else {
                 log::debug!(
-                    "MySQL sink: no {:?} command configured for {}",
+                    "MySQL sink: no {:?} command configured for output {}",
                     operation,
-                    result.query_id
+                    output.alias
                 );
                 continue;
             };
-            let context = storedproc::build_context(
-                &result.query_id,
-                &operation.as_str().to_uppercase(),
-                &timestamp,
-                &result.metadata,
-                before,
-                after,
-                data,
-            );
+            // The context is the truthful change: operation, identity, sequence
+            // and only the images the record carries.
+            let context = notification.to_json()?;
             let command = CommandRenderer::new().render(template, &context)?;
             if command.sql.is_empty() {
-                log::debug!("MySQL command condition excluded query {}", result.query_id);
+                log::debug!("MySQL command condition excluded output {}", output.alias);
                 continue;
             }
             let parameter_bytes = serde_json::to_vec(&command.params)?.len();
@@ -320,5 +313,114 @@ impl Drop for MySqlStoredProcSink {
         if self.pending.get_mut().is_some() {
             log::warn!("MySQL procedure sink dropped without awaited cleanup");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_computation_contracts::StreamId;
+    use drasi_core_types::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+    use serde_json::json;
+
+    fn sink() -> Result<MySqlStoredProcSink> {
+        let inputs = [InputBinding {
+            input_port: PortId::try_new("in")?,
+            output: drasi_computation_contracts::OutputEndpoint::new(
+                ComponentId::try_new("facilities-db")?,
+                PortId::try_new("out")?,
+            ),
+            stream: StreamId::try_new("facilities-db/out")?,
+        }];
+        MySqlStoredProcSink::new(
+            ComponentId::try_new("sink")?,
+            serde_json::from_value(json!({
+                "hostname": "no-connection-at-construction", "database": "d",
+                "user": "u", "password": "p",
+                "outputs": {"facilities-db": {"component": "facilities-db", "port": "out"}},
+                "default_template": {
+                    "added": {"template": "CALL a({{param operation}},{{param identity.id}},{{param after.name}})"},
+                    "updated": {"template": "CALL u({{param operation}},{{param after.name}})"},
+                    "deleted": {"template": "CALL d({{param identity.id}})"}
+                }
+            }))?,
+            &inputs,
+        )
+    }
+
+    fn metadata() -> ElementMetadata {
+        ElementMetadata {
+            reference: ElementReference::new("facilities-db", "room-1"),
+            labels: std::sync::Arc::from([std::sync::Arc::<str>::from("Room")]),
+            effective_from: 1_000,
+        }
+    }
+
+    fn room(name: &str) -> Element {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("name", ElementValue::String(name.into()));
+        Element::Node {
+            metadata: metadata(),
+            properties,
+        }
+    }
+
+    fn input(stream: &str) -> Result<InputEnvelope> {
+        Ok(InputEnvelope {
+            port: PortId::try_new("in")?,
+            envelope: GraphChangeCodec::encode_changes(
+                &[
+                    SourceChange::Insert {
+                        element: room("one"),
+                    },
+                    SourceChange::Update {
+                        element: room("two"),
+                        removed_properties: Default::default(),
+                    },
+                    SourceChange::Delete {
+                        metadata: metadata(),
+                    },
+                ],
+                StreamId::try_new(stream)?,
+                3,
+                None,
+            )?,
+        })
+    }
+
+    #[test]
+    fn source_graph_changes_render_ordered_commands_without_query_annotations() -> Result<()> {
+        let commands = sink()?.commands(&input("facilities-db/out")?)?;
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.sql.as_str())
+                .collect::<Vec<_>>(),
+            ["CALL a(?,?,?)", "CALL u(?,?)", "CALL d(?)"]
+        );
+        assert_eq!(
+            commands[0].params,
+            [json!("ADD"), json!("room-1"), json!("one")]
+        );
+        assert_eq!(commands[1].params, [json!("PATCH"), json!("two")]);
+        assert_eq!(commands[2].params, [json!("room-1")]);
+        Ok(())
+    }
+
+    #[test]
+    fn unbound_streams_and_scheduling_controls_fail_instead_of_being_dropped() -> Result<()> {
+        assert!(sink()?.commands(&input("other/out")?).is_err());
+        let due = InputEnvelope {
+            port: PortId::try_new("in")?,
+            envelope: GraphChangeCodec::encode_futures_due(
+                StreamId::try_new("facilities-db/out")?,
+                4,
+                chrono::Utc::now(),
+            )?,
+        };
+        assert!(sink()?.commands(&due).is_err());
+        Ok(())
     }
 }

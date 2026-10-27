@@ -273,7 +273,7 @@ impl HttpSnapshotReader {
                             response::MappedChange::Upsert { element, operation } => {
                                 match operation {
                                     OperationType::Insert => SourceChange::Insert { element },
-                                    OperationType::Update => SourceChange::Update { element },
+                                    OperationType::Update => SourceChange::update(element),
                                     OperationType::Delete => unreachable!(),
                                 }
                             }

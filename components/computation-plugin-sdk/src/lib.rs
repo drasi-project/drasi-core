@@ -4,7 +4,7 @@
 //! Native ComputationGraph SDK. See the crate README for the ownership, scheduling
 //! and capability contracts. No legacy Source/Reaction interfaces are involved.
 
-pub use drasi_computation_contracts::SinkBatching;
+pub use drasi_computation_contracts::{PortFormatAlternative, PortFormatCatalogue, SinkBatching};
 pub use drasi_computation_plugin_abi as abi;
 pub mod activation_credentials;
 pub mod admission;
@@ -18,8 +18,10 @@ mod control;
 mod export;
 pub mod input_position;
 pub mod metadata;
+pub mod output_reads;
+pub mod output_snapshots;
+mod port_formats;
 pub mod progress;
-pub mod query_snapshots;
 mod transaction;
 pub mod transport;
 pub mod wire;
@@ -43,8 +45,10 @@ pub use export::{Component, CreatedComponent, ExportedPlugin, Factory, PluginDef
 pub use metadata::{
     Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, PluginMetadata,
 };
+pub use output_snapshots::{
+    NativeOutputSnapshot, NativeOutputSnapshots, OutputSnapshotHeader, SnapshotOpen,
+};
 pub use progress::NativeSourceProgress;
-pub use query_snapshots::{NativeQuerySnapshot, NativeQuerySnapshots, QuerySnapshotMetadata};
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
 pub use wire::{CreateRequest, Scope};
 
@@ -112,11 +116,11 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_query_snapshots_v1(
-        ) -> *const $crate::abi::query_snapshots::PluginQuerySnapshotsV1 {
+        pub extern "C" fn drasi_computation_plugin_output_snapshots_v1(
+        ) -> *const $crate::abi::output_snapshots::PluginOutputSnapshotsV1 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
-                    Ok(export) => export.query_snapshots(),
+                    Ok(export) => export.output_snapshots(),
                     Err(_) => std::ptr::null(),
                 }
             }))
@@ -161,6 +165,28 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.source_schema(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_output_reads_v1(
+        ) -> *const $crate::abi::output_reads::PluginOutputReadsV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.output_reads(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_output_follow_v1(
+        ) -> *const $crate::abi::output_follow::PluginOutputFollowV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.output_follow(),
                     Err(_) => std::ptr::null(),
                 }
             }))

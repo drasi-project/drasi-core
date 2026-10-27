@@ -37,6 +37,9 @@ use tokio::sync::{mpsc, Notify};
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
 
+#[path = "output_catalogue_tests.rs"]
+mod output_catalogue_tests;
+
 #[path = "source_schema_tests.rs"]
 mod source_schema_tests;
 
@@ -270,7 +273,7 @@ async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
     );
     assert!(core.get_source_info("query").await.is_err());
     assert_eq!(
-        core.get_query_config("query").await.unwrap().sources[0].source_id,
+        core.get_query_config("query").await.unwrap().inputs[0].component,
         "source"
     );
     assert_eq!(core.get_current_config().await.unwrap().queries.len(), 1);
@@ -292,7 +295,7 @@ async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
     assert_eq!(source_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(reaction_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(
-        core.get_query_config("query").await.unwrap().sources[0].source_id,
+        core.get_query_config("query").await.unwrap().inputs[0].component,
         "source"
     );
     assert!(core.remove_source("source", false).await.is_err());
@@ -1066,7 +1069,7 @@ fn config(id: &str, source: Option<&str>) -> QueryConfig {
         .auto_start(false)
         .enable_bootstrap(false);
     match source {
-        Some(source) => query.from_source(source).build(),
+        Some(source) => query.from_input(source).build(),
         None => query.build(),
     }
 }
@@ -1599,8 +1602,8 @@ async fn pending_initialization_does_not_block_addition_or_removal() {
         .unwrap();
     let invalid = crate::Query::cypher("invalid-dependency")
         .query("MATCH (n) RETURN n")
-        .from_source("pending")
-        .from_source("missing")
+        .from_input("pending")
+        .from_input("missing")
         .auto_start(false)
         .build();
     let invalid = core.add_query_with_handle(invalid).await.unwrap();
@@ -2672,7 +2675,7 @@ async fn query_start_does_not_wait_for_the_instance_subscription_fence() {
         .await;
     let query = crate::Query::cypher("query")
         .query("MATCH (n:Person) RETURN n")
-        .from_source("source")
+        .from_input("source")
         .enable_bootstrap(true)
         .auto_start(true)
         .build();
@@ -2769,7 +2772,7 @@ async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failu
             .await;
         let query = crate::Query::cypher("query")
             .query("MATCH (n:Person) RETURN n")
-            .from_source("source")
+            .from_input("source")
             .enable_bootstrap(true)
             .auto_start(true)
             .build();

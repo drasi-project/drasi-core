@@ -5,13 +5,13 @@ use drasi_computation_plugin_sdk::{NativeComponent, NativeTransformer};
 
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ChangeEnvelope, ComponentDescriptor, GraphChangeCodec, InputEnvelope, OutputEnvelope, PortId,
-    Schema, StreamId,
+    ChangeEnvelope, ComponentDescriptor, GraphChangeCodec, GraphProducerIdentity,
+    GraphProducerProgress, InputEnvelope, OutputEnvelope, PortId, Schema, StreamId,
 };
 use drasi_computation_plugin_sdk::{NativeTransactionContext, TransactionalComponent};
 use drasi_core_types::models::{Element, ElementValue, SourceChange};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 fn value_field() -> String {
     "value".into()
@@ -80,6 +80,7 @@ struct Configuration {
 pub(super) struct Arithmetic {
     descriptor: ComponentDescriptor,
     configuration: Configuration,
+    identity: GraphProducerIdentity,
     sequence: u64,
     running: bool,
 }
@@ -95,9 +96,16 @@ impl Arithmetic {
                 && configuration.field != configuration.counter_property,
             "arithmetic fields must be nonempty and distinct"
         );
+        let identity = GraphProducerIdentity::volatile(
+            "volatile".into(),
+            "volatile".into(),
+            descriptor.id().clone(),
+            configuration.stream.clone(),
+        )?;
         Ok(Self {
             descriptor,
             configuration,
+            identity,
             sequence: 0,
             running: false,
         })
@@ -122,6 +130,21 @@ impl Arithmetic {
             ElementValue::Integer(batches),
         );
         Ok(value)
+    }
+    /// Applies the calculation to an update. A removed field has no value to
+    /// calculate from, so its removal passes through unchanged.
+    fn calculate_update(
+        &self,
+        element: &mut Element,
+        removed_properties: &mut BTreeSet<String>,
+        batches: i64,
+    ) -> anyhow::Result<Option<i64>> {
+        if removed_properties.contains(&self.configuration.field) {
+            return Ok(None);
+        }
+        let value = self.calculate(element, batches)?;
+        removed_properties.remove(&self.configuration.counter_property);
+        Ok(Some(value))
     }
 }
 #[async_trait]
@@ -157,8 +180,14 @@ impl NativeTransformer for Arithmetic {
         let mut changes = GraphChangeCodec::decode_changes(&input.envelope)?;
         for change in &mut changes {
             match change {
-                SourceChange::Insert { element } | SourceChange::Update { element } => {
+                SourceChange::Insert { element } | SourceChange::Replace { element } => {
                     self.calculate(element, batches)?;
+                }
+                SourceChange::Update {
+                    element,
+                    removed_properties,
+                } => {
+                    self.calculate_update(element, removed_properties, batches)?;
                 }
                 SourceChange::Delete { .. } => {}
                 SourceChange::Future { .. } => {
@@ -166,12 +195,13 @@ impl NativeTransformer for Arithmetic {
                 }
             }
         }
-        let envelope = GraphChangeCodec::derive_changes(
+        let mut envelope = GraphChangeCodec::derive_changes(
             &input.envelope,
             &changes,
             self.configuration.stream.clone(),
             sequence,
         )?;
+        GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
         self.sequence = sequence;
         Ok(vec![OutputEnvelope {
             port: PortId::try_new("out")?,
@@ -211,21 +241,29 @@ impl TransactionalComponent for Arithmetic {
         let mut last_value = None;
         for change in &mut changes {
             match change {
-                SourceChange::Insert { element } => {
+                SourceChange::Insert { element } | SourceChange::Replace { element } => {
                     context.put_element(element).await?;
                     last_value = Some(self.calculate(element, batches)?);
                 }
-                SourceChange::Update { element } => {
+                SourceChange::Update {
+                    element,
+                    removed_properties,
+                } => {
                     if let Some(previous) = context.get_element(element.get_reference()).await? {
                         anyhow::ensure!(
                             std::mem::discriminant(element)
                                 == std::mem::discriminant(previous.as_ref()),
                             "arithmetic update changed the element type"
                         );
-                        element.merge_missing_properties(previous.as_ref());
+                        element
+                            .merge_missing_properties_except(previous.as_ref(), removed_properties);
                     }
                     context.put_element(element).await?;
-                    last_value = Some(self.calculate(element, batches)?);
+                    if let Some(value) =
+                        self.calculate_update(element, removed_properties, batches)?
+                    {
+                        last_value = Some(value);
+                    }
                 }
                 SourceChange::Delete { metadata } => {
                     context.remove_element(&metadata.reference).await?;
@@ -250,5 +288,75 @@ impl TransactionalComponent for Arithmetic {
             input.system().timestamp(),
         )?;
         context.derive(&input, output.changes().clone()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_computation_contracts::ComponentId;
+    use drasi_computation_plugin_sdk::Factory;
+    use drasi_core_types::models::{ElementMetadata, ElementPropertyMap, ElementReference};
+
+    fn subject() -> Arithmetic {
+        let descriptor = crate::ArithmeticFactory
+            .metadata()
+            .descriptor(ComponentId::try_new("arithmetic").unwrap())
+            .unwrap();
+        Arithmetic::new(
+            descriptor,
+            serde_json::json!({"stream": "out/arithmetic", "add": 1, "multiply": 2}),
+        )
+        .unwrap()
+    }
+
+    fn node(properties: &[(&str, ElementValue)]) -> Element {
+        let mut map = ElementPropertyMap::new();
+        for (name, value) in properties {
+            map.insert(name, value.clone());
+        }
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("source", "one"),
+                labels: Arc::from([Arc::from("Item")]),
+                effective_from: 1,
+            },
+            properties: map,
+        }
+    }
+
+    #[test]
+    fn calculating_an_update_that_sets_the_counter_drops_its_removal() {
+        let mut element = node(&[("value", ElementValue::Integer(3))]);
+        let mut removed = BTreeSet::from(["batch_count".to_string(), "other".to_string()]);
+        let value = subject()
+            .calculate_update(&mut element, &mut removed, 7)
+            .unwrap();
+        assert_eq!(value, Some(8));
+        assert_eq!(element.get_property("value"), &ElementValue::Integer(8));
+        assert_eq!(
+            element.get_property("batch_count"),
+            &ElementValue::Integer(7)
+        );
+        assert_eq!(removed, BTreeSet::from(["other".to_string()]));
+        assert!(SourceChange::Update {
+            element,
+            removed_properties: removed
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn removing_the_calculated_field_passes_the_removal_through_unchanged() {
+        let mut element = node(&[("other", ElementValue::Null)]);
+        let mut removed = BTreeSet::from(["value".to_string()]);
+        let value = subject()
+            .calculate_update(&mut element, &mut removed, 7)
+            .unwrap();
+        assert_eq!(value, None);
+        assert_eq!(removed, BTreeSet::from(["value".to_string()]));
+        assert!(!element.get_properties().contains_key("batch_count"));
+        assert!(!element.get_properties().contains_key("value"));
     }
 }

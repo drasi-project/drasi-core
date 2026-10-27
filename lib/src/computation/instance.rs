@@ -271,6 +271,7 @@ async fn finish_driver(
                     log::debug!("Refreshing rejected shutdown revision {expected:?} to {actual:?}");
                     continue;
                 }
+                Err(GraphError::ControllerClosed) => return driver_result(run.await),
                 Ok(report) if report.summary == OperationSummary::Completed => {}
                 Ok(report) => failures.push(super::v1::LifecycleReportError::Stop(report).into()),
                 Err(error) => failures.push(error.into()),
@@ -916,6 +917,47 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_retries_only_rejected_revision_on_multiple_threads() -> anyhow::Result<()> {
         shutdown_after_accepted_revision_change().await
+    }
+
+    async fn shutdown_after_external_cancellation() -> anyhow::Result<()> {
+        for _ in 0..8 {
+            let stops = Arc::new(AtomicUsize::new(0));
+            let graph = ComputationGraph::builder("external-cancellation")
+                .service(Box::new(IdleService {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::try_new("idle")?,
+                        vec![],
+                    )?,
+                    stops: stops.clone(),
+                }))
+                .build()?;
+            let entry = Entry::new(graph, "external-cancellation");
+            let handle = entry.ready().await?;
+            let control = handle.control();
+            assert_eq!(
+                control
+                    .start_components(control.desired_snapshot().revision, GraphSelection::All)
+                    .await?
+                    .summary,
+                OperationSummary::Completed
+            );
+            control.cancel();
+            entry.shutdown(&[]).await?;
+            assert_eq!(stops.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_after_cancel_awaits_terminal_result_on_current_thread() -> anyhow::Result<()>
+    {
+        shutdown_after_external_cancellation().await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_after_cancel_awaits_terminal_result_on_multiple_threads() -> anyhow::Result<()>
+    {
+        shutdown_after_external_cancellation().await
     }
 
     #[test]

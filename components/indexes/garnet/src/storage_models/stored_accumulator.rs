@@ -13,7 +13,13 @@
 // limitations under the License.
 
 use drasi_core::evaluation::functions::aggregation::ValueAccumulator;
+use drasi_core::models::{ElementPropertyMap, ElementValue};
 use prost::bytes::{Bytes, BytesMut};
+
+use super::{
+    stored_value::{StoredValueContainer, StoredValueError},
+    StoredValueMap,
+};
 
 #[derive(PartialEq, Clone, ::prost::Message)]
 pub struct StoredValueAccumulatorContainer {
@@ -78,9 +84,11 @@ pub struct StoredLinearGradient {
     pub cov: f64,
 }
 
-impl From<ValueAccumulator> for StoredValueAccumulator {
-    fn from(acc: ValueAccumulator) -> Self {
-        match acc {
+impl TryFrom<ValueAccumulator> for StoredValueAccumulator {
+    type Error = StoredValueError;
+
+    fn try_from(acc: ValueAccumulator) -> Result<Self, Self::Error> {
+        Ok(match acc {
             ValueAccumulator::Sum { value } => StoredValueAccumulator::Sum(value),
             ValueAccumulator::Avg { sum, count } => {
                 StoredValueAccumulator::Avg(StoredAverage { sum, count })
@@ -103,15 +111,21 @@ impl From<ValueAccumulator> for StoredValueAccumulator {
                 m2,
                 cov,
             }),
-            ValueAccumulator::Value(value) => StoredValueAccumulator::Value((&value).into()),
-            ValueAccumulator::Map(map) => StoredValueAccumulator::Map((&map).into()),
-        }
+            ValueAccumulator::Value(value) => {
+                StoredValueAccumulator::Value(StoredValueContainer::try_from(&value)?)
+            }
+            ValueAccumulator::Map(map) => {
+                StoredValueAccumulator::Map(StoredValueMap::try_from(&map)?)
+            }
+        })
     }
 }
 
-impl From<StoredValueAccumulator> for ValueAccumulator {
-    fn from(val: StoredValueAccumulator) -> Self {
-        match val {
+impl TryFrom<StoredValueAccumulator> for ValueAccumulator {
+    type Error = StoredValueError;
+
+    fn try_from(val: StoredValueAccumulator) -> Result<Self, Self::Error> {
+        Ok(match val {
             StoredValueAccumulator::Sum(value) => ValueAccumulator::Sum { value },
             StoredValueAccumulator::Avg(avg) => ValueAccumulator::Avg {
                 sum: avg.sum,
@@ -131,8 +145,49 @@ impl From<StoredValueAccumulator> for ValueAccumulator {
                     cov: linear_gradient.cov,
                 }
             }
-            StoredValueAccumulator::Value(value) => ValueAccumulator::Value(value.into()),
-            StoredValueAccumulator::Map(map) => ValueAccumulator::Map(map.into()),
+            StoredValueAccumulator::Value(value) => {
+                ValueAccumulator::Value(ElementValue::try_from(value)?)
+            }
+            StoredValueAccumulator::Map(map) => {
+                ValueAccumulator::Map(ElementPropertyMap::try_from(map)?)
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use prost::Message;
+
+    fn roundtrip(accumulator: ValueAccumulator) -> ValueAccumulator {
+        let stored = StoredValueAccumulator::try_from(accumulator).unwrap();
+        let container = StoredValueAccumulatorContainer {
+            value: Some(stored),
+        };
+        let decoded =
+            StoredValueAccumulatorContainer::decode(container.encode_to_vec().as_slice()).unwrap();
+        ValueAccumulator::try_from(decoded.value.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn value_accumulator_keeps_precise_datetime() {
+        let value = ElementValue::LocalDateTime(
+            NaiveDate::from_ymd_opt(2024, 6, 15)
+                .unwrap()
+                .and_hms_nano_opt(10, 30, 45, 123_456_789)
+                .unwrap(),
+        );
+        match roundtrip(ValueAccumulator::Value(value.clone())) {
+            ValueAccumulator::Value(result) => assert_eq!(result, value),
+            other => panic!("Expected Value, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn corrupt_accumulator_value_is_an_error() {
+        let corrupt = StoredValueAccumulator::Value(StoredValueContainer { value: None });
+        assert!(ValueAccumulator::try_from(corrupt).is_err());
     }
 }

@@ -643,6 +643,7 @@ fn consumer_progress_sdk_rejects_unbound_base_creation_even_without_host_negotia
             &mut factory,
         ))?;
         let request = sdk::CreateRequest {
+            inputs: Vec::new(),
             activation_credentials_bound: false,
             id: id("producer"),
             implementation: fixture::Factory(ComponentRole::Source, false)
@@ -657,6 +658,7 @@ fn consumer_progress_sdk_rejects_unbound_base_creation_even_without_host_negotia
             sdk::transport::borrowed_bytes((*export.metadata()).manifest, abi::MAX_METADATA_BYTES)?,
         )?;
         let request = sdk::CreateRequest {
+            inputs: Vec::new(),
             implementation: metadata.factories[0].implementation.clone(),
             ..request
         };
@@ -948,6 +950,7 @@ mod graph_fanout {
                 },
             },
             2 => SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata,
                     properties: ElementPropertyMap::from(json!({"value":20})),

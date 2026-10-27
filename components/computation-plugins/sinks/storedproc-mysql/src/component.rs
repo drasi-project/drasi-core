@@ -5,7 +5,7 @@ use crate::MySqlStoredProcConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, InputEnvelope, SinkCompletion,
+    ComponentDescriptor, ComponentId, InputBinding, InputEnvelope, SinkCompletion,
 };
 use drasi_computation_plugin_sdk::{ActivationCredentials, NativeComponent, NativeSink};
 use drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink as Sink;
@@ -13,16 +13,21 @@ use drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink as Sink;
 pub struct MySqlStoredProcSink(Sink);
 
 impl MySqlStoredProcSink {
-    pub fn new(id: ComponentId, config: MySqlStoredProcConfig) -> Result<Self> {
-        Ok(Self(Sink::new(id, config)?))
+    pub fn new(
+        id: ComponentId,
+        config: MySqlStoredProcConfig,
+        inputs: &[InputBinding],
+    ) -> Result<Self> {
+        Ok(Self(Sink::new(id, config, inputs)?))
     }
     pub(crate) fn new_with_activation_credentials(
         id: ComponentId,
         config: MySqlStoredProcConfig,
         bound: bool,
+        inputs: &[InputBinding],
     ) -> Result<Self> {
         Ok(Self(Sink::new_with_activation_credentials(
-            id, config, bound,
+            id, config, bound, inputs,
         )?))
     }
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {

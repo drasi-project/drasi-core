@@ -324,6 +324,9 @@ fn value_to_id_fragment(value: &ElementValue) -> String {
         ElementValue::ZonedDateTime(v) => v.to_rfc3339(),
         ElementValue::List(v) => format!("{v:?}").replace(':', "%3A"),
         ElementValue::Object(v) => format!("{v:?}").replace(':', "%3A"),
+        ElementValue::Typed(_) => {
+            drasi_core::evaluation::variable_value::VariableValue::from(value).to_string()
+        }
     }
 }
 
@@ -334,6 +337,15 @@ fn quote_ident(identifier: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_unsigned_key_is_not_rounded_or_replaced() {
+        let unsigned = drasi_core::evaluation::variable_value::VariableValue::Integer(
+            drasi_core::evaluation::variable_value::integer::Integer::from(u64::MAX),
+        );
+        let typed: ElementValue = (&unsigned).try_into().unwrap();
+        assert_eq!(value_to_id_fragment(&typed), u64::MAX.to_string());
+    }
 
     #[test]
     fn generate_element_id_uses_key_columns_when_provided() {

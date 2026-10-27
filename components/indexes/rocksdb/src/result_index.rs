@@ -98,7 +98,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
                             },
                             Err(e) => return Err(IndexError::other(e)),
                         };
-                        let value: ValueAccumulator = value.into();
+                        let value = ValueAccumulator::try_from(value).map_err(IndexError::other)?;
                         Ok(Some(value))
                     }
                     Ok(None) => Ok(None),
@@ -132,7 +132,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
                     .delete_cf(&values_cf, set_id.to_be_bytes())
                     .map_err(IndexError::other),
                 Some(v) => {
-                    let value: StoredValueAccumulator = v.into();
+                    let value = StoredValueAccumulator::try_from(v).map_err(IndexError::other)?;
                     let value = value.serialize();
                     txn.put_cf(&values_cf, set_id.to_be_bytes(), &value)
                         .map_err(IndexError::other)

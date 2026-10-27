@@ -17,7 +17,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 logs="${1:-target/runtime-conformance}"
-export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
 export TMPDIR="$PWD/target/runtime-conformance-scratch"
 unset RUST_LOG
 if [[ "${DRASI_TEST_EXECUTION+x}" == x && "$DRASI_TEST_EXECUTION" != computation ]]; then
@@ -37,7 +37,7 @@ fi
 
 python3 lib/tests/runtime_parity/check_requirements.py || exit 1
 
-for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions postgres-common postgres-native dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle mysql-common file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
     package=drasi-lib
     inventory=lib/tests/runtime_parity/original-cases.tsv
     mappings=lib/tests/runtime_parity/case-mappings.tsv
@@ -128,6 +128,29 @@ for profile in core-types shared-contracts default no-default-features extra-cap
             sources=(lib components/sources/postgres/tests/native_transactions.rs)
             targets=(--lib --test native_transactions)
             test_arguments+=(--test-threads=1)
+            ;;
+        postgres-common|postgres-native|mysql-common)
+            # Dependency unit tests are not executed by the source crate's --lib.
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib)
+            targets=(--lib)
+            features+=(--no-default-features)
+            test_arguments+=(--test-threads=1)
+            case "$profile" in
+                postgres-common)
+                    package=drasi-postgres-common
+                    features+=(--features replication)
+                    ;;
+                postgres-native)
+                    package=drasi-computation-source-postgres
+                    ;;
+                mysql-common)
+                    package=drasi-mysql-common
+                    features+=(--features native)
+                    test_arguments+=(--include-ignored)
+                    ;;
+            esac
             ;;
         dashboard-lifecycle)
             package=drasi-reaction-dashboard

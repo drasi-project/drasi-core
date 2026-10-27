@@ -38,6 +38,7 @@ tonic-prost = { version = "0.14", optional = true }
 tonic-prost-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
+drasi-core-types = { workspace = true }
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt", "net", "time"] }
 

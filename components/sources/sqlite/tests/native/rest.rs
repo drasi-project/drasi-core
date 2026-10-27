@@ -97,7 +97,7 @@ async fn native_rest_crud_batches_and_rowids_use_the_source_connection() -> Resu
                 StatusCode::OK
             );
             assert!(matches!(&changes(next(&mut source).await?, mode)?[..],
-                [SourceChange::Update { element }] if element.get_reference() == &identity));
+                [SourceChange::Update { element, .. }] if element.get_reference() == &identity));
             assert_eq!(
                 client
                     .delete(format!("{base}/api/tables/items/1"))

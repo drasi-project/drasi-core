@@ -117,6 +117,7 @@ async fn isolated_context_updates_do_not_rescan_every_required_anchor() {
     index.scans.store(0, Ordering::Relaxed);
     let changes = query
         .process_source_change(SourceChange::Update {
+            removed_properties: Default::default(),
             element: element("ready", "Readiness", 2000, json!({"ready":true})),
         })
         .await
@@ -142,6 +143,7 @@ async fn isolated_context_updates_do_not_rescan_every_required_anchor() {
     ] {
         let changes = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: element("ready", label, time, json!({"ready":true})),
             })
             .await

@@ -767,7 +767,7 @@ mod tests {
         core.add_query(
             Query::cypher("schema-query")
                 .query("MATCH (s:Sensor)-[r:CONNECTS_TO]->(c:Counter) RETURN s, r, c")
-                .from_source("schema-src")
+                .from_input("schema-src")
                 .build(),
         )
         .await

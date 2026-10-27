@@ -498,7 +498,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("test-source")
+                    .from_input("test-source")
                     .auto_start(false)
                     .build(),
             )

@@ -1273,7 +1273,7 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
     core.add_query_with_handle(
         drasi_lib::Query::cypher("query")
             .query("MATCH (n) RETURN n")
-            .from_source("source")
+            .from_input("source")
             .build(),
     )
     .await

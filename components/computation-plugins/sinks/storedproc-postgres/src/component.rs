@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     workers::{join_owned_worker, spawn_owned_worker, WorkerCompletion},
-    ComponentDescriptor, ComponentId, DeliveryHandler, DeliveryItem, PipeRequirements,
-    PortDescriptor, PortDirection, PortId, QueryChangeCodec,
+    ComponentDescriptor, ComponentId, DeliveryHandler, DeliveryItem, GraphChangeCodec,
+    InputBinding, PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs,
 };
 use drasi_computation_plugin_sdk::NativeComponent;
 use drasi_postgres_common::{
@@ -31,27 +31,24 @@ fn is_loopback_hostname(hostname: &str) -> bool {
 
 struct ProcedureEffect {
     config: Arc<PostgresStoredProcConfig>,
+    outputs: Arc<SinkOutputs>,
     templates: Arc<HashMap<String, CompiledTemplate>>,
 }
 
 #[async_trait]
 impl PostgresDeliveryEffect for ProcedureEffect {
     async fn apply(&mut self, transaction: &Transaction<'_>, item: DeliveryItem<'_>) -> Result<()> {
-        let input = build_native_render_input(item.envelope, item.operation)?;
-        anyhow::ensure!(
-            self.config.queries.contains(&input.query_id),
-            "PostgreSQL sink received unconfigured query '{}'",
-            input.query_id
-        );
+        let output = self.outputs.output_for(item.envelope.system().stream())?;
+        let input = build_native_render_input(item.envelope, item.operation, output)?;
         let Some(spec) = self
             .config
-            .get_template_spec(&input.query_id, input.operation)
+            .get_template_spec(&input.alias, input.operation)
             .filter(|spec| !spec.template.is_empty())
         else {
             log::debug!(
-                "PostgreSQL sink: no {:?} command configured for query '{}'",
+                "PostgreSQL sink: no {:?} command configured for output '{}'",
                 input.operation,
-                input.query_id
+                input.alias
             );
             return Ok(());
         };
@@ -62,8 +59,8 @@ impl PostgresDeliveryEffect for ProcedureEffect {
         let (command, parameters) = template.render(&input.context)?;
         if command.trim().is_empty() {
             log::debug!(
-                "PostgreSQL sink: command condition excluded query '{}'",
-                input.query_id
+                "PostgreSQL sink: command condition excluded output '{}'",
+                input.alias
             );
             return Ok(());
         }
@@ -77,6 +74,7 @@ impl PostgresDeliveryEffect for ProcedureEffect {
 pub struct PostgresStoredProcSink {
     descriptor: ComponentDescriptor,
     config: Arc<PostgresStoredProcConfig>,
+    outputs: Arc<SinkOutputs>,
     templates: Arc<HashMap<String, CompiledTemplate>>,
     handler: Option<PostgresDeliveryHandler<ProcedureEffect>>,
     driver: RwLock<Option<JoinHandle<DriverResult>>>,
@@ -85,12 +83,21 @@ pub struct PostgresStoredProcSink {
 }
 
 impl PostgresStoredProcSink {
-    pub fn new(id: ComponentId, config: PostgresStoredProcConfig) -> Result<Self> {
+    /// `inputs` are the graph's declared incoming edges; they define the
+    /// outputs this sink accepts.
+    pub fn new(
+        id: ComponentId,
+        config: PostgresStoredProcConfig,
+        inputs: &[InputBinding],
+    ) -> Result<Self> {
         config.validate()?;
+        let outputs = SinkOutputs::from_inputs(inputs, &config.outputs)?;
+        config.validate_outputs(&outputs)?;
         let templates = Arc::new(config.compile_templates()?);
         Ok(Self {
             descriptor: Self::describe(id)?,
             config: Arc::new(config),
+            outputs: Arc::new(outputs),
             templates,
             handler: None,
             driver: RwLock::new(None),
@@ -105,7 +112,7 @@ impl PostgresStoredProcSink {
             vec![PortDescriptor::new(
                 PortId::try_new("in")?,
                 PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             )],
         )?)
@@ -193,6 +200,7 @@ impl NativeComponent for PostgresStoredProcSink {
             client,
             ProcedureEffect {
                 config: self.config.clone(),
+                outputs: self.outputs.clone(),
                 templates: self.templates.clone(),
             },
         ));

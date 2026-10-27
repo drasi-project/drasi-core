@@ -111,7 +111,7 @@ async fn sqlite_handle_create_update_delete_flow() {
 
     let query = Query::cypher("sqlite-handle-query")
         .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name, s.temp AS temp")
-        .from_source("sqlite-handle-source")
+        .from_input("sqlite-handle-source")
         .auto_start(true)
         .build();
 
@@ -204,7 +204,7 @@ async fn sqlite_rest_crud_and_batch_flow() {
 
     let query = Query::cypher("sqlite-rest-query")
         .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name, s.temp AS temp")
-        .from_source("sqlite-rest-source")
+        .from_input("sqlite-rest-source")
         .auto_start(true)
         .build();
 
@@ -422,12 +422,12 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
 
     let sensors_query = Query::cypher("sqlite-sensors-query")
         .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name")
-        .from_source("sqlite-multi-source")
+        .from_input("sqlite-multi-source")
         .auto_start(true)
         .build();
     let devices_query = Query::cypher("sqlite-devices-query")
         .query("MATCH (d:devices) RETURN d.id AS id, d.name AS name")
-        .from_source("sqlite-multi-source")
+        .from_input("sqlite-multi-source")
         .auto_start(true)
         .build();
 

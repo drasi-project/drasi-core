@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::ErrorHandling;
+use crate::common::{derive_removes_output, derived_property_is_set, ErrorHandling};
 use async_trait::async_trait;
 use base64::Engine;
 use drasi_core::{
@@ -93,10 +93,25 @@ impl SourceMiddleware for Decoder {
                 Ok(_) => Ok(vec![SourceChange::Insert { element }]),
                 Err(e) => Err(e),
             },
-            SourceChange::Update { mut element } => match self.decode_property(&mut element) {
-                Ok(_) => Ok(vec![SourceChange::Update { element }]),
+            SourceChange::Replace { mut element } => match self.decode_property(&mut element) {
+                Ok(_) => Ok(vec![SourceChange::Replace { element }]),
                 Err(e) => Err(e),
             },
+            SourceChange::Update {
+                mut element,
+                mut removed_properties,
+            } => {
+                let target = &self.config.target_property;
+                let output = self.config.output_property.as_deref().unwrap_or(target);
+                if !derive_removes_output(&element, &mut removed_properties, target, output) {
+                    self.decode_property(&mut element)?;
+                    derived_property_is_set(&element, &mut removed_properties, output);
+                }
+                Ok(vec![SourceChange::Update {
+                    element,
+                    removed_properties,
+                }])
+            }
             // Pass through other change types
             SourceChange::Delete { .. } | SourceChange::Future { .. } => Ok(vec![source_change]),
         }
@@ -116,6 +131,7 @@ impl Decoder {
             ElementValue::Object(_) => "Object",
             ElementValue::LocalDateTime(_) => "LocalDateTime",
             ElementValue::ZonedDateTime(_) => "ZonedDateTime",
+            ElementValue::Typed(_) => "Typed",
         }
     }
 

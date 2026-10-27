@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use drasi_bootstrap_application::ApplicationBootstrapProvider;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::{computation::v1::*, DrasiLib};
@@ -10,7 +11,16 @@ use drasi_source_application::{
     ApplicationSourceHandle, NativeApplicationSource, PropertyMapBuilder,
 };
 use serde_json::{json, Value};
-use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    num::NonZeroUsize,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
 use tokio::sync::{mpsc, RwLock};
 
 struct Application {
@@ -59,20 +69,35 @@ impl Application {
         text: &str,
         bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
     ) -> Result<QueryOutput> {
+        self.query_with_provider(id, text, bootstrap, None).await
+    }
+
+    async fn query_with_provider(
+        &self,
+        id: &str,
+        text: &str,
+        bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
+        indexes: Option<Arc<dyn drasi_core::computation::ComputationIndexProvider>>,
+    ) -> Result<QueryOutput> {
         let control = self.core.computation_control()?;
         let query_id = ComponentId::try_new(id)?;
         let mut pipeline = self
             .core
             .computation_pipeline()?
             .native_source(self.output.clone())?;
+        let enable_bootstrap = bootstrap.is_some();
         if let Some(bootstrap) = bootstrap {
             pipeline = pipeline.query_bootstrap(id, bootstrap)?;
+        }
+        if let Some(indexes) = indexes {
+            pipeline = pipeline.query_provider(id, indexes, QueryPublicationMode::NonAtomic)?;
         }
         let batch = pipeline
             .query(
                 drasi_lib::Query::cypher(id)
                     .query(text)
-                    .from_source("input")
+                    .from_input("input")
+                    .enable_bootstrap(enable_bootstrap)
                     .with_outbox_capacity(16)
                     .build(),
             )
@@ -335,7 +360,8 @@ async fn native_query_reconfiguration() -> Result<()> {
                 "names",
                 drasi_lib::Query::cypher("names")
                     .query("MATCH (p:Person) RETURN p.name AS name, true AS updated")
-                    .from_source("input")
+                    .from_input("input")
+                    .enable_bootstrap(false)
                     .with_outbox_capacity(16)
                     .build(),
             )
@@ -430,25 +456,38 @@ async fn query_before_native_source() -> Result<()> {
         (false, false, true),
         (true, true, true),
     ] {
-        late_source_case(auto_start, explicit_stop, update).await?;
+        late_source_case(auto_start, explicit_stop, update, "later").await?;
+        if update {
+            late_source_case(auto_start, explicit_stop, update, "superseded").await?;
+        }
     }
     Ok(())
 }
 
-async fn late_source_case(auto_start: bool, explicit_stop: bool, update: bool) -> Result<()> {
-    let scope = format!("native-late-source-{auto_start}-{explicit_stop}-{update}");
+async fn late_source_case(
+    auto_start: bool,
+    explicit_stop: bool,
+    update: bool,
+    initial_source: &str,
+) -> Result<()> {
+    let scope =
+        format!("native-late-source-{auto_start}-{explicit_stop}-{update}-{initial_source}");
     let core = DrasiLib::builder().with_id(&scope).build().await?;
     let result = async {
         core.start().await?;
-        let output = Endpoint::new(ComponentId::try_new("later")?, PortId::try_new("out")?);
+        let output = Endpoint::new(
+            ComponentId::try_new(initial_source)?,
+            PortId::try_new("out")?,
+        );
         let batch = core
             .computation_pipeline()?
             .native_source(output.clone())?
             .query(
                 drasi_lib::Query::cypher("waiting")
                     .query("MATCH (p:Person) RETURN p.name AS name")
-                    .from_source("later")
+                    .from_input(initial_source)
                     .auto_start(auto_start)
+                    .enable_bootstrap(false)
                     .build(),
             )
             .build()?;
@@ -461,7 +500,7 @@ async fn late_source_case(auto_start: bool, explicit_stop: bool, update: bool) -
                     .observed()?
                     .waiting_for
                     .contains(&DependencyWait::Component {
-                        id: ComponentId::try_new("later")?,
+                        id: ComponentId::try_new(initial_source)?,
                     }),
                 "{:?}",
                 query.observed()?
@@ -471,16 +510,28 @@ async fn late_source_case(auto_start: bool, explicit_stop: bool, update: bool) -
             core.stop_query("waiting").await?;
         }
         if update {
-            core.update_query(
-                "waiting",
-                drasi_lib::Query::cypher("waiting")
-                    .query("MATCH (p:Person) RETURN p.name AS name, true AS updated")
-                    .from_source("later")
-                    .auto_start(auto_start)
-                    .build(),
-            )
-            .await?;
+            let mut replacement = drasi_lib::Query::cypher("waiting")
+                .query("MATCH (p:Person) RETURN p.name AS name, true AS updated")
+                .from_input("later")
+                .auto_start(auto_start)
+                .enable_bootstrap(false)
+                .build();
+            if initial_source != "later" {
+                replacement.inputs[0].port = Some("out".into());
+            }
+            core.update_query("waiting", replacement).await?;
             query = core.computation_component("waiting")?;
+            let observed = query.observed()?;
+            assert!(observed.failure.is_none(), "{observed:?}");
+            assert_ne!(observed.lifecycle, ComponentLifecycle::Running);
+            if auto_start && !explicit_stop {
+                assert!(
+                    observed.waiting_for.contains(&DependencyWait::Component {
+                        id: ComponentId::try_new("later")?,
+                    }),
+                    "{observed:?}"
+                );
+            }
         }
         let (source, input) = NativeApplicationSource::channel(
             scope,
@@ -494,7 +545,10 @@ async fn late_source_case(auto_start: bool, explicit_stop: bool, update: bool) -
         )?;
         let batch = ComponentBatch::builder()
             .source(Box::new(source))
-            .bind_stream(output, StreamId::try_new("later/out")?)
+            .bind_stream(
+                Endpoint::new(ComponentId::try_new("later")?, PortId::try_new("out")?),
+                StreamId::try_new("later/out")?,
+            )
             .build()?;
         assert!(core.add_components(batch).await?.committed);
         if !auto_start || explicit_stop {
@@ -541,6 +595,305 @@ async fn late_source_case(auto_start: bool, explicit_stop: bool, update: bool) -
     Ok(())
 }
 
+struct CountingIndexes(AtomicUsize);
+
+#[async_trait]
+impl drasi_core::computation::ComputationIndexProvider for CountingIndexes {
+    async fn create_indexes(
+        &self,
+        graph: &str,
+        query: &str,
+    ) -> std::result::Result<
+        drasi_core::computation::ComputationIndexes,
+        drasi_core::interface::IndexError,
+    > {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        drasi_core::computation::InMemoryComputationProvider
+            .create_indexes(graph, query)
+            .await
+    }
+
+    fn is_volatile(&self) -> bool {
+        true
+    }
+}
+
+struct PrimaryApplicationSource {
+    descriptor: ComponentDescriptor,
+    inner: NativeApplicationSource,
+}
+
+#[async_trait]
+impl ComputationComponent for PrimaryApplicationSource {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+
+    async fn start(&mut self) -> Result<()> {
+        self.inner.start().await
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        self.inner.stop().await
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for PrimaryApplicationSource {
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        Ok(self.inner.next().await?.map(|mut output| {
+            output.port = PortId::try_new("data").expect("primary port");
+            output
+        }))
+    }
+}
+
+struct PrimaryApplicationFactory {
+    descriptor: FactoryDescriptor,
+    source: Mutex<Option<NativeApplicationSource>>,
+    created: AtomicUsize,
+}
+
+#[async_trait]
+impl ComponentFactory for PrimaryApplicationFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+
+    fn primary_ports(&self) -> PortPrimaries {
+        PortPrimaries::new(None, Some(PortId::try_new("data").expect("primary port")))
+    }
+
+    fn validate(&self, _: &ComponentSpecification) -> Result<()> {
+        Ok(())
+    }
+
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        let source = self
+            .source
+            .lock()
+            .expect("fixture source")
+            .take()
+            .context("query replacement must not reconstruct its producer")
+            .map_err(ComponentCreationError::terminal)?;
+        self.created.fetch_add(1, Ordering::SeqCst);
+        Ok(ConstructedComponent::source(Box::new(
+            PrimaryApplicationSource {
+                descriptor: context.specification.descriptor.clone(),
+                inner: source,
+            },
+        )))
+    }
+}
+
+async fn deferred_native_primary_preserves_resources() -> Result<()> {
+    let app = Application::new("native-deferred-primary").await?;
+    let result = async {
+        let mut observer = app
+            .query("observer", "MATCH (p:Person) RETURN p.name AS name", None)
+            .await?;
+        let indexes = Arc::new(CountingIndexes(AtomicUsize::new(0)));
+        let bootstrap = Arc::new(ApplicationBootstrapProvider::with_shared_data(Arc::new(
+            RwLock::new(vec![person("seed", "Initial")]),
+        )));
+        let mut output = app
+            .query_with_provider(
+                "names",
+                "MATCH (p:Person) RETURN p.name AS name",
+                Some(bootstrap),
+                Some(indexes.clone()),
+            )
+            .await?;
+        let original_source_generation = app.source.generation();
+        let replacement = drasi_lib::Query::cypher("names")
+            .query("MATCH (p:Person) RETURN p.name AS name, true AS updated")
+            .from_input("later")
+            .with_outbox_capacity(16)
+            .build();
+        app.core.update_query("names", replacement.clone()).await?;
+        let pending = app.core.computation_component("names")?.observed()?;
+        assert!(pending.failure.is_none(), "{pending:?}");
+        assert_ne!(pending.lifecycle, ComponentLifecycle::Running);
+        assert!(!pending.waiting_for.is_empty(), "{pending:?}");
+        let control = app.core.computation_control()?;
+        assert!(control
+            .desired_snapshot()
+            .edges
+            .iter()
+            .all(|edge| { edge.definition.from.component.as_str() != "later" }));
+        assert!(control
+            .desired_snapshot()
+            .unbound_relationships
+            .iter()
+            .all(|edge| edge.definition.from.component.as_str() != "later"));
+        // A second update must recognize the internal boundary by logical input.
+        app.core.update_query("names", replacement).await?;
+        let before_resume = indexes.0.load(Ordering::SeqCst);
+        let (source, input) = NativeApplicationSource::channel(
+            "native-deferred-primary",
+            control.desired_snapshot().id.to_string(),
+            "later",
+            StreamId::try_new("later/data")?,
+            NonZeroUsize::new(4).context("capacity")?,
+        )?;
+        let factory = Arc::new(PrimaryApplicationFactory {
+            descriptor: FactoryDescriptor {
+                implementation: ImplementationIdentity::try_new("test/primary-application", "1")?,
+                role: ComponentRole::Source,
+                configuration_version: 1,
+                configuration: ConfigurationSchema {
+                    fields: BTreeMap::new(),
+                    allow_additional: false,
+                },
+                dependencies: BTreeMap::new(),
+            },
+            source: Mutex::new(Some(source)),
+            created: AtomicUsize::new(0),
+        });
+        let descriptor = ComponentDescriptor::try_new(
+            ComponentId::try_new("later")?,
+            ["auxiliary", "data"]
+                .into_iter()
+                .map(|port| {
+                    Ok(PortDescriptor::new(
+                        PortId::try_new(port)?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )?;
+        let (sink, _unused) = NativeApplicationReaction::channel(
+            "unused",
+            GraphChangeCodec::schema().descriptor().clone(),
+            NonZeroUsize::new(4).context("capacity")?,
+        )?;
+        let batch = ComponentBatch::builder()
+            .component(
+                ComponentSpecification {
+                    descriptor,
+                    role: ComponentRole::Source,
+                    completion: None,
+                    implementation: factory.descriptor.implementation.clone(),
+                    configuration_version: 1,
+                    configuration: BTreeMap::new(),
+                    dependencies: BTreeMap::new(),
+                },
+                factory.clone(),
+            )
+            .sink(Box::new(sink))
+            .bind_stream(
+                Endpoint::new(ComponentId::try_new("later")?, PortId::try_new("data")?),
+                StreamId::try_new("later/data")?,
+            )
+            .bind_stream(
+                Endpoint::new(
+                    ComponentId::try_new("later")?,
+                    PortId::try_new("auxiliary")?,
+                ),
+                StreamId::try_new("later/auxiliary")?,
+            )
+            .connect(
+                EdgeDefinition::new(
+                    Endpoint::new(
+                        ComponentId::try_new("later")?,
+                        PortId::try_new("auxiliary")?,
+                    ),
+                    Endpoint::new(ComponentId::try_new("unused")?, PortId::try_new("in")?),
+                ),
+                Box::new(BoundedPipeConfig { capacity: 4 }),
+            )
+            .build()?;
+        assert!(app.core.add_components(batch).await?.committed);
+        app.core
+            .computation_component("names")?
+            .wait_started()
+            .await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match app.core.get_query_status("names").await? {
+                    drasi_lib::channels::ComponentStatus::Running => {
+                        return Ok::<_, anyhow::Error>(())
+                    }
+                    drasi_lib::channels::ComponentStatus::Error => {
+                        anyhow::bail!("resolved query failed: {:?}", app.core.get_graph().await)
+                    }
+                    _ => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await??;
+        assert!(indexes.0.load(Ordering::SeqCst) > before_resume);
+        assert_eq!(
+            app.core.get_query_results("names").await?,
+            [json!({"name":"Initial","updated":true})],
+            "the explicit native bootstrap and catalogue must survive deferred assembly"
+        );
+        let desired = control.desired_snapshot();
+        let inputs: Vec<_> = desired
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.definition.from.component.as_str() == "later"
+                    && edge.definition.to.component.as_str() == "names"
+            })
+            .collect();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].definition.from.port.as_str(), "data");
+        assert!(desired
+            .unbound_relationships
+            .iter()
+            .all(|edge| { edge.definition.to.component.as_str() != "names" }));
+        let producer = app.core.computation_component("later")?;
+        let generation = producer.generation();
+        input
+            .send_node_insert(
+                "live",
+                vec!["Person"],
+                PropertyMapBuilder::new()
+                    .with_string("name", "Ready")
+                    .build(),
+            )
+            .await?;
+        assert_eq!(
+            output.row("name", json!("Ready")).await?,
+            json!({"name":"Ready","updated":true})
+        );
+        app.core.stop_query("names").await?;
+        assert_eq!(producer.observed()?.generation, generation);
+        assert_eq!(producer.observed()?.lifecycle, ComponentLifecycle::Running);
+        assert_eq!(factory.created.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            app.source.observed()?.generation,
+            original_source_generation
+        );
+        assert_eq!(
+            app.source.observed()?.lifecycle,
+            ComponentLifecycle::Running
+        );
+        app.input
+            .send_node_insert(
+                "original",
+                vec!["Person"],
+                PropertyMapBuilder::new()
+                    .with_string("name", "Still running")
+                    .build(),
+            )
+            .await?;
+        observer.row("name", json!("Still running")).await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = app.core.shutdown().await;
+    result?;
+    cleanup?;
+    Ok(())
+}
+
 async fn bootstrap_survives_query_replacement() -> Result<()> {
     let app = Application::new("native-application-bootstrap-update").await?;
     let result = async {
@@ -563,7 +916,7 @@ async fn bootstrap_survives_query_replacement() -> Result<()> {
                 "seeded",
                 drasi_lib::Query::cypher("seeded")
                     .query("MATCH (p:Person) RETURN p.name AS name, true AS updated")
-                    .from_source("input")
+                    .from_input("input")
                     .with_outbox_capacity(16)
                     .build(),
             )
@@ -636,7 +989,7 @@ async fn custom_inputs_are_not_replaced() -> Result<()> {
                 "names",
                 drasi_lib::Query::cypher("names")
                     .query("MATCH (p:Person) RETURN p.name AS name, true AS updated")
-                    .from_source("input")
+                    .from_input("input")
                     .build(),
             )
             .await
@@ -698,7 +1051,7 @@ async fn native_pipeline_validates_configuration() -> Result<()> {
                 .query(
                     drasi_lib::Query::cypher("names")
                         .query("MATCH (p:Person) RETURN p.name AS name")
-                        .from_source(source)
+                        .from_input(source)
                         .enable_bootstrap(enabled)
                         .build(),
                 )
@@ -709,9 +1062,9 @@ async fn native_pipeline_validates_configuration() -> Result<()> {
         }
         let mut query = drasi_lib::Query::cypher("names")
             .query("MATCH (p:Person) RETURN p.name AS name")
-            .from_source("input")
+            .from_input("input")
             .build();
-        query.sources[0].nodes.push("Person".into());
+        query.inputs[0].nodes.push("Person".into());
         let error = core
             .computation_pipeline()?
             .native_source(output.clone())?
@@ -726,7 +1079,7 @@ async fn native_pipeline_validates_configuration() -> Result<()> {
             .query(
                 drasi_lib::Query::cypher("names")
                     .query("MATCH (p:Person) RETURN p.name AS name")
-                    .from_source("input")
+                    .from_input("input")
                     .build(),
             )
             .build()?;
@@ -791,6 +1144,11 @@ fn native_application_query_declared_before_its_source_activates_without_readdit
 #[test]
 fn native_application_query_replacement_preserves_bootstrap_and_live_delivery() -> Result<()> {
     both_runtimes(bootstrap_survives_query_replacement)
+}
+
+#[test]
+fn native_application_update_resolves_late_factory_primary_and_preserves_resources() -> Result<()> {
+    both_runtimes(deferred_native_primary_preserves_resources)
 }
 
 #[test]

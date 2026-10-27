@@ -1274,7 +1274,7 @@ fn subscription_settings() -> SourceSubscriptionSettings {
 fn assert_change(event: &SourceEvent, expected_id: &str, update: bool) {
     let element = match event {
         SourceEvent::Change(SourceChange::Insert { element }) if !update => element,
-        SourceEvent::Change(SourceChange::Update { element }) if update => element,
+        SourceEvent::Change(SourceChange::Update { element, .. }) if update => element,
         other => panic!("unexpected source event: {other:?}"),
     };
     match element {

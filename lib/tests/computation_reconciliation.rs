@@ -46,6 +46,9 @@ struct Calls {
     panic_update_metadata: AtomicBool,
     panic_preflight: AtomicBool,
     panic_drop: AtomicBool,
+    binds_inputs: AtomicBool,
+    fail_bind_inputs: AtomicBool,
+    bound: Mutex<Vec<Vec<InputBinding>>>,
     validator_tasks: Mutex<Vec<Option<tokio::task::Id>>>,
 }
 
@@ -109,6 +112,21 @@ impl ComputationComponent for Sink {
             panic!("reconfigured metadata fault");
         }
         &self.descriptor
+    }
+    fn binds_inputs(&self) -> bool {
+        self.calls.binds_inputs.load(Ordering::SeqCst)
+    }
+    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.calls.fail_bind_inputs.load(Ordering::SeqCst),
+            "input binding fault"
+        );
+        self.calls
+            .bound
+            .lock()
+            .expect("bound")
+            .push(bindings.to_vec());
+        Ok(())
     }
     async fn start(&mut self) -> anyhow::Result<()> {
         if let Some(gate) = self.start_gate.take() {
@@ -900,8 +918,13 @@ struct Factory {
     descriptor: FactoryDescriptor,
     calls: Arc<Calls>,
     received: mpsc::Sender<(String, u64)>,
+    binds: bool,
 }
 impl Factory {
+    fn binding(mut self) -> Self {
+        self.binds = true;
+        self
+    }
     fn new(calls: Arc<Calls>, received: mpsc::Sender<(String, u64)>) -> Self {
         Self {
             descriptor: FactoryDescriptor {
@@ -924,6 +947,7 @@ impl Factory {
             },
             calls,
             received,
+            binds: false,
         }
     }
     fn specification(&self, label: &str) -> ComponentSpecification {
@@ -949,6 +973,9 @@ impl ComponentFactory for Factory {
     fn supports_reconfiguration(&self) -> bool {
         true
     }
+    fn binds_inputs(&self) -> bool {
+        self.binds
+    }
     fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
         self.calls
             .validator_tasks
@@ -966,6 +993,11 @@ impl ComponentFactory for Factory {
         context: ConstructionContext,
     ) -> Result<ConstructedComponent, ComponentCreationError> {
         self.calls.creates.fetch_add(1, Ordering::SeqCst);
+        self.calls
+            .bound
+            .lock()
+            .expect("bound")
+            .push(context.input_bindings().to_vec());
         if self.calls.fail_create.swap(false, Ordering::SeqCst) {
             return Err(if self.calls.terminal.load(Ordering::SeqCst) {
                 ComponentCreationError::terminal(anyhow::anyhow!("invalid runtime configuration"))
@@ -2713,4 +2745,204 @@ async fn committed_reconciliation_ignores_disjoint_pending_start() {
 both_tokio_flavors!(
     disjoint_start_during_committed_reconciliation,
     committed_reconciliation_ignores_disjoint_pending_start
+);
+
+fn declared_input(producer: &str) -> InputBinding {
+    InputBinding {
+        input_port: port("in"),
+        output: OutputEndpoint::new(component(producer), port("out")),
+        stream: stream(producer),
+    }
+}
+
+fn source_definition(id: &str) -> DesiredComponent {
+    DesiredComponent {
+        descriptor: descriptor(id, &[], &["out"]),
+        role: ComponentRole::Source,
+        completion: None,
+        streams: BTreeMap::from([(port("out"), stream(id))]),
+        lifecycle: LifecyclePolicy::default(),
+        input_merge: InputMergePolicy::Arrival,
+        construction: ComponentConstruction::External { binding: id.into() },
+    }
+}
+
+#[tokio::test]
+async fn supplied_component_receives_declared_bindings_only_when_opted_in() {
+    for opted_in in [true, false] {
+        let calls = Arc::new(Calls::default());
+        calls.binds_inputs.store(opted_in, Ordering::SeqCst);
+        let (source, input) = source(Arc::new(Calls::default()));
+        let (received, mut output_rx) = mpsc::channel(8);
+        let mut graph = ComputationGraph::builder("supplied-bindings")
+            .source(source)
+            .sink(Box::new(sink("sink", "sink", calls.clone(), received)))
+            .bind_stream(endpoint("source", "out"), stream("source"))
+            .connect(
+                edge("source", "sink"),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .build()
+            .expect("graph");
+        let run = graph.run().expect("scope");
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            activate(&control).await;
+            input
+                .send(output(root("source", 1, &[1])))
+                .await
+                .expect("input");
+            assert_eq!(output_rx.recv().await, Some(("sink".into(), 1)));
+            let bound = calls.bound.lock().expect("bound").clone();
+            if opted_in {
+                assert!(!bound.is_empty());
+                assert!(bound
+                    .iter()
+                    .all(|bindings| bindings == &[declared_input("source")]));
+            } else {
+                assert!(bound.is_empty());
+            }
+            control.cancel();
+        });
+        cancelled(result);
+    }
+}
+
+#[tokio::test]
+async fn failed_input_binding_fails_the_operation_instead_of_being_ignored() {
+    let calls = Arc::new(Calls::default());
+    calls.binds_inputs.store(true, Ordering::SeqCst);
+    calls.fail_bind_inputs.store(true, Ordering::SeqCst);
+    let (source, _input) = source(Arc::new(Calls::default()));
+    let (received, _output_rx) = mpsc::channel(8);
+    let mut graph = ComputationGraph::builder("failed-bindings")
+        .source(source)
+        .sink(Box::new(sink("sink", "sink", calls.clone(), received)))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .expect("graph");
+    let run = graph.run().expect("scope");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.expect("deployment");
+        let started = control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await;
+        assert!(started
+            .map(|report| report.summary != OperationSummary::Completed)
+            .unwrap_or(true));
+        assert!(calls.bound.lock().expect("bound").is_empty());
+        assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
+        control.cancel();
+    });
+    cancelled(result);
+}
+
+#[tokio::test]
+async fn binding_factory_gets_declared_inputs_and_is_replaced_when_they_change() {
+    for binds in [true, false] {
+        let calls = Arc::new(Calls::default());
+        let (received, _output_rx) = mpsc::channel(8);
+        let factory = Factory::new(calls.clone(), received);
+        let factory = Arc::new(if binds { factory.binding() } else { factory });
+        let (source, _input) = source(Arc::new(Calls::default()));
+        let mut graph = ComputationGraph::builder("factory-bindings")
+            .source(source)
+            .component(factory.specification("sink"), factory.clone())
+            .bind_stream(endpoint("source", "out"), stream("source"))
+            .connect(
+                edge("source", "sink"),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .build()
+            .expect("graph");
+        let run = graph.run().expect("scope");
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            activate(&control).await;
+            assert_eq!(
+                *calls.bound.lock().expect("bound"),
+                vec![if binds {
+                    vec![declared_input("source")]
+                } else {
+                    Vec::new()
+                }]
+            );
+            let preview = control
+                .preview(
+                    GraphRevision(1),
+                    vec![
+                        DesiredMutation::PutComponent(source_definition("other")),
+                        DesiredMutation::Bind(DesiredRelationship {
+                            definition: edge("other", "sink"),
+                            policy: RelationshipPolicy::default(),
+                            pipe: DesiredPipe::Bounded { capacity: 1 },
+                        }),
+                    ],
+                )
+                .await
+                .expect("a second incoming edge is a valid preview");
+            assert_eq!(preview.replaced().contains(&component("sink")), binds);
+            assert!(preview.paused().contains(&component("sink")));
+            control.cancel();
+        });
+        cancelled(result);
+    }
+}
+
+async fn binding_factory_waits_for_its_input_declaration() {
+    let calls = Arc::new(Calls::default());
+    let (received, _output_rx) = mpsc::channel(8);
+    let factory = Arc::new(Factory::new(calls.clone(), received).binding());
+    let (source, _input) = source(Arc::new(Calls::default()));
+    let mut graph = ComputationGraph::builder("pending-factory-input")
+        .source(source)
+        .component(factory.specification("sink"), factory)
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .build()
+        .expect("unconnected declarations");
+    let run = graph.run().expect("scope");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control
+            .deployment_report()
+            .await
+            .expect("deployment observation");
+        let observed = control.observed();
+        let sink = &observed.components[&component("sink")];
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 0);
+        assert!(sink.failure.is_none());
+        assert!(sink.waiting_for.contains(&DependencyWait::Connection {
+            endpoint: endpoint("sink", "in"),
+        }));
+        control
+            .connect(
+                edge("source", "sink"),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+                RelationshipPolicy::default(),
+            )
+            .await
+            .expect("declare the input");
+        let report = control
+            .start_components(control.desired_snapshot().revision, GraphSelection::All)
+            .await
+            .expect("activate the connected graph");
+        assert_eq!(report.summary, OperationSummary::Completed);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *calls.bound.lock().unwrap(),
+            vec![vec![declared_input("source")]]
+        );
+        control.cancel();
+    });
+    cancelled(result);
+}
+
+both_tokio_flavors!(
+    binding_factory_missing_input,
+    binding_factory_waits_for_its_input_declaration
 );

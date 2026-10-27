@@ -3,7 +3,7 @@
 **User-approved deferral: this family is parked, not qualified or complete.**
 
 One bootstrap-role crate exports two explicit factories, both through the real
-static SDK and ABI 1.0.0 / wire 2 dynamic library:
+static SDK and ABI 1.0.0 / wire 1 dynamic library:
 
 | Factory | Permissions and behavior |
 |---|---|

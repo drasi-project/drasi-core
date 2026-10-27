@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
             MATCH (m:MidPrice)-[:PRICE_OF]->(c:Coin {name: "BTC"})
             RETURN c.name AS coin, m.price AS price
         "#)
-        .from_source("hl")
+        .from_input("hl")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

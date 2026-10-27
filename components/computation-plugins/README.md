@@ -9,7 +9,8 @@ Shared crates contain helpers, not additional registered components.
 
 The dynamic plugins use the lightweight `drasi-computation-contracts` and
 `drasi-core-types` packages, not `drasi-lib` or the query engine. The SDK exposes
-only supported plugin operations and borrowed host services. A query-result
+only supported plugin operations and borrowed host services. Native sinks accept the standard graph-change schema from any source,
+transformer or query ([sink input contract](SINKS.md)); a query-result
 message does not require query execution. `make check-native-dependencies`
 checks every native library independently, including its build dependencies.
 

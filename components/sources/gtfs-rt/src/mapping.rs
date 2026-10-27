@@ -374,9 +374,7 @@ pub fn diff_graph_snapshots(
 
     for id in update_ids {
         if let Some(item) = current.items.get(&id) {
-            changes.push(SourceChange::Update {
-                element: item.item.to_element(source_id)?,
-            });
+            changes.push(SourceChange::update(item.item.to_element(source_id)?));
         }
     }
 

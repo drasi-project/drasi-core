@@ -478,7 +478,7 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
     let changes =
         SourceTransactionCodec::decode(&envelope.envelope, database.settings.transactions)?
             .into_changes();
-    let [SourceChange::Update { element }] = changes.as_slice() else {
+    let [SourceChange::Update { element, .. }] = changes.as_slice() else {
         anyhow::bail!("expected a complete typed update after binlog rotation");
     };
     assert_eq!(element.get_property("mi"), &Integer(-1));
@@ -986,8 +986,21 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
             );
             assert!(factory.validate(&invalid).is_err());
             invalid = spec.clone();
-            invalid.descriptor =
-                MySqlSource::describe(ComponentId::try_new("source")?, MySqlOutput::Changes)?;
+            let schema = GraphChangeCodec::schema();
+            invalid.descriptor = ComponentDescriptor::try_new(
+                ComponentId::try_new("source")?,
+                vec![PortDescriptor::new(
+                    PortId::try_new("out")?,
+                    PortDirection::Output,
+                    SchemaDescriptor::try_new(
+                        SchemaId::try_new("not-graph-change")?,
+                        schema.descriptor().version(),
+                        schema.descriptor().encoding(),
+                        schema.descriptor().definition().clone(),
+                    )?,
+                    PipeRequirements::default(),
+                )],
+            )?;
             invalid.configuration.insert(
                 Arc::from("settings"),
                 ConfigurationValue::Literal(serde_json::to_value(&database.settings)?),

@@ -461,29 +461,32 @@ impl ComponentHandle {
     }
 
     async fn wait(&self, started: bool) -> GraphResult<()> {
-        let mut changes = self.control.subscribe_observed();
+        let mut changes = self.control.subscribe_registry();
         loop {
+            self.observed()?;
             let snapshot = changes.borrow_and_update().clone();
-            let node = snapshot
+            if let Some(node) = snapshot
+                .observed
                 .components
                 .get(&self.id)
                 .filter(|node| node.generation == self.generation)
-                .ok_or(GraphError::StaleGeneration)?;
-            if started && node.started || !started && node.realization == RealizationState::Created
             {
-                return Ok(());
-            }
-            if let Some(failure) = &node.failure {
-                return Err(GraphError::Reported {
-                    cause: failure.cause.clone(),
-                });
-            }
-            // A stop acknowledges a cancelled or retryable creation failure without retrying
-            // it, so this generation cannot progress until an explicit start.
-            if node.realization == RealizationState::CreationFailed {
-                return Err(GraphError::CreationStopped {
-                    component: self.id.clone(),
-                });
+                if started && node.started
+                    || !started && node.realization == RealizationState::Created
+                {
+                    return Ok(());
+                }
+                if let Some(failure) = &node.failure {
+                    return Err(GraphError::Reported {
+                        cause: failure.cause.clone(),
+                    });
+                }
+                // A stop acknowledges a creation failure without retrying it.
+                if node.realization == RealizationState::CreationFailed {
+                    return Err(GraphError::CreationStopped {
+                        component: self.id.clone(),
+                    });
+                }
             }
             tokio::select! {
                 biased;
@@ -594,8 +597,10 @@ impl std::fmt::Debug for ComponentHandle {
 }
 
 impl GraphControl {
-    /// Declare a connection. Required reconstructible pipes wait for missing
-    /// endpoints; opaque external pipes require both endpoints to be declared.
+    /// Declare a connection. Reconstructible pipes can retain missing endpoints
+    /// as boundary declarations; required connections bind when they appear.
+    /// Optional/orphan boundaries need an explicit bind to become active.
+    /// Opaque external pipes require both endpoints to be declared.
     /// Pipe creation failures remain in the returned reconciliation report.
     pub async fn connect(
         &self,
@@ -955,6 +960,15 @@ pub(super) fn insert(
             .resources
             .extend(addition.resources.iter().cloned());
         candidate.validate_structure()?;
+    }
+    if let ComponentConstruction::External { binding } = &addition.definition.construction {
+        if let Some(component) = addition.bindings.components.get(binding) {
+            component
+                .0
+                .output_readers()
+                .validate(&addition.definition.descriptor)
+                .map_err(|error| topology(error.to_string()))?;
+        }
     }
     let mut addition = pending.take().expect("validated addition");
     graph

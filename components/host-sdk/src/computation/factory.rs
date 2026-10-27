@@ -63,6 +63,7 @@ pub struct NativeFactory {
     metadata: FactoryMetadata,
     configuration_details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
     descriptor: FactoryDescriptor,
+    port_formats: Option<PortFormatCatalogue>,
     raw: abi::FactoryHandle,
     _plugin: Arc<PluginOwner>,
     codec: Arc<BinaryEnvelopeCodec>,
@@ -75,8 +76,10 @@ pub struct NativeFactory {
         abi::consumer::PluginConsumerV1,
     )>,
     batching: Option<abi::batching::PluginBatchingV1>,
-    query_snapshots: Option<abi::query_snapshots::PluginQuerySnapshotsV1>,
+    output_snapshots: Option<abi::output_snapshots::PluginOutputSnapshotsV1>,
     source_schema: Option<abi::source_schema::PluginSourceSchemaV1>,
+    output_reads: Option<abi::output_reads::PluginOutputReadsV1>,
+    output_follow: Option<abi::output_follow::PluginOutputFollowV1>,
     bootstrap_coordination: Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
     activation_credentials: Option<abi::activation_credentials::PluginActivationCredentialsV1>,
 }
@@ -127,8 +130,13 @@ impl NativeFactory {
                 .dependencies
                 .insert("input_progress".into(), requirement);
         }
+        let port_formats = metadata
+            .supports_port_format_overrides()
+            .then(|| metadata.port_catalogue())
+            .transpose()?;
         Ok(Self {
             descriptor,
+            port_formats,
             metadata,
             configuration_details: None,
             raw,
@@ -140,8 +148,10 @@ impl NativeFactory {
             consumer_progress: None,
             consumer: None,
             batching: None,
-            query_snapshots: None,
+            output_snapshots: None,
             source_schema: None,
+            output_reads: None,
+            output_follow: None,
             bootstrap_coordination: None,
             activation_credentials: None,
         })
@@ -185,8 +195,21 @@ impl NativeFactory {
         configuration: serde_json::Value,
         identity: Arc<super::NativeIdentityResource>,
     ) -> anyhow::Result<NativeComponentProxy> {
+        self.create_component_with_identity_and_inputs(id, configuration, identity, Vec::new())
+    }
+
+    /// Like [`Self::create_component_with_identity`], for a component that binds
+    /// its declared incoming edges (`inputs`).
+    pub fn create_component_with_identity_and_inputs(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        identity: Arc<super::NativeIdentityResource>,
+        inputs: Vec<InputBinding>,
+    ) -> anyhow::Result<NativeComponentProxy> {
         self.construct_bound_with_identity(
             CreateRequest {
+                inputs,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -264,6 +287,7 @@ impl NativeFactory {
         self.validate_configuration(&configuration)?;
         super::NativeSourceBootstrapResource::create(
             CreateRequest {
+                inputs: Vec::new(),
                 activation_credentials_bound: identity.is_some(),
                 id,
                 configuration,
@@ -283,6 +307,20 @@ impl NativeFactory {
         extension: Option<abi::source_schema::PluginSourceSchemaV1>,
     ) -> Self {
         self.source_schema = extension;
+        self
+    }
+    pub(super) fn with_output_reads(
+        mut self,
+        extension: Option<abi::output_reads::PluginOutputReadsV1>,
+    ) -> Self {
+        self.output_reads = extension;
+        self
+    }
+    pub(super) fn with_output_follow(
+        mut self,
+        extension: Option<abi::output_follow::PluginOutputFollowV1>,
+    ) -> Self {
+        self.output_follow = extension;
         self
     }
     pub(super) fn with_configuration_details(
@@ -368,25 +406,25 @@ impl NativeFactory {
         self.batching = batching;
         Ok(self)
     }
-    pub(super) fn with_query_snapshots(
+    pub(super) fn with_output_snapshots(
         mut self,
-        snapshots: Option<abi::query_snapshots::PluginQuerySnapshotsV1>,
+        snapshots: Option<abi::output_snapshots::PluginOutputSnapshotsV1>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             snapshots.is_none()
                 || (self.metadata.role == ComponentRole::Sink && self.consumer.is_none()),
-            "native query-snapshot reads require a sink without an independent consumer wrapper"
+            "native output-snapshot reads require a sink without an independent consumer wrapper"
         );
         if snapshots.is_some() {
             let mut requirement = ResourceRequirement::exactly_one::<
-                super::NativeQuerySnapshotsResource,
-            >(ResourceRole::QueryCatalog);
+                super::NativeOutputSnapshotsResource,
+            >(ResourceRole::OutputCatalogue);
             requirement.minimum = 0;
             self.descriptor
                 .dependencies
-                .insert("query_snapshots".into(), requirement);
+                .insert("output_snapshots".into(), requirement);
         }
-        self.query_snapshots = snapshots;
+        self.output_snapshots = snapshots;
         Ok(self)
     }
     pub async fn create_consumer(
@@ -397,11 +435,27 @@ impl NativeFactory {
         provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
         options: DeliveryOptions,
     ) -> anyhow::Result<super::NativeConsumerProxy> {
+        self.create_consumer_with_inputs(id, configuration, scope, provider, options, Vec::new())
+            .await
+    }
+
+    /// Like [`Self::create_consumer`], for a consumer that binds its declared
+    /// incoming edges (`inputs`).
+    pub async fn create_consumer_with_inputs(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
+        options: DeliveryOptions,
+        inputs: Vec<InputBinding>,
+    ) -> anyhow::Result<super::NativeConsumerProxy> {
         let (mode, extension) = self
             .consumer
             .ok_or_else(|| anyhow::anyhow!("native factory has no consumer service"))?;
         let component = self.construct_bound(
             CreateRequest {
+                inputs,
                 activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
@@ -451,6 +505,7 @@ impl NativeFactory {
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct(
             CreateRequest {
+                inputs: Vec::new(),
                 activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
@@ -463,15 +518,43 @@ impl NativeFactory {
         )
     }
 
-    pub fn create_component_with_query_snapshots(
+    /// Construct a component that binds its incoming edges, as the graph does
+    /// from its declared topology. `inputs` are the actual producer outputs and
+    /// streams feeding the component; a factory that does not bind inputs
+    /// rejects them.
+    pub fn create_component_with_inputs(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        inputs: Vec<InputBinding>,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        self.construct(
+            CreateRequest {
+                inputs,
+                activation_credentials_bound: false,
+                id,
+                implementation: self.metadata.implementation.clone(),
+                configuration_version: self.metadata.configuration_version,
+                configuration,
+                scope: None,
+            },
+            None,
+            None,
+        )
+    }
+
+    pub fn create_component_with_output_snapshots(
         &self,
         id: ComponentId,
         configuration: serde_json::Value,
         scope: Scope,
-        snapshots: Arc<super::NativeQuerySnapshotsResource>,
+        snapshots: Arc<super::NativeOutputSnapshotsResource>,
+        catalogue: OutputCatalogue,
+        inputs: Vec<InputBinding>,
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct_bound(
             CreateRequest {
+                inputs,
                 activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
@@ -482,7 +565,10 @@ impl NativeFactory {
             None,
             None,
             false,
-            Some(snapshots),
+            Some(super::OutputSnapshotsService {
+                resource: snapshots,
+                catalogue,
+            }),
             None,
             None,
             None,
@@ -498,6 +584,7 @@ impl NativeFactory {
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct_bound(
             CreateRequest {
+                inputs: Vec::new(),
                 activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
@@ -529,6 +616,7 @@ impl NativeFactory {
         };
         self.construct_bound(
             CreateRequest {
+                inputs: Vec::new(),
                 activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
@@ -558,6 +646,7 @@ impl NativeFactory {
     ) -> anyhow::Result<NativeComponentProxy> {
         self.construct_bound(
             CreateRequest {
+                inputs: Vec::new(),
                 activation_credentials_bound: false,
                 id,
                 implementation: self.metadata.implementation.clone(),
@@ -584,6 +673,7 @@ impl NativeFactory {
         configuration: serde_json::Value,
     ) -> anyhow::Result<ComponentSpecification> {
         self.validate_configuration(&configuration)?;
+        let descriptor = self.metadata.descriptor_for(id, &configuration)?;
         let configuration = configuration
             .as_object()
             .expect("validated object")
@@ -596,7 +686,7 @@ impl NativeFactory {
             })
             .collect();
         Ok(ComponentSpecification {
-            descriptor: self.metadata.descriptor(id)?,
+            descriptor,
             role: self.metadata.role,
             completion: self.metadata.completion,
             implementation: self.metadata.implementation.clone(),
@@ -621,7 +711,7 @@ impl NativeFactory {
         admission: Option<Arc<SourceAdmission>>,
         progress: Option<Arc<QuerySourceProgress>>,
         consumer: bool,
-        query_snapshots: Option<Arc<super::NativeQuerySnapshotsResource>>,
+        output_snapshots: Option<super::OutputSnapshotsService>,
         consumer_progress: Option<Arc<ConsumerProgressSet>>,
         input_progress: Option<Arc<QuerySourceProgress>>,
         source_bootstrap: Option<Arc<super::NativeSourceBootstrapResource>>,
@@ -631,7 +721,7 @@ impl NativeFactory {
             admission,
             progress,
             consumer,
-            query_snapshots,
+            output_snapshots,
             consumer_progress,
             input_progress,
             source_bootstrap,
@@ -646,13 +736,17 @@ impl NativeFactory {
         admission: Option<Arc<SourceAdmission>>,
         progress: Option<Arc<QuerySourceProgress>>,
         consumer: bool,
-        query_snapshots: Option<Arc<super::NativeQuerySnapshotsResource>>,
+        output_snapshots: Option<super::OutputSnapshotsService>,
         consumer_progress: Option<Arc<ConsumerProgressSet>>,
         input_progress: Option<Arc<QuerySourceProgress>>,
         source_bootstrap: Option<Arc<super::NativeSourceBootstrapResource>>,
         identity: Option<Arc<super::NativeIdentityResource>>,
     ) -> anyhow::Result<NativeComponentProxy> {
         request.activation_credentials_bound = identity.is_some();
+        anyhow::ensure!(
+            request.inputs.is_empty() || self.metadata.capabilities.binds_inputs,
+            "native factory does not bind inputs"
+        );
         if let Some(owner) = &input_progress {
             anyhow::ensure!(
                 self.supports_input_progress(),
@@ -680,7 +774,7 @@ impl NativeFactory {
                 || (admission.is_none()
                     && progress.is_none()
                     && !consumer
-                    && query_snapshots.is_none()),
+                    && output_snapshots.is_none()),
             "native consumer progress cannot be combined with other service bindings"
         );
         let consumer_progress = consumer_progress
@@ -732,23 +826,19 @@ impl NativeFactory {
         };
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
-        let query_snapshots = query_snapshots
+        let output_snapshots = output_snapshots
             .map(|resource| -> anyhow::Result<_> {
                 anyhow::ensure!(
-                    self.query_snapshots.is_some()
+                    self.output_snapshots.is_some()
                         && !consumer
                         && admission.is_none()
                         && progress.is_none(),
-                    "native query snapshots require their negotiated read service"
+                    "native output snapshots require their negotiated read service"
                 );
-                anyhow::ensure!(
-                    request
-                        .scope
-                        .as_ref()
-                        .is_some_and(|scope| scope.graph_id == resource.graph_id()),
-                    "query-snapshot resource belongs to another graph"
-                );
-                Ok(super::query_snapshots::QuerySnapshotsBinding::new(resource))
+                Ok(super::output_snapshots::OutputSnapshotsBinding::new(
+                    resource.resource,
+                    resource.catalogue,
+                ))
             })
             .transpose()?;
         let binding = admission.as_ref().map(|admission| {
@@ -773,7 +863,7 @@ impl NativeFactory {
         unsafe {
             if let Some(coordinator) = &source_bootstrap {
                 anyhow::ensure!(
-                    admission.is_none() && !consumer && query_snapshots.is_none(),
+                    admission.is_none() && !consumer && output_snapshots.is_none(),
                     "source bootstrap cannot be combined with unrelated service bindings"
                 );
                 let extension = self.bootstrap_coordination.ok_or_else(|| {
@@ -810,9 +900,9 @@ impl NativeFactory {
                     &progress.binding.table(),
                     &mut component,
                 ))?;
-            } else if let Some(binding) = &query_snapshots {
+            } else if let Some(binding) = &output_snapshots {
                 take_status(self
-                    .query_snapshots
+                    .output_snapshots
                     .expect("validated")
                     .create
                     .expect("validated")(
@@ -856,7 +946,7 @@ impl NativeFactory {
         let component = unsafe {
             NativeComponentProxy::new(
                 component,
-                self.metadata.clone(),
+                self.metadata.for_configuration(&request.configuration)?,
                 &request.id,
                 self.codec.clone(),
                 self.schemas.clone(),
@@ -875,8 +965,9 @@ impl NativeFactory {
         }?;
         component
             .with_identity(activation_identity)
-            .with_query_snapshots(query_snapshots)
-            .with_source_schema(self.source_schema)
+            .with_output_snapshots(output_snapshots)
+            .with_source_schema(self.source_schema)?
+            .with_output_reads(self.output_reads, self.output_follow)
     }
 }
 impl Drop for NativeFactory {
@@ -889,6 +980,15 @@ impl Drop for NativeFactory {
 impl ComponentFactory for NativeFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
+    }
+    fn port_formats(&self) -> Option<&PortFormatCatalogue> {
+        self.port_formats.as_ref()
+    }
+    fn primary_ports(&self) -> PortPrimaries {
+        self.metadata.capabilities.primary_ports.clone()
+    }
+    fn binds_inputs(&self) -> bool {
+        self.metadata.capabilities.binds_inputs
     }
     fn specification_from_config(
         &self,
@@ -920,7 +1020,7 @@ impl ComponentFactory for NativeFactory {
                             self.consumer_progress.is_some() && resources.len() == 1
                         }
                         "consumer" => self.consumer.is_some() && resources.len() == 1,
-                        "query_snapshots" => self.query_snapshots.is_some(),
+                        "output_snapshots" => self.output_snapshots.is_some(),
                         "identity" => {
                             self.activation_credentials.is_some() && self.consumer.is_none()
                         }
@@ -982,10 +1082,16 @@ impl ComponentFactory for NativeFactory {
             }),
             "native source cannot bind admission and a separate replay owner"
         );
+        let port_overrides = match specification.configuration.get(PORT_FORMATS_KEY) {
+            Some(ConfigurationValue::Literal(value)) => Some(value),
+            Some(_) => anyhow::bail!("port format overrides must be literal configuration"),
+            None => None,
+        };
         anyhow::ensure!(
             specification.descriptor
                 == self
                     .metadata
+                    .for_port_overrides(port_overrides)?
                     .descriptor(specification.descriptor.id().clone())?,
             "native specification descriptor mismatch"
         );
@@ -1033,8 +1139,13 @@ impl ComponentFactory for NativeFactory {
                     .map(|(name, value)| (name.to_string(), value.clone()))
                     .collect(),
             );
+            let inputs = if self.metadata.capabilities.binds_inputs {
+                context.input_bindings().to_vec()
+            } else {
+                Vec::new()
+            };
             let proxy = self
-                .create_consumer(
+                .create_consumer_with_inputs(
                     context.component_id,
                     configuration,
                     Scope {
@@ -1044,6 +1155,7 @@ impl ComponentFactory for NativeFactory {
                     },
                     resource.provider.clone(),
                     resource.options.clone(),
+                    inputs,
                 )
                 .await
                 .map_err(ComponentCreationError::terminal)?;
@@ -1119,13 +1231,17 @@ impl ComponentFactory for NativeFactory {
         let snapshots = if context
             .specification
             .dependencies
-            .contains_key("query_snapshots")
+            .contains_key("output_snapshots")
         {
             context
-                .resources::<super::NativeQuerySnapshotsResource>("query_snapshots")
+                .resources::<super::NativeOutputSnapshotsResource>("output_snapshots")
                 .map_err(ComponentCreationError::terminal)?
                 .into_iter()
                 .next()
+                .map(|resource| super::OutputSnapshotsService {
+                    resource,
+                    catalogue: context.output_catalogue().clone(),
+                })
         } else {
             None
         };
@@ -1170,6 +1286,11 @@ impl ComponentFactory for NativeFactory {
         let proxy = self
             .construct_bound_with_identity(
                 CreateRequest {
+                    inputs: if self.metadata.capabilities.binds_inputs {
+                        context.input_bindings().to_vec()
+                    } else {
+                        Vec::new()
+                    },
                     activation_credentials_bound: false,
                     id: context.component_id,
                     implementation: context.specification.implementation.clone(),
@@ -1210,7 +1331,7 @@ impl ComponentFactory for NativeFactory {
             ComponentRole::Service => ConstructedComponent::service(Box::new(proxy)),
             ComponentRole::Query => {
                 return Err(ComponentCreationError::terminal(anyhow::anyhow!(
-                    "native dynamic query snapshot/outbox is unsupported"
+                    "native dynamic output snapshot/outbox is unsupported"
                 )))
             }
         })

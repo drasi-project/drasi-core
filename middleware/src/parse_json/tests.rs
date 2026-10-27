@@ -75,6 +75,7 @@ fn create_node_insert_change(props: Value) -> SourceChange {
 
 fn create_node_update_change(props: Value) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: create_node_element(create_prop_map(props)),
     }
 }
@@ -94,9 +95,9 @@ fn create_node_delete_change() -> SourceChange {
 
 fn get_props_from_change(change: &SourceChange) -> &ElementPropertyMap {
     match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => {
-            element.get_properties()
-        }
+        SourceChange::Insert { element }
+        | SourceChange::Replace { element }
+        | SourceChange::Update { element, .. } => element.get_properties(),
         SourceChange::Delete { .. } | SourceChange::Future { .. } => {
             panic!("Cannot get properties from Delete or Future change")
         }
@@ -786,5 +787,81 @@ mod factory {
         assert!(
             matches!(result.err().unwrap(), MiddlewareSetupError::InvalidConfiguration(msg) if msg.contains("'max_json_size' must be greater than 0"))
         );
+    }
+}
+
+mod canonical_mutation {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn removing(removed: &[&str], props: Value) -> SourceChange {
+        let SourceChange::Update { element, .. } = create_node_update_change(props) else {
+            panic!("expected update");
+        };
+        SourceChange::update_with_removals(
+            element,
+            removed.iter().map(|name| name.to_string()).collect(),
+        )
+        .unwrap()
+    }
+
+    async fn run(output_property: Option<&str>, change: SourceChange) -> Vec<SourceChange> {
+        let mut config = json!({"target_property": "data_json"});
+        if let Some(output) = output_property {
+            config["output_property"] = json!(output);
+        }
+        ParseJsonFactory::default()
+            .create(&create_mw_config(config))
+            .unwrap()
+            .process(change, &InMemoryElementIndex::new())
+            .await
+            .unwrap()
+    }
+
+    fn removed_of(changes: &[SourceChange]) -> BTreeSet<String> {
+        let [SourceChange::Update {
+            removed_properties, ..
+        }] = changes
+        else {
+            panic!("an update stays one update: {changes:?}");
+        };
+        removed_properties.clone()
+    }
+
+    #[tokio::test]
+    async fn removing_the_json_property_removes_the_parsed_output_too() {
+        let result = run(Some("parsed"), removing(&["data_json"], json!({"id": 1}))).await;
+        assert_eq!(
+            removed_of(&result),
+            BTreeSet::from(["data_json".to_string(), "parsed".to_string()])
+        );
+        // The in-place form needs no extra removal: removing the source is enough.
+        let result = run(None, removing(&["data_json"], json!({"id": 1}))).await;
+        assert_eq!(
+            removed_of(&result),
+            BTreeSet::from(["data_json".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn parsing_an_update_keeps_unrelated_removals_and_replacements() {
+        let result = run(
+            Some("parsed"),
+            removing(&["gone", "parsed"], json!({"data_json": r#"{"a":1}"#})),
+        )
+        .await;
+        assert_eq!(removed_of(&result), BTreeSet::from(["gone".to_string()]));
+        assert!(get_props_from_change(&result[0]).get("parsed").is_some());
+
+        let SourceChange::Insert { element } =
+            create_node_insert_change(json!({"data_json": r#"{"a":1}"#}))
+        else {
+            panic!("expected insert");
+        };
+        let replaced = run(None, SourceChange::replace(element)).await;
+        assert!(matches!(
+            replaced.as_slice(),
+            [SourceChange::Replace { .. }]
+        ));
     }
 }

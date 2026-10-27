@@ -796,7 +796,7 @@ async fn main() -> Result<()> {
     // Create continuous query
     let query = Query::cypher("active-users")
         .query("MATCH (u:User) WHERE u.active = true RETURN u.name")
-        .from_source("http-source")
+        .from_input("http-source")
         .build();
 
     // Initialize Drasi

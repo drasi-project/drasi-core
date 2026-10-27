@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{ChangeEnvelope, ComponentId, ContextEntry, ContextValue, ContractError};
 
@@ -108,6 +109,34 @@ impl QueryRecoveryIdentity {
         self.incarnation
     }
 
+    /// Publish through the same output identity contract as any other producer.
+    /// Persistent reconstruction keeps the epoch; a reset generation changes it.
+    pub fn output_producer(
+        &self,
+        stream: super::StreamId,
+        generation: u64,
+    ) -> anyhow::Result<super::GraphProducerIdentity> {
+        self.validate()?;
+        let mut hash = Sha256::new();
+        hash.update(b"drasi.query-output-epoch.v1");
+        hash.update(serde_json::to_vec(self)?);
+        hash.update(generation.to_be_bytes());
+        let digest = hash.finalize();
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        // RFC 9562 version 8 carries an application-defined stable epoch.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        super::GraphProducerIdentity::for_epoch(
+            self.construction_scope.clone(),
+            self.graph_id.clone(),
+            self.query_id.clone(),
+            stream,
+            uuid::Uuid::from_bytes(bytes),
+            self.incarnation.is_none(),
+        )
+    }
+
     pub fn validate(&self) -> Result<(), QueryIdentityError> {
         super::data::validate_identifier("query construction scope", &self.construction_scope)?;
         super::data::validate_identifier("graph", &self.graph_id)?;
@@ -179,5 +208,48 @@ impl QueryRecoveryIdentity {
         }
         record.identity.validate()?;
         Ok(Some(record.identity))
+    }
+}
+
+#[cfg(test)]
+mod output_epoch_tests {
+    use super::*;
+
+    fn identity(incarnation: Option<uuid::Uuid>) -> QueryRecoveryIdentity {
+        QueryRecoveryIdentity::try_new(
+            "graph",
+            ComponentId::try_new("query").unwrap(),
+            42,
+            incarnation,
+        )
+        .unwrap()
+        .with_construction_scope("instance")
+        .unwrap()
+    }
+
+    #[test]
+    fn persistent_output_epoch_survives_reconstruction_but_not_reset() {
+        let identity = identity(None);
+        let restored: QueryRecoveryIdentity =
+            serde_json::from_slice(&serde_json::to_vec(&identity).unwrap()).unwrap();
+        let stream = crate::StreamId::try_new("query/out").unwrap();
+        let original = identity.output_producer(stream.clone(), 2).unwrap();
+        assert!(original.persistent());
+        assert_eq!(
+            original,
+            restored.output_producer(stream.clone(), 2).unwrap()
+        );
+        assert_ne!(original, restored.output_producer(stream, 3).unwrap());
+    }
+
+    #[test]
+    fn volatile_reconstruction_has_a_distinct_output_epoch() {
+        let stream = crate::StreamId::try_new("query/out").unwrap();
+        let first = identity(Some(uuid::Uuid::new_v4()));
+        let second = identity(Some(uuid::Uuid::new_v4()));
+        let output = first.output_producer(stream.clone(), 0).unwrap();
+        assert!(!output.persistent());
+        assert_eq!(output, first.output_producer(stream.clone(), 0).unwrap());
+        assert_ne!(output, second.output_producer(stream, 0).unwrap());
     }
 }

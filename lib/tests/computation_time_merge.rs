@@ -920,10 +920,30 @@ async fn query_controls_are_not_source_changes() {
     let mut merger =
         SourceTimeMergeTransformer::new(definition(), GraphChangeCodec::schema()).unwrap();
     merger.start().await.unwrap();
-    let notification =
-        GraphChangeCodec::encode_futures_due(&component("a"), stream("a"), 1, time(10)).unwrap();
+    let notification = GraphChangeCodec::encode_futures_due(stream("a"), 1, time(10)).unwrap();
     assert!(merger.transform(input(notification)).await.is_err());
     assert_eq!(merger.subscribe().borrow().buffered_events, 0);
+}
+
+#[tokio::test]
+async fn producer_sequence_inputs_are_rejected_and_event_time_inputs_keep_ordering() {
+    let mut merger = SourceTimeMergeTransformer::new(definition(), schema()).unwrap();
+    merger.start().await.unwrap();
+    let source = event("a", 1, 10);
+    let sequenced = ChangeEnvelope::new(
+        source.id().clone(),
+        source.changes().clone(),
+        source
+            .system()
+            .as_ref()
+            .clone()
+            .with_ordering(ChangeOrdering::ProducerSequence),
+    );
+    assert!(merger.transform(input(sequenced)).await.is_err());
+    assert_eq!(merger.subscribe().borrow().buffered_events, 0);
+
+    merger.transform(input(source)).await.unwrap();
+    assert_eq!(merger.subscribe().borrow().buffered_events, 1);
 }
 
 #[tokio::test(start_paused = true)]

@@ -15,7 +15,7 @@ use drasi_core::{
 use drasi_lib::{computation::v1::*, DrasiLib};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
@@ -231,6 +231,7 @@ fn inventory_changes<T: FileRow>(
             }),
             Some(old) if old != product => changes.push_back(SourceChange::Update {
                 element: product.element(time),
+                removed_properties: BTreeSet::new(),
             }),
             Some(_) => {}
         }
@@ -1593,20 +1594,9 @@ mod tests {
 
     #[test]
     fn equal_rows_keep_distinct_identities_and_deletes_need_no_image() -> anyhow::Result<()> {
-        let first = QueryChangeCodec::encode_row(
-            "low-stock",
-            1,
-            &Default::default(),
-            QueryRowKind::Row,
-            RecordImage::Full,
-        )?;
-        let second = QueryChangeCodec::encode_row(
-            "low-stock",
-            2,
-            &Default::default(),
-            QueryRowKind::Row,
-            RecordImage::Full,
-        )?;
+        let projector = ResultNodeProjector::try_new("low-stock/out", None)?;
+        let first = QueryChangeCodec::encode_row(&projector, 1, &Default::default(), 1)?;
+        let second = QueryChangeCodec::encode_row(&projector, 2, &Default::default(), 1)?;
         let envelope = |sequence, operations| -> anyhow::Result<ChangeEnvelope> {
             let stream = StreamId::try_new("low-stock/out")?;
             Ok(ChangeEnvelope::new(

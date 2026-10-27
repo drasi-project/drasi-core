@@ -247,15 +247,13 @@ pub struct SnapshotRow {
     pub data: Value,
 }
 
-/// Snapshot of accumulated query results, separating rows from aggregation state.
+/// Snapshot of all query result rows, including grouped aggregates.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct QuerySnapshot {
     pub rows: Vec<SnapshotRow>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aggregation: Option<Value>,
 }
 
-/// In-memory snapshot store that accumulates query result rows and aggregation state.
+/// In-memory snapshot store keyed by query result identity.
 /// Clients can fetch the current state to populate widgets on first load.
 #[derive(Clone)]
 pub struct QuerySnapshotStore {
@@ -305,7 +303,7 @@ impl QuerySnapshotStore {
                     // Insert-of-an-existing-element is an upsert in drasi: replace
                     // an existing row with the same identity instead of appending a
                     // duplicate (see issue #605).
-                    upsert_row(&mut snapshot.rows, *row_signature, data);
+                    upsert_row(&mut snapshot.rows, *row_signature, data, None);
                 }
                 ResultDiff::Delete {
                     data,
@@ -321,22 +319,14 @@ impl QuerySnapshotStore {
                     row_signature,
                     ..
                 } => {
-                    // The row_signature is stable across an update; match on it,
-                    // falling back to the `before` payload when it is unknown.
-                    if let Some(idx) = find_row_index(&snapshot.rows, *row_signature, before) {
-                        snapshot.rows[idx] = SnapshotRow {
-                            row_signature: *row_signature,
-                            data: after.clone(),
-                        };
-                    } else {
-                        snapshot.rows.push(SnapshotRow {
-                            row_signature: *row_signature,
-                            data: after.clone(),
-                        });
-                    }
+                    upsert_row(&mut snapshot.rows, *row_signature, after, Some(before));
                 }
-                ResultDiff::Aggregation { after, .. } => {
-                    snapshot.aggregation = Some(after.clone());
+                ResultDiff::Aggregation {
+                    before,
+                    after,
+                    row_signature,
+                } => {
+                    upsert_row(&mut snapshot.rows, *row_signature, after, before.as_ref());
                 }
                 ResultDiff::Noop => {}
             }
@@ -386,19 +376,24 @@ impl QuerySnapshotStore {
         snapshots.get(query_id).cloned().unwrap_or_default()
     }
 
-    /// Check whether there is any data (rows or aggregation) for a query.
+    /// Check whether there are any result rows for a query.
     pub async fn has_data(&self, query_id: &str) -> bool {
         let snapshots = self.snapshots.read().await;
         snapshots
             .get(query_id)
-            .map(|s| !s.rows.is_empty() || s.aggregation.is_some())
+            .map(|s| !s.rows.is_empty())
             .unwrap_or(false)
     }
 }
 
 /// Insert or replace a row by its identity.
-fn upsert_row(rows: &mut Vec<SnapshotRow>, row_signature: u64, data: &Value) {
-    if let Some(idx) = find_row_index(rows, row_signature, data) {
+fn upsert_row(
+    rows: &mut Vec<SnapshotRow>,
+    row_signature: u64,
+    data: &Value,
+    before: Option<&Value>,
+) {
+    if let Some(idx) = find_row_index(rows, row_signature, before.unwrap_or(data)) {
         rows[idx] = SnapshotRow {
             row_signature,
             data: data.clone(),
@@ -426,10 +421,12 @@ fn find_row_index(rows: &[SnapshotRow], row_signature: u64, data: &Value) -> Opt
         // it by id/equality rather than appending a duplicate.
     }
     if let Some(target_id) = data.get("id") {
-        rows.iter()
-            .position(|r| r.data.get("id") == Some(target_id))
+        rows.iter().position(|r| {
+            (row_signature == 0 || r.row_signature == 0) && r.data.get("id") == Some(target_id)
+        })
     } else {
-        rows.iter().position(|r| &r.data == data)
+        rows.iter()
+            .position(|r| (row_signature == 0 || r.row_signature == 0) && &r.data == data)
     }
 }
 

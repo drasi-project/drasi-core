@@ -10,7 +10,7 @@ use drasi_source_sqlite::{
     TableKeyConfig,
 };
 use futures_util::{StreamExt, TryStreamExt};
-use std::num::NonZeroU64;
+use std::{collections::BTreeMap, num::NonZeroU64};
 
 const KIND: &str = "drasi.sqlite/file-bootstrap";
 const INSTANCE: &str = "native-file-bootstrap";
@@ -43,7 +43,7 @@ fn configuration(path: &Path) -> Value {
 }
 
 fn provider(plugin: &NativePlugin, path: &Path) -> Result<Arc<NativeBootstrapProxy>> {
-    plugin.bootstrap_factories()[0].create_provider(
+    file_factory(plugin)?.create_provider(
         id("query"),
         configuration(path),
         Some(Scope {
@@ -55,6 +55,14 @@ fn provider(plugin: &NativePlugin, path: &Path) -> Result<Arc<NativeBootstrapPro
     )
 }
 
+fn file_factory(plugin: &NativePlugin) -> Result<&Arc<computation::NativeBootstrapFactory>> {
+    plugin
+        .bootstrap_factories()
+        .iter()
+        .find(|factory| factory.metadata().implementation.name.as_ref() == KIND)
+        .context("missing SQLite file bootstrap factory")
+}
+
 #[test]
 fn sqlite_bootstrap_only_catalogue_is_discovered_and_empty_base_without_extension_rejects(
 ) -> Result<()> {
@@ -63,16 +71,35 @@ fn sqlite_bootstrap_only_catalogue_is_discovered_and_empty_base_without_extensio
         native.factories().is_empty(),
         "bootstrap must not register a dummy component"
     );
-    assert_eq!(native.bootstrap_factories().len(), 1);
+    let expected = BTreeMap::from([
+        (KIND.to_owned(), (false, false)),
+        (
+            "drasi.sqlite/coordinated-bootstrap".to_owned(),
+            (true, true),
+        ),
+        ("drasi.sqlite/shared-bootstrap".to_owned(), (true, true)),
+    ]);
+    let inventory = |factory: &Arc<computation::NativeBootstrapFactory>| {
+        let metadata = factory.metadata();
+        assert_eq!(metadata.implementation.version.as_ref(), "1");
+        assert_eq!(metadata.configuration_version, 1);
+        (
+            metadata.implementation.name.to_string(),
+            (
+                metadata.source_progress,
+                factory.requires_source_bootstrap(),
+            ),
+        )
+    };
+    assert_eq!(native.bootstrap_factories().len(), expected.len());
     assert_eq!(
-        native.bootstrap_factories()[0]
-            .metadata()
-            .implementation
-            .name
-            .as_ref(),
-        KIND
+        native
+            .bootstrap_factories()
+            .iter()
+            .map(inventory)
+            .collect::<BTreeMap<_, _>>(),
+        expected
     );
-    assert!(!native.bootstrap_factories()[0].metadata().source_progress);
     let metadata =
         scan_plugin_metadata(&plugin_path(KIND)).context("bootstrap-only metadata discovery")?;
     assert_eq!(metadata.abi_family.as_deref(), Some("computation"));
@@ -80,8 +107,30 @@ fn sqlite_bootstrap_only_catalogue_is_discovered_and_empty_base_without_extensio
     assert!(registry
         .register_computation_plugin(native.clone())?
         .is_empty());
-    assert_eq!(registry.computation_bootstrap_metadata().len(), 1);
-    assert_eq!(registry.computation_bootstrap_factories()?.len(), 1);
+    let metadata = registry.computation_bootstrap_metadata();
+    assert_eq!(metadata.len(), expected.len());
+    assert_eq!(
+        metadata
+            .iter()
+            .map(|metadata| (
+                metadata.implementation.name.to_string(),
+                metadata.source_progress
+            ))
+            .collect::<BTreeMap<_, _>>(),
+        expected
+            .iter()
+            .map(|(name, (progress, _))| (name.clone(), *progress))
+            .collect::<BTreeMap<_, _>>()
+    );
+    let factories = registry.computation_bootstrap_factories()?;
+    assert_eq!(factories.len(), expected.len());
+    assert_eq!(
+        factories
+            .values()
+            .map(inventory)
+            .collect::<BTreeMap<_, _>>(),
+        expected
+    );
 
     // The successful load above pins these function pointers for process lifetime.
     let library = unsafe { libloading::Library::new(plugin_path(KIND))? };
@@ -95,7 +144,7 @@ fn sqlite_bootstrap_only_catalogue_is_discovered_and_empty_base_without_extensio
     let failure = rejected.err().context("missing bootstrap rejection")?;
     assert!(format!("{failure:#}").contains("no component or bootstrap factories"));
     assert!(
-        native.bootstrap_factories()[0]
+        file_factory(&native)?
             .create_provider(
                 id("query"),
                 configuration(Path::new("not-opened.db")),
@@ -196,7 +245,7 @@ async fn hosted_file_snapshot() -> Result<()> {
         ).await?.committed);
         let mut pipeline = core.computation_pipeline()?.native_source(output)?;
         for query in ["query", "observer"] {
-            let snapshot = native.bootstrap_factories()[0].create_provider(
+            let snapshot = file_factory(&native)?.create_provider(
                 id(query), configuration(&path),
                 Some(Scope {
                     instance_id: INSTANCE.into(),
@@ -208,7 +257,7 @@ async fn hosted_file_snapshot() -> Result<()> {
             pipeline = pipeline.query_bootstrap(query, snapshot)?
                 .query(drasi_lib::Query::cypher(query)
                     .query("MATCH (n:items) RETURN n.id AS id,n.value AS value")
-                    .from_source("source").enable_bootstrap(true).build());
+                    .from_input("source").enable_bootstrap(true).build());
         }
         assert!(core.add_components(pipeline.build()?).await?.committed);
         core.start().await?;

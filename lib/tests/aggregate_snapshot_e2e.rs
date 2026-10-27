@@ -155,8 +155,8 @@ fn join(id: &str, keys: &[(&str, &str)]) -> QueryJoinConfig {
 fn portfolio_config() -> QueryConfig {
     Query::cypher(SUMMARY_ID)
         .query(PORTFOLIO_SUMMARY)
-        .from_source("postgres-stocks")
-        .from_source("price-feed")
+        .from_input("postgres-stocks")
+        .from_input("price-feed")
         .with_joins(vec![
             join(
                 "OWNS_STOCK",
@@ -327,6 +327,7 @@ async fn aggregate_snapshot_trading_bootstrap_updates_deletes_and_rebootstrap() 
     for (time, price_value, before, after) in [(2, 115, 2000.0, 2050.0), (3, 125, 2050.0, 2150.0)] {
         price_feed
             .send(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: price("AAPL", price_value, time),
             })
             .await?;
@@ -457,7 +458,7 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         .with_query(
             Query::cypher("comfort")
                 .query(query_text)
-                .from_source("building")
+                .from_input("building")
                 .with_joins(vec![join(
                     "PART_OF_FLOOR",
                     &[("Room", "floor_id"), ("Floor", "id")],
@@ -502,6 +503,7 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         let after = json!({"FloorId": floor, "ComfortLevel": comfort});
         handle
             .send(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: room(room_id, floor, temperature, time),
             })
             .await?;
@@ -530,7 +532,7 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
         .with_source(source)
         .with_query(Query::cypher("numeric-summary")
             .query("MATCH (p:Position) WITH p.group AS groupKey, sum(p.value) AS totalValue RETURN groupKey, totalValue")
-            .from_source("numeric")
+            .from_input("numeric")
             .enable_bootstrap(false)
             .build())
         .build().await?;
@@ -559,6 +561,7 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
     };
     handle
         .send(SourceChange::Update {
+            removed_properties: Default::default(),
             element: node(
                 "numeric",
                 "Position",
@@ -579,6 +582,7 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
     );
     handle
         .send(SourceChange::Update {
+            removed_properties: Default::default(),
             element: node(
                 "numeric",
                 "Position",
@@ -612,7 +616,7 @@ async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result
         .with_query(
             Query::cypher("terminal-summary")
                 .query("MATCH (p:Position) RETURN sum(p.value) AS totalValue")
-                .from_source("terminal")
+                .from_input("terminal")
                 .enable_bootstrap(false)
                 .build(),
         )

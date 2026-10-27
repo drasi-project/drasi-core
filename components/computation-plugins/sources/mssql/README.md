@@ -4,7 +4,7 @@
 incomplete. No further local or remote database attempts are authorized.**
 
 `drasi-computation-source-mssql` exports `drasi.mssql/changes`, using computation
-ABI **1.0.0**, wire **2**. Static `plugin()` and the `dynamic-plugin` entrypoint
+ABI **1.0.0**, wire **1**. Static `plugin()` and the `dynamic-plugin` entrypoint
 construct the same implementation. Dependencies contain no query runtime,
 parser, legacy SDK or source/reaction adapter.
 
@@ -79,7 +79,7 @@ parity qualification.
 | Capability | Native implementation / qualification limit |
 |---|---|
 | Tiberius connection, LSN decoding, SQL key/value helpers | Reused from `mssql-common`; CDC operation decoder and its original assertions moved there and re-exported by the legacy source. |
-| INSERT / UPDATE / DELETE | Complete CDC operation groups, including update-before images; full before/after images retained in standard graph change records. Real SQL tests remain deferred. |
+| INSERT / UPDATE / DELETE | Complete CDC operation groups, including update-before images; an UPDATE publishes a full replacement, not a property patch. Full before/after images are retained in standard graph change records. Real SQL tests remain deferred. |
 | Rekey | Explicit old-key DELETE then new-key INSERT; distinct CDC image ordinals permit partial replay. Legacy discarded update-before images and could leave the old key behind. |
 | Transactions / rollback | Uses committed CDC rows sorted globally by commit LSN, sequence, table and image. Row-mode delivery does **not** claim atomic multi-row graph evaluation. Legacy “transaction grouping” also dispatched individual rows, not an atomic graph transaction. |
 | Primary/custom/composite keys | Shared catalog/type logic, canonical schema-qualified IDs; null custom keys fail. Composite separators are escaped to prevent legacy underscore collisions, so migration requires authoritative query reconstruction. |

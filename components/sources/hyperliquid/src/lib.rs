@@ -644,7 +644,9 @@ fn split_changes(
 ) {
     for change in changes {
         match &change {
-            SourceChange::Insert { element } | SourceChange::Update { element } => match element {
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => match element {
                 Element::Node { .. } => nodes.push(change),
                 Element::Relation { .. } => relations.push(change),
             },
@@ -659,7 +661,9 @@ fn matches_labels(
     relation_labels: &[String],
 ) -> bool {
     match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => match element {
+        SourceChange::Insert { element }
+        | SourceChange::Replace { element }
+        | SourceChange::Update { element, .. } => match element {
             Element::Node { metadata, .. } => labels_match(&metadata.labels, node_labels),
             Element::Relation { metadata, .. } => labels_match(&metadata.labels, relation_labels),
         },

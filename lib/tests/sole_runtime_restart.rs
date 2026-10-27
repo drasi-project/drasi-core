@@ -228,7 +228,7 @@ async fn no_snapshot_source_keeps_committed_query_state_and_strict_reaction_prog
         .with_query(
             Query::cypher("query")
                 .query("MATCH (p:Person) RETURN p.value AS value")
-                .from_source("source")
+                .from_input("source")
                 .build(),
         )
         .with_reaction(RecordingReaction {
@@ -286,7 +286,7 @@ async fn real_volatile_snapshot_still_refreshes_state_and_advances_reset_generat
         .with_query(
             Query::cypher("query")
                 .query("MATCH (p:Person) RETURN p.value AS value")
-                .from_source("source")
+                .from_input("source")
                 .build(),
         )
         .build()

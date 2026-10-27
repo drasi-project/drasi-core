@@ -25,6 +25,7 @@ pub(super) struct CatalogQuery {
     pub generation: u64,
     pub config_hash: u64,
     pub results: QueryResults,
+    pub reader: Arc<super::query_output::QueryOutputProvider>,
     pub progress: Option<Arc<QuerySourceProgress>>,
     pub incarnation: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
     pub checkpoint: Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
@@ -603,7 +604,7 @@ impl QueryResultsCatalog {
     pub(super) fn register(
         &self,
         id: ComponentId,
-        results: QueryResults,
+        reader: Arc<super::query_output::QueryOutputProvider>,
         progress: Option<Arc<QuerySourceProgress>>,
         config_hash: u64,
         incarnation: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
@@ -624,7 +625,8 @@ impl QueryResultsCatalog {
             CatalogQuery {
                 generation,
                 config_hash,
-                results,
+                results: reader.results(),
+                reader,
                 progress,
                 incarnation,
                 checkpoint,
@@ -739,11 +741,7 @@ impl QueryResultsCatalog {
         id: &str,
         timeout: Duration,
     ) -> anyhow::Result<QueryResultSnapshot> {
-        self.ready(id, timeout)
-            .await?
-            .results
-            .snapshot()
-            .map_err(Into::into)
+        Ok(self.ready(id, timeout).await?.reader.query_view()?.snapshot)
     }
     pub async fn replay(
         &self,
@@ -751,11 +749,13 @@ impl QueryResultsCatalog {
         after: u64,
         timeout: Duration,
     ) -> anyhow::Result<Vec<ChangeEnvelope>> {
-        self.ready(id, timeout)
+        let entry = self.ready(id, timeout).await?;
+        let head = entry.reader.committed_head().await?;
+        Ok(entry
+            .reader
+            .replay_after(&head.at_sequence(after))
             .await?
-            .results
-            .replay(after)
-            .map_err(Into::into)
+            .into_envelopes())
     }
 }
 

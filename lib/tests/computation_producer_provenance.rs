@@ -105,11 +105,17 @@ async fn raw_and_derived_diamond_inputs_keep_distinct_progress_without_losing_pr
         )?;
         let mut first = None;
         for sequence in 1..=2 {
-            let mut derived = GraphChangeCodec::derive_changes(
+            let ordering = if marker == "immediate-volatile" {
+                ChangeOrdering::ProducerSequence
+            } else {
+                ChangeOrdering::EventTime
+            };
+            let mut derived = GraphChangeCodec::derive_changes_with_ordering(
                 &cause,
                 &[change(&format!("derived-{sequence}"), "Derived", sequence as i64)],
                 StreamId::try_new("derived/out")?,
                 sequence,
+                ordering,
             )?;
             if marker == "immediate-volatile" {
                 GraphProducerProgress::annotate(&mut derived, &identity, sequence)?;

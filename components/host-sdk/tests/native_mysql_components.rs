@@ -27,6 +27,8 @@ mod database;
 mod identity;
 #[path = "fixtures/native_mysql/parity.rs"]
 mod parity;
+#[path = "fixtures/native_sink_inputs.rs"]
+mod sink_inputs;
 #[path = "fixtures/native_mysql/teardown.rs"]
 mod teardown;
 use database::Database;
@@ -569,9 +571,10 @@ async fn procedure_lifecycle(
         port: PortId::try_new("in").expect("input"),
         envelope: envelope.clone(),
     };
-    let mut sink = factory.create_component(
+    let mut sink = sink_inputs::create(
+        factory,
         id("held-procedure"),
-        configuration("CALL wait_effect({{param query_id}})", 50),
+        configuration("CALL wait_effect({{param output.alias}})", 50),
     )?;
     sink.start().await?;
     let mut pending = Box::pin(sink.handle(input()));
@@ -614,9 +617,10 @@ async fn procedure_lifecycle(
             .await?,
         "1"
     );
-    let mut failed = factory.create_component(
+    let mut failed = sink_inputs::create(
+        factory,
         id("failed-procedure"),
-        configuration("CALL fail_effect({{param query_id}})", 5000),
+        configuration("CALL fail_effect({{param output.alias}})", 5000),
     )?;
     failed.start().await?;
     assert!(failed.handle(input()).await.is_err());

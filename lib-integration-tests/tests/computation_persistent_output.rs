@@ -42,7 +42,7 @@ const UPDATED_TEXT: &str = "MATCH (p:Person) RETURN p.name AS name, p.active AS 
 fn config(text: &str, capacity: usize) -> QueryConfig {
     Query::cypher(QUERY)
         .query(text)
-        .from_source(SOURCE)
+        .from_input(SOURCE)
         .enable_bootstrap(false)
         .auto_start(true)
         .with_outbox_capacity(capacity)

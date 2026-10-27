@@ -33,7 +33,7 @@ async fn submit(
         properties: ElementPropertyMap::from(properties),
     };
     let change = if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     };
@@ -168,7 +168,7 @@ async fn default_pipeline_memory_provider_processes_the_same_context_updates() -
         .query(
             drasi_lib::Query::cypher("probe")
                 .query(TEXT)
-                .from_source("source")
+                .from_input("source")
                 .enable_bootstrap(false)
                 .build(),
         )

@@ -269,7 +269,7 @@ async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
             RETURN s.id AS id, s.jam_factor AS jam_factor
             "#,
         )
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -281,7 +281,7 @@ async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
             RETURN i.id AS id, i.status AS status
             "#,
         )
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

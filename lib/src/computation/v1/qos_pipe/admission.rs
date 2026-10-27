@@ -471,12 +471,16 @@ impl QosChannel {
             .head
             .checked_add(1)
             .ok_or_else(|| backend("admission journal sequence exhausted"))?;
-        let mut system = SystemMetadata::new(self.definition.stream.clone(), position);
+        let mut system = SystemMetadata::new(self.definition.stream.clone(), position)
+            .with_ordering(input.system().ordering());
         if let Some(timestamp) = input.system().timestamp() {
             system = system.with_timestamp(timestamp);
         }
         if let Some(position) = input.system().source_position() {
             system = system.with_source_position(position.clone());
+        }
+        if let Some(control) = input.system().control() {
+            system = system.with_control(control.clone());
         }
         let mut envelope = input.derive(
             EnvelopeId::try_new(

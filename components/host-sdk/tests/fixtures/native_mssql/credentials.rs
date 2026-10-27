@@ -53,12 +53,10 @@ async fn public_binding(dynamic: bool) -> Result<()> {
     );
     let config = json!({"settings":{
         "connection":{"host":"credential-only.invalid","port":1437,"database":"d","user":"","password":""},
-        "queries":["q"],"command_timeout_ms":100,
+        "outputs":{"q":{"component":"q","port":"out"}},"command_timeout_ms":100,
     }});
     ensure!(
-        factory
-            .create_component(id("sink"), config.clone())
-            .is_err(),
+        crate::sink_inputs::create(factory, id("sink"), config.clone()).is_err(),
         "unbound empty credentials were accepted"
     );
     let provider = Provider {
@@ -66,7 +64,8 @@ async fn public_binding(dynamic: bool) -> Result<()> {
         certificate: Arc::default(),
         contexts: Arc::default(),
     };
-    let mut sink = factory.create_component_with_identity(
+    let mut sink = crate::sink_inputs::create_with_identity(
+        factory,
         id("sink"),
         config,
         Arc::new(NativeIdentityResource::new(Arc::new(provider.clone()))),
@@ -164,10 +163,15 @@ pub(super) async fn actual_override_and_refresh(dynamic: bool) -> Result<()> {
     let mut connection = settings["connection"].clone();
     connection["user"] = json!("deliberately-wrong-literal");
     connection["password"] = json!("deliberately-wrong-literal");
-    let mut sink=factory.create_component_with_identity(id("identity-sink"),json!({"settings":{
-        "connection":connection,"queries":["q"],
-        "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect N'IDENTITY',1,1")}}
-    }}),Arc::new(NativeIdentityResource::new(Arc::new(provider.clone()))))?;
+    let mut sink = crate::sink_inputs::create_with_identity(
+        factory,
+        id("identity-sink"),
+        json!({"settings":{
+            "connection":connection,"outputs":{"q":{"component":"q","port":"out"}},
+            "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect N'IDENTITY',1,1")}}
+        }}),
+        Arc::new(NativeIdentityResource::new(Arc::new(provider.clone()))),
+    )?;
     let declared = sink.configuration()?;
     for _ in 0..2 {
         sink.start().await?;
@@ -176,6 +180,7 @@ pub(super) async fn actual_override_and_refresh(dynamic: bool) -> Result<()> {
             None,
             &id("q"),
             SystemMetadata::new(stream("q"), 1),
+            &ResultNodeProjector::try_new("test/native-mssql-credentials/q", None)?,
             &[QueryPartEvaluationContext::Adding {
                 after: Default::default(),
                 row_signature: 1,

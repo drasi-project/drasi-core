@@ -8,6 +8,7 @@ readme = "README.md"
 
 [dependencies]
 drasi-core = { workspace = true }
+drasi-core-types = { workspace = true }
 drasi-lib = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
@@ -28,8 +29,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 drasi-computation-source-bridge = { path = "../../sources/bridge" }
 drasi-computation-sink-bridge = { path = "../../sinks/bridge" }
-bincode = "1"
 chrono = "0.4"
+drasi-computation-contracts = { workspace = true }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 
 [lints]

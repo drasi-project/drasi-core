@@ -6,7 +6,7 @@ mod config;
 
 use anyhow::Result;
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, ImplementationIdentity, QueryChangeCodec, SinkCompletion,
+    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ConsumerMode, ControlSender, CreateRequest,
@@ -35,7 +35,7 @@ pub fn plugin() -> Result<PluginDefinition> {
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
         vec![Arc::new(PostgresStoredProcFactory)],
-        vec![QueryChangeCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 
@@ -63,7 +63,10 @@ impl Factory for PostgresStoredProcFactory {
             .ports()
             .to_vec(),
             completion: Some(SinkCompletion::Handled),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                binds_inputs: true,
+                ..Capabilities::default()
+            },
         }
     }
     fn consumer_mode(&self) -> Option<ConsumerMode> {
@@ -77,6 +80,7 @@ impl Factory for PostgresStoredProcFactory {
         Ok(Component::Consumer(Box::new(PostgresStoredProcSink::new(
             request.id.clone(),
             config.settings,
+            &request.inputs,
         )?))
         .into())
     }
@@ -92,9 +96,21 @@ mod tests {
         json!({
             "hostname": "no-database-is-opened-at-construction",
             "database": "test", "user": "user", "password": "secret",
-            "queries": ["source.people"],
+            "outputs": {"people": {"component": "source.people", "port": "out"}},
             "default_template": { "added": {"template": "CALL add_user({{param after.id}})"} }
         })
+    }
+
+    fn inputs() -> Result<Vec<drasi_computation_contracts::InputBinding>> {
+        use drasi_computation_contracts::{InputBinding, OutputEndpoint, PortId, StreamId};
+        Ok(vec![InputBinding {
+            input_port: PortId::try_new("in")?,
+            output: OutputEndpoint::new(
+                ComponentId::try_new("source.people")?,
+                PortId::try_new("out")?,
+            ),
+            stream: StreamId::try_new("people/out")?,
+        }])
     }
 
     #[test]
@@ -108,6 +124,7 @@ mod tests {
         let sink = PostgresStoredProcSink::new(
             ComponentId::try_new("sink")?,
             serde_json::from_value(config())?,
+            &inputs()?,
         )?;
         let configuration = sink.configuration()?;
         assert_eq!(configuration["settings"]["password"], "secret");
@@ -121,7 +138,7 @@ mod tests {
     #[test]
     fn configuration_rejects_unsafe_sql_unknown_routes_and_invalid_bounds() {
         for (field, value) in [
-            ("queries", json!([])),
+            ("outputs", json!({"bad id": {"component": "source.people"}})),
             ("port", json!(0)),
             ("command_timeout_ms", json!(0)),
             ("shutdown_timeout_ms", json!(0)),
@@ -141,8 +158,26 @@ mod tests {
             value_config[field] = value;
             let result = serde_json::from_value::<PostgresStoredProcConfig>(value_config)
                 .map_err(anyhow::Error::from)
-                .and_then(|config| config.validate());
+                .and_then(|config| {
+                    config.validate()?;
+                    let outputs = drasi_computation_contracts::SinkOutputs::from_inputs(
+                        &inputs()?,
+                        &config.outputs,
+                    )?;
+                    config.validate_outputs(&outputs)
+                });
             assert!(result.is_err(), "{field}");
         }
+    }
+
+    #[test]
+    fn a_sink_without_declared_inputs_fails_clearly() -> Result<()> {
+        assert!(PostgresStoredProcSink::new(
+            ComponentId::try_new("sink")?,
+            serde_json::from_value(config())?,
+            &[],
+        )
+        .is_err());
+        Ok(())
     }
 }

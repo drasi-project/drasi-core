@@ -81,7 +81,7 @@ let pipeline = drasi.computation_pipeline()?
     ))?
     .query(Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("source")
+        .from_input("source")
         .enable_bootstrap(false)
         .build())
     .build()?;

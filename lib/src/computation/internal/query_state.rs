@@ -21,7 +21,8 @@ use std::{
 };
 
 use crate::computation::v1::{
-    ChangeEnvelope, ChangeOperation, QueryRecoveryIdentity, Record, RecordId,
+    ChangeEnvelope, ChangeOperation, OutputFollowHub, OutputFollowLimits, QueryRecoveryIdentity,
+    Record, RecordId, ResultNodeProjector,
 };
 
 pub use drasi_computation_contracts::QueryResultSnapshot;
@@ -53,6 +54,7 @@ pub enum QueryHistoryError {
 }
 
 pub(crate) struct QueryOutputState {
+    pub(crate) projector: ResultNodeProjector,
     pub(crate) rows: im::HashMap<RecordId, Record>,
     pub(crate) sequence: u64,
     pub(crate) outbox: VecDeque<ChangeEnvelope>,
@@ -62,11 +64,13 @@ pub(crate) struct QueryOutputState {
     pub(crate) recovery_ready: bool,
     pub(crate) generation: u64,
     pub(crate) identity: Option<QueryRecoveryIdentity>,
+    pub(crate) follow: OutputFollowHub,
 }
 
 impl QueryOutputState {
-    pub(crate) fn new(capacity: NonZeroUsize) -> Self {
+    pub(crate) fn new(capacity: NonZeroUsize, projector: ResultNodeProjector) -> Self {
         Self {
+            projector,
             rows: im::HashMap::new(),
             sequence: 0,
             outbox: VecDeque::new(),
@@ -75,6 +79,15 @@ impl QueryOutputState {
             recovery_ready: false,
             generation: 0,
             identity: None,
+            follow: OutputFollowHub::new(
+                NonZeroUsize::new(64).expect("nonzero lease capacity"),
+                OutputFollowLimits {
+                    max_envelopes: capacity,
+                    max_bytes: NonZeroUsize::new(16 * 1024 * 1024).expect("nonzero byte capacity"),
+                    lifetime: std::time::Duration::from_secs(300),
+                },
+            )
+            .expect("valid query output follow bounds"),
         }
     }
 
@@ -94,6 +107,7 @@ impl QueryOutputState {
         if envelope.system().sequence() != self.next_sequence()? {
             anyhow::bail!("committed output does not match the next in-memory sequence");
         }
+        self.follow.publish(&envelope)?;
         self.apply_rows(&envelope);
         self.sequence = envelope.system().sequence();
         if self.outbox.len() == self.capacity.get() {
@@ -101,6 +115,34 @@ impl QueryOutputState {
         }
         self.outbox.push_back(envelope);
         Ok(())
+    }
+
+    /// Retained outputs after `after`, or the typed gap when retention (or the
+    /// committed head) cannot supply them.
+    pub(crate) fn replay_after(
+        &self,
+        after: u64,
+    ) -> Result<Vec<ChangeEnvelope>, QueryHistoryError> {
+        let oldest = self
+            .outbox
+            .front()
+            .map(|envelope| envelope.system().sequence());
+        if after > self.sequence
+            || (after < self.sequence
+                && oldest.map_or(true, |oldest| after < oldest.saturating_sub(1)))
+        {
+            return Err(QueryHistoryError::Unavailable {
+                requested: after,
+                oldest: oldest.unwrap_or(self.sequence),
+                latest: self.sequence,
+            });
+        }
+        Ok(self
+            .outbox
+            .iter()
+            .filter(|envelope| envelope.system().sequence() > after)
+            .cloned()
+            .collect())
     }
 
     pub(crate) fn apply_rows(&mut self, envelope: &ChangeEnvelope) {
@@ -123,20 +165,28 @@ impl QueryOutputState {
         outbox: Vec<ChangeEnvelope>,
         generation: u64,
         identity: QueryRecoveryIdentity,
-    ) {
+    ) -> anyhow::Result<()> {
+        self.follow.retire()?;
         self.rows = rows;
         self.generation = generation;
         self.identity = Some(identity);
         self.sequence = sequence;
         let skip = outbox.len().saturating_sub(self.capacity.get());
         self.outbox = outbox.into_iter().skip(skip).collect();
+        Ok(())
     }
 
-    pub(crate) fn reset_to_sequence(&mut self, sequence: u64, generation: u64) {
+    pub(crate) fn reset_to_sequence(
+        &mut self,
+        sequence: u64,
+        generation: u64,
+    ) -> anyhow::Result<()> {
+        self.follow.retire()?;
         self.rows.clear();
         self.outbox.clear();
         self.sequence = sequence;
         self.generation = generation;
+        Ok(())
     }
 }
 
@@ -185,6 +235,7 @@ impl QueryResults {
     pub fn snapshot(&self) -> Result<QueryResultSnapshot, QueryHistoryError> {
         let state = self.state.read().map_err(|_| QueryHistoryError::Poisoned)?;
         Ok(QueryResultSnapshot {
+            projector: state.projector.clone(),
             as_of_sequence: state.sequence,
             generation: state.generation,
             rows: state.rows.clone(),
@@ -205,6 +256,7 @@ impl QueryResults {
                 .clone()
                 .ok_or(QueryHistoryError::MissingIdentity)?,
             snapshot: QueryResultSnapshot {
+                projector: state.projector.clone(),
                 as_of_sequence: state.sequence,
                 generation: state.generation,
                 rows: state.rows.clone(),
@@ -225,26 +277,9 @@ impl QueryResults {
     }
 
     pub fn replay(&self, after: u64) -> Result<Vec<ChangeEnvelope>, QueryHistoryError> {
-        let state = self.state.read().map_err(|_| QueryHistoryError::Poisoned)?;
-        let oldest = state
-            .outbox
-            .front()
-            .map(|envelope| envelope.system().sequence());
-        if after > state.sequence
-            || (after < state.sequence
-                && oldest.map_or(true, |oldest| after < oldest.saturating_sub(1)))
-        {
-            return Err(QueryHistoryError::Unavailable {
-                requested: after,
-                oldest: oldest.unwrap_or(state.sequence),
-                latest: state.sequence,
-            });
-        }
-        Ok(state
-            .outbox
-            .iter()
-            .filter(|envelope| envelope.system().sequence() > after)
-            .cloned()
-            .collect())
+        self.state
+            .read()
+            .map_err(|_| QueryHistoryError::Poisoned)?
+            .replay_after(after)
     }
 }

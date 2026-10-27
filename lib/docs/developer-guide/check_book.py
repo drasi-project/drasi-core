@@ -131,6 +131,8 @@ def compile_contexts(project):
         "quantity-patch": "items",
         "synthetic-join": "",
         "query-snapshot": "results: QueryResults",
+        "output-snapshot-follow": "items",
+        "chained-query-input": "items",
         "live-catalog": query,
         "source-pipeline": "expression",
         "continuation-chunk": "items",

@@ -67,6 +67,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
     //Order Becomes Ready for pickup - waiting for vehicle to arrive
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.RetailOperations", "order_01"),
@@ -88,6 +89,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
     //Vehicle arrives in curbside pickup zone - order is already ready/waiting
     {
         let vehicle_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "vehicle_01"),
@@ -109,6 +111,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
         );
 
         let located_in_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Relation {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "located_in_01"),
@@ -142,6 +145,7 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
     //Order Delivered to Waiting Vehicle - order complete
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.RetailOperations", "order_01"),
@@ -186,6 +190,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
     //Vehicle arrives in curbside pickup zone - order is already ready/waiting
     {
         let vehicle_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "vehicle_02"),
@@ -207,6 +212,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
         );
 
         let located_in_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Relation {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "located_in_02"),
@@ -229,6 +235,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
     //Order Becomes Ready for pickup - vehicle already waiting
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.RetailOperations", "order_02"),
@@ -259,6 +266,7 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
     //Order Delivered to Waiting Vehicle - order complete
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.RetailOperations", "order_02"),
@@ -303,6 +311,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
     //Vehicle arrives in curbside pickup zone - order is already ready/waiting
     {
         let vehicle_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "vehicle_03"),
@@ -324,6 +333,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
         );
 
         let located_in_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Relation {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "located_in_03"),
@@ -345,6 +355,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.RetailOperations", "order_03"),
@@ -375,6 +386,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.RetailOperations", "order_03"),
@@ -416,6 +428,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
     }
     {
         let vehicle_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "vehicle_04"),
@@ -437,6 +450,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
         );
 
         let located_in_event = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Relation {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.PhysicalOperations", "located_in_04"),
@@ -457,6 +471,7 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.RetailOperations", "order_04"),

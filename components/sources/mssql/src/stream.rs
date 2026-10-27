@@ -413,16 +413,14 @@ async fn poll_cdc_changes(
                 }
                 CdcOperation::UpdateAfter => {
                     let properties = extract_properties_from_cdc_row(&row)?;
-                    SourceChange::Update {
-                        element: Element::Node {
-                            metadata: ElementMetadata {
-                                reference: ElementReference::new(source_id, &element_id),
-                                labels: Arc::from([Arc::from(label)]),
-                                effective_from,
-                            },
-                            properties,
+                    SourceChange::update(Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(source_id, &element_id),
+                            labels: Arc::from([Arc::from(label)]),
+                            effective_from,
                         },
-                    }
+                        properties,
+                    })
                 }
                 CdcOperation::Delete => SourceChange::Delete {
                     metadata: ElementMetadata {

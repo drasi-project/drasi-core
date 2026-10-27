@@ -122,7 +122,7 @@ impl Options {
     fn query_config(&self, id: &str) -> QueryConfig {
         let mut query = Query::cypher(id)
             .query(self.query())
-            .from_source("input")
+            .from_input("input")
             .enable_bootstrap(false);
         if self.workload == "join" {
             query = query.with_joins(vec![QueryJoinConfig {
@@ -170,7 +170,7 @@ fn change(sequence: usize, payload: &str, join: bool) -> SourceChange {
     if sequence < KEYS {
         SourceChange::Insert { element }
     } else {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     }
 }
 

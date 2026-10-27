@@ -100,7 +100,9 @@ impl ElementIndex for RocksDbElementIndex {
                             .try_into()
                             .map_err(|_| IndexError::CorruptedData)?;
                         if let Some(element) = get_element_internal(context.clone(), &key, txn)? {
-                            rows.push(Arc::new(element.into()));
+                            rows.push(Arc::new(
+                                Element::try_from(element).map_err(IndexError::other)?,
+                            ));
                         }
                     }
                 }
@@ -124,7 +126,7 @@ impl ElementIndex for RocksDbElementIndex {
                 let stored = get_element_internal(context.clone(), &element_key, txn)?;
                 match stored {
                     Some(stored) => {
-                        let element: Element = stored.into();
+                        let element = Element::try_from(stored).map_err(IndexError::other)?;
                         Ok(Some(Arc::new(element)))
                     }
                     None => Ok(None),
@@ -144,7 +146,7 @@ impl ElementIndex for RocksDbElementIndex {
         element: &Element,
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
-        let stored: StoredElement = element.into();
+        let stored = StoredElement::try_from(element).map_err(IndexError::other)?;
         let slot_affinity = slot_affinity.clone();
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
@@ -199,7 +201,7 @@ impl ElementIndex for RocksDbElementIndex {
 
                 match get_element_internal(context.clone(), &element_key, txn) {
                     Ok(Some(stored)) => {
-                        let element: Element = stored.into();
+                        let element = Element::try_from(stored).map_err(IndexError::other)?;
                         Ok(Some(Arc::new(element)))
                     }
                     Ok(None) => Ok(None),
@@ -241,8 +243,11 @@ impl ElementIndex for RocksDbElementIndex {
                             let relation_key = decode_inout_key_relation(&key);
                             match get_element_internal(context.clone(), &relation_key, txn) {
                                 Ok(Some(stored)) => {
-                                    let element: Element = stored.into();
-                                    results.push(Ok(Arc::new(element)));
+                                    results.push(
+                                        Element::try_from(stored)
+                                            .map(Arc::new)
+                                            .map_err(IndexError::other),
+                                    );
                                 }
                                 Ok(None) => {
                                     log::debug!(
@@ -296,8 +301,11 @@ impl ElementIndex for RocksDbElementIndex {
                             let relation_key = decode_inout_key_relation(&key);
                             match get_element_internal(context.clone(), &relation_key, txn) {
                                 Ok(Some(stored)) => {
-                                    let element: Element = stored.into();
-                                    results.push(Ok(Arc::new(element)));
+                                    results.push(
+                                        Element::try_from(stored)
+                                            .map(Arc::new)
+                                            .map_err(IndexError::other),
+                                    );
                                 }
                                 Ok(None) => {
                                     log::debug!(
@@ -408,12 +416,10 @@ fn get_element_internal(
         Err(e) => return Err(IndexError::other(e)),
     };
 
-    let element = match StoredElementContainer::decode(element.as_slice()) {
-        Ok(container) => container.element,
-        Err(e) => return Err(IndexError::other(e)),
-    };
-
-    Ok(element)
+    match StoredElementContainer::decode(element.as_slice()) {
+        Ok(container) => container.element.map(Some).ok_or(IndexError::CorruptedData),
+        Err(e) => Err(IndexError::other(e)),
+    }
 }
 
 fn delete_element_internal(
@@ -675,7 +681,10 @@ fn update_source_joins(
                                 {
                                     Ok(Some(data)) => {
                                         match StoredElementContainer::decode(data.as_slice()) {
-                                            Ok(container) => container.element,
+                                            Ok(container) => match container.element {
+                                                Some(element) => Some(element),
+                                                None => return Err(IndexError::CorruptedData),
+                                            },
                                             Err(e) => return Err(IndexError::other(e)),
                                         }
                                     }

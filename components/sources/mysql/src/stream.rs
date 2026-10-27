@@ -866,7 +866,7 @@ mod tests {
         };
         vec![
             insert_change(source_id, "row-1"),
-            SourceChange::Update { element: second },
+            SourceChange::update(second),
             SourceChange::Delete {
                 metadata: third.get_metadata().clone(),
             },

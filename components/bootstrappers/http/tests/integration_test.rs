@@ -143,7 +143,7 @@ async fn test_simple_json_endpoint() {
 
     // Verify first event
     match &events[0].change {
-        SourceChange::Update { element } => match element {
+        SourceChange::Update { element, .. } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(&*metadata.reference.element_id, "1");
                 assert_eq!(&*metadata.labels[0], "User");
@@ -1220,7 +1220,7 @@ async fn test_relations_mapping() {
 
     let events = collect_events(rx).await;
     match &events[0].change {
-        SourceChange::Update { element } => match element {
+        SourceChange::Update { element, .. } => match element {
             Element::Relation {
                 metadata,
                 in_node,
@@ -1593,7 +1593,7 @@ async fn test_xml_response_parsing() {
     assert_eq!(events.len(), 1);
 
     match &events[0].change {
-        SourceChange::Update { element } => match element {
+        SourceChange::Update { element, .. } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(&*metadata.labels[0], "XmlNode");
             }
@@ -1673,7 +1673,7 @@ async fn test_yaml_response_parsing() {
     assert_eq!(events.len(), 3);
 
     match &events[0].change {
-        SourceChange::Update { element } => match element {
+        SourceChange::Update { element, .. } => match element {
             Element::Node {
                 metadata,
                 properties,
@@ -1754,7 +1754,7 @@ async fn test_type_preservation_in_properties() {
 
     let events = collect_events(rx).await;
     match &events[0].change {
-        SourceChange::Update { element } => match element {
+        SourceChange::Update { element, .. } => match element {
             Element::Node { properties, .. } => {
                 use drasi_core::models::ElementValue;
                 use ordered_float::OrderedFloat;

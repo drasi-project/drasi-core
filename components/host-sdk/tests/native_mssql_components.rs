@@ -10,6 +10,8 @@ mod coverage;
 mod credentials;
 #[path = "fixtures/native_mssql/database.rs"]
 mod database;
+#[path = "fixtures/native_sink_inputs.rs"]
+mod sink_inputs;
 
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
@@ -161,7 +163,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
     source
         .dependencies
         .insert("consumer_progress".into(), vec![resource("consumers")]);
-    let sink_settings = json!({"connection":db.settings()["connection"],"queries":["all"],
+    let sink_settings = json!({"connection":db.settings()["connection"],"outputs":{"all":{"component":"all","port":"out"}},
     "default_template":{
         "added":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param after.id}},{{param after.value}}")},
         "updated":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param after.id}},{{param after.value}}")},

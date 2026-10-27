@@ -78,7 +78,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
             RETURN p.name AS name, p.age AS age
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -260,7 +260,7 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
 
     let query = Query::cypher("shutdown-query")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("shutdown-source")
+        .from_input("shutdown-source")
         .auto_start(true)
         .build();
 

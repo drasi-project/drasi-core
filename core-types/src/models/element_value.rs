@@ -16,10 +16,11 @@
 use super::ConversionError;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ops::{Index, IndexMut},
 };
 
+use crate::data_value::{DataValue, DataValueError};
 use crate::evaluation::variable_value::{
     float::Float, integer::Integer, zoned_datetime::ZonedDateTime as VarZonedDateTime,
     VariableValue,
@@ -29,14 +30,14 @@ use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime};
 use ordered_float::OrderedFloat;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub enum ElementValue {
     #[default]
     Null,
     Bool(bool),
-    Float(OrderedFloat<f64>),
+    Float(#[serde(with = "float_image")] OrderedFloat<f64>),
     Integer(i64),
     String(Arc<str>),
     List(Vec<ElementValue>),
@@ -45,6 +46,141 @@ pub enum ElementValue {
     // ElementValue stores zoned datetimes as fixed offsets only; optional
     // IANA timezone names from VariableValue are not represented here.
     ZonedDateTime(DateTime<FixedOffset>),
+    /// Rich values retain their typed representation without enlarging primitive properties.
+    Typed(Box<TypedElementValue>),
+}
+
+impl ElementValue {
+    /// Decode the typed JSON projection, rejecting malformed typed-value envelopes.
+    ///
+    /// Plain JSON construction remains available through `From`; this method
+    /// additionally restores typed values produced by the JSON projection.
+    pub fn try_from_data_json(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        use serde::de::Error;
+
+        match value {
+            serde_json::Value::Object(object)
+                if object
+                    .get(DRASI_ENVELOPE_MARKER_TAG)
+                    .and_then(|v| v.as_str())
+                    == Some(DRASI_DATA_VALUE_MARKER) =>
+            {
+                let payload = object
+                    .get("value")
+                    .ok_or_else(|| serde_json::Error::custom("typed value has no payload"))?;
+                let value = serde_json::from_value::<DataValue>(payload.clone())?
+                    .decode()
+                    .map_err(serde_json::Error::custom)?;
+                (&value).try_into().map_err(serde_json::Error::custom)
+            }
+            serde_json::Value::Object(object)
+                if object
+                    .get(DRASI_ENVELOPE_MARKER_TAG)
+                    .and_then(|v| v.as_str())
+                    == Some(DRASI_ENVELOPE_MARKER_VALUE) =>
+            {
+                Ok(value.into())
+            }
+            serde_json::Value::Object(object) => {
+                let mut properties = ElementPropertyMap::new();
+                for (name, value) in object {
+                    properties.insert(name, Self::try_from_data_json(value)?);
+                }
+                Ok(Self::Object(properties))
+            }
+            serde_json::Value::Array(values) => Ok(Self::List(
+                values
+                    .iter()
+                    .map(Self::try_from_data_json)
+                    .collect::<Result<_, _>>()?,
+            )),
+            _ => Ok(value.into()),
+        }
+    }
+}
+
+/// A validated value outside the compact primitive property representation.
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct TypedElementValue(DataValue);
+
+impl TypedElementValue {
+    pub fn as_data_value(&self) -> &DataValue {
+        &self.0
+    }
+
+    fn from_variable(value: &VariableValue) -> Result<Self, DataValueError> {
+        Ok(Self(DataValue::encode(value)?))
+    }
+
+    fn to_variable(&self) -> VariableValue {
+        self.0
+            .clone()
+            .decode()
+            .expect("TypedElementValue is validated at construction and deserialization")
+    }
+}
+
+impl TryFrom<DataValue> for TypedElementValue {
+    type Error = DataValueError;
+
+    fn try_from(value: DataValue) -> Result<Self, Self::Error> {
+        value.clone().decode()?;
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for TypedElementValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        DataValue::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+mod float_image {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(
+        value: &OrderedFloat<f64>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if !serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+        #[derive(Serialize)]
+        struct Bits {
+            bits: String,
+        }
+        Bits {
+            bits: format!("{:016x}", value.0.to_bits()),
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<OrderedFloat<f64>, D::Error> {
+        if !deserializer.is_human_readable() {
+            return OrderedFloat::deserialize(deserializer);
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Image {
+            Number(f64),
+            Bits { bits: String },
+        }
+        match Image::deserialize(deserializer)? {
+            Image::Number(value) => Ok(OrderedFloat(value)),
+            Image::Bits { bits } => {
+                if bits.len() != 16 {
+                    return Err(serde::de::Error::custom("expected 16 float bit digits"));
+                }
+                let bits = u64::from_str_radix(&bits, 16).map_err(serde::de::Error::custom)?;
+                Ok(OrderedFloat(f64::from_bits(bits)))
+            }
+        }
+    }
 }
 
 impl From<&ElementPropertyMap> for VariableValue {
@@ -72,6 +208,7 @@ impl From<&ElementValue> for VariableValue {
                 // ElementValue cannot carry IANA timezone names, so we emit None.
                 VariableValue::ZonedDateTime(VarZonedDateTime::new(*dt, None))
             }
+            ElementValue::Typed(value) => value.to_variable(),
         }
     }
 }
@@ -83,19 +220,24 @@ impl TryInto<ElementValue> for &VariableValue {
         match self {
             VariableValue::Null => Ok(ElementValue::Null),
             VariableValue::Bool(b) => Ok(ElementValue::Bool(*b)),
-            VariableValue::Float(f) => Ok(ElementValue::Float(OrderedFloat(
-                f.as_f64().unwrap_or_default(),
-            ))),
-            VariableValue::Integer(i) => Ok(ElementValue::Integer(i.as_i64().unwrap_or_default())),
+            VariableValue::Float(f) => Ok(ElementValue::Float(OrderedFloat(f64::from_bits(
+                f.to_bits(),
+            )))),
+            VariableValue::Integer(i) if i.as_i64().is_some() => Ok(ElementValue::Integer(
+                i.as_i64().expect("checked signed integer"),
+            )),
             VariableValue::String(s) => Ok(ElementValue::String(Arc::from(s.as_str()))),
             VariableValue::List(l) => Ok(ElementValue::List(
-                l.iter().map(|x| x.try_into().unwrap_or_default()).collect(),
+                l.iter().map(|x| x.try_into()).collect::<Result<_, _>>()?,
             )),
             VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
             VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(*dt)),
-            // Preserve the fixed-offset instant; timezone_name metadata is dropped.
-            VariableValue::ZonedDateTime(zdt) => Ok(ElementValue::ZonedDateTime(*zdt.datetime())),
-            _ => Err(ConversionError {}),
+            VariableValue::ZonedDateTime(zdt) if zdt.timezone_name().is_none() => {
+                Ok(ElementValue::ZonedDateTime(*zdt.datetime()))
+            }
+            value => TypedElementValue::from_variable(value)
+                .map(|value| ElementValue::Typed(Box::new(value)))
+                .map_err(|_| ConversionError {}),
         }
     }
 }
@@ -104,23 +246,7 @@ impl TryInto<ElementValue> for VariableValue {
     type Error = ConversionError;
 
     fn try_into(self) -> Result<ElementValue, ConversionError> {
-        match self {
-            VariableValue::Null => Ok(ElementValue::Null),
-            VariableValue::Bool(b) => Ok(ElementValue::Bool(b)),
-            VariableValue::Float(f) => Ok(ElementValue::Float(OrderedFloat(
-                f.as_f64().unwrap_or_default(),
-            ))),
-            VariableValue::Integer(i) => Ok(ElementValue::Integer(i.as_i64().unwrap_or_default())),
-            VariableValue::String(s) => Ok(ElementValue::String(Arc::from(s.as_str()))),
-            VariableValue::List(l) => Ok(ElementValue::List(
-                l.iter().map(|x| x.try_into().unwrap_or_default()).collect(),
-            )),
-            VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
-            VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(dt)),
-            // Preserve the fixed-offset instant; timezone_name metadata is dropped.
-            VariableValue::ZonedDateTime(zdt) => Ok(ElementValue::ZonedDateTime(*zdt.datetime())),
-            _ => Err(ConversionError {}),
-        }
+        (&self).try_into()
     }
 }
 
@@ -131,15 +257,23 @@ impl TryInto<ElementValue> for VariableValue {
 const DRASI_TYPE_TAG: &str = "__drasi_v1_type__";
 const DRASI_ENVELOPE_MARKER_TAG: &str = "__drasi_v1_envelope__";
 const DRASI_ENVELOPE_MARKER_VALUE: &str = "drasi.element_value.datetime";
+const DRASI_DATA_VALUE_MARKER: &str = "drasi.data-value";
+
+fn typed_json(value: &DataValue) -> serde_json::Value {
+    serde_json::json!({
+        DRASI_ENVELOPE_MARKER_TAG: DRASI_DATA_VALUE_MARKER,
+        "value": value,
+    })
+}
 
 impl From<&ElementValue> for serde_json::Value {
     fn from(val: &ElementValue) -> Self {
         match val {
             ElementValue::Null => serde_json::Value::Null,
             ElementValue::Bool(b) => serde_json::Value::Bool(*b),
-            ElementValue::Float(f) => {
-                serde_json::Value::Number(serde_json::Number::from_f64(f.into_inner()).unwrap())
-            }
+            ElementValue::Float(f) => serde_json::Number::from_f64(f.into_inner())
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| typed_json(&DataValue::Float(f.0.to_bits()))),
             ElementValue::Integer(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
             ElementValue::String(s) => serde_json::Value::String(s.to_string()),
             ElementValue::List(l) => serde_json::Value::Array(l.iter().map(|x| x.into()).collect()),
@@ -158,6 +292,7 @@ impl From<&ElementValue> for serde_json::Value {
                     "value": dt.to_rfc3339()
                 })
             }
+            ElementValue::Typed(value) => typed_json(value.as_data_value()),
         }
     }
 }
@@ -170,6 +305,8 @@ impl From<&serde_json::Value> for ElementValue {
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     ElementValue::Integer(i)
+                } else if let Some(i) = n.as_u64() {
+                    ElementValue::Typed(Box::new(TypedElementValue(DataValue::Unsigned(i))))
                 } else if let Some(f) = n.as_f64() {
                     ElementValue::Float(OrderedFloat(f))
                 } else {
@@ -253,6 +390,10 @@ impl ElementPropertyMap {
         self.values.insert(Arc::from(key), value);
     }
 
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
     pub fn merge(&mut self, other: &ElementPropertyMap) {
         for (key, value) in other.values.iter() {
             self.values
@@ -261,10 +402,21 @@ impl ElementPropertyMap {
         }
     }
 
-    pub fn map_iter<T>(
-        &self,
-        f: impl Fn(&Arc<str>, &ElementValue) -> T + 'static,
-    ) -> impl Iterator<Item = T> + '_ {
+    /// Adds properties missing from this map, except names in `removed`.
+    pub fn merge_except(&mut self, other: &ElementPropertyMap, removed: &BTreeSet<String>) {
+        for (key, value) in other.values.iter() {
+            if !removed.contains(&**key) {
+                self.values
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
+
+    pub fn map_iter<'a, T>(
+        &'a self,
+        f: impl Fn(&'a Arc<str>, &'a ElementValue) -> T + 'a,
+    ) -> impl Iterator<Item = T> + 'a {
         self.values.iter().map(move |(k, v)| f(k, v))
     }
 }
@@ -364,6 +516,126 @@ mod tests {
         VariableValue,
     };
     use chrono::{NaiveDate, TimeZone, Utc};
+
+    #[test]
+    fn property_mapping_can_borrow_values_and_local_context() {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("value", ElementValue::List(vec![ElementValue::Integer(7)]));
+        let context = String::from("local");
+        let (scope, key, value) = properties
+            .map_iter(|key, value| (context.as_str(), key.as_ref(), value))
+            .next()
+            .unwrap();
+        assert_eq!((scope, key), ("local", "value"));
+        assert!(std::ptr::eq(value, properties.get("value").unwrap()));
+    }
+
+    fn assert_rich_roundtrip(value: VariableValue) {
+        let expected = rmp_serde::to_vec_named(&DataValue::encode(&value).unwrap()).unwrap();
+        let property: ElementValue = (&value).try_into().unwrap();
+        let assert_value = |property: &ElementValue| {
+            let value: VariableValue = property.into();
+            let actual = rmp_serde::to_vec_named(&DataValue::encode(&value).unwrap()).unwrap();
+            assert_eq!(actual, expected);
+        };
+        assert_value(&property);
+        let binary = rmp_serde::to_vec_named(&property).unwrap();
+        assert_value(&rmp_serde::from_slice::<ElementValue>(&binary).unwrap());
+        let serialized = serde_json::to_vec(&property).unwrap();
+        assert_value(&serde_json::from_slice::<ElementValue>(&serialized).unwrap());
+        let json: serde_json::Value = (&property).into();
+        assert_value(&ElementValue::try_from_data_json(&json).unwrap());
+    }
+
+    #[test]
+    fn rich_query_values_remain_typed_properties() {
+        use crate::evaluation::variable_value::{
+            duration::Duration, zoned_time::ZonedTime, ListRange, RangeBound,
+        };
+
+        let date = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        let time = date.and_hms_opt(3, 4, 5).unwrap().time();
+        let offset = FixedOffset::east_opt(3600).unwrap();
+        for value in [
+            VariableValue::Integer(Integer::from(u64::MAX)),
+            VariableValue::Date(date),
+            VariableValue::LocalTime(time),
+            VariableValue::ZonedTime(ZonedTime::new(time, offset)),
+            VariableValue::ZonedDateTime(VarZonedDateTime::new(
+                sample_fixed_datetime(),
+                Some("Etc/GMT-1".to_string()),
+            )),
+            VariableValue::Duration(Duration::new(chrono::Duration::seconds(5), 2, 3)),
+            VariableValue::ListRange(ListRange {
+                start: RangeBound::Index(2),
+                end: RangeBound::Unbounded,
+            }),
+            VariableValue::ElementReference(super::super::ElementReference::new("source", "row")),
+            VariableValue::Expression(drasi_query_ast::ast::Expression::ListExpression(
+                drasi_query_ast::ast::ListExpression { elements: vec![] },
+            )),
+            VariableValue::Awaiting,
+        ] {
+            assert_rich_roundtrip(value);
+        }
+    }
+
+    #[test]
+    fn nonfinite_and_nested_properties_roundtrip_without_defaulting() {
+        for bits in [
+            (-0.0_f64).to_bits(),
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            0x7ff8_0000_0000_0042,
+        ] {
+            assert_rich_roundtrip(VariableValue::Float(Float::from(f64::from_bits(bits))));
+        }
+        assert_rich_roundtrip(VariableValue::Object(BTreeMap::from([(
+            "nested".to_string(),
+            VariableValue::List(vec![
+                VariableValue::Date(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()),
+                VariableValue::Integer(Integer::from(u64::MAX)),
+                VariableValue::Float(Float::from(f64::INFINITY)),
+            ]),
+        )])));
+        let mut properties = ElementPropertyMap::new();
+        properties.insert(
+            "nonfinite",
+            ElementValue::Float(OrderedFloat(f64::from_bits(0x7ff8_0000_0000_0042))),
+        );
+        assert_rich_roundtrip(VariableValue::Element(Arc::new(
+            super::super::Element::Node {
+                metadata: super::super::ElementMetadata {
+                    reference: super::super::ElementReference::new("source", "embedded"),
+                    labels: Arc::from([Arc::from("Nested")]),
+                    effective_from: 1,
+                },
+                properties,
+            },
+        )));
+    }
+
+    #[test]
+    fn typed_property_deserialization_rejects_invalid_values() {
+        let invalid = serde_json::json!({"ZonedTime": ["12:00:00", 999999]});
+        assert!(serde_json::from_value::<TypedElementValue>(invalid.clone()).is_err());
+        assert!(ElementValue::try_from_data_json(&serde_json::json!({
+            "__drasi_v1_envelope__": "drasi.data-value",
+            "value": invalid,
+        }))
+        .is_err());
+        assert!(ElementValue::try_from_data_json(&serde_json::json!({
+            "__drasi_v1_envelope__": "drasi.data-value",
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn json_unsigned_integer_is_not_rounded_through_float() {
+        let property = ElementValue::from(&serde_json::json!(u64::MAX));
+        let value: VariableValue = (&property).into();
+        assert_eq!(value, VariableValue::Integer(Integer::from(u64::MAX)));
+    }
 
     fn sample_naive_datetime() -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2024, 6, 15)

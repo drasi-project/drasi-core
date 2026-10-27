@@ -130,9 +130,7 @@ impl App {
                         self.add_incident(data);
                     }
                 }
-                ResultDiff::Update {
-                    before, after, ..
-                } => {
+                ResultDiff::Update { before, after, .. } => {
                     self.updates += 1;
                     if result.query_id == "traffic-segments" {
                         self.update_segment(before, after);
@@ -152,8 +150,11 @@ impl App {
             }
         }
         // Keep segments sorted by jam factor (worst first)
-        self.segments
-            .sort_by(|a, b| b.jam.partial_cmp(&a.jam).unwrap_or(std::cmp::Ordering::Equal));
+        self.segments.sort_by(|a, b| {
+            b.jam
+                .partial_cmp(&a.jam)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     fn add_segment(&mut self, data: &serde_json::Value) {
@@ -253,7 +254,7 @@ fn ui(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
+            Constraint::Length(3), // header
             Constraint::Min(6),    // segments
             Constraint::Length(8), // incidents
             Constraint::Length(9), // change log
@@ -318,7 +319,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_segments(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
-        .title(" Congested Segments ".fg(Color::Red).add_modifier(Modifier::BOLD))
+        .title(
+            " Congested Segments "
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -461,9 +466,7 @@ fn render_log(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(format!(" {time} "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("[{symbol}] "),
-                    Style::default()
-                        .fg(color)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(entry.message.clone(), Style::default().fg(color)),
             ]))
@@ -573,7 +576,7 @@ async fn main() -> Result<()> {
                    s.confidence AS confidence
             "#,
         )
-        .from_source("traffic")
+        .from_input("traffic")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -586,7 +589,7 @@ async fn main() -> Result<()> {
                    i.description AS description
             "#,
         )
-        .from_source("traffic")
+        .from_input("traffic")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

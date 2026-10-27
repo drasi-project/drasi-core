@@ -187,8 +187,6 @@ export class DashboardDesigner {
         form.__sampleRows = rows;
         if (rows.length > 0) {
           updateFieldSelects(Object.keys(rows[0]).sort());
-        } else if (snapshot.aggregation && typeof snapshot.aggregation === "object") {
-          updateFieldSelects(Object.keys(snapshot.aggregation).sort());
         } else {
           form.__refreshGraphPreview?.();
         }
@@ -725,19 +723,15 @@ export class DashboardDesigner {
       if (!response.ok) return;
       const snapshot = await response.json();
       const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
-      const aggregation = snapshot.aggregation ?? null;
-      if (rows.length === 0 && aggregation === null) return;
+      if (rows.length === 0) return;
 
       for (const widget of this.dashboard.widgets) {
         if ((widget.config?.queryId ?? "") !== queryId) continue;
         const runtime = this.runtimeByWidgetId.get(widget.id) ?? createWidgetRuntime();
         // Only populate if the runtime has no data yet
-        if (runtime.rows.length === 0 && runtime.aggregation === null) {
+        if (runtime.rows.length === 0) {
           for (const entry of rows) {
             applyResultDiff(runtime, snapshotRowToAddDiff(entry));
-          }
-          if (aggregation !== null) {
-            applyResultDiff(runtime, { op: "aggregation", after: aggregation });
           }
           this.runtimeByWidgetId.set(widget.id, runtime);
           this.renderWidget(widget.id);

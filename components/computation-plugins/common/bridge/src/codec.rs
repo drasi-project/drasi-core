@@ -4,36 +4,37 @@
 use std::{borrow::Cow, num::NonZeroU64};
 
 use drasi_lib::computation::v1::{
-    BinaryEnvelopeCodec, ChangeEnvelope, ChangeOperation, ContextValue, EnvelopeCodec, Record,
-    SourceTransactionCodec, SourceTransactionLimits,
+    BinaryEnvelopeCodec, ChangeEnvelope, ChangeOperation, ContextValue, EnvelopeCodec,
+    QueryChangeCodec, Record, RecordImage, SourceTransactionCodec, SourceTransactionLimits,
+    SystemMetadata,
 };
 use serde::Deserialize;
 
 use crate::{
     payload::{annotation_json, PayloadGuard},
-    BridgeError, Limits, Namespace, PortableSchema, Result,
+    BridgeError, Limits, Namespace, PortableDelivery, Result,
 };
 
-/// Only the three standard executable schemas are installed. Peer metadata
-/// cannot cause discovery or loading of any plugin code.
+/// Only the standard graph schema is installed. Peer metadata cannot cause
+/// discovery or loading of any plugin code.
 pub struct PortableEnvelopeCodec {
     binary: BinaryEnvelopeCodec,
-    schema: PortableSchema,
+    delivery: PortableDelivery,
     limits: Limits,
     namespace: Namespace,
 }
 
 impl PortableEnvelopeCodec {
-    pub fn new(schema: PortableSchema, namespace: Namespace, limits: Limits) -> Result<Self> {
+    pub fn new(delivery: PortableDelivery, namespace: Namespace, limits: Limits) -> Result<Self> {
         limits.validate()?;
         namespace.validate()?;
         let mut binary = BinaryEnvelopeCodec::new(limits.envelope_limit());
         binary
-            .register_schema(schema.schema())
+            .register_schema(delivery.schema())
             .map_err(|error| BridgeError::invalid(error.to_string()))?;
         Ok(Self {
             binary,
-            schema,
+            delivery,
             limits,
             namespace,
         })
@@ -47,7 +48,7 @@ impl PortableEnvelopeCodec {
                 .expect("nonzero canonical envelope limit"),
         );
         codec
-            .register_schema(self.schema.schema())
+            .register_schema(self.delivery.schema())
             .map_err(|error| BridgeError::invalid(error.to_string()))?;
         Ok(codec)
     }
@@ -79,7 +80,7 @@ impl PortableEnvelopeCodec {
     }
 
     pub fn validate(&self, envelope: &ChangeEnvelope) -> Result<()> {
-        if envelope.changes().schema() != self.schema.schema().descriptor()
+        if envelope.changes().schema() != self.delivery.schema().descriptor()
             || envelope.changes().operations().len() > self.limits.max_operations
             || envelope.annotations().len() > self.limits.max_annotations
         {
@@ -92,13 +93,7 @@ impl PortableEnvelopeCodec {
             envelope.changes().id().namespace(),
             envelope.changes().id().value(),
         )?;
-        crate::config::identifier(envelope.system().stream().as_str())?;
-        position(
-            envelope
-                .system()
-                .source_position()
-                .map(|value| value.as_ref()),
-        )?;
+        system_metadata(envelope.system())?;
         let mut lineage = envelope.lineage();
         let mut count = 0;
         while let Some(entry) = lineage {
@@ -107,8 +102,9 @@ impl PortableEnvelopeCodec {
                 return Err(BridgeError::invalid("envelope lineage limit"));
             }
             identity(entry.envelope_id().namespace(), entry.envelope_id().value())?;
-            crate::config::identifier(entry.system().stream().as_str())?;
-            position(entry.system().source_position().map(|value| value.as_ref()))?;
+            // Historical controls are provenance, not commands; only the frame
+            // budget bounds them.
+            system_metadata(entry.system())?;
             lineage = entry.parent();
         }
         for entry in envelope.annotations().entries() {
@@ -136,11 +132,7 @@ impl PortableEnvelopeCodec {
                 ChangeOperation::Deleted {
                     identity, before, ..
                 } => {
-                    guard.identity(
-                        self.schema,
-                        identity.identity().namespace(),
-                        identity.identity().value(),
-                    )?;
+                    guard.identity(identity.identity().namespace(), identity.identity().value())?;
                     if let Some(before) = before {
                         self.record(before, &mut guard)?;
                     }
@@ -151,12 +143,12 @@ impl PortableEnvelopeCodec {
     }
 
     fn record(&self, record: &Record, guard: &mut PayloadGuard<'_>) -> Result<()> {
-        guard.identity(
-            self.schema,
+        guard.record(
+            record.image(),
             record.identity().namespace(),
             record.identity().value(),
-        )?;
-        guard.payload(self.schema, record.payload())
+            record.payload(),
+        )
     }
 
     fn validate_semantics(&self, envelope: &ChangeEnvelope) -> Result<()> {
@@ -165,37 +157,37 @@ impl PortableEnvelopeCodec {
                 "bridge transport sequences start at one",
             ));
         }
-        match self.schema {
-            PortableSchema::GraphChange => {
-                if envelope
-                    .annotations()
-                    .entries()
-                    .any(|entry| entry.key() == "drasi.query.futures-due")
-                {
-                    return Err(BridgeError::invalid(
-                        "query scheduling remains local to its instance",
-                    ));
-                }
-                drasi_lib::computation::v1::GraphChangeCodec::decode_changes(envelope)
-                    .map_err(|error| BridgeError::invalid(error.to_string()))?;
+        if envelope.system().control().is_some() {
+            return Err(event_local_control());
+        }
+        // Source, query, transformer and transaction outputs are all ordinary
+        // graph data. Records were validated by the schema when the envelope was
+        // built or decoded and are not converted to `SourceChange`, so canonical
+        // patches, removals and partial images cross unchanged. Query metadata is
+        // never needed to carry them.
+        //
+        // Snapshots and progress-only frames are explicit recovery operations.
+        // They are recognized only from the current envelope's own scoped
+        // projection, never from the schema or from annotations inherited from
+        // an earlier envelope.
+        if QueryChangeCodec::is_snapshot(envelope) || QueryChangeCodec::is_progress_only(envelope) {
+            return Err(BridgeError::invalid(
+                "query snapshot and progress frames are recovery controls, not portable bridge data",
+            ));
+        }
+        let invalid = |error: drasi_lib::computation::v1::SourceTransactionError| {
+            BridgeError::invalid(error.to_string())
+        };
+        match self.delivery {
+            // A complete-transaction marker that is present must still be valid
+            // for this very change set; absence is an ordinary event.
+            PortableDelivery::Events => {
+                SourceTransactionCodec::metadata(envelope).map_err(invalid)?;
             }
-            PortableSchema::QueryChange => {
-                use drasi_lib::computation::v1::QueryChangeCodec;
-                if QueryChangeCodec::is_snapshot(envelope)
-                    || QueryChangeCodec::is_progress_only(envelope)
-                {
-                    return Err(BridgeError::invalid(
-                        "snapshot/recovery control frames need an explicit protocol",
-                    ));
-                }
-                let metadata = QueryChangeCodec::metadata(envelope)
-                    .map_err(|error| BridgeError::invalid(error.to_string()))?;
-                self.namespace.query(&metadata.query_id)?;
-                QueryChangeCodec::decode_evaluation(envelope)
-                    .map_err(|error| BridgeError::invalid(error.to_string()))?;
-            }
-            PortableSchema::SourceTransaction => {
-                SourceTransactionCodec::decode(
+            // Atomic delivery is selected by configuration, never inferred from
+            // the schema: every frame needs its own current, valid marker.
+            PortableDelivery::CompleteTransactions => {
+                let transaction = SourceTransactionCodec::decode(
                     envelope,
                     SourceTransactionLimits {
                         max_changes: std::num::NonZeroUsize::new(self.limits.max_operations)
@@ -205,7 +197,8 @@ impl PortableEnvelopeCodec {
                             .expect("validated deadline"),
                     },
                 )
-                .map_err(|error| BridgeError::invalid(error.to_string()))?;
+                .map_err(invalid)?;
+                self.namespace.source(transaction.source_id())?;
             }
         }
         Ok(())
@@ -226,11 +219,24 @@ fn position(bytes: Option<&[u8]>) -> Result<()> {
     Ok(())
 }
 
+/// Event-local graph controls (futures-due, reevaluation) schedule work inside one
+/// instance and are never inherited; a peer cannot be asked to run them.
+fn event_local_control() -> BridgeError {
+    BridgeError::invalid(
+        "event-local graph controls such as scheduled notifications are not portable bridge data",
+    )
+}
+
+fn system_metadata(system: &SystemMetadata) -> Result<()> {
+    crate::config::identifier(system.stream().as_str())?;
+    position(system.source_position().map(|value| value.as_ref()))
+}
+
 fn annotation(key: &str, bytes: &[u8], limits: &Limits) -> Result<()> {
     if bytes.len() > 64 * 1024 {
         return Err(BridgeError::invalid("annotation bytes exceed 64 KiB"));
     }
-    if key.starts_with("drasi.") {
+    if key.starts_with("drasi.") && key != drasi_lib::computation::v1::QUERY_PROJECTION {
         annotation_json(bytes, limits.max_depth)?;
     }
     Ok(())
@@ -238,7 +244,18 @@ fn annotation(key: &str, bytes: &[u8], limits: &Limits) -> Result<()> {
 
 /// Iterative framing check before serde can reserve from a hostile count.
 /// Blob contents are never recursively visited as MessagePack.
-pub fn preflight_messagepack(mut bytes: &[u8], limit: usize, max_values: usize) -> Result<()> {
+pub fn preflight_messagepack(bytes: &[u8], limit: usize, max_values: usize) -> Result<()> {
+    preflight_nested(bytes, limit, max_values, 23).map(drop)
+}
+
+/// Like [`preflight_messagepack`] with an explicit bound on open containers.
+/// Returns the number of values visited.
+pub(crate) fn preflight_nested(
+    mut bytes: &[u8],
+    limit: usize,
+    max_values: usize,
+    max_nesting: usize,
+) -> Result<usize> {
     if bytes.len() > limit {
         return Err(BridgeError::invalid("MessagePack frame exceeds byte limit"));
     }
@@ -310,8 +327,8 @@ pub fn preflight_messagepack(mut bytes: &[u8], limit: usize, max_values: usize) 
             ));
         }
         if children > 0 {
-            if remaining.len() >= 24 {
-                return Err(BridgeError::invalid("MessagePack nesting exceeds 24"));
+            if remaining.len() > max_nesting {
+                return Err(BridgeError::invalid("MessagePack nesting limit exceeded"));
             }
             remaining.push(children);
         }
@@ -319,7 +336,7 @@ pub fn preflight_messagepack(mut bytes: &[u8], limit: usize, max_values: usize) 
     if !bytes.is_empty() {
         return Err(BridgeError::invalid("trailing MessagePack values"));
     }
-    Ok(())
+    Ok(visited)
 }
 
 #[derive(Deserialize)]
@@ -344,14 +361,25 @@ impl Identity<'_> {
 struct Image<'a> {
     #[serde(borrow)]
     identity: Identity<'a>,
+    kind: u8,
     #[serde(borrow)]
     bytes: Blob<'a>,
 }
 
 impl Image<'_> {
-    fn check(&self, schema: PortableSchema, guard: &mut PayloadGuard<'_>) -> Result<()> {
-        guard.identity(schema, &self.identity.namespace, &self.identity.value.0)?;
-        guard.payload(schema, &self.bytes.0)
+    fn check(&self, guard: &mut PayloadGuard<'_>) -> Result<()> {
+        let image = match self.kind {
+            0 => RecordImage::Full,
+            1 => RecordImage::Patch,
+            2 => RecordImage::Partial,
+            _ => return Err(BridgeError::invalid("unknown record image kind")),
+        };
+        guard.record(
+            image,
+            &self.identity.namespace,
+            &self.identity.value.0,
+            &self.bytes.0,
+        )
     }
 }
 
@@ -375,15 +403,19 @@ enum Operation<'a> {
     },
 }
 
+/// Control contents are bounded only by the frame budget and validated by the
+/// standard envelope decoder; the probe only needs to know one is present.
 #[derive(Deserialize)]
 struct Metadata<'a> {
     #[serde(borrow)]
     stream: Cow<'a, str>,
     #[serde(borrow)]
     source_position: Option<Blob<'a>>,
+    control: Option<serde::de::IgnoredAny>,
 }
 
 impl Metadata<'_> {
+    /// Bounds shared by the current event and historical lineage entries.
     fn check(&self) -> Result<()> {
         crate::config::identifier(&self.stream)?;
         position(
@@ -391,6 +423,14 @@ impl Metadata<'_> {
                 .as_ref()
                 .map(|position| position.0.as_ref()),
         )
+    }
+
+    fn check_current(&self) -> Result<()> {
+        self.check()?;
+        if self.control.is_some() {
+            return Err(event_local_control());
+        }
+        Ok(())
     }
 }
 
@@ -445,7 +485,7 @@ struct EnvelopeProbe<'a> {
 
 impl EnvelopeProbe<'_> {
     fn validate(&self, codec: &PortableEnvelopeCodec) -> Result<()> {
-        let schema = codec.schema.schema();
+        let schema = codec.delivery.schema();
         let expected = schema.descriptor();
         if self.format != BinaryEnvelopeCodec::VERSION
             || self.schema.id.as_ref() != expected.id().as_str()
@@ -462,7 +502,7 @@ impl EnvelopeProbe<'_> {
         }
         self.id.check()?;
         self.change_set.check()?;
-        self.system.check()?;
+        self.system.check_current()?;
         for (id, metadata) in &self.lineage {
             id.check()?;
             metadata.check()?;
@@ -490,17 +530,17 @@ impl EnvelopeProbe<'_> {
         let mut guard = PayloadGuard::new(&codec.limits, &codec.namespace);
         for operation in &self.operations {
             match operation {
-                Operation::Add { after } => after.check(codec.schema, &mut guard)?,
+                Operation::Add { after } => after.check(&mut guard)?,
                 Operation::Update { before, after } => {
                     if let Some(before) = before {
-                        before.check(codec.schema, &mut guard)?;
+                        before.check(&mut guard)?;
                     }
-                    after.check(codec.schema, &mut guard)?;
+                    after.check(&mut guard)?;
                 }
                 Operation::Delete { identity, before } => {
-                    guard.identity(codec.schema, &identity.namespace, &identity.value.0)?;
+                    guard.identity(&identity.namespace, &identity.value.0)?;
                     if let Some(before) = before {
-                        before.check(codec.schema, &mut guard)?;
+                        before.check(&mut guard)?;
                     }
                 }
             }

@@ -136,7 +136,9 @@ impl Arithmetic {
     fn change(&self, input: &ChangeEnvelope, count: i64) -> TestResult<ChangeEnvelope> {
         let mut output = Vec::new();
         for mut change in GraphChangeCodec::decode_changes(input)? {
-            if let SourceChange::Insert { element } | SourceChange::Update { element } = &mut change
+            if let SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } = &mut change
             {
                 let Element::Node { properties, .. } = element else {
                     anyhow::bail!("expected node")
@@ -1973,7 +1975,7 @@ async fn builtin_middleware_participates_and_unwind_state_survives_reconstructio
                     }),
                 };
                 if update {
-                    SourceChange::Update { element }
+                    SourceChange::update(element)
                 } else {
                     SourceChange::Insert { element }
                 }
@@ -2400,11 +2402,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
         .expect("confirm");
 
     // A transport re-emission is still the same query result.
-    let repeated = input_from_query.derive(
-        emission_id(&stream("query/out"), 99).expect("emission"),
-        input_from_query.changes().clone(),
-        SystemMetadata::new(stream("query/out"), 99),
-    );
+    let repeated = input_from_query.reemit(99).expect("reemit");
     let replay = first
         .transform(InputEnvelope {
             port: port("in"),
@@ -2443,7 +2441,10 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
             })
             .await
             .expect_err("do not skip missing query result");
-        assert!(format!("{error:#}").contains("missing result"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("logical progress has a gap"),
+            "{error:#}"
+        );
         gap.stop().await.expect("cleanup gap");
     }
     let mut gap = open(gap_definition, registry.clone(), storage.clone()).await;
@@ -2464,22 +2465,26 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     gap.delivery_completed(&output).await.expect("confirm");
     gap.stop().await.expect("stop");
 
-    let mut reset = input_from_query.clone();
-    reset
-        .append_annotation(
-            ContextEntry::try_new(
-                id("query"),
-                "drasi.query-generation.v1",
-                ContextValue::Unsigned(1),
-            )
-            .expect("annotation"),
-        )
-        .expect("append");
+    query.stop().await.expect("stop before reset");
+    query.deprovision().await.expect("reset query state");
+    query.start().await.expect("restart reset query");
+    let reset = query.transform(input(1, 3)).await.expect("reset output");
+    assert_ne!(
+        GraphProducerProgress::from_envelope(&reset[0].envelope)
+            .unwrap()
+            .unwrap()
+            .identity(),
+        GraphProducerProgress::from_envelope(&input_from_query)
+            .unwrap()
+            .unwrap()
+            .identity(),
+        "the actual reset must publish a new output epoch",
+    );
     assert!(
         first
             .transform(InputEnvelope {
                 port: port("in"),
-                envelope: reset
+                envelope: reset[0].envelope.clone()
             })
             .await
             .is_err(),
@@ -2507,7 +2512,13 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
         })
         .await
         .expect_err("volatile boundary");
-    assert!(format!("{error:#}").contains("volatile query"), "{error:#}");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("persistent graph processing")
+            && message.contains("cannot recover")
+            && message.contains("volatile"),
+        "{message}"
+    );
     reject.stop().await.expect("cleanup");
     volatile.stop().await.expect("stop");
 }

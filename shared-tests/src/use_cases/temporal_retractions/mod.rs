@@ -27,7 +27,7 @@ fn node(id: &str, label: &str, time: u64, properties: Value, update: bool) -> So
         properties: ElementPropertyMap::from(properties),
     };
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }

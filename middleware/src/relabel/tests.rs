@@ -54,6 +54,7 @@ fn create_node_insert_change(labels: Vec<&str>, props: Value) -> SourceChange {
 fn create_node_update_change(labels: Vec<&str>, props: Value) -> SourceChange {
     let labels: Vec<Arc<str>> = labels.into_iter().map(Arc::from).collect();
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test_source", "node1"),
@@ -251,7 +252,7 @@ mod process {
 
         assert_eq!(result.len(), 1);
         match &result[0] {
-            SourceChange::Update { element } => {
+            SourceChange::Update { element, .. } => {
                 let metadata = element.get_metadata();
                 assert_eq!(metadata.labels.len(), 1);
                 assert!(metadata.labels.contains(&Arc::from("FinalLabel")));
@@ -489,5 +490,64 @@ mod factory {
         let mw_config = create_mw_config(config);
         let result = factory.build(&mw_config);
         assert!(result.is_ok());
+    }
+}
+
+mod canonical_mutation {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn subject() -> crate::relabel::RelabelMiddleware {
+        RelabelMiddlewareFactory::new()
+            .build(&create_mw_config(
+                json!({"labelMappings": {"Person": "User"}}),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn update_keeps_its_removals_and_null_values() {
+        let SourceChange::Update { element, .. } =
+            create_node_update_change(vec!["Person"], json!({"kept": null}))
+        else {
+            panic!("expected update");
+        };
+        let change =
+            SourceChange::update_with_removals(element, BTreeSet::from(["gone".to_string()]))
+                .unwrap();
+        let result = subject().apply(change).await.unwrap();
+        let [SourceChange::Update {
+            element,
+            removed_properties,
+        }] = result.as_slice()
+        else {
+            panic!("an update stays one update");
+        };
+        assert_eq!(
+            removed_properties.iter().collect::<Vec<_>>(),
+            [&"gone".to_string()]
+        );
+        assert!(element.get_metadata().labels.contains(&Arc::from("User")));
+        assert_eq!(
+            element.get_properties().get("kept"),
+            Some(&ElementValue::Null)
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_stays_a_replacement() {
+        let SourceChange::Insert { element } =
+            create_node_insert_change(vec!["Person"], json!({"name": "a"}))
+        else {
+            panic!("expected insert");
+        };
+        let result = subject()
+            .apply(SourceChange::replace(element))
+            .await
+            .unwrap();
+        let [SourceChange::Replace { element }] = result.as_slice() else {
+            panic!("a replacement must not become an insert");
+        };
+        assert!(element.get_metadata().labels.contains(&Arc::from("User")));
     }
 }

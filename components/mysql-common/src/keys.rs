@@ -14,7 +14,7 @@
 
 //! Key formatting and identifier helpers for MySQL plugins.
 
-use drasi_core_types::models::ElementValue;
+use drasi_core_types::{evaluation::variable_value::VariableValue, models::ElementValue};
 
 /// Native identity shared by initial loading and live changes; legacy IDs are unchanged.
 pub fn transaction_element_id(
@@ -42,6 +42,21 @@ pub fn transaction_element_id(
                     .all(|value| matches!(value, ElementValue::Integer(0..=255))),
                 "MySQL binary keys require bytes"
             ),
+            ElementValue::Typed(_) => match VariableValue::from(value) {
+                VariableValue::Null
+                | VariableValue::List(_)
+                | VariableValue::Object(_)
+                | VariableValue::Element(_)
+                | VariableValue::ElementMetadata(_)
+                | VariableValue::ElementReference(_)
+                | VariableValue::Expression(_)
+                | VariableValue::ListRange(_)
+                | VariableValue::Awaiting => anyhow::bail!("unsupported MySQL key value"),
+                VariableValue::Float(value) => {
+                    anyhow::ensure!(value.is_f64(), "non-finite MySQL key")
+                }
+                _ => {}
+            },
             _ => {}
         }
         let value = match value {
@@ -77,6 +92,7 @@ pub fn format_value_for_key(value: &ElementValue) -> String {
             .collect::<Vec<_>>()
             .join("-"),
         ElementValue::Object(_) => "object".to_string(),
+        ElementValue::Typed(_) => VariableValue::from(value).to_string(),
     }
 }
 

@@ -728,7 +728,7 @@ impl Binlog {
                                         SourceChange::Insert { element: after },
                                     ]
                                 } else {
-                                    vec![SourceChange::Update { element: after }]
+                                    vec![SourceChange::update(after)]
                                 }
                             }
                             _ => anyhow::bail!("empty MySQL row change"),

@@ -25,6 +25,13 @@ use super::{
 
 pub(super) const INPUT_OWNER_PREFIX: &str = "computation:input-owner:";
 
+pub(super) fn producer_owner_key(stream: &StreamId) -> String {
+    format!(
+        "{INPUT_OWNER_PREFIX}{}",
+        super::query::progress_key(stream.as_str(), None)
+    )
+}
+
 use drasi_computation_contracts::has_distinct_producer_lineage;
 pub use drasi_computation_contracts::{GraphProducerIdentity, GraphProducerProgress};
 
@@ -98,8 +105,7 @@ impl GraphInputProgress {
         progress_owner: Option<&super::QuerySourceProgress>,
         producer_role: Option<super::ComponentRole>,
     ) -> anyhow::Result<(Self, Option<QueryInputOwner>)> {
-        let query_input =
-            input.changes().schema() == super::QueryChangeCodec::schema().descriptor();
+        let query_input = super::QueryChangeCodec::is_query_output(input);
         let immediate = if query_input {
             GraphProducerProgress::from_query_envelope(input)?
         } else {
@@ -137,9 +143,7 @@ impl GraphInputProgress {
                 Some(owner),
             ));
         }
-        if input.changes().schema() == GraphChangeCodec::schema().descriptor()
-            || input.changes().schema() == super::SourceTransactionCodec::schema().descriptor()
-        {
+        if input.changes().schema() == GraphChangeCodec::schema().descriptor() {
             Ok((Self::from_envelope(input)?, None))
         } else {
             let mut progress = Self::from_stream(input, input.system().sequence());
@@ -168,10 +172,7 @@ impl GraphInputProgress {
                 identity: SourceProgressKey::Stream(system.stream().clone()),
                 sequence: progress.sequence(),
                 position: None,
-                producer: progress
-                    .identity()
-                    .persistent()
-                    .then(|| progress.identity().clone()),
+                producer: Some(progress.identity().clone()),
                 volatile_producer: !progress.identity().persistent(),
                 positioned: None,
             });
@@ -241,7 +242,7 @@ impl GraphInputProgress {
         let origin = boundary.system;
         let producer = GraphProducerProgress::read_boundary(input, &origin)?.0;
         let query_progress = boundary.role != super::ComponentRole::Transformer
-            && input.changes().schema() == super::QueryChangeCodec::schema().descriptor()
+            && super::QueryChangeCodec::is_query_output(input)
             && producer.is_none();
         if origin.stream() != input.system().stream() {
             self = if query_progress {
@@ -337,10 +338,7 @@ impl GraphInputProgress {
             .as_ref()
             .and_then(|position| position.origin_transport.as_ref())
             .map_or(&self.stream, |(stream, _)| stream);
-        format!(
-            "{INPUT_OWNER_PREFIX}{}",
-            super::query::progress_key(stream.as_str(), None)
-        )
+        producer_owner_key(stream)
     }
 
     pub(super) fn validate_durability(&self, persistent: bool) -> anyhow::Result<()> {
@@ -358,41 +356,52 @@ impl GraphInputProgress {
     ) -> anyhow::Result<Option<SourceCheckpoint>> {
         let saved = store.read_checkpoint(&self.key).await?;
         let owner = store.read_checkpoint(&self.owner_key()).await?;
-        anyhow::ensure!(
-            self.producer.is_some() || owner.is_none(),
-            "graph input omitted its committed producer identity"
-        );
         self.validate_durability(persistent)?;
+        anyhow::ensure!(
+            !persistent
+                || self
+                    .producer
+                    .as_ref()
+                    .map_or(true, GraphProducerIdentity::persistent),
+            "persistent graph processing cannot recover through a volatile output"
+        );
+        let owner = owner
+            .map(|owner| {
+                anyhow::ensure!(
+                    owner.sequence == 1,
+                    "invalid input producer identity version"
+                );
+                let stored: GraphProducerIdentity = serde_json::from_slice(
+                    owner
+                        .source_position
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("missing input producer identity"))?,
+                )?;
+                stored.validate()?;
+                Ok::<_, anyhow::Error>(stored)
+            })
+            .transpose()?;
+        self.validate_owner(saved.as_ref().map(|saved| saved.sequence), owner.as_ref())?;
+        Ok(saved)
+    }
+
+    pub(super) fn validate_owner(
+        &self,
+        saved: Option<u64>,
+        owner: Option<&GraphProducerIdentity>,
+    ) -> anyhow::Result<()> {
         match (&self.producer, owner) {
             (Some(identity), owner) => {
-                anyhow::ensure!(
-                    !persistent || identity.persistent(),
-                    "persistent graph processing cannot recover through volatile middleware"
-                );
                 if let Some(owner) = owner {
-                    anyhow::ensure!(
-                        owner.sequence == 1,
-                        "invalid input producer identity version"
-                    );
-                    let stored: GraphProducerIdentity = serde_json::from_slice(
-                        owner
-                            .source_position
-                            .as_deref()
-                            .ok_or_else(|| anyhow::anyhow!("missing input producer identity"))?,
-                    )?;
-                    anyhow::ensure!(&stored == identity, "graph input producer identity changed");
+                    anyhow::ensure!(owner == identity, "graph input producer identity changed");
                 } else {
                     anyhow::ensure!(saved.is_none(), "committed input has no producer identity");
                 }
-                if saved
-                    .as_ref()
-                    .map_or(true, |saved| self.sequence > saved.sequence)
-                {
-                    let expected = saved
-                        .as_ref()
-                        .map_or(Some(1), |saved| saved.sequence.checked_add(1));
+                // Volatile streams need epoch fencing too, but do not acquire
+                // durable replay's consecutive-history guarantee.
+                if identity.persistent() && saved.map_or(true, |saved| self.sequence > saved) {
                     anyhow::ensure!(
-                        expected == Some(self.sequence),
+                        saved.map_or(Some(1), |saved| saved.checked_add(1)) == Some(self.sequence),
                         "graph input logical progress has a gap"
                     );
                 }
@@ -400,7 +409,7 @@ impl GraphInputProgress {
             (None, Some(_)) => anyhow::bail!("graph input omitted its committed producer identity"),
             (None, None) => {}
         }
-        Ok(saved)
+        Ok(())
     }
 
     pub async fn stage(&self, store: &dyn CheckpointStore) -> Result<(), IndexError> {
@@ -545,13 +554,41 @@ mod tests {
                 input.key,
                 super::super::query::progress_key(stream.as_str(), None)
             );
-            assert_eq!(input.producer.as_ref(), persistent.then_some(&identity));
+            assert_eq!(input.producer.as_ref(), Some(&identity));
             assert_eq!(input.volatile_producer, !persistent);
             let mut transports = BTreeMap::new();
             input.record_transport(&mut transports);
             assert_eq!(transports[&stream], 17);
             assert_eq!(transports[&relay], 50);
         }
+    }
+
+    #[test]
+    fn volatile_progress_retains_epoch_ownership_without_claiming_contiguous_replay() {
+        let stream = StreamId::try_new("producer/out").unwrap();
+        let identity = GraphProducerIdentity::volatile(
+            "scope".into(),
+            "graph".into(),
+            ComponentId::try_new("producer").unwrap(),
+            stream.clone(),
+        )
+        .unwrap();
+        let mut envelope = GraphChangeCodec::encode_changes(&[], stream.clone(), 50, None).unwrap();
+        GraphProducerProgress::annotate(&mut envelope, &identity, 8).unwrap();
+        let progress = GraphInputProgress::from_envelope(&envelope).unwrap();
+        progress.validate_owner(Some(4), Some(&identity)).unwrap();
+        assert!(progress.validate_owner(Some(4), None).is_err());
+        let replacement = GraphProducerIdentity::volatile(
+            "scope".into(),
+            "graph".into(),
+            ComponentId::try_new("producer").unwrap(),
+            stream,
+        )
+        .unwrap();
+        assert!(progress
+            .validate_owner(Some(4), Some(&replacement))
+            .is_err());
+        assert!(progress.validate_durability(true).is_err());
     }
 
     #[test]

@@ -81,7 +81,7 @@ async fn core_with_failed_bootstrap_query() -> Result<(DrasiLib, MockSourceHandl
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -244,8 +244,8 @@ async fn query_enters_error_state_when_multiple_bootstraps_fail() -> Result<()> 
 
     let query = Query::cypher("q-multi")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("source-a")
-        .from_source("source-b")
+        .from_input("source-a")
+        .from_input("source-b")
         .auto_start(true)
         .build();
 
@@ -299,11 +299,11 @@ async fn core_with_conflicting_query() -> Result<DrasiLib> {
     let (source_b, _handle_b) = MockSource::new("source-b")?;
     let mut query = Query::cypher("conflicting-query")
         .query("MATCH (n:Sensor) RETURN n")
-        .from_source("source-a")
-        .from_source("source-b")
+        .from_input("source-a")
+        .from_input("source-b")
         .auto_start(false)
         .build();
-    for subscription in &mut query.sources {
+    for subscription in &mut query.inputs {
         subscription.nodes = vec!["Sensor".to_string()];
     }
     let core = runtime_support::builder()
@@ -412,7 +412,7 @@ async fn query_runtime_stop_preserves_successful_restart() -> Result<()> {
         .with_query(
             Query::cypher("restart-query")
                 .query("MATCH (n:Sensor) RETURN n")
-                .from_source("test-source")
+                .from_input("test-source")
                 .auto_start(false)
                 .build(),
         )

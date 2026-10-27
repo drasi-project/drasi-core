@@ -42,7 +42,7 @@ fn input(sequence: u64) -> InputEnvelope {
             if sequence == 1 {
                 SourceChange::Insert { element }
             } else {
-                SourceChange::Update { element }
+                SourceChange::update(element)
             },
             StreamId::try_new("source/out").expect("stream"),
             sequence,
@@ -60,6 +60,7 @@ impl ComputationBootstrapProvider for Bootstrap {
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter([Ok(input(1).envelope)])),
             watermarks: vec![BootstrapWatermark {
+                producer: None,
                 stream: StreamId::try_new("source/out")?,
                 source_id: None,
                 sequence: 1,

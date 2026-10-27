@@ -457,7 +457,7 @@ impl Source for MockSource {
                             if is_new {
                                 SourceChange::Insert { element }
                             } else {
-                                SourceChange::Update { element }
+                                SourceChange::update(element)
                             }
                         }
                         DataType::Generic => {
@@ -1062,9 +1062,7 @@ async fn emit_mesh_tick(
         dispatch_generated_change(
             base.clone_shared(),
             source_id,
-            SourceChange::Update {
-                element: connected_to_element(source_name, &edge, random_strength()),
-            },
+            SourceChange::update(connected_to_element(source_name, &edge, random_strength())),
         )
         .await;
     }

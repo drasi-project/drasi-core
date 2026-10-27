@@ -190,7 +190,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
     let (source, handle) = ApplicationSource::new("test-source", durable_source_config())?;
     let query = Query::cypher("test-query")
         .query("MATCH (e:Entity) RETURN e.id AS id, e.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -357,7 +357,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
 
     let query = Query::cypher("agg-query")
         .query("MATCH (i:Item) RETURN count(i) AS total, sum(i.amount) AS total_amount")
-        .from_source("agg-source")
+        .from_input("agg-source")
         .auto_start(true)
         .build();
 

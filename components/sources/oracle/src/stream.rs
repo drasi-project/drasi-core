@@ -458,7 +458,7 @@ fn make_insert_or_update_change(
     Ok(if is_insert {
         SourceChange::Insert { element }
     } else {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     })
 }
 

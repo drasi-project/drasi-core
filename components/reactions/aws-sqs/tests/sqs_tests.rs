@@ -195,7 +195,7 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
     )?;
     let query = Query::cypher("sensor-query")
         .query("MATCH (s:Sensor) RETURN s.id AS id, s.value AS value")
-        .from_source("app-source")
+        .from_input("app-source")
         .auto_start(true)
         .build();
 
@@ -329,7 +329,7 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
     )?;
     let query = Query::cypher("agg-query")
         .query("MATCH (s:Sensor) RETURN count(s) AS total, sum(s.value) AS total_value")
-        .from_source("app-source")
+        .from_input("app-source")
         .auto_start(true)
         .build();
 

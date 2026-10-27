@@ -646,6 +646,7 @@ version = "0.6.4"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bincode",
  "bit-set",
  "bytes",
  "chrono",

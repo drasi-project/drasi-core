@@ -258,6 +258,7 @@ fn test_update_change_contains_node_element() {
     assert!(matches!(
         changes.first().expect("update change"),
         SourceChange::Update {
+            removed_properties: _,
             element: Element::Node { .. }
         }
     ));

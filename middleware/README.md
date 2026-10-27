@@ -29,6 +29,31 @@ drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
 - **`unwind`** - Unwind arrays into multiple elements
 - **`all`** - Enable all middleware (convenience feature, includes `bundled-jq`)
 
+### Updates, Removals and Replacements
+
+A `SourceChange::Update` sets the properties of its element (`null` is a value) and
+deletes only the names in `removed_properties`; omitted properties stay unchanged. A
+`SourceChange::Replace` carries a complete element and drops omitted properties.
+
+- `relabel`, `decoder`, `parse_json` and `promote` forward removals and replacements
+  unchanged (derived properties follow the removal of their source).
+- `map` and `jq` accept `"op": "Replace"` and map a replacement to a replacement by
+  default. They remain **stateless event mappers**, using their `update` rules for
+  replacements. Rules operate on the data present in each event, not a retained
+  input or output view. An incoming removal patch cannot in general be translated
+  into a mapped update without prior context, so that update rule is skipped with
+  a debug diagnostic. Explicit event mappings to `Insert`, `Replace` or `Delete`
+  can still run. Missing selections and unmatched rules produce no mapped event;
+  malformed changes and configured processing failures remain errors.
+- `unwind` evaluates an update as the patch it carries; a removed or omitted array
+  property deletes the children it selected, and a child item that loses fields
+  removes them. A replacement or a changed label also cleans the previous children.
+
+A stateful **view transform** would be a separate component that maintains a
+derived dataset, including retractions for filtered or removed outputs. It is
+[future work](../lib/docs/computation-graph-remaining-work.md#cw-68), not a mode
+or replacement for the stateless event mappers.
+
 ### JQ Middleware Options
 
 You can use the JQ middleware in two ways:
@@ -140,9 +165,15 @@ impl SourceMiddleware for MyMiddleware {
                 // Transform the element being inserted
                 Ok(vec![SourceChange::Insert { element }])
             },
-            SourceChange::Update { mut element } => {
-                // Transform the element being updated
-                Ok(vec![SourceChange::Update { element }])
+            SourceChange::Replace { mut element } => {
+                // A full replacement: omitted properties are dropped
+                Ok(vec![SourceChange::Replace { element }])
+            },
+            SourceChange::Update { mut element, removed_properties } => {
+                // `element` holds only the properties being set (null is a value);
+                // `removed_properties` names the properties to delete. Anything
+                // else stays unchanged. Keep the two sets disjoint.
+                Ok(vec![SourceChange::Update { element, removed_properties }])
             },
             SourceChange::Delete { metadata } => {
                 // Handle deletion

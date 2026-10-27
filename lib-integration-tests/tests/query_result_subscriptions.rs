@@ -22,7 +22,7 @@ type Results = BoxStream<'static, drasi_lib::Result<Arc<QueryResult>>>;
 fn configuration(mode: DispatchMode, retention: usize) -> QueryConfig {
     let mut config = Query::cypher("query")
         .query("MATCH (n:Item) RETURN n.value AS value")
-        .from_source("input")
+        .from_input("input")
         .enable_bootstrap(false)
         .auto_start(true)
         .with_dispatch_buffer_capacity(1)

@@ -6,8 +6,8 @@ pub mod config;
 pub mod delivery;
 
 use drasi_computation_contracts::{
-    ComponentRole, ImplementationIdentity, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    QueryChangeCodec, SinkCompletion,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_network_common::wire;
 use drasi_computation_plugin_sdk::{
@@ -28,7 +28,7 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
         vec![Arc::new(HttpSinkFactory)],
-        vec![QueryChangeCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 
@@ -52,11 +52,14 @@ impl Factory for HttpSinkFactory {
             ports: vec![PortDescriptor::new(
                 PortId::try_new("in").expect("constant"),
                 PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             )],
             completion: Some(SinkCompletion::Handled),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                binds_inputs: true,
+                ..Capabilities::default()
+            },
         }
     }
 
@@ -65,9 +68,13 @@ impl Factory for HttpSinkFactory {
         request: &CreateRequest,
         _control: ControlSender,
     ) -> anyhow::Result<CreatedComponent> {
+        let config = HttpSinkConfig::parse(request.configuration.clone())?;
+        let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
+        config.validate_outputs(&outputs)?;
         Ok(Component::Sink(Box::new(component::HttpSink::new(
             self.metadata().descriptor(request.id.clone())?,
-            HttpSinkConfig::parse(request.configuration.clone())?,
+            config,
+            outputs,
         )?))
         .into())
     }

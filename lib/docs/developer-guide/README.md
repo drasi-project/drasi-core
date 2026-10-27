@@ -1,9 +1,11 @@
 # The drasi-lib developer guide
 
 **Development API guide.** This guide describes the current checkout, including
-native MySQL/SQLite components, shared hosting and query-progress measurements. Use
+native MySQL/SQLite components, shared hosting, query-progress measurements and the
+unified graph-change data contract (queries publish ordinary result nodes). Use
 matching Core/Server sources and rebuilt plugin libraries; an older published
-commit or registry binary does not contain all of these interfaces.
+commit or registry binary does not contain all of these interfaces, and earlier
+native wire or query-row formats are not read.
 
 **drasi-lib is an embedded data-processing runtime for Rust applications.**
 You connect **components** into a **computation graph** to ingest data, transform it,
@@ -514,16 +516,22 @@ fn quantity_update(sku: &str, quantity: i64, time: u64) -> SourceChange {
             metadata: metadata(sku, time),
             properties: ElementPropertyMap::from(serde_json::json!({"quantity": quantity})),
         },
+        removed_properties: BTreeSet::new(),
     }
 }
 ```
+
+`removed_properties` names properties to delete from the element. It is empty
+here because the update only sets `quantity`. An empty list is the usual case, but
+it is explicit: removing a property is different from setting it to null.
 
 The query retains `sku` and `minimum`. At the graph-change boundary:
 
 | Change | Meaning |
 |---|---|
 | `Insert` | A full-row upsert. Repeating the same complete element is not another contribution to an aggregate. |
-| `Update` | Merge the supplied properties into the element. Omitted properties remain; a supplied null clears a property. |
+| `Update` | Merge the supplied properties into the element. Omitted properties remain. A supplied null stores null; a name in `removed_properties` removes that property. |
+| `Replace` | Replace the element with the supplied full image: properties it omits are dropped, as one change rather than a delete followed by an insert. |
 | `Delete` | Remove the element identified by its metadata. No property payload is required. |
 
 Updates and deletions must use the original element reference. Generating a
@@ -531,10 +539,12 @@ new ID for each update creates different elements instead of updating one.
 A live node and relationship cannot share one element identity; that collision
 fails before modifying state.
 
-Properties can contain scalars, lists, objects, and supported temporal values.
-`ElementValue` and `ElementPropertyMap` preserve the typed model. A string that
-looks like a date is still a string unless you construct or parse a temporal
-value.
+Properties can contain scalars, lists, objects, temporal values, and the other
+rich values Drasi represents (unsigned integers, durations, ranges and
+references, for example). `ElementValue` and `ElementPropertyMap` preserve the
+typed model, and the graph-change records carry those values without reducing
+them to JSON. A string that looks like a date is still a string unless you
+construct or parse a temporal value.
 
 #### Supply meaningful time
 
@@ -932,9 +942,13 @@ contract needed for remote effects.
 
 #### Receive native query output
 
-The query emits `QueryChangeCodec` records, not source graph elements. Stockroom's
-custom `Alerts` sink demonstrates the underlying trait. The full implementation
-also handles the optional reorder, audit, and display branches:
+The query emits ordinary graph-change records: each result row is a node in the
+query's own output namespace, not one of the source graph's elements. Its
+properties are the `RETURN` aliases. `QueryChangeCodec::schema()` is the same
+schema as `GraphChangeCodec::schema()`, so a sink that handles graph changes can
+receive it. Stockroom's custom `Alerts` sink demonstrates the underlying trait.
+The full implementation also handles the optional reorder, audit, and display
+branches:
 
 <!-- excerpt: stockroom/src/main.rs#alert-sink -->
 ```rust
@@ -993,9 +1007,11 @@ they are not a retained stream of every result change. Terminal writes use
 #### Key the view by record identity
 
 Two result rows can have identical values. Do not use JSON equality as their
-identity, and do not derive identity from a field that may change.
-`QueryChangeCodec` includes the query namespace and row signature in each
-record's `RecordId`.
+identity, and do not derive identity from a field that may change. A result row
+is a node whose `RecordId` combines the query output's dataset namespace with an
+opaque row identity the query supplies. The identity bytes are not a column and
+should not be parsed; treat the `RecordId` as the key. Two rows with equal values
+therefore stay separate rows, and the namespace keeps two outputs from colliding.
 
 The companion stores:
 
@@ -1053,14 +1069,18 @@ copying its entire state for every change.
 
 The delete path needs only identity. The update path uses the new row rather
 than applying an assumed numeric increment. Aggregation updates additionally
-carry `QueryRowKind::Aggregation` metadata, including grouping and default-value
-information; preserve it when implementing logic that depends on how the
-aggregate changed.
+carry row-kind information (`QueryRowKind::Aggregation`, with grouping keys and
+default-value flags) in the envelope's query projection, available from
+`QueryChangeCodec::projection`; it is not stored in the node. Preserve it when
+implementing logic that depends on how the aggregate changed.
 
-`decode_row` yields typed `VariableValue` values, a query ID, a signature, and
-a row kind. `row_values_to_json` is useful for a JSON presentation. Keep the
-typed values when business logic depends on temporal types, element references,
-or distinctions a JSON projection cannot adequately represent.
+`decode_row` yields a `DecodedQueryRow`: typed `VariableValue` values keyed by
+`RETURN` alias, the node's dataset and label, its opaque identity, and the
+evaluator signature when the identity is exactly one. It does not contain a query
+ID or row kind; those belong to the envelope. `row_values_to_json` is useful for
+a JSON presentation. Keep the typed values when business logic depends on
+temporal types, element references, or distinctions a JSON projection cannot
+adequately represent.
 
 #### Read current results without rerunning the query
 
@@ -1077,8 +1097,9 @@ for record in snapshot.rows.values() {
 }
 ```
 
-`QueryResultSnapshot` contains keyed records, a logical output position, and a
-generation. `core.get_query_results("low-stock").await?` is a convenient JSON
+`QueryResultSnapshot` contains the output's `projector`, keyed records, a
+logical output position, and a generation. The projector names the output scope
+even when the snapshot is empty. `core.get_query_results("low-stock").await?` is a convenient JSON
 read for an inspection endpoint. Neither call executes the query again, and
 neither establishes a live subscription.
 
@@ -1198,11 +1219,14 @@ curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-re
 
 Use `curl.exe` in Windows PowerShell. The supplied JSON requests insert the
 product at quantity 3 and update it to 8. Each SSE data message contains
-`queryId`, `timestamp`, and a `results` array. These two requests produce `ADD`
-and `DELETE` entries containing `type`, `data`, and `row_signature`; neither
-entry is a paired before/after update. An `UPDATE` entry carries the changed
-row plus its `before` and `after` values. Heartbeat frames are transport
-liveness messages, not inventory changes.
+`output` (the alias, component and port of the producing output), `sequence`,
+`publishedAt` (the sink's own clock) and a `changes` array. Each change states its
+`operation`, a canonical `identity`, and only the images the record carries. The
+first request produces an `ADD` with `after`; a `REPLACE` carries the changed
+row as `after` plus its `before`; the removal is a `DELETE` with `before`. There
+is no query ID or row signature, so the same shape serves a source or a
+transformer too. Heartbeat frames are transport liveness messages, not
+inventory changes.
 
 The HTTP response confirms volatile ingress acceptance. The SSE sink is also
 volatile and **Accepted**: a disconnected browser receives no retained history,
@@ -1258,8 +1282,9 @@ cargo run --locked --features plugins -- webhook ../drasi-core/target/debug http
 After `Connected live webhook destination` appears, lower the quantity and save.
 The receiver prints the query-result addition. Restocking produces its deletion.
 The application configured a native sink; it did not implement HTTP delivery.
-Webhook payloads identify the `operation`, `queryId`, and `sequenceId`.
-An addition has `after`, a deletion has `before`, and an update has both.
+Webhook payloads identify the `operation`, the producing `output`, the element
+`identity` and the `sequence`. An addition has `after`, a deletion has `before`,
+and a replacement has both.
 
 The observation receiver acknowledges receipt and printing, not a durable
 purchase. For external business effects, use the completion/idempotency contract
@@ -1297,7 +1322,7 @@ Rust components:
 | HTTP sink | Query-result notifications to a webhook | HTTP outcome under the configured policy; destination effects need their own contract |
 | gRPC source/sink | Native graph-change ingress and query-result egress | Explicit transport acceptance and configured handling policies |
 | SSE sink | Live query-result notifications to browser/stream clients | Volatile acceptance; reconnecting clients need a current view |
-| Capture sink | Graph-change envelopes written to a file | Write/flush completion; it consumes graph changes, not query rows |
+| Capture sink | Graph-change envelopes written to a file | Write/flush completion; it accepts any graph-change envelope, including query output (result nodes) |
 | SQLite source/bootstrap | Committed changes through the original Rust handle/callbacks or source-owned REST; file or paired initial loading | Ordinary changes/transactions, or journal-backed single/shared persistent owners; file initialization requires quiescent writers |
 | PostgreSQL sources | Committed row changes or complete transactions, selected by factory | Configured-slot shared recovery or the distinct single-owner modes; whole-transaction queries require atomic persistent progress |
 | MySQL source/bootstrap | Ordinary rows, complete transactions, or explicit MySQL 5.7 positional rows; coordinated or standalone initial loading | Actual single/fixed-member progress, partial-row replay and retained history; positional rows do not claim FULL metadata, coordinated snapshots or commit clocks |
@@ -1308,8 +1333,9 @@ Rust components:
 
 The [native component packages](../../../components/computation-plugins/README.md)
 and [application sink API](../../../components/reactions/application/src/native.rs)
-describe their exact configurations and schemas. In particular, connecting the
-capture sink directly to a query output would be a schema mismatch.
+describe their exact configurations and schemas. The result-notification sinks
+(HTTP, gRPC, SSE) need a current query output and reject plain source changes;
+the capture sink writes any graph-change envelope.
 
 Database capture requires its source-specific setup:
 
@@ -1424,11 +1450,32 @@ contain no query at all: normalization, routing, and custom calculations do
 not require inventing query text.
 
 Connections must agree on the **complete schema descriptor**, including
-version, encoding, and definition. A query-result record is not a graph node,
-even if both contain a property called `quantity`. To feed one query's results
-into another query, explicitly map rows into graph changes with stable
-identities and correct deletion handling. Connect ports only after that explicit
-schema conversion.
+version, encoding, and definition. Sources, middleware, and queries all publish
+the standard graph-change schema, and a query's result rows are ordinary nodes,
+so any of them can connect to a graph-change input, including another query, with
+no conversion step. For example, with a first query that returns a `total` alias,
+a second query can read it as:
+
+```cypher
+MATCH (r:Result)
+RETURN r.total AS total
+```
+
+and the batch connects `first/out` to `second/in` like any other edge. `Result`
+is the default label of a result node; the properties are the first query's
+`RETURN` aliases. When the first query's answer is corrected, the second query
+updates too, even if the correction carries an older business time, because the
+query stream is ordered by its producer's output sequence rather than by the
+clock. Compatible schemas do not mean every sink accepts every graph change:
+sinks that report query results (HTTP, gRPC, SSE) require a current query output.
+A custom schema connects directly to any port that declares the same complete
+schema, provided the factories on both ends explicitly declare and implement it.
+A factory that implements several formats on one port can let configuration pick
+one with a `ports` override, resolved and validated before construction; see
+[Choosing a port format](../computation-graph-schemas-ports-pipes.md#choosing-a-port-format).
+Only a genuinely different format needs an intentional conversion: a query's
+input port declares graph-change, so custom records must be converted into graph
+changes before a query can read them.
 
 Data connections form a directed acyclic graph. Control relationships, covered
 in Chapter 7, carry readiness signals separately from the acyclic data path.
@@ -1489,13 +1536,14 @@ Unknown kinds, duplicate names, and missing pipeline entries are errors.
 The registry contains the implementations enabled in the build.
 
 The same normalization can run inside a query by passing middleware definitions
-and source-specific pipelines through `QueryExecutionSettings`, along with
-the registry to `new_configured`. For example, a source entry is:
+and input-specific pipelines through `QueryExecutionSettings`, along with
+the registry to `new_configured`. For example, an input entry is:
 
 <!-- illustration: source-pipeline -->
 ```rust
-drasi_lib::config::SourceSubscriptionConfig {
-    source_id: "inventory".into(),
+drasi_lib::config::QueryInputConfig {
+    component: "inventory".into(),
+    port: None,
     nodes: vec!["Product".into()],
     relations: vec![],
     pipeline: vec!["read-payload".into(), "quantity-at-root".into()],
@@ -1515,13 +1563,28 @@ determine which input reaches the query.
 | `parse_json` | Interpret a string property as structured data | Bound input size and nesting; choose fail/skip behavior explicitly |
 | `promote` | Copy nested values to named properties | Decide whether conflicting destination values overwrite, skip, or fail |
 | `relabel` | Map upstream labels to the application's graph vocabulary | Labels on deletions must be normalized too |
-| `map` | Select and reshape changes using JSONPath | Preserve IDs and account for the fields available in delete images |
-| `jq` | Express more elaborate selection and reshaping | jq expressions have their own quoting and error behavior |
+| `map` | Select and reshape changes using JSONPath | A stateless event mapper (see below); preserve IDs and account for the fields available in delete images |
+| `jq` | Express more elaborate selection and reshaping | A stateless event mapper; jq expressions have their own quoting and error behavior |
 | `unwind` | Expand warehouse bins into maintained child nodes and relationships | Stable child keys and previous-element state are essential |
 
 Each kind has a corresponding `middleware-*` Cargo feature.
 `middleware-jq` uses system libjq; `middleware-bundled-jq` builds it.
 Enable just the transformations the application uses.
+
+`map` and `jq` are **event mappers**. Each rule looks only at the data in the
+incoming event, keeps no memory of earlier input or output, and ignores an event
+that makes no sense for it. A `Replace` maps to a `Replace` by default, and
+`"op": "Replace"` can be configured. An update that carries property removals
+cannot in general be mapped without knowing what came before, so that `update`
+rule is skipped (a debug diagnostic is logged) rather than failing; explicit
+rules that produce `Insert`, `Replace` or `Delete` can still run. A missing
+selection or unmatched rule produces no mapped event, while a malformed change or
+a failing configured expression is still an error. `Future` changes are not
+mapped and pass through, so scheduled work is unaffected. Use an event mapper for
+reshaping each event. If you need a *maintained* derived dataset (retracting
+outputs that stop matching a filter, or re-keying outputs), that is a different,
+stateful component: a view transform, planned as
+[CW-68](../computation-graph-remaining-work.md#cw-68) and not available today.
 
 Unwind illustrates why apparently simple transformation can be stateful.
 When a bin disappears from a warehouse's array, the old child must be deleted.
@@ -1700,6 +1763,15 @@ It preserves each stream's order and does not wait for unseen input from a
 quiet producer. `RankedInputPipeConfig` additionally uses an actual shared
 ranked queue and declared source ranks; it is not a switch that makes unrelated
 queues one globally ordered stream.
+
+Each event also states how a receiving query treats stale changes
+(`SystemMetadata::ordering`). Source data uses `ChangeOrdering::EventTime`: a
+change older than the element's accepted time is skipped. A query's own output is
+published with `ChangeOrdering::ProducerSequence`, so a downstream query follows
+the producing query's validated output order and still applies a correction that
+carries an older business time. Scheduled work is carried by a separate
+event-local control, not by the data records. These are set by the producing
+component; an application normally only chooses to connect or not.
 
 Neither policy can move a late event before work already evaluated. If a
 warehouse total must use a bounded source-time reorder window, make that
@@ -2803,7 +2875,6 @@ fn codec() -> anyhow::Result<EnvelopeCodec> {
         NonZeroUsize::new(1024 * 1024).expect("positive size"),
     );
     codec.register_schema(GraphChangeCodec::schema())?;
-    codec.register_schema(QueryChangeCodec::schema())?;
     Ok(codec)
 }
 ```
@@ -3037,7 +3108,8 @@ Connect query output to replay, connect replay to the sink, and bind
 `alert-replay/out`. `inner` must actually complete its promised work before
 returning Handled. Stockroom's first `Alerts` handles a volatile view; adding
 a persistent checkpoint would not make its rows durable. A snapshot-restorable
-view must implement `supports_snapshot` and `replace_snapshot`.
+view must return a `SnapshotConsumer` from `EnvelopeSink::snapshot_consumer` for
+each input port that supports it; a port without one rejects snapshots.
 
 Persist the view itself as well as its checkpoint. For a key/value-backed view,
 use stable record keys, idempotent upserts/deletes, and a dedicated data
@@ -3053,6 +3125,54 @@ empty change set independently authorizes skipped work.
 Snapshots carry generation and recovery identity as well as sequence. Accept
 continuation only when those identities match. This restores materialized
 views; irreversible actions still need their destination-specific protocol.
+
+#### Read any output through the same interface
+
+`DrasiLib::output_catalogue()` resolves source, query and transformer outputs
+by component and port, without knowing their internal storage. Each output
+independently registers snapshot, replay and snapshot/live capabilities.
+A source may offer none; a query supplies these over its existing result state.
+Discovery reports the actual providers, not a promise inferred from graph-change
+format or persistence.
+
+For a live viewer, capture current contents and the subsequent stream together:
+
+<!-- illustration: output-snapshot-follow -->
+```rust
+async fn open_live_view(
+    drasi: &drasi_lib::DrasiLib,
+) -> anyhow::Result<OutputSnapshotFollow> {
+    let output = drasi.output_catalogue()?.resolve(&OutputEndpoint::new(
+        ComponentId::try_new("low-stock")?,
+        PortId::try_new("out")?,
+    ))?;
+    Ok(output.snapshot_and_follow(OutputFollowLimits {
+        max_envelopes: NonZeroUsize::new(8).expect("positive capacity"),
+        max_bytes: NonZeroUsize::new(1024 * 1024).expect("positive bytes"),
+        lifetime: std::time::Duration::from_secs(30),
+    }).await?)
+}
+```
+
+Call `into_parts()` to obtain the snapshot and its follow handle. Install the
+snapshot's full records and cursor as one view, then apply each envelope from
+`follow.next().await`. Changes arriving while the snapshot is being read are
+retained within the lease's limits. A cursor uses the producer's logical
+sequence and epoch, not an envelope's re-emission transport sequence.
+
+Choose limits within the provider's ceilings. A query permits up to 64 leases,
+each bounded by its configured outbox capacity, 16 MiB and five minutes.
+Exceeding a live buffer produces an explicit `Gap`; reaching its non-renewing
+deadline produces `LeaseExpired`. Neither silently discards changes and carries
+on, and neither blocks query processing. Drop the old handle and capture a new
+snapshot if the viewer's policy permits rebuilding. Dropping releases retention;
+cancelling a pending `next` does not consume its event.
+
+This bounded, volatile viewer is not the durable consumer protocol above.
+`snapshot()` is a point read, `replay_after(cursor)` reads retained history, and
+`catch_up()` combines the two with gap/epoch checks but does not subscribe to
+later output. A component without the requested capability fails explicitly.
+None of these interfaces requires a component to use a shared row store.
 
 #### Acknowledge only the promised boundary
 
@@ -3105,7 +3225,7 @@ let runner = Arc::new(Mutex::new(DeliveryRunner::new_transactional(
 ```
 
 The provider is the native RocksDB provider from Chapter 9. `codec` registers
-the permitted query-row schema and a message-size limit. `DeliveryScope` names
+the standard graph-change schema and a message-size limit. `DeliveryScope` names
 the stable instance, graph, and consumer. The module's `size` helper constructs
 positive `NonZeroUsize` bounds. `DeliveryRetryPolicy::default` makes
 one attempt; a retry policy is not implied by persistence.
@@ -3364,9 +3484,11 @@ not just row payloads.
 #### Configure the receiving query
 
 Set `QueryExecutionSettings.source_transactions` to the accepted limits.
-The definition's input descriptor then uses `SourceTransactionCodec`, not
-`GraphChangeCodec`. Source and query ports must agree on that schema.
-The receiving query requires atomic publication.
+The input still uses the ordinary graph-change schema. Transaction mode requires
+the current `drasi.source-transaction.v1` completeness metadata as well as
+validating the operations and limits; matching data schemas alone do not prove
+that a database transaction is complete. The receiving query requires atomic
+publication.
 
 All changes in a source group update query state and results in one processing
 transaction. Input progress cannot advance through half of the group.
@@ -4287,26 +4409,21 @@ pub(super) async fn add_webhook(
     let specification = factory.specification(
         ComponentId::try_new("webhook")?,
         serde_json::json!({
-            "queryId":"low-stock", "stream":"low-stock/out", "url":url,
+            "outputs":{"low-stock":{"component":"low-stock","port":"out"}},
+            "url":url,
             "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
         }),
     )?;
-    let component = core
-        .add_computation_component(
-            ComponentAddition::from_specification(specification, factory).auto_start(false),
-        )
-        .await?;
-    let report = core
-        .computation_control()?
+    let addition = ComponentBatch::builder()
+        .component(specification, factory)
         .connect(
             EdgeDefinition::new(endpoint("low-stock", "out")?, endpoint("webhook", "in")?),
             Box::new(BoundedPipeConfig { capacity: 8 }),
-            RelationshipPolicy::default(),
         )
-        .await?;
-    if report.summary != OperationSummary::Completed {
-        return Err(LifecycleReportError::Reconciliation(report).into());
-    }
+        .build()?
+        .auto_start(false);
+    core.add_components(addition).await?;
+    let component = core.computation_component("webhook")?;
     tokio::time::timeout(Duration::from_secs(10), component.start())
         .await
         .context("wait for webhook readiness")??;
@@ -4564,7 +4681,7 @@ An envelope carries a change set, stream metadata, and context:
 
 | Identity | What it identifies |
 |---|---|
-| `ElementReference` | A node or relationship in a source namespace |
+| `ElementReference` | A node or relationship in a source namespace; for a query result, its output's dataset namespace plus an opaque row identity |
 | `RecordId` | A schema-defined record; its namespace and bytes are both significant |
 | `ChangeSetId` and operation ordinal | One identified group of changes and each operation's place in that group |
 | Stream and sequence | A producer's ordered emissions from one output |
@@ -4576,7 +4693,9 @@ logical identity to the same content on retries.
 
 A `ChangeOperation` is Added, Updated, or Deleted. Records describe their
 image as Full, Patch, or Partial, and updates explicitly distinguish Patch
-from Replace. Consumers must support the image they receive. A delete may
+from Replace. A Patch sets the properties it lists (null is a value) and names
+any properties to remove separately; a Replace carries the complete element.
+Consumers must support the image they receive. A delete may
 contain only a validated `RecordReference`, with no before image.
 
 `SystemMetadata` belongs to the framework boundary; business attributes belong
@@ -4632,7 +4751,7 @@ dropping its controller future as proof that its connections stopped.
 
 #### Validate custom records
 
-Graph changes and query rows use the standard codecs. A custom binary
+Graph changes (including query results, which are ordinary nodes) use the standard codec. A custom binary
 transformer can instead define a `SchemaDescriptor` and executable
 `RecordValidator`. Validate both identity and payload; image-less deletions
 still need identity validation.
@@ -4681,8 +4800,9 @@ too. A schema name alone does not establish compatibility.
 
 The [finite computation example](../../examples/computation_graph.rs) shows a
 complete custom-binary source, transformations, and collecting sink.
-Custom records do not become query graph elements without an explicit codec
-or conversion step.
+Custom records connect directly to ports declaring the same schema. They do not
+become query graph elements without a codec or an intentional conversion step,
+because a query's input port declares graph-change.
 
 #### Implement honest recovery and transport extensions
 
@@ -4732,7 +4852,7 @@ storage ownership:
 
 Consumer progress and its optional position policy use the separate
 `drasi_computation_plugin_consumer_progress_v1` extension. Base ABI `1.0.0`,
-wire `2` and the existing recovery interface are unchanged. Opt-in producer
+wire `1` and the existing recovery interface are unchanged. Opt-in producer
 factories require the actual `consumer_progress` resource and cannot mix it
 with single-owner progress or source admission. Constructors retain the
 capability without reading/subscribing until start. Stop fences new work but
@@ -4848,13 +4968,20 @@ Timeout, disconnect, and a lost response leave uncertainty rather than proving
 rejection.
 
 Both peers must agree on link/endpoint identities, streams, schemas, limits,
-and namespace policy. Standard graph changes, supported query rows, and complete
-source transactions can cross. Arbitrary plugin schemas, scheduled signals,
-and query snapshot/progress control frames are not portable bridge input.
+and namespace policy. The link carries one graph-change format, used for source,
+transformer and query data alike, plus complete source transactions. A query's
+result nodes cross as ordinary nodes. Arbitrary plugin schemas, scheduled
+signals (event-local controls), and query snapshot/progress recovery frames are
+not portable bridge input.
 
-Namespace prefixes allocate authority; the bridge does not automatically rename
-colliding source IDs. Mutual TLS authenticates the configured peer, but does
-not establish global transaction ownership or a completed business action.
+The namespace allowlist names the element namespaces permitted to cross. A query
+publishes in a derived dataset namespace (`drasi.output/<hash>`), not under its
+query ID, so list each exported output's exact namespace next to the physical
+source prefixes; the bridge infers no broader permission from query metadata. An
+entry ending in `/` is a prefix; any other entry is one exact namespace. The
+bridge does not automatically rename colliding source IDs. Mutual TLS
+authenticates the configured peer, but does not establish global transaction
+ownership or a completed business action.
 
 Keep transaction containers and shared-storage groups inside one instance.
 Never open another process's RocksDB directory to imitate a shared transaction.
@@ -4899,7 +5026,9 @@ own. The final application must still identify who owns every unfinished action.
 | Envelope | One identified change set with system metadata, context, and lineage |
 | Stream | An ordered sequence emitted by one producer output |
 | Port / edge / pipe | A component boundary / a declared connection / its transport implementation |
-| Row signature | A query result's identity within its query namespace, not its JSON value |
+| Row signature | The evaluator's identity for a result row; it becomes the node's opaque identity within its output's dataset namespace, not its JSON value |
+| Result node | The ordinary graph node a query publishes for one result row, with one property per `RETURN` alias |
+| Dataset namespace | The bounded, scoped `source_id` of a derived output's nodes, so two outputs never share identities |
 | Bootstrap | Coordinated initial loading and handover to live/replayed input |
 | Composite bootstrap | Ordered query-scoped providers with namespaced initialization state and one existing query completion boundary |
 | Checkpoint | A saved position proving only the owning processor's completion boundary |
@@ -5046,10 +5175,45 @@ component ID and output stream. Each query owns its own indexes and result
 identity. The application's slowest required downstream path can still apply
 backpressure; independent queries are not a promise of isolated resources.
 
-Chaining is an explicit conversion: query output uses `QueryChangeCodec`,
-while a query normally consumes graph changes. A transformer between them
-maps result-row identities to stable element references, converts values,
-and emits deletions when upstream rows retract. Feeding only additions would
-leave stale elements in the second query. Use a single query with `WITH`
-when the calculation fits one query; chain when the maintained intermediate
-state is itself a useful application boundary.
+Chaining needs no conversion: a query's output is ordinary graph-change data,
+so connect it to the second query's `in` port. Each result row is a node with the
+`Result` label (or its configured `result.label`) whose properties are the first query's `RETURN` aliases. Result
+nodes retract with ordinary deletions when the upstream row retracts, and the
+second query evaluates them with the same evaluator as any source. Use a single
+query with `WITH` when the calculation fits one query; chain when the maintained
+intermediate state is itself a useful application boundary. Queries still have no
+`ORDER BY`, `LIMIT` or `SKIP`.
+
+The ordinary query API can name that same output without spelling out pipes:
+
+<!-- illustration: chained-query-input -->
+```rust
+async fn add_low_stock_count(drasi: &drasi_lib::DrasiLib) -> anyhow::Result<()> {
+    drasi.add_query(
+        drasi_lib::Query::cypher("low-stock-count")
+            .query("MATCH (r:Result) RETURN count(r) AS Items")
+            .from_input("low-stock")
+            .with_result_label("LowStockCount")
+            .build(),
+    ).await?;
+    Ok(())
+}
+```
+
+`from_input_port(component, port)` selects an explicit output. With no port,
+resolution uses the factory's declared primary output or its only output; several
+outputs without a primary are an error, not a first-port guess. YAML/JSON uses
+`inputs: [low-stock]` or an expanded entry such as
+`inputs: [{component: low-stock, port: out}]`. Old `sources`/`sourceId` query
+declarations are not accepted.
+
+Initialization is independent of format. With bootstrap enabled, a native
+producer must supply a real snapshot; its live pipe is already bound before
+snapshot capture. Buffered changes covered by the snapshot are skipped using
+its producer epoch and logical position. A volatile downstream query rebuilds
+that input view on restart. A persistent downstream query resumes from retained
+output through `ReplayProvider`; a retention gap or changed epoch fails under
+Strict, while explicit AutoReset permits rebuilding from a current snapshot.
+These services do not add a shared materializer to the producer. Choose
+`enable_bootstrap(false)` explicitly for a future-events-only input rather than
+treating a missing snapshot capability as an empty initial dataset.

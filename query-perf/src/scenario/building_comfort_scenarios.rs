@@ -237,8 +237,6 @@ impl SourceChangeGenerator for RoomPropertySourceChangeGenerator {
         self.state.iterations_complete += 1;
         self.state.current_time_ms = current_time_ms;
 
-        Option::Some(SourceChange::Update {
-            element: source_change.node_after.unwrap(),
-        })
+        Option::Some(SourceChange::update(source_change.node_after.unwrap()))
     }
 }

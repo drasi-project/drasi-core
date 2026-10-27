@@ -153,6 +153,12 @@ impl DrasiLib {
         self.computation_runtime.control().map_err(DrasiError::from)
     }
 
+    /// Generic discovery and reading of the optional snapshot/replay providers
+    /// that source, query and transformer outputs actually registered.
+    pub fn output_catalogue(&self) -> Result<super::v1::OutputCatalogue> {
+        Ok(super::v1::OutputCatalogue::new(self.computation_control()?))
+    }
+
     pub fn computation_component(&self, id: &str) -> Result<super::v1::ComponentHandle> {
         let id = super::v1::ComponentId::try_new(id)
             .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
@@ -204,10 +210,15 @@ impl DrasiLib {
         if !self.is_running().await {
             addition.bindings.defer_activation = true;
         }
-        control.add_component(addition).await.map_err(|error| {
+        let handle = control.add_component(addition).await.map_err(|error| {
             DrasiError::operation_failed("component", id.as_str(), "add", error.to_string())
                 .with_cause(error)
-        })
+        })?;
+        self.computation_runtime
+            .refresh_pending_query_inputs()
+            .await
+            .map_err(DrasiError::from)?;
+        Ok(handle)
     }
 
     pub async fn add_transformer_with_handle(
@@ -445,6 +456,12 @@ impl DrasiLib {
                     return Err(super::instance::components_cleanup_error(
                         pending, error, None,
                     ));
+                }
+                if report.committed {
+                    self.computation_runtime
+                        .refresh_pending_query_inputs()
+                        .await
+                        .map_err(DrasiError::from)?;
                 }
                 Ok(report)
             }

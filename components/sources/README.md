@@ -171,7 +171,7 @@ async fn run() -> anyhow::Result<()> {
 
     let query = Query::cypher("counter-query")
         .query("MATCH (c:Counter) RETURN c.value AS value")
-        .from_source("my-source")
+        .from_input("my-source")
         .build();
 
     let drasi = DrasiLib::builder()
@@ -369,7 +369,7 @@ impl MySource {
         if value == 1 {
             SourceChange::Insert { element }
         } else {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         }
     }
 }
@@ -603,7 +603,7 @@ async fn run() -> anyhow::Result<()> {
 
     let query = Query::cypher("counter-query")
         .query("MATCH (c:Counter) RETURN c.value AS value")
-        .from_source("my-source")
+        .from_input("my-source")
         .build();
 
     let drasi = DrasiLib::builder()

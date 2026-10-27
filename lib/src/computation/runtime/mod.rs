@@ -437,10 +437,22 @@ impl Runtime {
                 }
                 _ => continue,
             };
-            for source in config.sources {
+            for source in config.inputs {
+                if batch
+                    .definition
+                    .relationships
+                    .iter()
+                    .chain(batch.definition.boundary_relationships.iter())
+                    .any(|relationship| {
+                        relationship.definition.from.component.as_str() == source.component
+                            && relationship.definition.to.component == *node.descriptor.id()
+                    })
+                {
+                    continue;
+                }
                 if !spec.dependencies.contains_key("declaration") {
                     let resource =
-                        ComputationPipelineBuilder::source_resource_id(&source.source_id)?;
+                        ComputationPipelineBuilder::source_resource_id(&source.component)?;
                     let Some(binding) = batch.bindings.resources.get(&resource) else {
                         continue;
                     };
@@ -454,7 +466,7 @@ impl Runtime {
                     let Some(record) = records
                         .as_ref()
                         .expect("source records were loaded")
-                        .get(&source.source_id)
+                        .get(&source.component)
                     else {
                         continue;
                     };
@@ -466,11 +478,11 @@ impl Runtime {
                         continue;
                     }
                 }
-                let producer = ComponentId::try_new(source.source_id.as_str())?;
+                let producer = ComponentId::try_new(source.component.as_str())?;
                 subscriptions.insert((producer.clone(), node.descriptor.id().clone()));
                 let reader = ComputationPipelineBuilder::source_component_id(
                     node.descriptor.id().as_str(),
-                    &source.source_id,
+                    &source.component,
                 )?;
                 if batch
                     .definition
@@ -978,6 +990,7 @@ impl Runtime {
         }
         let batch = self.ordinary_query_batch(&config, None).await?;
         let handle = self.install_ordinary_query(batch, id, start).await?;
+        self.refresh_pending_query_inputs_locked().await?;
         self.notify();
         Ok(handle)
     }
@@ -1841,9 +1854,9 @@ impl Runtime {
             let mut complete = true;
             for query in queries.iter().filter(|query| {
                 query
-                    .sources
+                    .inputs
                     .iter()
-                    .any(|input| input.source_id == source.source.id())
+                    .any(|input| input.component == source.source.id())
             }) {
                 let id = ComponentId::try_new(query.id.as_str())?;
                 let requested = query.auto_start
@@ -1854,9 +1867,9 @@ impl Runtime {
                         .is_some_and(|state| state.started || state.lifecycle_requested);
                 if requested {
                     let expected = query
-                        .sources
+                        .inputs
                         .iter()
-                        .map(|input| &input.source_id)
+                        .map(|input| &input.component)
                         .collect::<BTreeSet<_>>()
                         .len();
                     if self.query(&query.id).await?.subscription_count().await != expected {

@@ -353,7 +353,7 @@ fn apply(elements: &mut BTreeMap<String, Element>, changes: &[SourceChange]) {
     for change in changes {
         let id = change.get_reference().element_id.to_string();
         match change {
-            SourceChange::Insert { element } | SourceChange::Update { element } => {
+            SourceChange::Insert { element } | SourceChange::Update { element, .. } => {
                 elements.insert(id, element.clone());
             }
             SourceChange::Delete { .. } => {
@@ -2101,7 +2101,7 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
                 &ElementValue::Integer((remaining + 1) as i64)
             );
             assert!(changes.iter().any(|change| matches!(
-                change, SourceChange::Update { element } if element.get_reference().element_id.as_ref() == family_id.key()
+                change, SourceChange::Update { element, .. } if element.get_reference().element_id.as_ref() == family_id.key()
             )));
             if remaining == 0 {
                 assert!(!topology.nodes.contains_key(&plugin_id));
@@ -2376,7 +2376,7 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
         }));
         let changes = drain(&mut source).await;
         assert!(changes.iter().any(|change| matches!(
-            change, SourceChange::Update { element } if element.get_reference().element_id.as_ref() == pipe_id.key()
+            change, SourceChange::Update { element, .. } if element.get_reference().element_id.as_ref() == pipe_id.key()
         )));
         assert!(!changes.iter().any(|change| matches!(
             change, SourceChange::Delete { metadata } if metadata.reference.element_id.as_ref() == pipe_id.key()

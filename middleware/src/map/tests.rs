@@ -87,6 +87,7 @@ mod process {
         assert_eq!(
             result[0],
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("test", "v1"),
@@ -176,6 +177,7 @@ mod process {
         let result = result.unwrap();
         assert_eq!(result.len(), 2);
         assert!(result.contains(&SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "v1"),
@@ -189,6 +191,7 @@ mod process {
             }
         }));
         assert!(result.contains(&SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "f1"),
@@ -276,6 +279,7 @@ mod process {
         assert_eq!(
             result[0],
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("test", "v1"),
@@ -397,5 +401,114 @@ mod factory {
         };
 
         assert!(subject.build(&mw_config).is_err());
+    }
+}
+
+mod canonical_mutation {
+    use std::collections::BTreeSet;
+
+    use drasi_core_types::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        SourceMiddlewareConfig,
+    };
+    use serde_json::json;
+
+    use crate::map::{Map, MapFactory};
+
+    fn subject(op: Option<&str>) -> Map {
+        let mut mapping = json!({
+            "label": "Vehicle",
+            "id": "$.vehicleId",
+            "properties": {"id": "$.vehicleId", "speed": "$.speed"}
+        });
+        if let Some(op) = op {
+            mapping["op"] = json!(op);
+        }
+        MapFactory::new()
+            .build(&SourceMiddlewareConfig {
+                name: "test".into(),
+                kind: "map".into(),
+                config: json!({"Telemetry": {"insert": [mapping.clone()], "update": [mapping]}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            })
+            .unwrap()
+    }
+
+    fn telemetry(properties: serde_json::Value) -> Element {
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("test", "t1"),
+                labels: vec!["Telemetry".into()].into(),
+                effective_from: 1,
+            },
+            properties: ElementPropertyMap::from(properties),
+        }
+    }
+
+    #[tokio::test]
+    pub async fn removal_patches_skip_update_rules_but_keep_meaningful_event_mappings() {
+        let change = SourceChange::update_with_removals(
+            telemetry(json!({"vehicleId": "v1"})),
+            BTreeSet::from(["speed".to_string()]),
+        )
+        .unwrap();
+        // A stateless mapping cannot tell which mapped output a removal affects.
+        assert!(subject(None)
+            .apply(change.clone())
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Mapping to a full image or a deletion is well defined.
+        let result = subject(Some("Insert")).apply(change.clone()).await.unwrap();
+        assert!(matches!(result.as_slice(), [SourceChange::Insert { .. }]));
+        let result = subject(Some("Replace"))
+            .apply(change.clone())
+            .await
+            .unwrap();
+        assert!(matches!(result.as_slice(), [SourceChange::Replace { .. }]));
+        let result = subject(Some("Delete")).apply(change).await.unwrap();
+        assert!(matches!(result.as_slice(), [SourceChange::Delete { .. }]));
+    }
+
+    #[tokio::test]
+    pub async fn malformed_updates_are_errors_not_ignored_events() {
+        let change = SourceChange::Update {
+            element: telemetry(json!({"vehicleId":"v1","speed":3})),
+            removed_properties: BTreeSet::from(["speed".to_string()]),
+        };
+        assert!(subject(None).apply(change).await.is_err());
+    }
+
+    #[tokio::test]
+    pub async fn updates_without_removals_and_replacements_keep_their_kind() {
+        let result = subject(None)
+            .apply(SourceChange::update(telemetry(
+                json!({"vehicleId": "v1", "speed": null}),
+            )))
+            .await
+            .unwrap();
+        let [SourceChange::Update {
+            element,
+            removed_properties,
+        }] = result.as_slice()
+        else {
+            panic!("an update maps to one update");
+        };
+        assert!(removed_properties.is_empty());
+        assert_eq!(
+            element.get_properties().get("speed"),
+            Some(&drasi_core_types::models::ElementValue::Null)
+        );
+
+        let result = subject(None)
+            .apply(SourceChange::replace(telemetry(
+                json!({"vehicleId": "v1", "speed": 3}),
+            )))
+            .await
+            .unwrap();
+        assert!(matches!(result.as_slice(), [SourceChange::Replace { .. }]));
     }
 }

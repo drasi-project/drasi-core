@@ -17,9 +17,9 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
-    FactoryMetadata, NativeQuerySnapshot, NativeQuerySnapshots,
+    FactoryMetadata, NativeOutputSnapshot, NativeOutputSnapshots,
 };
-use drasi_reaction_common::sse::{default_payload, QueryConfig, SseRenderer};
+use drasi_reaction_common::sse::{default_changes_payload, QueryConfig, SseRenderer};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -57,7 +57,8 @@ fn max_paths() -> usize {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SseSinkConfig {
-    pub query_streams: BTreeMap<String, StreamId>,
+    #[serde(default, skip_serializing_if = "OutputAliases::is_empty")]
+    pub outputs: OutputAliases,
     #[serde(default = "host")]
     pub host: String,
     #[serde(default = "port")]
@@ -81,14 +82,14 @@ impl SseSinkConfig {
             ConfigDefinition, ConfigOption as Field, ConfigType::*,
         };
         ConfigDefinition::try_new([
-            Field::new("queryStreams", Object, true, "Nonempty map from query identifiers to their connected output stream identifiers."),
+            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in routes and snapshot URLs."),
             Field::new("host", String, false, "IP address on which to listen.").default(host()),
             Field::new("port", Integer, false, "TCP port; zero requests an available local port.").default(port()).minimum(0).maximum(u16::MAX as u64),
             Field::new("ssePath", String, false, "Absolute event-stream path without query, fragment or control characters; /snapshot and its descendants are reserved.").default(path()),
             Field::new("heartbeatIntervalMs", Integer, false, "Positive heartbeat interval in milliseconds, representable by the system clock.").default(heartbeat()).minimum(1),
             Field::new("broadcastCapacity", Integer, false, "Maximum retained notifications in the shared broadcast buffer; a lagging client is disconnected and must obtain a fresh snapshot.").default(capacity()).minimum(1).maximum(MAX_BROADCAST_CAPACITY as u64),
-            Field::new("routes", Object, false, "Per-query added/updated/deleted body templates and optional static or templated paths; full query identifiers take precedence over their last dotted segment.").default(serde_json::json!({})),
-            Field::new("defaultTemplate", Object, false, "Fallback operation templates for queries without a matching route; an empty body uses the existing singular-result SSE payload."),
+            Field::new("routes", Object, false, "Per-output-alias added/updated/deleted body templates and optional static or templated paths; full aliases take precedence over their last dotted segment.").default(serde_json::json!({})),
+            Field::new("defaultTemplate", Object, false, "Fallback operation templates for outputs without a matching route; an empty body uses the default graph-change SSE payload."),
             Field::new("maxPaths", Integer, false, "Maximum number of configured and dynamically rendered event paths, including the base path; exceeding the bound fails before broadcasting the input.").default(max_paths()).minimum(1).maximum(MAX_PATHS as u64),
         ]).expect("constant SSE sink configuration")
     }
@@ -106,13 +107,7 @@ impl SseSinkConfig {
             validate_template_fields(config)?;
         }
         let config: Self = serde_json::from_value(value)?;
-        ensure!(
-            !config.query_streams.is_empty(),
-            "queryStreams must not be empty"
-        );
-        for query in config.query_streams.keys() {
-            ComponentId::try_new(query.as_str())?;
-        }
+        config.outputs.validate()?;
         config.host.parse::<IpAddr>()?;
         ensure!(
             valid_path(&config.sse_path),
@@ -130,7 +125,7 @@ impl SseSinkConfig {
         SseRenderer::validate(
             &config.routes,
             config.default_template.as_ref(),
-            &config.query_streams.keys().cloned().collect::<Vec<_>>(),
+            &config.routes.keys().cloned().collect::<Vec<_>>(),
         )?;
         let paths = config.renderer().static_paths();
         ensure!(
@@ -138,6 +133,17 @@ impl SseSinkConfig {
             "configured SSE paths are invalid or exceed maxPaths"
         );
         Ok(config)
+    }
+
+    /// Checks that depend on the incoming edges: routes must name an output of
+    /// this sink.
+    fn validate_outputs(&self, outputs: &SinkOutputs) -> Result<()> {
+        SseRenderer::validate(
+            &self.routes,
+            self.default_template.as_ref(),
+            &outputs.aliases().map(str::to_owned).collect::<Vec<_>>(),
+        )?;
+        Ok(())
     }
 
     fn renderer(&self) -> SseRenderer {
@@ -185,7 +191,7 @@ fn validate_template_fields(config: &Value) -> Result<()> {
 
 pub struct SseFactory;
 impl Factory for SseFactory {
-    fn supports_query_snapshots(&self) -> bool {
+    fn supports_output_snapshots(&self) -> bool {
         true
     }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
@@ -202,27 +208,33 @@ impl Factory for SseFactory {
             ports: vec![PortDescriptor::new(
                 PortId::try_new("in").expect("constant port"),
                 PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             )],
             completion: Some(SinkCompletion::Accepted),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                binds_inputs: true,
+                ..Capabilities::default()
+            },
         }
     }
     fn create(&self, request: &CreateRequest, control: ControlSender) -> Result<CreatedComponent> {
-        self.create_with_query_snapshots(request, control, None)
+        self.create_with_output_snapshots(request, control, None)
     }
-    fn create_with_query_snapshots(
+    fn create_with_output_snapshots(
         &self,
         request: &CreateRequest,
         _: ControlSender,
-        snapshots: Option<NativeQuerySnapshots>,
+        snapshots: Option<NativeOutputSnapshots>,
     ) -> Result<CreatedComponent> {
         let config = SseSinkConfig::parse(request.configuration.clone())?;
+        let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
+        config.validate_outputs(&outputs)?;
         let renderer = config.renderer();
         Ok(Component::Sink(Box::new(SseSink {
             descriptor: self.metadata().descriptor(request.id.clone())?,
             config,
+            outputs,
             renderer,
             snapshots,
             running: None,
@@ -245,63 +257,96 @@ impl Drop for Running {
 struct SseSink {
     descriptor: ComponentDescriptor,
     config: SseSinkConfig,
+    outputs: SinkOutputs,
     renderer: SseRenderer,
-    snapshots: Option<NativeQuerySnapshots>,
+    snapshots: Option<NativeOutputSnapshots>,
     running: Option<Running>,
 }
 
+const OUTPUT_EPOCH_HEADER: &str = "x-drasi-output-epoch";
+const OUTPUT_POSITION_HEADER: &str = "x-drasi-output-position";
+
+/// The HTTP outcome of a failed snapshot read. An absent capability is explicit
+/// and never an empty snapshot.
+fn snapshot_failure(error: &anyhow::Error) -> (StatusCode, &'static str) {
+    use drasi_computation_plugin_sdk::{abi::status, transport::Failure};
+    if let Some(read) = error.downcast_ref::<OutputReadError>() {
+        return match read {
+            OutputReadError::Absent { .. } => (
+                StatusCode::NOT_IMPLEMENTED,
+                "The output does not provide a snapshot",
+            ),
+            OutputReadError::UnknownOutput(_) | OutputReadError::UnknownComponent(_) => {
+                (StatusCode::NOT_FOUND, "Unknown output")
+            }
+            OutputReadError::Invalid(_) | OutputReadError::Failed(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The output snapshot failed",
+            ),
+            _ => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The output snapshot is not ready",
+            ),
+        };
+    }
+    match error.downcast_ref::<Failure>().map(|failure| failure.code) {
+        Some(status::BUSY) => (StatusCode::TOO_MANY_REQUESTS, "Snapshot readers are busy"),
+        Some(status::INVALID_ARGUMENT) => (
+            StatusCode::NOT_FOUND,
+            "The output is outside the snapshot capability",
+        ),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The output snapshot is unavailable",
+        ),
+    }
+}
+
 async fn snapshot_response(
-    query: String,
-    queries: Arc<BTreeSet<String>>,
-    snapshots: Option<NativeQuerySnapshots>,
+    alias: String,
+    outputs: Arc<SinkOutputs>,
+    snapshots: Option<NativeOutputSnapshots>,
     stopped: CancellationToken,
 ) -> axum::response::Response {
     let response = async {
-        if !queries.contains(&query) {
+        let Some(binding) = outputs.get(&alias) else {
             return StatusCode::NOT_FOUND.into_response();
-        }
+        };
         let Some(snapshots) = snapshots else {
             return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Query snapshot service is not bound",
+                StatusCode::NOT_IMPLEMENTED,
+                "This sink has no output snapshot capability bound",
             )
                 .into_response();
         };
+        let endpoint = binding.endpoint();
+        let schema = GraphChangeCodec::schema();
         let snapshot = tokio::select! {
             biased;
             _ = stopped.cancelled() => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-            snapshot = snapshots.snapshot(&query) => match snapshot {
+            snapshot = snapshots.snapshot(&endpoint, &schema) => match snapshot {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    eprintln!("drasi.network SSE snapshot for {query} failed: {error:#}");
-                    let status = if error
-                        .downcast_ref::<drasi_computation_plugin_sdk::transport::Failure>()
-                        .is_some_and(|failure| failure.code == drasi_computation_plugin_sdk::abi::status::BUSY)
-                    {
-                        StatusCode::TOO_MANY_REQUESTS
-                    } else {
-                        StatusCode::SERVICE_UNAVAILABLE
-                    };
-                    return (status, "Query snapshot is unavailable").into_response();
+                    eprintln!("drasi.network SSE snapshot for {endpoint} failed: {error:#}");
+                    return snapshot_failure(&error).into_response();
                 }
             },
         };
-        let sequence = snapshot.metadata.as_of_sequence;
-        let generation = snapshot.metadata.generation;
+        let epoch = snapshot.cursor.epoch().to_string();
+        let position = snapshot.cursor.sequence();
         let mut response =
-            axum::body::Body::from_stream(snapshot_body(snapshot, query, stopped)).into_response();
+            axum::body::Body::from_stream(snapshot_body(snapshot, stopped)).into_response();
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             "application/json".parse().expect("constant header"),
         );
         response.headers_mut().insert(
-            "x-drasi-query-sequence",
-            sequence.into(),
+            OUTPUT_EPOCH_HEADER,
+            epoch.parse().expect("UUID is a valid header value"),
         );
-        response.headers_mut().insert(
-            "x-drasi-query-generation",
-            generation.into(),
-        );
+        response
+            .headers_mut()
+            .insert(OUTPUT_POSITION_HEADER, position.into());
         response
     }
     .await;
@@ -312,44 +357,50 @@ async fn snapshot_response(
     );
     response.headers_mut().insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        "x-drasi-query-sequence,x-drasi-query-generation"
+        format!("{OUTPUT_EPOCH_HEADER},{OUTPUT_POSITION_HEADER}")
             .parse()
             .expect("constant header"),
     );
     response
 }
 
+/// The snapshot as a JSON array of canonical `ADD` changes, each with its real
+/// identity, element shape and complete `after` image: the same change shape a
+/// live frame carries, so a client applies both with one identity-keyed state.
 fn snapshot_body(
-    snapshot: NativeQuerySnapshot,
-    query: String,
+    snapshot: NativeOutputSnapshot,
     stopped: CancellationToken,
 ) -> impl futures_util::Stream<Item = std::result::Result<String, std::io::Error>> + Send {
-    let mut rows = snapshot.rows;
+    let endpoint = snapshot.endpoint.clone();
+    let mut records = snapshot.records;
     async_stream::try_stream! {
         use futures_util::StreamExt;
         yield String::from("[");
-        let mut first = true;
+        let mut ordinal = 0u64;
         loop {
-            let row = tokio::select! {
+            let record = tokio::select! {
                 biased;
                 _ = stopped.cancelled() => Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "SSE snapshot stopped",
                 )),
-                row = rows.next() => Ok(row),
+                record = records.next() => Ok(record),
             }?;
-            let Some(row) = row else { break; };
-            let row = row.map_err(|error| {
-                eprintln!("drasi.network SSE snapshot stream for {query} failed: {error:#}");
-                std::io::Error::other("SSE query snapshot stream failed")
-            })?;
-            let encoded = row.to_string();
-            yield if first {
-                first = false;
-                encoded
-            } else {
-                format!(",{encoded}")
-            };
+            let Some(record) = record else { break; };
+            let encoded = record
+                .and_then(|record| {
+                    let change = GraphChange::from_operation(&ChangeOperation::Added {
+                        ordinal,
+                        after: record,
+                    })?;
+                    Ok(change.to_json()?.to_string())
+                })
+                .map_err(|error| {
+                    eprintln!("drasi.network SSE snapshot stream for {endpoint} failed: {error:#}");
+                    std::io::Error::other("SSE output snapshot stream failed")
+                })?;
+            yield if ordinal == 0 { encoded } else { format!(",{encoded}") };
+            ordinal += 1;
         }
         yield String::from("]");
     }
@@ -413,22 +464,16 @@ impl NativeComponent for SseSink {
         let interval =
             crate::config::duration(self.config.heartbeat_interval_ms, "heartbeatIntervalMs")?;
         let snapshot_service = self.snapshots.clone();
-        let snapshot_queries = Arc::new(
-            self.config
-                .query_streams
-                .keys()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-        );
+        let snapshot_outputs = Arc::new(self.outputs.clone());
         let snapshot_stop = cancel.clone();
         let router = Router::new()
             .route(
-                "/snapshot/:query_id",
+                "/snapshot/:alias",
                 get(
-                    move |axum::extract::Path(query): axum::extract::Path<String>| {
+                    move |axum::extract::Path(alias): axum::extract::Path<String>| {
                         snapshot_response(
-                            query,
-                            snapshot_queries.clone(),
+                            alias,
+                            snapshot_outputs.clone(),
                             snapshot_service.clone(),
                             snapshot_stop.clone(),
                         )
@@ -532,12 +577,12 @@ impl NativeSink for SseSink {
             !running.cancel.is_cancelled(),
             "SSE listener stopped; cleanup required"
         );
-        let result = query_result(&input, &self.config.query_streams)?;
-        let events =
-            self.renderer
-                .render(&result, chrono::Utc::now().timestamp_millis(), |message| {
-                    eprintln!("drasi.network SSE {}: {message}", self.descriptor.id())
-                });
+        let notifications = notifications(&input, &self.outputs)?;
+        let events = self.renderer.render_changes(
+            &notifications,
+            chrono::Utc::now().timestamp_millis(),
+            |message| eprintln!("drasi.network SSE {}: {message}", self.descriptor.id()),
+        )?;
         ensure!(
             events.iter().all(|event| valid_path(&event.path)),
             "rendered SSE path must be absolute without query, fragment or control characters and outside /snapshot"
@@ -569,31 +614,30 @@ impl NativeSink for SseSink {
     }
 }
 
-pub fn sse_payload(input: &InputEnvelope, queries: &BTreeMap<String, StreamId>) -> Result<Value> {
-    let result = query_result(input, queries)?;
-    Ok(default_payload(
-        &result,
+/// The default browser frame an input produces without any route template.
+pub fn sse_payload(input: &InputEnvelope, outputs: &SinkOutputs) -> Result<Value> {
+    let notifications = notifications(input, outputs)?;
+    let first = notifications
+        .first()
+        .context("SSE input has no graph changes")?;
+    let changes = notifications
+        .iter()
+        .map(|notification| notification.change().to_json())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(default_changes_payload(
+        first.output_json(),
+        first.sequence(),
         chrono::Utc::now().timestamp_millis(),
+        changes,
     ))
 }
 
-fn query_result(
-    input: &InputEnvelope,
-    queries: &BTreeMap<String, StreamId>,
-) -> Result<drasi_computation_contracts::exchange::QueryResult> {
-    ensure!(input.port.as_str() == "in", "unexpected SSE input port");
-    let envelope = &input.envelope;
-    ensure!(
-        !QueryChangeCodec::is_snapshot(envelope) && !QueryChangeCodec::is_progress_only(envelope),
-        "SSE notifications do not implement snapshot/recovery control"
-    );
-    let metadata = QueryChangeCodec::metadata(envelope)?;
-    ensure!(
-        queries.get(&metadata.query_id) == Some(envelope.system().stream()),
-        "unexpected SSE query/stream"
-    );
-    // Reuse the established browser wire projection, not a legacy runtime adapter.
-    Ok(QueryChangeCodec::to_legacy_result(envelope)?)
+/// Decode standard graph changes from any bound output. The binding names the
+/// data and no query annotation is read. Patches and identity-only deletes are
+/// sent as such: the browser's row state owns applying them. An envelope
+/// without changes yields none; a scheduling control or recovery frame fails.
+fn notifications(input: &InputEnvelope, outputs: &SinkOutputs) -> Result<Vec<ChangeNotification>> {
+    drasi_computation_network_common::wire::notifications(input, outputs)
 }
 
 #[cfg(test)]
@@ -601,14 +645,27 @@ mod tests {
     use super::*;
     use futures_util::{FutureExt, StreamExt};
 
+    fn q_outputs() -> Value {
+        json!({"q": {"component": "q", "port": "out"}})
+    }
+
+    fn q_inputs() -> Result<Vec<InputBinding>> {
+        Ok(vec![InputBinding {
+            input_port: PortId::try_new("in")?,
+            output: OutputEndpoint::new(ComponentId::try_new("q")?, PortId::try_new("out")?),
+            stream: StreamId::try_new("q/out")?,
+        }])
+    }
+
     fn sink() -> Result<SseSink> {
         let config = SseSinkConfig::parse(json!({
-            "queryStreams": {"q": "q/out"}, "host": "127.0.0.1", "port": 0,
+            "outputs": q_outputs(), "host": "127.0.0.1", "port": 0,
         }))?;
         Ok(SseSink {
             descriptor: SseFactory
                 .metadata()
                 .descriptor(ComponentId::try_new("ui")?)?,
+            outputs: SinkOutputs::from_inputs(&q_inputs()?, &config.outputs)?,
             renderer: config.renderer(),
             snapshots: None,
             config,
@@ -619,16 +676,30 @@ mod tests {
     #[test]
     fn configuration_rejects_invalid_and_unsupported_options() {
         for value in [
-            json!({"queryStreams": {}}),
-            json!({"queryStreams": {"q": "q/out"}, "heartbeatIntervalMs": 0}),
-            json!({"queryStreams": {"q": "q/out"}, "broadcastCapacity": 0}),
-            json!({"queryStreams": {"q": "q/out"}, "ssePath": "events"}),
-            json!({"queryStreams": {"q": "q/out"}, "maxPaths": 0}),
-            json!({"queryStreams": {"q": "q/out"}, "routes": {"missing": {}}}),
-            json!({"queryStreams": {"q": "q/out"}, "routes": {"q": {"added": {"templat": "typo"}}}}),
+            json!({"outputs": {"bad id": {"component": "q"}}}),
+            json!({"queryStreams": {"q": "q/out"}}),
+            json!({"producers": {"q": "q/out"}}),
+            json!({"outputs": {"q": {"component": "q", "stream": "q/out"}}}),
+            json!({"outputs": q_outputs(), "heartbeatIntervalMs": 0}),
+            json!({"outputs": q_outputs(), "broadcastCapacity": 0}),
+            json!({"outputs": q_outputs(), "ssePath": "events"}),
+            json!({"outputs": q_outputs(), "maxPaths": 0}),
+            json!({"outputs": q_outputs(), "routes": {"q": {"added": {"templat": "typo"}}}}),
         ] {
             assert!(SseSinkConfig::parse(value).is_err());
         }
+    }
+
+    #[test]
+    fn routes_must_name_an_incoming_output() -> Result<()> {
+        let config = SseSinkConfig::parse(json!({"routes": {"missing": {}}}))?;
+        let outputs = SinkOutputs::from_inputs(&q_inputs()?, &config.outputs)?;
+        assert!(config.validate_outputs(&outputs).is_err());
+        let config = SseSinkConfig::parse(json!({"routes": {"q": {}}}))?;
+        let outputs = SinkOutputs::from_inputs(&q_inputs()?, &config.outputs)?;
+        config.validate_outputs(&outputs)?;
+        assert_eq!(outputs.aliases().collect::<Vec<_>>(), ["q"]);
+        Ok(())
     }
 
     #[tokio::test]
