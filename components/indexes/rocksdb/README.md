@@ -35,7 +35,6 @@ cargo test -p drasi-index-rocksdb --features plugin-descriptor
 cargo clippy -p drasi-index-rocksdb --all-targets --features plugin-descriptor -- -D warnings
 ```
 
-The focused CI matrix tests Ubuntu 26.04 x86_64, Linux arm64, and macOS using
-their default C++ compilers. The downstream server must also update its lockfile
-to the newly published `drasi-index-rocksdb` release and rerun its locked
-dependency validation and release rehearsal.
+The existing workspace test job includes the RocksDB index tests. The downstream
+server must also update its lockfile to the newly published `drasi-index-rocksdb`
+release and rerun its locked dependency validation and release rehearsal.
