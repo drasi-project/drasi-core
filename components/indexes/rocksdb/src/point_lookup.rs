@@ -28,8 +28,9 @@
 //! injected through it (see #634).
 //!
 //! The settings below mirror `ColumnFamilyOptions::OptimizeForPointLookup`
-//! in RocksDB 8.10.0 (`options/options.cc:629`), which is the version pinned
-//! by `librocksdb-sys 0.16.0+8.10.0`:
+//! in RocksDB 8.10.0 (`options/options.cc:629`), the engine used when this
+//! policy was introduced. These explicit settings are preserved when upgrading
+//! the engine rather than adopting changes to its convenience preset:
 //!
 //! | `OptimizeForPointLookup(mb)` | Here |
 //! |---|---|
