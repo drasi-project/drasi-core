@@ -28,6 +28,7 @@ jobs:
   test:
     uses: drasi-project/.github/.github/workflows/rust-unit-test.yaml@main
     with:
+      runner: ubuntu-24.04
       test-command: |
         .github/scripts/package-visibility.test.sh
         .github/scripts/release-with-retry.test.sh
