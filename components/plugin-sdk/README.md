@@ -200,7 +200,18 @@ cp target/release/libdrasi_source_my_plugin.so /path/to/server/plugins/
 
 #### Plugin metadata provenance
 
-`PluginMetadata` includes `git_commit` (from `GIT_COMMIT` env or `git rev-parse HEAD`) and `build_timestamp` (from `BUILD_TIMESTAMP` env or compile time) for build provenance tracking.
+`PluginMetadata` includes `git_commit` and `build_timestamp` for build provenance
+tracking. Prepared release/nightly builds set `DRASI_BUILD_GIT_SHA` to the full
+40-character commit recorded in the candidate manifest. The SDK validates and
+embeds that value verbatim, without consulting a parent tooling checkout or
+requiring `.git` inside a build container. Changing or removing the variable
+invalidates Cargo's cached SDK build metadata.
+
+Without this override, release builds (or builds with `DRASI_EMBED_GIT_SHA` set)
+use `git rev-parse --short HEAD`; unavailable Git metadata produces a warning
+and `unknown`. Ordinary debug builds use the stable `dev` placeholder.
+The build timestamp is the current UTC time for release builds or when
+`DRASI_EMBED_BUILD_TIMESTAMP` is set, and `dev-build` otherwise.
 
 #### Plugin signing
 

@@ -1,3 +1,6 @@
+[build.env]
+passthrough = ["DRASI_BUILD_GIT_SHA"]
+
 [target.x86_64-unknown-linux-musl]
 dockerfile = "Dockerfile.cross-musl"
 
