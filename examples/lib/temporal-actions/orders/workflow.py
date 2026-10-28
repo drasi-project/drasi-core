@@ -8,9 +8,11 @@ from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
     import os
+    import psycopg
     from temporalio.client import Client, WorkflowExecutionStatus
     from temporalio.common import WorkflowIDReusePolicy
     from temporalio.exceptions import WorkflowAlreadyStartedError
+    from temporalio.service import RPCError, RPCStatusCode
     from temporalio.worker import Worker
 
 
@@ -53,15 +55,27 @@ class OrderLifecycle:
 async def main():
     client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
     async with Worker(client, task_queue="orders", workflows=[OrderLifecycle]):
+        with psycopg.connect(connect_timeout=5) as db:
+            order = db.execute("SELECT status FROM orders WHERE id = %s", ("1001",)).fetchone()
+        if order is None:
+            try:
+                await client.start_workflow(
+                    OrderLifecycle.run, id="order-1001", task_queue="orders",
+                    id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                )
+            except WorkflowAlreadyStartedError:
+                pass
         try:
-            await client.start_workflow(
-                OrderLifecycle.run, id="order-1001", task_queue="orders",
-                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-            )
-        except WorkflowAlreadyStartedError:
             current = await client.get_workflow_handle("order-1001").describe()
-            if current.status not in (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.COMPLETED):
-                raise RuntimeError("order-1001 did not complete normally; use a fresh demo project")
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+            raise RuntimeError(
+                "Order workflow history is missing; it may have expired or been reset. "
+                "The saved order cannot resume. Use a fresh Compose project."
+            ) from error
+        if current.status not in (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.COMPLETED):
+            raise RuntimeError("order-1001 did not complete normally; use a fresh demo project")
         print("Order Worker ready", flush=True)
         await asyncio.Event().wait()
 

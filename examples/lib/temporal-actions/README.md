@@ -119,7 +119,9 @@ class OrderLifecycle:
 
 The file imports `workflow` from the Temporal Python SDK. Its Worker registers
 `OrderLifecycle` on the `orders` task queue and starts it with workflow ID
-`order-1001`. On restart, it keeps the same execution, even after completion.
+`order-1001` only while the database has no order. Once an order exists, startup
+requires the existing execution rather than creating a replacement. A completed
+execution can be resumed for inspection only while Temporal retains its history.
 The demo commands query `progress` while it runs and read its result after it
 completes. The workflow buffers received signals so that its stages advance
 in order even if signals arrive in a different order.
@@ -252,15 +254,35 @@ in this example, not in the reusable reaction.
 ./demo.sh down
 ```
 
-Data is preserved. `./demo.sh up` resumes with the same order and workflow
-history. A delivered order stays delivered, and its workflow stays completed.
+Docker volumes are preserved. `./demo.sh up` resumes with the same order and
+workflow while Temporal retains the execution. The development server's default
+namespace retains **closed workflow history for 24 hours**; that retention still
+applies when its database is stored in a volume. Running workflows do not expire
+under this retention policy.
+
+After history expires, PostgreSQL and Drasi may still contain the delivered order
+and its acknowledged checkpoints. The demo cannot reconstruct the workflow from
+those checkpoints. Startup reports missing history instead of silently creating
+an empty replacement. `REJECT_DUPLICATE` protects workflow IDs only while their
+closed executions remain within Temporal's
+[retention period](https://docs.temporal.io/workflow-execution/workflowid-runid#what-is-a-workflow-id-reuse-policy).
 
 This is a local development demo with fixed demo credentials. Only Temporal's
 UI is exposed, on loopback. The database and Drasi status endpoint are internal
 to the Compose network.
 
 For a fresh independent run, set `COMPOSE_PROJECT_NAME` to a new name before
-running the commands. To delete a run's saved data after stopping it:
+running the commands. Use another UI port if the previous project is still running:
+
+```sh
+export COMPOSE_PROJECT_NAME=drasi-temporal-orders-fresh
+export TEMPORAL_UI_PORT=18081
+./demo.sh up
+```
+
+Keep those environment variables set when running the stage commands and `down`.
+This leaves the original project's data untouched. To delete a run's saved data
+after stopping it:
 
 ```sh
 docker compose -f orders/compose.yaml down --volumes
@@ -278,8 +300,9 @@ reuse the previous inventory demo's data. If that demo still occupies port
 - [Action configuration reference](../../../components/reactions/temporal/README.md)
 - Run `./verify-demo.sh` to repeat the walkthrough, check workflow state, and
   exercise repeated startup and restart. It also runs the Python command-confirmation
-  tests. This is a manual check, not a CI job. It uses its own temporary Compose
-  project and removes only that project's data.
+  tests and removes the test workflow's history to verify that an existing order
+  is never silently restarted after history loss. This is a manual check, not a CI
+  job. It uses its own temporary Compose project and removes only that project's data.
 
 Like the other `examples/lib` demos, this is a standalone Cargo workspace.
 Its committed `Cargo.lock` pins the Docker build's dependencies independently

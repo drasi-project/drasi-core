@@ -9,7 +9,10 @@ case "${1:-}" in
     up)
         [[ $# -eq 1 ]] || { echo "Usage: ./demo.sh up" >&2; exit 2; }
         echo "Starting PostgreSQL, Drasi, and Temporal. The first build takes several minutes."
-        "${compose[@]}" up --build --detach --wait --wait-timeout 120
+        if ! "${compose[@]}" up --build --detach --wait --wait-timeout 120; then
+            "${compose[@]}" logs --no-color --tail=20 worker drasi >&2
+            exit 1
+        fi
         "${compose[@]}" exec -T worker python demo.py ready
         ui_address="$("${compose[@]}" port temporal 8233)"
         echo "Temporal UI: http://$ui_address"
@@ -21,7 +24,7 @@ case "${1:-}" in
     down)
         [[ $# -eq 1 ]] || { echo "Usage: ./demo.sh down" >&2; exit 2; }
         "${compose[@]}" down
-        echo "Stopped. Data is preserved; ./demo.sh up resumes the demo."
+        echo "Stopped. Data is preserved; resuming requires retained Temporal workflow history."
         ;;
     *)
         echo "Usage: ./demo.sh up | placed | paid | shipped | delivered | down" >&2

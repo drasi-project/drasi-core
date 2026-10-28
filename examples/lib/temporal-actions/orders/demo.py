@@ -89,6 +89,13 @@ async def main():
         row = db.execute("SELECT status FROM orders WHERE id = %s", (ORDER_ID,)).fetchone()
         before = row[0] if row else None
         if before is not None:
+            confirmed = {event["signal"] for event in state["events"]}
+            if not set(STAGES[:STAGES.index(before)]).issubset(confirmed):
+                raise RuntimeError(
+                    "Order workflow history is missing previously confirmed stages; "
+                    "it may have expired or been reset. The saved order cannot resume. "
+                    "Use a fresh Compose project."
+                )
             state = await wait_for_stage(handle, before)
         elif state["status"] != "awaiting_placement":
             raise RuntimeError("The database and workflow do not match; use a fresh demo project.")

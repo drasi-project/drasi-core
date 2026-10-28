@@ -132,3 +132,54 @@ reject_stage placed
 ./demo.sh up
 assert_state delivered
 echo "PASS: four SQL-driven signals, workflow completion, payloads, no-op, invalid transitions, repeated up, restart before/after completion, and explicit outage failure"
+
+"${compose[@]}" stop drasi worker
+"${compose[@]}" run --rm --no-deps -T worker python - "$run_id" <<'PY'
+import asyncio, os, sys
+import psycopg
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
+from temporalio.client import Client
+from temporalio.service import RPCError, RPCStatusCode
+from workflow import OrderLifecycle, main
+
+async def check():
+    client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
+    handle = client.get_workflow_handle("order-1001")
+    await client.workflow_service.delete_workflow_execution(DeleteWorkflowExecutionRequest(
+        namespace="default",
+        workflow_execution=WorkflowExecution(workflow_id="order-1001", run_id=sys.argv[1]),
+    ))
+    async def missing():
+        try:
+            await handle.describe()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+            return True
+        return False
+    async with asyncio.timeout(15):
+        while not await missing():
+            await asyncio.sleep(0.1)
+        try:
+            await main()
+        except RuntimeError as error:
+            assert "history is missing" in str(error), error
+        else:
+            raise AssertionError("Startup accepted an order whose workflow history was deleted")
+    assert await missing(), "Startup recreated the expired workflow"
+    with psycopg.connect() as db:
+        assert db.execute("SELECT id, status FROM orders").fetchall() == [("1001", "delivered")]
+    print("PASS: missing workflow history fails startup without a replacement or SQL mutation")
+    await client.start_workflow(OrderLifecycle.run, id="order-1001", task_queue="orders")
+
+asyncio.run(check())
+PY
+"${compose[@]}" up --detach --wait --wait-timeout 120 worker drasi
+if failure="$("${compose[@]}" exec -T worker python demo.py ready 2>&1)"; then
+    echo "An empty replacement workflow was accepted for the delivered order" >&2
+    exit 1
+fi
+echo "$failure"
+[[ "$failure" == *"history is missing previously confirmed stages"* ]]
+echo "PASS: an already-replaced workflow is rejected immediately instead of waiting for stale signals"

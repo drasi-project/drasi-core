@@ -7,6 +7,9 @@ from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import demo
+import workflow as order_workflow
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 
 def state(stage):
@@ -78,6 +81,19 @@ class ConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 await demo.main()
             self.assertFalse(any("UPDATE" in c.args[0] for c in db.execute.call_args_list))
 
+    async def test_replacement_workflow_cannot_resume_a_later_database_stage(self):
+        with ExitStack() as stack:
+            wait = AsyncMock(return_value=state("paid"))
+            db = self.command(stack, wait)
+            stack.enter_context(patch("demo.progress", new=AsyncMock(return_value={
+                "status": "awaiting_placement", "events": [], "workflowStatus": "RUNNING",
+            })))
+            stack.enter_context(patch("sys.argv", ["demo.py", "ready"]))
+            with self.assertRaisesRegex(RuntimeError, "history.*missing"):
+                await demo.main()
+            wait.assert_not_awaited()
+            self.assertFalse(any("UPDATE" in c.args[0] for c in db.execute.call_args_list))
+
     async def test_previous_signal_cannot_confirm_a_new_stage_with_the_same_sequence(self):
         status = {"queries": {"shipped": {"checkpoint": {"sequence": 1}}}}
         with (
@@ -100,6 +116,42 @@ class ConfirmationTests(unittest.IsolatedAsyncioTestCase):
         ):
             await demo.wait_for_stage(MagicMock(), "paid")
         self.assertEqual(read.await_count, 2)
+
+
+class WorkerStartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retained_orders_reuse_the_workflow_without_starting_again(self):
+        for status in (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.COMPLETED):
+            with self.subTest(status=status), ExitStack() as stack:
+                client = MagicMock()
+                client.start_workflow = AsyncMock()
+                client.get_workflow_handle.return_value.describe = AsyncMock(
+                    return_value=MagicMock(status=status)
+                )
+                db = stack.enter_context(patch("psycopg.connect")).return_value.__enter__.return_value
+                db.execute.return_value.fetchone.return_value = ("delivered",)
+                stack.enter_context(patch("workflow.Client.connect", new=AsyncMock(return_value=client)))
+                stack.enter_context(patch("workflow.Worker")).return_value = AsyncMock()
+                stack.enter_context(patch("workflow.asyncio.Event")).return_value.wait = AsyncMock()
+                stack.enter_context(patch.dict("os.environ", {"TEMPORAL_ADDRESS": "unused:7233"}))
+                stack.enter_context(patch("builtins.print"))
+                await order_workflow.main()
+                client.start_workflow.assert_not_awaited()
+
+    async def test_missing_history_never_restarts_an_existing_order(self):
+        client = MagicMock()
+        client.start_workflow = AsyncMock(side_effect=AssertionError("started a replacement workflow"))
+        client.get_workflow_handle.return_value.describe = AsyncMock(side_effect=RPCError(
+            "workflow not found", status=RPCStatusCode.NOT_FOUND, raw_grpc_status=b"",
+        ))
+        with ExitStack() as stack:
+            db = stack.enter_context(patch("psycopg.connect")).return_value.__enter__.return_value
+            db.execute.return_value.fetchone.return_value = ("delivered",)
+            stack.enter_context(patch("workflow.Client.connect", new=AsyncMock(return_value=client)))
+            stack.enter_context(patch("workflow.Worker")).return_value = AsyncMock()
+            stack.enter_context(patch.dict("os.environ", {"TEMPORAL_ADDRESS": "unused:7233"}))
+            with self.assertRaisesRegex(RuntimeError, "history.*missing"):
+                await order_workflow.main()
+        client.start_workflow.assert_not_awaited()
 
 
 if __name__ == "__main__":
