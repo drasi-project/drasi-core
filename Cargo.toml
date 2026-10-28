@@ -16,6 +16,7 @@ members = [
   "components/kubernetes-common",
   "components/oracle-common",
   "components/postgres-common",
+  "components/salesforce-common",
   "components/sources/mapping",
 
   # Bootstrap Plugins
@@ -64,6 +65,7 @@ members = [
   "components/sources/kafka",
   "components/sources/otel",
   "components/sources/websocket",
+  "components/sources/salesforce",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -124,7 +126,7 @@ members = [
   "query-perf",
   "examples/query",
   "lib-integration-tests",
-  ]
+]
 
 # Exclude internal crates from workspace packaging
 exclude = [
@@ -161,6 +163,7 @@ drasi-lib = { version = "0.9.3", path = "lib" }
 drasi-ffi-primitives = { version = "0.11.3", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.11.3", path = "components/plugin-sdk" }
 drasi-host-sdk = { version = "0.11.3", path = "components/host-sdk" }
+drasi-salesforce-common = { version = "0.1.0", path = "components/salesforce-common" }
 
 # Common dependencies
 im = "15"
@@ -185,6 +188,7 @@ drasi-source-application = { version = "0.2.11", path = "components/sources/appl
 drasi-source-hyperliquid = { version = "0.1.11", path = "components/sources/hyperliquid" }
 drasi-source-cloudflare-radar = { version = "0.1.10", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.15", path = "components/bootstrappers/application" }
+drasi-source-salesforce = { version = "0.1.0", path = "components/sources/salesforce" }
 drasi-reaction-http = { version = "0.3.5", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.4.5", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.6", path = "components/reactions/file" }

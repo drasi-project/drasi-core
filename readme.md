@@ -358,6 +358,7 @@ requires the coordinated test-infra integration; see the
 | `make build-plugins` | Build all plugins (debug) |
 | `make build-plugins-release` | Build all plugins (release) |
 | `make test-host-sdk` | Build test plugins and run host-sdk integration tests |
+| `make test-salesforce-ffi` | Build the Salesforce plugin and run its FFI integration tests |
 | `make publish-plugins` | Publish plugins (debug build) |
 | `make publish-plugins-release` | Publish plugins (release build) |
 | `make publish-plugins-dry-run` | Preview what would be published |
