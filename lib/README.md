@@ -416,6 +416,10 @@ instances without deprovisioning them or deleting persisted state. Stop errors
 are returned after the remaining cleanup is attempted. Repeated calls are safe;
 concurrent shutdown calls wait for teardown to complete.
 
+Application sources finish any in-flight WAL pruning before stopping. Queries
+join all bootstrap workers but cancel blocked bootstrap-completion dispatch
+during stop, so an undrained result subscription cannot hold shutdown open.
+
 After shutdown, drop all `DrasiLib` clones and caller-held component/provider
 handles before reopening injected state stores or WAL providers at the same
 paths. These providers remain owned by the instance's configuration/managers

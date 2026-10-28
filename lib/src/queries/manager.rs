@@ -469,6 +469,97 @@ mod tests {
         assert_eq!(query.subscription_count().await, 0);
         Ok(())
     }
+
+    #[rstest::rstest]
+    #[case::stop_query(false)]
+    #[case::terminal_shutdown(true)]
+    #[tokio::test]
+    async fn retained_subscription_does_not_block_bootstrap_stop(
+        #[case] terminal_shutdown: bool,
+    ) -> Result<()> {
+        use crate::sources::tests::TestBootstrapMockSource;
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1);
+        drop(bootstrap_tx);
+        let core = crate::DrasiLib::builder()
+            .with_source(TestBootstrapMockSource::new("source".into(), bootstrap_rx)?)
+            .with_query(
+                crate::Query::cypher("query")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("source")
+                    .with_dispatch_mode(crate::DispatchMode::Channel)
+                    .with_dispatch_buffer_capacity(1)
+                    .build(),
+            )
+            .build()
+            .await?;
+        core.start().await?;
+        let instance = core
+            .query_manager()
+            .get_query_instance("query")
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let query = instance.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        let mut subscription =
+            timeout(Duration::from_secs(2), query.subscribe("retained".into())).await??;
+        let mut events = core.subscribe_all_component_events();
+        core.stop_query("query").await?;
+        crate::test_helpers::wait_for_component_status(
+            &mut events,
+            "query",
+            ComponentStatus::Stopped,
+            Duration::from_secs(2),
+        )
+        .await;
+
+        let source = query
+            .source_manager
+            .get_source_instance("source")
+            .await
+            .unwrap();
+        let source = source
+            .as_any()
+            .downcast_ref::<TestBootstrapMockSource>()
+            .unwrap();
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1);
+        source.set_bootstrap_receiver(bootstrap_rx).await;
+        core.start_query("query").await?;
+        drop(bootstrap_tx);
+
+        // All workers must finish before stop, so aborting them cannot skip dispatch.
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let workers = query.bootstrap_abort_handles.read().await;
+                if !workers.is_empty()
+                    && workers.iter().all(tokio::task::AbortHandle::is_finished)
+                    && query.base.dispatchers.try_write().is_err()
+                {
+                    break;
+                }
+                drop(workers);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(query.status().await, ComponentStatus::Starting);
+
+        timeout(Duration::from_secs(2), async {
+            if terminal_shutdown {
+                core.shutdown().await
+            } else {
+                core.stop_query("query").await
+            }
+        })
+        .await??;
+        assert_eq!(query.status().await, ComponentStatus::Stopped);
+        assert!(query.bootstrap_supervisor.read().await.is_none());
+        let signal = subscription.receiver.recv().await?;
+        assert_eq!(signal.metadata["control_signal"], "bootstrapStarted");
+        core.shutdown().await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1296,7 +1387,14 @@ pub struct DrasiQuery {
     subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     // Abort bootstrap workers, then join their supervisor during stop.
     bootstrap_abort_handles: Arc<RwLock<Vec<tokio::task::AbortHandle>>>,
-    bootstrap_supervisor: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    bootstrap_supervisor: Arc<
+        RwLock<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                tokio::task::JoinHandle<()>,
+            )>,
+        >,
+    >,
     // Track bootstrap state per source
     bootstrap_state: Arc<RwLock<HashMap<String, BootstrapPhase>>>,
     // IndexFactory for creating storage backend indexes
@@ -2926,6 +3024,8 @@ impl Query for DrasiQuery {
                 let base_dispatchers_clone = base_dispatchers.clone();
                 let checkpoint_store_for_supervisor = checkpoint_store.clone();
                 let session_control_for_supervisor = session_control.clone();
+                let (supervisor_shutdown_tx, mut supervisor_shutdown_rx) =
+                    tokio::sync::oneshot::channel();
 
                 let span = tracing::info_span!(
                     "bootstrap_supervisor",
@@ -3076,13 +3176,21 @@ impl Query for DrasiQuery {
                         let arc_result = Arc::new(control_result);
 
                         // Dispatch bootstrapCompleted signal to all reactions
-                        let dispatchers = base_dispatchers_clone.read().await;
-                        let mut dispatched = false;
-                        for dispatcher in dispatchers.iter() {
-                            if dispatcher.dispatch_change(arc_result.clone()).await.is_ok() {
-                                dispatched = true;
-                            }
-                        }
+                        // without letting a full subscriber channel block stop.
+                        let dispatched = tokio::select! {
+                            biased;
+                            _ = &mut supervisor_shutdown_rx => return,
+                            dispatched = async {
+                                let dispatchers = base_dispatchers_clone.read().await;
+                                let mut dispatched = false;
+                                for dispatcher in dispatchers.iter() {
+                                    if dispatcher.dispatch_change(arc_result.clone()).await.is_ok() {
+                                        dispatched = true;
+                                    }
+                                }
+                                dispatched
+                            } => dispatched,
+                        };
 
                         if !dispatched {
                             debug!(
@@ -3100,7 +3208,8 @@ impl Query for DrasiQuery {
                     }
                     .instrument(span),
                 );
-                *self.bootstrap_supervisor.write().await = Some(supervisor_handle);
+                *self.bootstrap_supervisor.write().await =
+                    Some((supervisor_shutdown_tx, supervisor_handle));
             }
 
             // Store abort handles for cleanup on stop()
@@ -3492,7 +3601,8 @@ impl Query for DrasiQuery {
             handle.abort();
         }
         let supervisor = self.bootstrap_supervisor.write().await.take();
-        if let Some(supervisor) = supervisor {
+        if let Some((shutdown_tx, supervisor)) = supervisor {
+            let _ = shutdown_tx.send(());
             if let Err(error) = supervisor.await {
                 warn!(
                     "Query '{}' bootstrap supervisor failed during stop: {error}",

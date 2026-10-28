@@ -365,7 +365,12 @@ pub struct ApplicationSource {
     /// Serializes WAL append and enqueue across all source handles.
     enqueue_order: Arc<tokio::sync::Mutex<()>>,
     /// Handle to the WAL pruning background task (if running)
-    prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
+    prune_task: tokio::sync::RwLock<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::task::JoinHandle<()>,
+        )>,
+    >,
 }
 
 impl ApplicationSource {
@@ -601,10 +606,16 @@ impl Source for ApplicationSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
             let prune_handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
-                    interval.tick().await;
+                    tokio::select! {
+                        biased;
+                        _ = &mut shutdown_rx => break,
+                        _ = interval.tick() => {}
+                    }
+                    // Finish each iteration: cancelling a WAL future can detach blocking DB work.
                     if let Some(confirmed) = base.compute_confirmed_position().await {
                         if confirmed > 0 {
                             match wal.prune_up_to(&source_id, confirmed).await {
@@ -625,7 +636,7 @@ impl Source for ApplicationSource {
                     }
                 }
             });
-            *self.prune_task.write().await = Some(prune_handle);
+            *self.prune_task.write().await = Some((shutdown_tx, prune_handle));
         }
 
         Ok(())
@@ -641,17 +652,15 @@ impl Source for ApplicationSource {
             )
             .await;
 
-        // Cancel WAL pruning task
+        // Wake the pruning loop and join any in-flight database work.
         let prune_task = self.prune_task.write().await.take();
-        if let Some(handle) = prune_task {
-            handle.abort();
+        if let Some((shutdown_tx, handle)) = prune_task {
+            let _ = shutdown_tx.send(());
             if let Err(error) = handle.await {
-                if !error.is_cancelled() {
-                    error!(
-                        "ApplicationSource '{}' WAL pruning task failed during stop: {error}",
-                        self.base.id
-                    );
-                }
+                error!(
+                    "ApplicationSource '{}' WAL pruning task failed during stop: {error}",
+                    self.base.id
+                );
             }
         }
 
