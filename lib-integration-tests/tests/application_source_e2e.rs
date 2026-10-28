@@ -37,7 +37,7 @@ use tokio::time::timeout;
 async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
     // Subscribe BEFORE checking to avoid missing events
     let mut rx = drasi.subscribe_all_component_events();
-    let snapshot = drasi.get_graph().await;
+    let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()

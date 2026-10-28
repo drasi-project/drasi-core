@@ -646,31 +646,27 @@ not currently supply the same generic metrics; `QosChannel::progress()` instead
 exposes journal head, earliest retained position, subscriber progress, retirement,
 and producer/source position.
 
-## 8. Known limits and worthwhile improvements
+<a id="8-known-limits-and-worthwhile-improvements"></a>
 
-The [opt-in resilience and recovery plan](computation-graph-reliability-plan.md)
-records the completed native-framework admission, delivery, handover and
-restoration services. Those services remain opt-in and do not automatically
-upgrade every connector. The following limits concern current runtime capacity
-and declared guarantees, not missing foundation services.
+## 8. Contract boundaries
 
-| Current limit | Consequence and improvement opportunity |
+Admission, delivery, handover and restoration services are opt-in. They do not
+automatically upgrade every connector or make a volatile pipeline recoverable.
+Use the [maintainer's recovery guide](computation-graph-maintainers-guide.md#recovery-is-a-chain-of-completion-boundaries)
+to follow the actual owners and completion boundaries.
+
+| Boundary | Current meaning |
 |---|---|
-| **No pipe rate limiter** | Capacity limits buffered envelopes, not throughput. Add optional asynchronous admission/delivery limits with explicit rate and burst size. `governor`, already used by the test framework, is a candidate. Preserve ordering, cancellation, acknowledgements, and shared QoS accounting. |
-| **Native CPU parallelism is not automatic** | Per-node work budgets already bound immediately ready work and preserve controller progress. Native nodes in one graph still share a controller; measure CPU-heavy workloads before adding independently scheduled execution. Rate limiting is a separate policy. |
-| **Byte quotas are not memory budgets** | Byte-bounded FIFO charges complete serialized envelopes and permits one exclusive oversized item. Other pipe profiles remain count-bounded; component state, allocation overhead and pending/downstream work remain outside these quotas. Retained/QoS budgeting must follow journal and acknowledgement lifetimes. |
-| **Persistent history also occupies memory** | Retained and QoS owners can opt into bounded payload pages; defaults cache the full window. Shared QoS holds the group transaction across startup validation and each refill. Startup still scans every record. Byte accounting, progress, receipt metadata and backend buffers need separate memory allowances. |
-| **Acknowledged delivery is serial per consumer** | Retained/QoS allow one outstanding item per consumer. This simplifies correct progress but can limit throughput. Any windowed/batched acknowledgement extension must prevent later completion from skipping unfinished earlier work. |
-| **Schemas require exact agreement** | No automatic version compatibility, field conversion, or migration of stored envelopes. Use explicit conversion components now; define upgrade and recovery rules before adding automatic compatibility. |
-| **No automatic end-to-end recovery promise** | Every producer, intermediate stateful component, pipe, and consumer must preserve its own boundary. A volatile ingress or acceptance-only reaction can break an otherwise durable path. Verify the actual complete pipeline. |
-| **Observability differs by pipe** | Add consistent throughput, waiting-time, retained-depth, and subscriber-lag reporting. Distinguish accepted, dropped, delivered, handled, and durably handled rather than presenting one misleading success count. |
-| **Extensibility still depends on trusted implementations** | A matching descriptor/capability declaration cannot prove validator correctness, storage durability, or truthful handling completion. Keep shared conformance scenarios for custom providers and both in-process and plugin paths. |
+| Execution | Native work uses graph-owned independent tasks. A multi-thread runtime can execute independent CPU work in parallel; current-thread execution remains cooperative. A shared controller does not serialize all processing. |
+| Capacity | Count/encoded-byte admission quotas apply to the pipe profiles that advertise them. Payload-cache bounds are a separate policy. Component state, metadata, backend buffers and downstream work remain outside those quotas, so they are not total process-memory budgets. |
+| Acknowledgements | Retained and QoS receivers support batches. Durable progress must not skip unfinished earlier work, and pipe acknowledgement is not proof of an arbitrary external effect. |
+| Compatibility | Schemas require exact agreement. Conversion uses explicit components; there is no automatic stored-envelope migration. |
+| Recovery | Whole-path assertions inspect declared storage and recovery capabilities. They do not enable durability or prove that a custom implementation tells the truth. A volatile ingress or acceptance-only destination can weaken the whole path. |
 
-Foundation coverage is useful evidence, not whole-system qualification. In
-particular, lossless versus lossy operation, cancellation, restart, storage errors,
-and slow/missing consumers need distinct expectations. See the
-[backlog's foundation evidence](computation-graph-backlog.md) for current coverage
-and remaining qualification work.
+Known gaps and proposed changes belong only in the
+[remaining-work document](computation-graph-remaining-work.md). The
+[requirement ledger](../tests/runtime_parity/requirements.tsv) records evidence;
+foundation coverage is not whole-system qualification.
 
 ## 9. Where the implementation lives
 

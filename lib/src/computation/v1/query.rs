@@ -984,10 +984,12 @@ impl ContinuousQueryTransformer {
                     "invalid durable outbox metadata at {position}"
                 ))
             })?;
-            if envelope.system().sequence() != position
-                || envelope.system().stream() != &self.definition.output_stream
+            if envelope.system().stream() != &self.definition.output_stream
                 || metadata.query_id != self.definition.id.as_str()
             {
+                return Err(QueryRecoveryError::OwnershipMismatch.into());
+            }
+            if envelope.system().sequence() != position {
                 return Err(QueryRecoveryError::Inconsistent(
                     "retained output identity differs from the query".into(),
                 )
@@ -1012,12 +1014,7 @@ impl ContinuousQueryTransformer {
                 },
             )? {
                 Some(stored) if stored == identity => {}
-                Some(_) => {
-                    return Err(QueryRecoveryError::Inconsistent(
-                        "retained output belongs to another producer identity".into(),
-                    )
-                    .into())
-                }
+                Some(_) => return Err(QueryRecoveryError::OwnershipMismatch.into()),
                 None => {
                     return Err(QueryRecoveryError::Inconsistent(
                         "retained output has no producer identity".into(),

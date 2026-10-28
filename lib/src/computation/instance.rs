@@ -583,7 +583,12 @@ pub(crate) async fn build_instance(
     };
     let mut batches = batches.into_iter();
     while let Some(batch) = batches.next() {
-        if let Err(error) = core.add_components(batch).await {
+        let accepted = core.add_components(batch).await.and_then(|report| {
+            report
+                .ensure_committed()
+                .map_err(|error| DrasiError::Internal((*error).into()))
+        });
+        if let Err(error) = accepted {
             return Err(dispose_rejected(batches.collect(), Some(core), error).await);
         }
     }

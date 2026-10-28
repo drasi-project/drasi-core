@@ -922,11 +922,14 @@ mod durable {
         PauseReadCheckpoint,
         PauseReadSequence,
         PauseReadOutbox,
+        PauseAppend,
+        PauseStageCheckpoint,
     }
 
     struct FaultBackend {
         original: ComputationIndexes,
         fault: std::sync::atomic::AtomicUsize,
+        fail_rollback: std::sync::atomic::AtomicBool,
         entered: tokio::sync::Notify,
         resume: tokio::sync::Notify,
         persistent: bool,
@@ -1024,6 +1027,7 @@ mod durable {
         Arc::new(FaultBackend {
             original: resources(path).await,
             fault: std::sync::atomic::AtomicUsize::new(0),
+            fail_rollback: std::sync::atomic::AtomicBool::new(false),
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Notify::new(),
             persistent,
@@ -1050,6 +1054,12 @@ mod durable {
             Ok(())
         }
         fn rollback(&self) -> Result<(), IndexError> {
+            if self
+                .fail_rollback
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                return Err(IndexError::IOError);
+            }
             self.original.indexes().session_control.rollback()
         }
     }
@@ -1068,7 +1078,12 @@ mod durable {
             self.fail(Fault::StageCheckpoint)?;
             self.checkpoints()
                 .stage_checkpoint(key, sequence, position)
-                .await
+                .await?;
+            if self.take(Fault::PauseStageCheckpoint) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(())
         }
         async fn read_checkpoint(
             &self,
@@ -1146,9 +1161,15 @@ mod durable {
             retain_from: u64,
         ) -> Result<usize, IndexError> {
             self.fail(Fault::Append)?;
-            self.outbox()
+            let removed = self
+                .outbox()
                 .append_and_trim(key, sequence, data, retain_from)
-                .await
+                .await?;
+            if self.take(Fault::PauseAppend) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(removed)
         }
         async fn trim_before(&self, key: &str, retain_from: u64) -> Result<usize, IndexError> {
             self.outbox().trim_before(key, retain_from).await
@@ -1571,18 +1592,123 @@ mod durable {
     }
 
     #[tokio::test]
+    async fn failed_rollback_retains_both_causes_and_requires_reconstruction() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = fault_backend(directory.path(), true).await;
+        let store = IndexedEnvelopeStore::try_new(
+            backend.bundle(true),
+            codec(),
+            "edge",
+            NonZeroUsize::new(2).unwrap(),
+            RetentionPolicy::Backpressure,
+        )
+        .unwrap();
+        let generation = store.acquire_generation().unwrap();
+        backend.arm(Fault::StageSequence);
+        backend
+            .fail_rollback
+            .store(true, std::sync::atomic::Ordering::Release);
+        let error = store
+            .append(generation, &root("source", 1, &[7]))
+            .await
+            .unwrap_err();
+        let PipeError::Backend(error) = error else {
+            panic!("expected retained failure")
+        };
+        let classified = error.downcast_ref::<ComponentOperationError>().unwrap();
+        assert_eq!(classified.disposition, FailureDisposition::Terminal);
+        assert_eq!(
+            classified
+                .source
+                .downcast_ref::<drasi_lib::error::OperationFailures>()
+                .unwrap()
+                .failures()
+                .len(),
+            2
+        );
+        assert!(store
+            .progress(generation)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cleanup and recovery"));
+        store.shutdown().await.unwrap();
+        drop((store, backend));
+        let restored = open(directory.path()).await;
+        let generation = restored.acquire_generation().unwrap();
+        assert!(restored.next(generation, 0).await.unwrap().is_none());
+        restored.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn revocation_after_staging_rolls_back_without_fencing_the_store() {
+        for append in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let backend = fault_backend(directory.path(), true).await;
+            let store = IndexedEnvelopeStore::try_new(
+                backend.bundle(true),
+                codec(),
+                "edge",
+                NonZeroUsize::new(2).unwrap(),
+                RetentionPolicy::Backpressure,
+            )
+            .unwrap();
+            let generation = store.acquire_generation().unwrap();
+            store
+                .append(generation, &root("source", 1, &[7]))
+                .await
+                .unwrap();
+            backend.arm(if append {
+                Fault::PauseAppend
+            } else {
+                Fault::PauseStageCheckpoint
+            });
+            let writing = async {
+                if append {
+                    store
+                        .append(generation, &root("source", 2, &[8]))
+                        .await
+                        .map(|_| ())
+                } else {
+                    store.acknowledge(generation, 1).await
+                }
+            };
+            tokio::pin!(writing);
+            tokio::select! {
+                _ = backend.entered.notified() => {}
+                result = &mut writing => panic!("write did not reach held staging: {result:?}"),
+            }
+            store.revoke_generation(generation);
+            backend.resume.notify_one();
+            assert!(matches!(writing.await, Err(PipeError::Closed)));
+            let rebound = store
+                .acquire_generation()
+                .expect("confirmed rollback permits rebind");
+            assert_eq!(store.progress(rebound).await.unwrap(), 0);
+            assert!(store.next(rebound, 1).await.unwrap().is_none());
+            store.acknowledge(rebound, 1).await.unwrap();
+            store
+                .append(rebound, &root("source", 2, &[8]))
+                .await
+                .unwrap();
+            assert_eq!(store.progress(rebound).await.unwrap(), 1);
+            store.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn durable_storage_failures_preserve_committed_data_and_fence_interrupted_writes() {
         for (operation, fault, fenced) in [
             ("append", Fault::ReadOutbox, false),
             ("append", Fault::ReadSequence, false),
             ("append", Fault::Begin, true),
-            ("append", Fault::Append, true),
-            ("append", Fault::StageSequence, true),
+            ("append", Fault::Append, false),
+            ("append", Fault::StageSequence, false),
             ("receive", Fault::ReadOutbox, false),
             ("acknowledge", Fault::ReadCheckpoint, false),
             ("acknowledge", Fault::ReadSequence, false),
             ("acknowledge", Fault::Begin, true),
-            ("acknowledge", Fault::StageCheckpoint, true),
+            ("acknowledge", Fault::StageCheckpoint, false),
         ] {
             let directory = tempfile::tempdir().expect("directory");
             let seed = open(directory.path()).await;

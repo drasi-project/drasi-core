@@ -554,6 +554,27 @@ struct WriteFence<'a> {
     complete: bool,
 }
 
+impl WriteFence<'_> {
+    fn rollback(&mut self, primary: PipeError) -> PipeError {
+        match self.store.indexes.indexes().session_control.rollback() {
+            Ok(()) => {
+                self.complete = true;
+                primary
+            }
+            Err(error) => PipeError::Backend(
+                super::ComponentOperationError::new(
+                    super::FailureDisposition::Terminal,
+                    crate::error::OperationFailures::new(
+                        "retained write rejected and rollback failed",
+                        vec![primary.into(), error.into()],
+                    ),
+                )
+                .into(),
+            ),
+        }
+    }
+}
+
 impl Drop for WriteFence<'_> {
     fn drop(&mut self) {
         if !self.complete {
@@ -657,15 +678,21 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .begin()
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
-        outbox
-            .append_and_trim(&self.key, position, &bytes, retain_from)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?;
-        checkpoint
-            .stage_result_sequence(&self.key, position)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?;
-        check_generation(&self.generation, generation)?;
+        let staged = async {
+            outbox
+                .append_and_trim(&self.key, position, &bytes, retain_from)
+                .await
+                .map_err(|error| PipeError::Backend(error.into()))?;
+            checkpoint
+                .stage_result_sequence(&self.key, position)
+                .await
+                .map_err(|error| PipeError::Backend(error.into()))?;
+            check_generation(&self.generation, generation)
+        }
+        .await;
+        if let Err(error) = staged {
+            return Err(fence.rollback(error));
+        }
         self.indexes
             .indexes()
             .session_control
@@ -803,11 +830,17 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .begin()
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
-        checkpoint
-            .stage_checkpoint(&self.consumer_key(), position, None)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?;
-        check_generation(&self.generation, generation)?;
+        let staged = async {
+            checkpoint
+                .stage_checkpoint(&self.consumer_key(), position, None)
+                .await
+                .map_err(|error| PipeError::Backend(error.into()))?;
+            check_generation(&self.generation, generation)
+        }
+        .await;
+        if let Err(error) = staged {
+            return Err(fence.rollback(error));
+        }
         self.indexes
             .indexes()
             .session_control

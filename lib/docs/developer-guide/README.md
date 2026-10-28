@@ -406,6 +406,11 @@ does not establish that every component is processing. Stockroom bounds its
 required components' readiness waits and reports the specific missing
 connection when a deadline expires.
 
+An actual requested startup failure returns a `PartialStartError` cause.
+Independent components may already be running, so inspect their observations and
+call `stop()` or `shutdown()` before retrying. `is_running()` indicates that the
+instance still owns started work; it does not certify every component's readiness.
+
 Finally, the application gives the batch to its runtime owner:
 
 <!-- excerpt: stockroom/src/main.rs#instance-build -->
@@ -3548,6 +3553,12 @@ a persistent checkpoint would not make its rows durable. A snapshot-restorable
 view must return a `SnapshotConsumer` from `EnvelopeSink::snapshot_consumer` for
 each input port that supports it; a port without one rejects snapshots.
 
+`CheckpointedSink` preserves input/control binding, readiness and batching, but
+checkpoints each handled input rather than bypassing progress for a whole batch.
+It cannot safely forward an inner retirement proof that excludes its progress
+store, or permanently delete inner state while retaining old checkpoints; those
+unsupported ownership combinations are explicit errors.
+
 Persist the view itself as well as its checkpoint. For a key/value-backed view,
 use stable record keys, idempotent upserts/deletes, and a dedicated data
 partition. If snapshot replacement clears and rewrites that partition, an
@@ -4892,7 +4903,7 @@ pub(super) async fn add_webhook(
         )
         .build()?
         .auto_start(false);
-    core.add_components(addition).await?;
+    core.add_components(addition).await?.ensure_committed()?;
     let component = core.computation_component("webhook")?;
     tokio::time::timeout(Duration::from_secs(10), component.start())
         .await
@@ -4970,14 +4981,17 @@ let report = control
     .reconcile(preview, TopologyBindings::default())
     .await?;
 ensure!(
-    report.summary == OperationSummary::Completed,
-    "graph change failed: {:?}",
+    report.committed && report.summary == OperationSummary::Completed,
+    "graph change failed (committed={}): {:?}",
+    report.committed,
     report.failures
 );
 ```
 
 This requests a restart, not replacement or deprovision. Another accepted
-change can invalidate the preview's revision. New implementations and resources
+change can invalidate the preview's revision. Observed lifecycle/resource changes
+can also alter its impact without advancing that revision; `StalePreview` requires
+a new preview and inspection of its affected sets before execution. New implementations and resources
 belong in `TopologyBindings` as actual factories, instances, constructors,
 and pipe providers, not just serialized names.
 

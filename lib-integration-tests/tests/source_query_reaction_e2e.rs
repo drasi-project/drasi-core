@@ -229,7 +229,7 @@ impl Reaction for CapturingReaction {
 
 async fn wait_for_status(drasi: &DrasiLib, component: &str, id: &str, expected: ComponentStatus) {
     let mut rx = drasi.subscribe_all_component_events();
-    let snapshot = drasi.get_graph().await;
+    let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()

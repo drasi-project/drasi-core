@@ -11,6 +11,7 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
     if drasi
         .get_graph()
         .await
+        .unwrap()
         .nodes
         .iter()
         .any(|node| node.id == component_id && node.status == ComponentStatus::Running)

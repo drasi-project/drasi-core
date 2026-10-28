@@ -364,6 +364,11 @@ impl DrasiLib {
     /// * The server is already running (`DrasiError::InvalidState`)
     /// * Any component fails to start (propagated from component)
     ///
+    /// A component failure returns a [`crate::error::PartialStartError`] cause.
+    /// Independent components may already be running: `is_running()` stays true
+    /// and `stop()`/`shutdown()` remain available. Stop before retrying `start()`.
+    /// Valid declarations waiting for missing dependencies are not startup errors.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -389,6 +394,11 @@ impl DrasiLib {
                 "Server has been shut down and cannot be restarted",
             ));
         }
+        if lifecycle.stop_incomplete {
+            return Err(DrasiError::invalid_state(
+                "Previous stop requires cleanup; retry stop or shutdown before starting",
+            ));
+        }
 
         // Check preconditions under a brief read lock, then release before heavy work.
         {
@@ -408,14 +418,18 @@ impl DrasiLib {
         info!("Starting drasi-lib");
 
         // Start all configured components (no lock held during this await)
-        self.start_parallel_components().await?;
+        self.start_parallel_components().await.map_err(|cause| {
+            DrasiError::Internal(crate::error::PartialStartError { cause }.into())
+        })?;
 
         // Brief write lock to set the flag
         *self.running.write().await = true;
         lifecycle.stop_incomplete = false;
         drop(lifecycle);
         if let Some(management) = self.management.get() {
-            let report = management.reconcile().await?;
+            let report = management.reconcile().await.map_err(|cause| {
+                DrasiError::Internal(crate::error::PartialStartError { cause }.into())
+            })?;
             let observed = self.computation_control()?.observed();
             if !report.converged()
                 && (report.error.is_some()
@@ -428,9 +442,11 @@ impl DrasiLib {
                         .values()
                         .any(|resource| resource.failure.is_some()))
             {
-                return Err(DrasiError::invalid_state(
-                    "managed components did not all become ready; inspect management status",
-                ));
+                return Err(DrasiError::Internal(crate::error::PartialStartError {
+                    cause: DrasiError::invalid_state(
+                        "managed components did not all become ready; inspect management status",
+                    ).into(),
+                }.into()));
             }
         }
         info!("drasi-lib started successfully");
@@ -550,11 +566,26 @@ impl DrasiLib {
         let computation_shutdown = self.instance_graph.shutdown().await;
         let runtime_shutdown = self.computation_runtime.shutdown().await;
         *self.running.write().await = false;
-        runtime_shutdown?;
-        computation_shutdown?;
+        let mut failures = Vec::new();
+        if let Err(error) = computation_shutdown {
+            failures.push(error.context("shutting down computation graph"));
+        }
+        if let Err(error) = runtime_shutdown {
+            failures.push(error.context("shutting down instance adapters"));
+        }
         drop(_lifecycle);
-        if let Some(management) = self.management.get() {
-            management.close().await?;
+        // Store ownership must outlive every unfinished processing owner.
+        if failures.is_empty() {
+            if let Some(management) = self.management.get() {
+                if let Err(error) = management.close().await {
+                    failures.push(error.context("closing configuration store"));
+                }
+            }
+        }
+        if !failures.is_empty() {
+            return Err(DrasiError::Internal(
+                crate::error::OperationFailures::new("instance shutdown failed", failures).into(),
+            ));
         }
 
         info!("drasi-lib shut down permanently");

@@ -170,6 +170,12 @@ impl ContinuousQueryTransformer {
         if volatile_failed {
             self.reset_for_bootstrap().await?;
         } else if let Err(error) = self.recover().await {
+            if matches!(
+                error.downcast_ref::<QueryRecoveryError>(),
+                Some(QueryRecoveryError::OwnershipMismatch)
+            ) {
+                return Err(error);
+            }
             let explicit_configuration_reset = self.reset_configuration
                 && matches!(
                     error.downcast_ref::<QueryRecoveryError>(),
@@ -213,24 +219,42 @@ impl ContinuousQueryTransformer {
                     && self.provider.is_volatile()
                     || self.options.recovery == QueryRecoveryPolicy::AutoReset
                 {
-                    self.reset_for_bootstrap().await?;
-                    self.publish_source_progress(false).await?;
-                    if provider
-                        .prepare_with_state(&QueryBootstrapState(self.query()?))
-                        .await?
-                        != super::super::BootstrapPreparation::Ready
-                    {
-                        return Err(QueryRecoveryError::SourceResetRequired.into());
-                    }
+                    self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
                 } else {
                     return Err(QueryRecoveryError::SourceResetRequired.into());
                 }
+            }
+            if self.bootstrap_complete.load(Ordering::Acquire) && provider.has_pending_snapshot()? {
+                if self.options.recovery != QueryRecoveryPolicy::AutoReset
+                    && !self.provider.is_volatile()
+                {
+                    return Err(QueryRecoveryError::SourceResetRequired.into());
+                }
+                // The prepared cut initializes a new output incarnation. It must
+                // never overwrite an existing projection at an unchanged cursor.
+                self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
             }
         }
         if let Some(progress) = &self.source_progress {
             progress.admit();
         }
         self.run_bootstrap().await
+    }
+
+    async fn reset_and_prepare_bootstrap(
+        &mut self,
+        provider: &dyn super::super::ComputationBootstrapProvider,
+    ) -> anyhow::Result<()> {
+        self.reset_for_bootstrap().await?;
+        self.publish_source_progress(false).await?;
+        if provider
+            .prepare_with_state(&QueryBootstrapState(self.query()?))
+            .await?
+            != super::super::BootstrapPreparation::Ready
+        {
+            return Err(QueryRecoveryError::SourceResetRequired.into());
+        }
+        Ok(())
     }
 
     async fn reset_for_bootstrap(&mut self) -> anyhow::Result<()> {
@@ -248,6 +272,41 @@ impl ContinuousQueryTransformer {
                 .is_empty()
         {
             return Err(super::super::OutputBindingError::ResetRequiresUnboundDestinations.into());
+        }
+        if self.output_persistent {
+            let expected = self.recovery_identity()?;
+            let outbox = self
+                .query()?
+                .resources()
+                .outbox_writer()
+                .ok_or_else(|| anyhow::anyhow!("persistent reset requires an output store"))?;
+            for (sequence, bytes) in outbox.read_from(self.definition.id.as_str(), 0).await? {
+                let identity = self
+                    .codec
+                    .decode(&bytes)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|output| {
+                        super::super::QueryRecoveryIdentity::optional_from_envelope(&output)
+                            .map_err(anyhow::Error::from)
+                    });
+                match identity {
+                    Ok(Some(owner))
+                        if owner.construction_scope() != expected.construction_scope()
+                            || owner.graph_id() != expected.graph_id()
+                            || owner.query_id() != expected.query_id()
+                            || owner.incarnation() != expected.incarnation() =>
+                    {
+                        return Err(QueryRecoveryError::OwnershipMismatch.into());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "Authorized reset of query '{}' encountered corrupt output {sequence}: {error:#}",
+                            self.definition.id,
+                        );
+                    }
+                }
+            }
         }
         let query = self.query()?;
         let resources = query.resources();
@@ -397,13 +456,14 @@ impl ContinuousQueryTransformer {
         let Some(provider) = &self.bootstrap else {
             return Ok(());
         };
-        // Ordinary Source subscriptions can request a new snapshot when no
-        // source checkpoint exists. Consume the receivers chosen for this start
-        // without resetting previously committed output or its generation.
         let requested_snapshot = provider.has_pending_snapshot()?;
         if self.bootstrap_complete.load(Ordering::Acquire) && !requested_snapshot {
             return Ok(());
         }
+        anyhow::ensure!(
+            !self.bootstrap_complete.load(Ordering::Acquire),
+            QueryRecoveryError::SourceResetRequired
+        );
         let query = self.query()?;
         if let Some(checkpoint) = query.resources().checkpoint_store() {
             if checkpoint

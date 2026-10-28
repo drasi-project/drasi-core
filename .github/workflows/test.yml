@@ -33,6 +33,7 @@ jobs:
         .github/scripts/release-with-retry.test.sh
         node --test xtask/src/runtime_architecture/report.test.cjs
         cargo run -p xtask -- check-publish-dependency-cycles
+        cargo run -p xtask --bin runtime-architecture -- --check
         python3 lib/tests/runtime_parity/test_requirements.py
         bash lib/tests/runtime_parity/check-runner.sh
         make build-native-network-plugins

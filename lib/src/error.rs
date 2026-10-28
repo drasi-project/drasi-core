@@ -51,15 +51,16 @@
 //! use drasi_lib::error::{DrasiError, Result};
 //!
 //! fn example(some_operation: impl FnOnce() -> Result<()>) -> Result<()> {
-//!     // Pattern match on specific error variants
 //!     match some_operation() {
-//!         Err(DrasiError::ComponentNotFound { component_type, component_id }) => {
-//!             println!("{} '{}' not found", component_type, component_id);
-//!         }
-//!         Err(DrasiError::InvalidState { message }) => {
-//!             println!("Invalid state: {}", message);
-//!         }
-//!         Err(e) => return Err(e),
+//!         Err(error) => match error.classification() {
+//!             DrasiError::ComponentNotFound { component_type, component_id } => {
+//!                 println!("{} '{}' not found", component_type, component_id);
+//!             }
+//!             DrasiError::InvalidState { message } => {
+//!                 println!("Invalid state: {}", message);
+//!             }
+//!             _ => return Err(error),
+//!         },
 //!         Ok(v) => { /* ... */ }
 //!     }
 //!     Ok(())
@@ -69,6 +70,19 @@
 //! ```
 
 use thiserror::Error;
+
+/// Startup accepted work, but not every requested component became available.
+/// The instance remains running so callers can inspect failures and call `stop`
+/// or `shutdown`; retry `start` only after stopping it.
+#[derive(Debug, Error)]
+#[error(
+    "instance startup was partial; inspect component failures and stop before restarting: {cause}"
+)]
+#[non_exhaustive]
+pub struct PartialStartError {
+    #[source]
+    pub cause: anyhow::Error,
+}
 
 /// Typed lookup failure carried through internal `anyhow` errors.
 ///

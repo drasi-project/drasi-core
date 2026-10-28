@@ -23,6 +23,12 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
+exclude = [
+    "docs/runtime-architecture.html",
+    "docs/runtime-architecture.json",
+    "docs/runtime-dependencies.csv",
+    "**/__pycache__/**",
+]
 
 [lints]
 workspace = true

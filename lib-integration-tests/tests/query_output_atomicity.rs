@@ -910,6 +910,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
 #[derive(Clone)]
 struct FixtureOpts {
     query_text: &'static str,
+    recovery: RecoveryPolicy,
     fault: Option<Arc<FaultInjector>>,
     include_reaction: bool,
     durable_reaction: bool,
@@ -949,7 +950,7 @@ async fn build_core(
                 .enable_bootstrap(std::env::var(BOOTSTRAP_ENV).ok().as_deref() == Some("1"))
                 .with_outbox_capacity(32)
                 .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-                .with_recovery_policy(RecoveryPolicy::Strict)
+                .with_recovery_policy(opts.recovery)
                 .build(),
         )
         .with_wal_provider(wal);
@@ -993,7 +994,7 @@ async fn shutdown_and_release(core: DrasiLib, source: ApplicationSourceHandle) -
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let graph = core.get_graph().await;
+        let graph = core.get_graph().await.expect("graph snapshot");
         if graph
             .nodes
             .iter()
@@ -1359,6 +1360,7 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
             &paths,
             FixtureOpts {
                 query_text: QUERY_TEXT,
+                recovery: RecoveryPolicy::Strict,
                 fault: None,
                 include_reaction: true,
                 durable_reaction: false,
@@ -1479,6 +1481,7 @@ async fn run_bootstrap_idle_phase() -> Result<()> {
         &paths,
         FixtureOpts {
             query_text: QUERY_TEXT,
+            recovery: RecoveryPolicy::AutoReset,
             fault: None,
             include_reaction: false,
             durable_reaction: false,
@@ -1507,6 +1510,7 @@ async fn run_fault_phase() -> Result<()> {
         FixtureOpts {
             query_text,
             fault: Some(fault.clone()),
+            recovery: RecoveryPolicy::Strict,
             include_reaction: false,
             durable_reaction,
             captured: Arc::new(RwLock::new(Vec::new())),
@@ -1544,6 +1548,7 @@ async fn run_recover_phase() -> Result<()> {
         FixtureOpts {
             query_text,
             fault: None,
+            recovery: RecoveryPolicy::Strict,
             include_reaction: false,
             durable_reaction,
             captured: Arc::new(RwLock::new(Vec::new())),

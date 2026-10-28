@@ -125,6 +125,7 @@ pub struct DrasiLibBuilder {
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
+    activation_timeout_secs: Option<u64>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
     source_instances: Vec<(
@@ -205,6 +206,7 @@ impl DrasiLibBuilder {
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            activation_timeout_secs: None,
             storage_backends: Vec::new(),
             query_configs: Vec::new(),
             source_instances: Vec::new(),
@@ -447,6 +449,13 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Bound each component's activation, including input/start/output binding.
+    /// Defaults to 300 seconds; zero or an unrepresentable deadline fails build.
+    pub fn with_activation_timeout_secs(mut self, seconds: u64) -> Self {
+        self.activation_timeout_secs = Some(seconds);
+        self
+    }
+
     /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
@@ -620,6 +629,7 @@ impl DrasiLibBuilder {
             id: self.server_id.unwrap_or_else(|| "drasi-lib".to_string()),
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            activation_timeout_secs: self.activation_timeout_secs,
             storage_backends: self.storage_backends,
             queries: self.query_configs.clone(),
         };

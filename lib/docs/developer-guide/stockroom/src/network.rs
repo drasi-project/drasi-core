@@ -99,7 +99,7 @@ pub(super) async fn add_webhook(
         )
         .build()?
         .auto_start(false);
-    core.add_components(addition).await?;
+    core.add_components(addition).await?.ensure_committed()?;
     let component = core.computation_component("webhook")?;
     tokio::time::timeout(Duration::from_secs(10), component.start())
         .await

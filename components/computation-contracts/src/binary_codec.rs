@@ -80,6 +80,7 @@ impl BinaryEnvelopeCodec {
         if frame.format != Self::VERSION {
             return Err(BinaryEnvelopeCodecError::Version(frame.format));
         }
+        Lineage::validate_depth(frame.lineage.len())?;
         let schema = self
             .registry
             .lookup_schema(&frame.schema.id, frame.schema.version)?;
@@ -132,6 +133,7 @@ fn with_frame<T>(
     envelope: &ChangeEnvelope,
     use_frame: impl FnOnce(&Frame<'_>) -> Result<T>,
 ) -> Result<T> {
+    envelope.validate_lineage()?;
     let mut lineage = Vec::new();
     let mut parent = envelope.lineage();
     while let Some(entry) = parent {
@@ -713,6 +715,45 @@ mod tests {
         let mut codec = BinaryEnvelopeCodec::new(NonZeroUsize::new(limit).unwrap());
         codec.register_schema(GraphChangeCodec::schema()).unwrap();
         codec
+    }
+
+    #[test]
+    fn binary_lineage_depth_is_bounded_before_encoding_and_restoration() {
+        let codec = codec(4 * 1024 * 1024);
+        let mut input = envelope();
+        while input.lineage_depth() < crate::MAX_LINEAGE_DEPTH {
+            input = input
+                .try_derive(
+                    input.id().clone(),
+                    input.changes().clone(),
+                    input.system().as_ref().clone(),
+                )
+                .unwrap();
+        }
+        let encoded = codec.encode(&input).unwrap();
+        assert_eq!(
+            codec.decode(&encoded).unwrap().lineage_depth(),
+            crate::MAX_LINEAGE_DEPTH
+        );
+        let too_deep = input.derive(
+            input.id().clone(),
+            input.changes().clone(),
+            input.system().as_ref().clone(),
+        );
+        assert!(codec.encode(&too_deep).is_err());
+        assert!(BinaryEnvelopeCodec::encoded_size(&too_deep).is_err());
+        let mut frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4 * 1024 * 1024).unwrap();
+        frame.lineage.push((
+            Identity::envelope(input.id()),
+            Metadata::from(input.system().as_ref()),
+        ));
+        let oversized = rmp_serde::to_vec_named(&frame).unwrap();
+        assert!(matches!(
+            codec.decode(&oversized),
+            Err(BinaryEnvelopeCodecError::Contract(
+                ContractError::LineageTooDeep { .. }
+            ))
+        ));
     }
 
     fn envelope() -> ChangeEnvelope {

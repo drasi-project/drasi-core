@@ -438,7 +438,7 @@ async fn query_api(native: bool, added_while_running: bool) -> anyhow::Result<()
         core.remove_source("input", false).await.is_err(),
         "a query must protect its source dependency regardless of admission path"
     );
-    assert!(core.get_graph().await.contains("items"));
+    assert!(core.get_graph().await?.contains("items"));
     let ordinary = core.snapshot_configuration().await?;
     assert_eq!(
         ordinary

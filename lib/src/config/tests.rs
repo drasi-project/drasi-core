@@ -580,6 +580,7 @@ mod runtime_tests {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            activation_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![QueryConfig {
                 id: "q1".to_string(),
@@ -622,6 +623,7 @@ mod runtime_tests {
             id: "test-server".to_string(),
             priority_queue_capacity: Some(50000),
             dispatch_buffer_capacity: Some(5000),
+            activation_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![
                 QueryConfig {
@@ -692,6 +694,7 @@ mod runtime_tests {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            activation_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![],
         };
@@ -714,6 +717,7 @@ mod runtime_tests {
             id: "debug-test".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            activation_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![],
         };

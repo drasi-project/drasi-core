@@ -39,17 +39,15 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let snapshot = core.get_graph().await;
+    /// let snapshot = core.get_graph().await?;
     /// println!("Instance: {}", snapshot.instance_id);
     /// println!("Components: {}", snapshot.nodes.len());
     /// println!("Relationships: {}", snapshot.edges.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_graph(&self) -> GraphSnapshot {
-        self.computation_runtime.graph_snapshot().await.expect(
-            "computation registry publication must contain its declared component resources",
-        )
+    pub async fn get_graph(&self) -> Result<GraphSnapshot> {
+        Ok(self.computation_runtime.graph_snapshot().await?)
     }
 
     /// Get all components that depend on the given component.
@@ -64,20 +62,21 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let dependents = core.get_dependents("orders_db").await;
+    /// let dependents = core.get_dependents("orders_db").await?;
     /// for dep in &dependents {
     ///     println!("  {} ({:?}) depends on orders_db", dep.id, dep.kind);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_dependents(&self, id: &str) -> Vec<ComponentNode> {
-        self.get_graph()
-            .await
+    pub async fn get_dependents(&self, id: &str) -> Result<Vec<ComponentNode>> {
+        Ok(self
+            .get_graph()
+            .await?
             .get_dependents(id)
             .into_iter()
             .cloned()
-            .collect()
+            .collect())
     }
 
     /// Get all components that the given component depends on.
@@ -92,20 +91,21 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let deps = core.get_dependencies("active_orders").await;
+    /// let deps = core.get_dependencies("active_orders").await?;
     /// for dep in &deps {
     ///     println!("  active_orders depends on {} ({:?})", dep.id, dep.kind);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_dependencies(&self, id: &str) -> Vec<ComponentNode> {
-        self.get_graph()
-            .await
+    pub async fn get_dependencies(&self, id: &str) -> Result<Vec<ComponentNode>> {
+        Ok(self
+            .get_graph()
+            .await?
             .get_dependencies(id)
             .into_iter()
             .cloned()
-            .collect()
+            .collect())
     }
 
     /// Check if a component can be safely removed without breaking dependents.
@@ -171,7 +171,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = core.get_graph().await;
+        let snapshot = core.get_graph().await.expect("graph snapshot");
 
         assert_eq!(snapshot.instance_id, "empty-graph");
         // Instance root must be present
@@ -207,7 +207,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = core.get_graph().await;
+        let snapshot = core.get_graph().await.expect("graph snapshot");
 
         assert_eq!(snapshot.instance_id, "graph-test");
         // instance + source + query
@@ -243,7 +243,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dependents = core.get_dependents("src1").await;
+        let dependents = core.get_dependents("src1").await.unwrap();
 
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].id, "q1");
@@ -268,7 +268,7 @@ mod tests {
             .unwrap();
 
         // q1 is a leaf — nothing depends on it
-        let dependents = core.get_dependents("q1").await;
+        let dependents = core.get_dependents("q1").await.unwrap();
         assert!(dependents.is_empty());
     }
 
@@ -293,7 +293,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deps = core.get_dependencies("q1").await;
+        let deps = core.get_dependencies("q1").await.unwrap();
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].id, "src1");
@@ -310,7 +310,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deps = core.get_dependencies("src1").await;
+        let deps = core.get_dependencies("src1").await.unwrap();
         assert!(deps.is_empty());
     }
 

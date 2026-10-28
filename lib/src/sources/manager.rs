@@ -98,11 +98,8 @@ impl SourceManager {
         self.runtime.component_status(&id, "source").await
     }
 
-    pub async fn list_sources(&self) -> Vec<(String, ComponentStatus)> {
-        self.runtime
-            .list_components("source")
-            .await
-            .expect("initialized computation registry")
+    pub async fn list_sources(&self) -> crate::error::Result<Vec<(String, ComponentStatus)>> {
+        Ok(self.runtime.list_components("source").await?)
     }
 
     pub async fn get_source(&self, id: String) -> Result<SourceRuntime> {
@@ -146,20 +143,20 @@ impl SourceManager {
     pub async fn subscribe_logs(
         &self,
         id: &str,
-    ) -> Option<(
+    ) -> crate::error::Result<(
         Vec<LogMessage>,
         tokio::sync::broadcast::Receiver<LogMessage>,
     )> {
-        self.runtime.subscribe_logs(id, "source").await.ok()
+        Ok(self.runtime.subscribe_logs(id, "source").await?)
     }
 
     pub async fn subscribe_events(
         &self,
         id: &str,
-    ) -> Option<(
+    ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.runtime.subscribe_events(id, "source").await.ok()
+        Ok(self.runtime.subscribe_events(id, "source").await?)
     }
 }

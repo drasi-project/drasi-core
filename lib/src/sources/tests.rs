@@ -611,7 +611,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify source was added
-        let sources = manager.list_sources().await;
+        let sources = manager.list_sources().await.unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].0, "test-source");
     }
@@ -667,7 +667,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify source was removed
-        let sources = manager.list_sources().await;
+        let sources = manager.list_sources().await.unwrap();
         assert_eq!(sources.len(), 0);
     }
 
@@ -883,7 +883,7 @@ mod manager_tests {
         )
         .await;
 
-        let sources = manager.list_sources().await;
+        let sources = manager.list_sources().await.unwrap();
         assert_eq!(sources.len(), 2);
 
         // Check that we have different statuses
@@ -938,7 +938,7 @@ mod manager_tests {
         assert_eq!(failure_count, 9, "All other add_source calls should fail");
 
         // Verify only one source exists
-        let sources = manager.list_sources().await;
+        let sources = manager.list_sources().await.unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].0, "same-source");
     }
@@ -969,7 +969,7 @@ mod manager_tests {
         }
 
         // Verify all 10 sources exist
-        let sources = manager.list_sources().await;
+        let sources = manager.list_sources().await.unwrap();
         assert_eq!(sources.len(), 10);
     }
 
@@ -1132,7 +1132,7 @@ mod manager_tests {
         // Subscribe to logs
         let result = manager.subscribe_logs("logging-source").await;
         assert!(
-            result.is_some(),
+            result.is_ok(),
             "Should be able to subscribe to existing source logs"
         );
 
@@ -1148,7 +1148,7 @@ mod manager_tests {
         // Try to subscribe to a non-existent source
         let result = manager.subscribe_logs("nonexistent-source").await;
         assert!(
-            result.is_none(),
+            result.is_err(),
             "Should return None for non-existent source"
         );
     }
@@ -1236,7 +1236,7 @@ mod manager_tests {
         // Allow async log routing to complete (logs go through tracing layer → channel → registry)
         let history = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
                     if logs.len() >= 3 {
                         return logs;
                     }
@@ -1287,7 +1287,7 @@ mod manager_tests {
         // Allow async log routing to complete (logs go through tracing layer → channel → registry)
         let history = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
                     if logs.len() >= 3 {
                         return logs;
                     }
@@ -1430,7 +1430,7 @@ mod manager_tests {
         // Use a short retry loop since yield_now() alone may not be sufficient
         let logs_ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
                     if !logs.is_empty() {
                         return logs;
                     }
@@ -1451,7 +1451,7 @@ mod manager_tests {
 
         // Verify logs are cleaned up (subscribe should fail for non-existent source)
         let result = manager.subscribe_logs(&source_id).await;
-        assert!(result.is_none(), "Expected None for deleted source logs");
+        assert!(result.is_err(), "Expected an error for deleted source logs");
     }
 
     // ========================================================================
@@ -1684,7 +1684,7 @@ mod manager_tests {
         // Allow async log routing to complete (logs go through tracing layer → channel → registry)
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
                     if !logs.is_empty() {
                         return;
                     }

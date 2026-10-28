@@ -96,6 +96,7 @@ impl EnvelopeCodec {
     }
 
     pub fn encode(&self, envelope: &ChangeEnvelope) -> Result<Bytes, EnvelopeCodecError> {
+        envelope.validate_lineage()?;
         self.schema(envelope.changes().schema())?;
         let mut lineage = Vec::new();
         let mut parent = envelope.lineage().cloned();
@@ -156,6 +157,7 @@ impl EnvelopeCodec {
         if frame.format != 1 {
             return Err(EnvelopeCodecError::Version(frame.format));
         }
+        Lineage::validate_depth(frame.lineage.len())?;
         let descriptor = frame.schema.decode()?;
         let schema = self.schema(&descriptor)?;
         let operations = frame
@@ -625,6 +627,7 @@ mod tests {
             );
             assert_eq!(codec.encode(&decoded).unwrap(), encoded);
         }
+
         let encoded = codec
             .encode(&envelope(None, Some(control("custom/history", &[]))))
             .unwrap();
@@ -643,6 +646,42 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(value["format"], 1);
         assert!(value["system"]["control"].is_null());
+    }
+
+    #[test]
+    fn json_lineage_depth_is_bounded_before_encoding_and_restoration() {
+        let codec = codec(4 * 1024 * 1024);
+        let mut input = envelope(None, None);
+        while input.lineage_depth() < crate::MAX_LINEAGE_DEPTH {
+            input = input
+                .try_derive(
+                    input.id().clone(),
+                    input.changes().clone(),
+                    input.system().as_ref().clone(),
+                )
+                .unwrap();
+        }
+        let encoded = codec.encode(&input).unwrap();
+        assert_eq!(
+            codec.decode(&encoded).unwrap().lineage_depth(),
+            crate::MAX_LINEAGE_DEPTH
+        );
+        let too_deep = input.derive(
+            input.id().clone(),
+            input.changes().clone(),
+            input.system().as_ref().clone(),
+        );
+        assert!(codec.encode(&too_deep).is_err());
+        let mut frame: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let entries = frame["lineage"].as_array_mut().unwrap();
+        entries.push(entries[0].clone());
+        let oversized = serde_json::to_vec(&frame).unwrap();
+        assert!(matches!(
+            codec.decode(&oversized),
+            Err(EnvelopeCodecError::Contract(
+                ContractError::LineageTooDeep { .. }
+            ))
+        ));
     }
 
     #[test]

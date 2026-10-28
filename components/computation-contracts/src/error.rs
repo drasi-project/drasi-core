@@ -77,6 +77,8 @@ pub enum ContractError {
     },
     #[error("processing context length overflow")]
     ContextOverflow,
+    #[error("envelope lineage exceeds the supported depth of {limit}")]
+    LineageTooDeep { limit: usize },
     #[error("invalid port format declaration: {reason}")]
     InvalidPortFormats { reason: String },
     #[error("invalid port format override: {reason}")]

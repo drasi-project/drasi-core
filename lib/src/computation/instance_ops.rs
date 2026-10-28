@@ -454,6 +454,16 @@ impl DrasiLib {
         match result {
             Ok(report) => {
                 if let Err(error) = pending.cleanup().await {
+                    if !report.committed || report.summary != super::v1::OperationSummary::Completed
+                    {
+                        return Err(super::instance::components_cleanup_error(
+                            pending,
+                            DrasiError::Internal(
+                                super::v1::LifecycleReportError::Reconciliation(report).into(),
+                            ),
+                            Some(error),
+                        ));
+                    }
                     return Err(super::instance::components_cleanup_error(
                         pending, error, None,
                     ));

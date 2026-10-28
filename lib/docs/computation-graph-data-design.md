@@ -588,6 +588,12 @@ covered in [section 10](#10-logical-identity-and-metadata-authority).
 
 Lineage does not retain the parent's record payload. It follows a single chain;
 it is not a complete record of every input that a component has processed.
+Graph publication and both envelope codecs accept at most 1,024 lineage entries
+(`MAX_LINEAGE_DEPTH`). `try_derive` rejects the next derivation at that limit;
+the infallible in-memory `derive` remains available, but an oversized result
+cannot be published or encoded. Encoding-size calculation enforces the same
+limit. Shared ancestry is released iteratively, including after rejected decode
+or publication, and diagnostic formatting does not recursively traverse it.
 The transformer cannot mutate an input record merely because it received an
 owned envelope value: the underlying data is immutable and may be shared.
 

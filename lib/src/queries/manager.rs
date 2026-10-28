@@ -66,11 +66,8 @@ impl QueryManager {
         self.runtime.component_status(&id, "query").await
     }
 
-    pub async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>, String> {
-        self.runtime
-            .query_instance(id)
-            .await
-            .map_err(|error| format!("{error:#}"))
+    pub async fn get_query_instance(&self, id: &str) -> crate::error::Result<Arc<dyn Query>> {
+        Ok(self.runtime.query_instance(id).await?)
     }
 
     pub async fn get_query(&self, id: String) -> Result<QueryRuntime> {
@@ -85,27 +82,24 @@ impl QueryManager {
         self.runtime.remove_component(&id, "query", true).await
     }
 
-    pub async fn list_queries(&self) -> Vec<(String, ComponentStatus)> {
-        self.runtime
-            .list_components("query")
-            .await
-            .expect("initialized computation registry")
+    pub async fn list_queries(&self) -> crate::error::Result<Vec<(String, ComponentStatus)>> {
+        Ok(self.runtime.list_components("query").await?)
     }
 
-    pub async fn get_query_config(&self, id: &str) -> Option<QueryConfig> {
-        self.runtime.query_configuration(id).await.ok()
+    pub async fn get_query_config(&self, id: &str) -> crate::error::Result<QueryConfig> {
+        Ok(self.runtime.query_configuration(id).await?)
     }
 
-    pub async fn get_all_query_labels(&self) -> Vec<(String, QueryLabels)> {
+    pub async fn get_all_query_labels(&self) -> crate::error::Result<Vec<(String, QueryLabels)>> {
         self.runtime
             .query_configurations()
-            .await
-            .expect("initialized computation registry")
+            .await?
             .into_iter()
-            .filter_map(|config| {
-                LabelExtractor::extract_labels(&config.query, &config.query_language)
-                    .map(|labels| (config.id, labels))
-                    .ok()
+            .map(|config| {
+                Ok((
+                    config.id,
+                    LabelExtractor::extract_labels(&config.query, &config.query_language)?,
+                ))
             })
             .collect()
     }
@@ -137,21 +131,21 @@ impl QueryManager {
     pub async fn subscribe_logs(
         &self,
         id: &str,
-    ) -> Option<(
+    ) -> crate::error::Result<(
         Vec<LogMessage>,
         tokio::sync::broadcast::Receiver<LogMessage>,
     )> {
-        self.runtime.subscribe_logs(id, "query").await.ok()
+        Ok(self.runtime.subscribe_logs(id, "query").await?)
     }
 
     pub async fn subscribe_events(
         &self,
         id: &str,
-    ) -> Option<(
+    ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.runtime.subscribe_events(id, "query").await.ok()
+        Ok(self.runtime.subscribe_events(id, "query").await?)
     }
 }
 

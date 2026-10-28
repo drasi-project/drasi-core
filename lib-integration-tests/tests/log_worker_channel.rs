@@ -219,7 +219,7 @@ impl Source for SimpleLogSource {
 /// Wait for a component to reach Running status via event notification.
 async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
     let mut rx = drasi.subscribe_all_component_events();
-    let snapshot = drasi.get_graph().await;
+    let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()

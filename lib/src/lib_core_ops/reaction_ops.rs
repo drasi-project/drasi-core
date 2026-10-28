@@ -80,6 +80,7 @@ impl DrasiLib {
         metadata: HashMap<String, String>,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         let id = reaction.id().to_owned();
         self.computation_runtime
             .add_reaction(Box::new(reaction), metadata, self.is_running().await)

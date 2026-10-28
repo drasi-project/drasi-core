@@ -70,6 +70,7 @@ impl DrasiLib {
         query: QueryConfig,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         query
             .validate_declarations()
             .map_err(|error| crate::error::DrasiError::validation(error.to_string()))?;

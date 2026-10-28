@@ -422,6 +422,9 @@ pub struct DrasiLibConfig {
     /// Default dispatch buffer capacity for sources and queries (default: 1000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_buffer_capacity: Option<usize>,
+    /// Per-component activation deadline in seconds (default: 300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_timeout_secs: Option<u64>,
     /// Global storage backend definitions that can be referenced by queries
     #[serde(default)]
     pub storage_backends: Vec<StorageBackendConfig>,
@@ -436,6 +439,7 @@ impl Default for DrasiLibConfig {
             id: default_id(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            activation_timeout_secs: None,
             storage_backends: Vec::new(),
             queries: Vec::new(),
         }
@@ -739,6 +743,15 @@ impl DrasiLibConfig {
     ///
     /// Returns error if validation fails with a description of the problem.
     pub fn validate(&self) -> Result<()> {
+        if let Some(seconds) = self.activation_timeout_secs {
+            anyhow::ensure!(
+                seconds > 0
+                    && std::time::Instant::now()
+                        .checked_add(std::time::Duration::from_secs(seconds))
+                        .is_some(),
+                "activation_timeout_secs must be positive and representable"
+            );
+        }
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();
         for query in &self.queries {

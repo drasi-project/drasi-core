@@ -1259,9 +1259,10 @@ async fn strict_restart_keeps_sequence_only_checkpoint_output() {
 }
 
 #[tokio::test]
-async fn strict_reconstruction_bootstraps_without_source_checkpoint() {
+async fn cursorless_reconstruction_bootstraps_with_explicit_reset_authorization() {
     let backend = Arc::new(CharacterizationBackend::new(false));
     let bootstraps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut previous_generation = None;
     for expected in 1..=2 {
         let mut harness = PipelineHarness::new(backend.clone()).await;
         harness
@@ -1273,6 +1274,7 @@ async fn strict_reconstruction_bootstraps_without_source_checkpoint() {
             .await;
         let mut config = query_config();
         config.enable_bootstrap = true;
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         let (query, _) = harness.start_config(config, backend.trace.clone()).await;
         let subscription = harness.next_subscription().await;
         assert!(subscription.enable_bootstrap);
@@ -1285,7 +1287,12 @@ async fn strict_reconstruction_bootstraps_without_source_checkpoint() {
             .await
             .unwrap()
             .is_none());
-        assert_eq!(query.fetch_snapshot().await.unwrap().as_of_sequence, 0);
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snapshot.as_of_sequence, 0);
+        if let Some(previous) = previous_generation {
+            assert!(snapshot.output_generation > previous);
+        }
+        previous_generation = Some(snapshot.output_generation);
         harness.core.shutdown().await.unwrap();
     }
 }

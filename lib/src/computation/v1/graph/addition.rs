@@ -901,7 +901,8 @@ pub(super) fn insert(
         ));
     }
     if !addition.bindings.subscriptions.is_empty() {
-        for slot in &graph.components {
+        for &index in graph.ids.values() {
+            let slot = &graph.components[index];
             if let Some(progress) = slot.consumer_progress()? {
                 let participants =
                     super::consumer_progress::participants(&graph.snapshot, &progress);
@@ -950,17 +951,19 @@ pub(super) fn insert(
             ));
         }
     }
-    if graph.snapshot.unbound_relationships.iter().any(|edge| {
-        edge.policy.required_for_binding
-            && (edge.definition.from.component == id || edge.definition.to.component == id)
-    }) {
-        let mut candidate = graph.snapshot.select(super::super::GraphSelection::All)?;
-        candidate.components.push(addition.definition.clone());
-        candidate
-            .resources
-            .extend(addition.resources.iter().cloned());
-        candidate.validate_structure()?;
-    }
+    let mut candidate = graph.snapshot.select(super::super::GraphSelection::All)?;
+    candidate.components.push(addition.definition.clone());
+    candidate
+        .resources
+        .extend(addition.resources.iter().cloned());
+    candidate
+        .subscriptions
+        .extend(addition.bindings.subscriptions.iter().cloned());
+    candidate.validate_structure()?;
+    let mut future_ids = graph.ids.clone();
+    future_ids.insert(id.clone(), graph.components.len());
+    let order =
+        super::dependency_order(&future_ids, &graph.snapshot.edges, &candidate.subscriptions)?;
     if let ComponentConstruction::External { binding } = &addition.definition.construction {
         if let Some(component) = addition.bindings.components.get(binding) {
             component
@@ -1011,7 +1014,7 @@ pub(super) fn insert(
         component,
         generation,
     ));
-    graph.order.push(index);
+    graph.order = order;
     let mut nodes = graph.snapshot.nodes.to_vec();
     nodes.push(node);
     graph.snapshot.nodes = nodes.into();

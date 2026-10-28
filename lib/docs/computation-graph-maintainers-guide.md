@@ -38,10 +38,10 @@ For building a solution rather than changing Drasi, use the
 the [implementation reference](computation-graph-reference.md) for signatures,
 and the [capability comparison](componentgraph-vs-computationgraph.md) for the
 problems and scenarios this architecture addresses. The
-[remaining-work list](computation-graph-remaining-work.md) and
-[cleanup plan](computation-graph-cleanup-plan.md) distinguish open requirements
-from the broader native-only target; that target is not a prerequisite for
-using supported ordinary plugins.
+[remaining-work list](computation-graph-remaining-work.md) is the single backlog
+for known issues, qualification and improvements, including the broader
+native-only target. That target is not a prerequisite for using supported
+ordinary plugins.
 
 ## Reading map
 
@@ -2403,6 +2403,30 @@ for the dynamic-plugin boundary. The
 real regressions from run-to-run noise. Compare the same dependency features,
 storage, queue bounds, payloads and runtime flavor; a debug test duration is
 not a production throughput claim.
+
+The CPU-scaling reference uses eight native queries, the evaluator's 256-step
+reduction, a window of 32 and identical inputs on one, two and four workers.
+Its acceptance thresholds are median throughput of at least 1.25 times the
+one-worker result with two workers and 1.5 times with four, with at least three
+repetitions and exact result checks in every process. These are local reference
+targets, not production SLOs or a comparison against the old runtime.
+
+From the Core repository root:
+
+```sh
+cargo build --locked --offline --release -p drasi-lib \
+  --no-default-features --example core_workload
+python3 lib/tests/measure-core-workloads.py \
+  target/release/examples/core_workload target/native-cpu-scaling.json \
+  --events 5000 --repetitions 3 --queries 8 --windows 32 --payload-bytes 0 \
+  --executions native --runtimes multi-thread current-thread --workers 1 2 4 \
+  --workloads cpu-heavy
+```
+
+Run without competing CPU-heavy builds. Record binary/plugin/provider provenance
+and CPU time as well as elapsed time; worker names alone do not prove parallel
+execution. Keep light, I/O-heavy and persistent workloads separate, and account
+for the whole process tree when measuring isolated hosting.
 
 ### Test the boundary, then the adjacent paths
 

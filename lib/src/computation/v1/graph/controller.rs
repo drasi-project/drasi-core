@@ -3112,9 +3112,17 @@ impl Operations {
     }
 
     fn refresh_connections(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
+        self.refresh_connections_for(graph, &graph.snapshot)
+    }
+
+    fn refresh_connections_for(
+        &mut self,
+        graph: &ComputationGraph,
+        snapshot: &GraphSnapshot,
+    ) -> GraphResult<()> {
         let observed = graph.observed();
         let mut current: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
-        for edge in graph.snapshot.edges.iter() {
+        for edge in snapshot.edges.iter() {
             current
                 .entry((
                     edge.definition.from.component.clone(),
@@ -3129,11 +3137,10 @@ impl Operations {
                         .map_or(0, |state| state.generation),
                 );
         }
-        for pair in graph
-            .snapshot
+        for pair in snapshot
             .control_connections
             .iter()
-            .chain(graph.snapshot.subscriptions.iter())
+            .chain(snapshot.subscriptions.iter())
         {
             current.entry(pair.clone()).or_default();
         }
@@ -3203,7 +3210,17 @@ impl Operations {
                 && graph.components[index].generation == driver.control.generation()
                 && graph.components[index].damage().is_none()
             {
-                self.launch_control(graph, index, driver)?;
+                if let Err(error) = self.launch_control(graph, index, driver) {
+                    self.complete_control(
+                        graph,
+                        ControlCompletion {
+                            component: graph.components[index].id.clone(),
+                            generation: graph.components[index].generation,
+                            result: Ok(Err(error.into())),
+                            next: None,
+                        },
+                    );
+                }
             }
         }
         if graph.retirement_active() {
@@ -3424,6 +3441,7 @@ impl Operations {
                 .ok_or_else(|| topology("component operation epoch exhausted"))?,
         );
         let timeout = graph.cleanup_timeout;
+        let activation_timeout = graph.activation_timeout;
         let declarations = graph.snapshot.resources.clone();
         let resources = graph.resource_handles.clone();
         let scope = graph.execution_scope.clone();
@@ -3556,7 +3574,7 @@ impl Operations {
                         } else {
                             Vec::new()
                         };
-                        let context = ConstructionContext::resolve(
+                        let context = tokio::time::timeout(timeout, ConstructionContext::resolve(
                             scope,
                             graph_id,
                             generation,
@@ -3565,8 +3583,9 @@ impl Operations {
                             &factory.descriptor().configuration,
                             output_catalogue,
                             input_bindings,
-                        )
+                        ))
                         .await
+                        .map_err(|_| work_identity.interrupted("configuration resolution timeout"))?
                         .map_err(|error| GraphError::Creation {
                             component: node.descriptor.id().clone(),
                             disposition: error.disposition,
@@ -3623,7 +3642,7 @@ impl Operations {
                         super::addition::validation_failure(node.descriptor.id(), error)
                     })
                 }
-                Operation::Start => {
+                Operation::Start => tokio::time::timeout(activation_timeout, async {
                     let requirement = recovery?;
                     let admission_before = lease.component.recovery_contract();
                     let captured = lease.slot.recovery_contract()?;
@@ -3782,7 +3801,7 @@ impl Operations {
                         fence.completed();
                     }
                     Ok(())
-                }
+                }).await.map_err(|_| work_identity.interrupted("activation timeout"))?,
                 Operation::Process => {
                     recovery?;
                     super::consumer_progress::bind_positions(
@@ -3969,8 +3988,29 @@ impl Operations {
         {
             return Ok(());
         }
-        for group in std::mem::take(&mut self.starting) {
-            self.advance_start_group(graph, group)?;
+        for mut group in std::mem::take(&mut self.starting) {
+            match self.advance_start_group(graph, &mut group) {
+                Ok(true) => {}
+                Ok(false) | Err(GraphError::OperationInProgress) => self.starting.push(group),
+                Err(error) => {
+                    let failed = failure(error, FailurePhase::Activation);
+                    for index in &group.selected {
+                        group
+                            .outcomes
+                            .entry(graph.nodes[*index].descriptor.id().clone())
+                            .or_insert_with(|| StartOutcome::StartFailed(failed.clone()));
+                    }
+                    let report = StartReport {
+                        revision: group.revision,
+                        summary: OperationSummary::CompletedWithFailures,
+                        components: group.outcomes,
+                    };
+                    update(graph, |state| state.startup = Some(report.clone()));
+                    if let Some(reply) = group.reply {
+                        let _ = reply.send(Ok(report));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -3978,8 +4018,8 @@ impl Operations {
     fn advance_start_group(
         &mut self,
         graph: &ComputationGraph,
-        mut group: Starting,
-    ) -> GraphResult<()> {
+        group: &mut Starting,
+    ) -> GraphResult<bool> {
         for index in graph.order.iter().rev().copied() {
             if !group.pending.contains(&index)
                 || self.suspended_starts.contains(&index)
@@ -4158,17 +4198,17 @@ impl Operations {
                 } else {
                     OperationSummary::Completed
                 },
-                components: group.outcomes,
+                components: std::mem::take(&mut group.outcomes),
             };
             update(graph, |state| state.startup = Some(report.clone()));
             graph.state.send_replace(GraphState::Running);
-            if let Some(reply) = group.reply {
+            if let Some(reply) = group.reply.take() {
                 let _ = reply.send(Ok(report));
             }
+            Ok(true)
         } else {
-            self.starting.push(group);
+            Ok(false)
         }
-        Ok(())
     }
 
     /// Rejects queued handle starts for `component`, which a later stop
@@ -4423,9 +4463,25 @@ impl Operations {
                     self.stop_after_abort.insert(index);
                 }
                 group.pending.insert(index);
-            } else if graph.components[index].take()?.attempted {
-                group.pending.insert(index);
             } else {
+                let attempted = match graph.components[index].take() {
+                    Ok(lease) => lease.attempted,
+                    Err(GraphError::OperationInProgress) => {
+                        group.pending.insert(index);
+                        continue;
+                    }
+                    Err(error) => {
+                        group.outcomes.insert(
+                            id.clone(),
+                            StopOutcome::StopFailed(failure(error, FailurePhase::Stop)),
+                        );
+                        continue;
+                    }
+                };
+                if attempted {
+                    group.pending.insert(index);
+                    continue;
+                }
                 let mut acknowledged = false;
                 update(graph, |state| {
                     acknowledged = state
@@ -4487,7 +4543,12 @@ impl Operations {
                 }) {
                     continue;
                 }
-                self.launch(graph, index, Operation::Stop)?;
+                match self.launch(graph, index, Operation::Stop) {
+                    Ok(()) | Err(GraphError::OperationInProgress) => {}
+                    Err(error) => {
+                        self.fail_operation(graph, index, Operation::Stop, error)?;
+                    }
+                }
             }
         }
         self.finish_stop(graph);
@@ -4546,7 +4607,11 @@ impl Operations {
                 }
                 true
             } else {
-                graph.components[index].take()?.attempted
+                match graph.components[index].take() {
+                    Ok(lease) => lease.attempted,
+                    Err(GraphError::OperationInProgress) => true,
+                    Err(error) => return Err(error),
+                }
             };
             if attempted {
                 self.propagated_stop.insert(index);
@@ -4610,11 +4675,13 @@ impl Operations {
         controls: &PipeGuard,
     ) -> GraphResult<()> {
         let Some(active) = self.active.get(&completion.index) else {
-            return Err(GraphError::StaleGeneration);
+            log::debug!("Ignoring completion for an operation that is no longer active");
+            return Ok(());
         };
         let slot = &graph.components[completion.index];
         if active.epoch != completion.epoch || slot.generation != completion.generation {
-            return Err(GraphError::StaleGeneration);
+            log::debug!("Ignoring completion for an obsolete component generation or operation");
+            return Ok(());
         }
         let active = self
             .active
@@ -4714,8 +4781,26 @@ impl Operations {
         ) {
             let outcome = match result {
                 Ok(()) => {
-                    self.attach_control(graph, completion.index)?;
-                    let lease = slot.take()?;
+                    let lease = match self
+                        .attach_control(graph, completion.index)
+                        .and_then(|_| slot.take())
+                    {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            let failed = self.fail_operation(
+                                graph,
+                                completion.index,
+                                completion.operation,
+                                error,
+                            )?;
+                            update(graph, |state| {
+                                let node = state.components.get_mut(id).expect("component");
+                                node.realization = RealizationState::CreationFailed;
+                                node.failure = Some(failed);
+                            });
+                            return Ok(());
+                        }
+                    };
                     let connected =
                         graph.nodes[completion.index]
                             .descriptor
@@ -4878,9 +4963,8 @@ impl Operations {
                 update(graph, |state| {
                     state.components.get_mut(id).expect("component").exhausted = true
                 });
-                let lease = slot.take()?;
-                for output in &lease.outputs {
-                    if let Some(control) = controls.0.get(&output.edge) {
+                for (edge, _) in &active.outputs {
+                    if let Some(control) = controls.0.get(edge) {
                         control.close();
                     }
                 }
@@ -5263,11 +5347,27 @@ async fn bind_ready_dependencies(
         }
         let mut constructed = true;
         for endpoint in endpoints {
-            if index.is_some()
-                && !operations.active.contains_key(&endpoint)
-                && !graph.components[endpoint].is_constructed()?
-            {
-                constructed = false;
+            if index.is_some() && !operations.active.contains_key(&endpoint) {
+                match graph.components[endpoint].is_constructed() {
+                    Ok(ready) => constructed &= ready,
+                    Err(GraphError::OperationInProgress) => {
+                        operations.bindings_dirty = true;
+                        constructed = false;
+                    }
+                    Err(error) => {
+                        let failed = failure(error, FailurePhase::Binding);
+                        update(graph, |state| {
+                            let binding = state
+                                .relationships
+                                .get_mut(definition)
+                                .expect("declared relationship");
+                            binding.binding = BindingState::Failed;
+                            binding.availability = DataAvailability::Unavailable;
+                            binding.failure = Some(failed);
+                        });
+                        constructed = false;
+                    }
+                }
             }
         }
         if !constructed {
@@ -5786,7 +5886,8 @@ fn handle_command<'a>(
                             let proposed: BTreeSet<_> = connections.iter().cloned().collect();
                             let changed: Vec<_> = previous.symmetric_difference(&proposed).collect();
                             if !changed.is_empty() {
-                                for slot in &graph.components {
+                                for &index in graph.ids.values() {
+                                    let slot = &graph.components[index];
                                     if let Some(progress) = slot.consumer_progress()? {
                                         let participants = super::consumer_progress::participants(
                                             &graph.snapshot, &progress,
@@ -5837,15 +5938,23 @@ fn handle_command<'a>(
                     } else {
                         match graph.snapshot.revision.0.checked_add(1) {
                             Some(revision) => {
+                                let mut candidate = graph.snapshot.clone();
                                 if subscriptions {
-                                    graph.snapshot.subscriptions = connections.into();
+                                    candidate.subscriptions = connections.into();
                                 } else {
-                                    graph.snapshot.control_connections = connections.into();
+                                    candidate.control_connections = connections.into();
                                 }
-                                operations.refresh_connections(graph).map(|_| {
-                                    graph.snapshot.revision = GraphRevision(revision);
+                                let validated = super::dependency_order(
+                                    &graph.ids, &candidate.edges, &candidate.subscriptions,
+                                );
+                                validated.and_then(|order| {
+                                    operations.refresh_connections_for(graph, &candidate)?;
+                                    candidate.revision = GraphRevision(revision);
+                                    graph.snapshot = candidate;
+                                    graph.order = order;
                                     graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
                                     update(graph, |state| state.revision = GraphRevision(revision));
+                                    Ok(())
                                 })
                             }
                             None => Err(topology("graph revision exhausted")),

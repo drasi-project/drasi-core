@@ -157,7 +157,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify query was added
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].0, "test-query");
     }
@@ -206,7 +206,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify query was removed
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 0);
     }
 
@@ -376,7 +376,7 @@ mod manager_tests {
         delete_query(&manager, &graph, "test-query").await.unwrap();
         let source2 = create_test_mock_source("source2".to_string());
         add_source(&source_manager, &graph, source2).await.unwrap();
-        assert!(manager.list_queries().await.is_empty());
+        assert!(manager.list_queries().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -389,7 +389,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify query was added
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].0, "test-gql-query");
     }
@@ -449,7 +449,7 @@ mod manager_tests {
         assert!(add_query(&manager, &graph, gql_config).await.is_ok());
 
         // Verify both queries were added
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 2);
 
         let query_ids: Vec<String> = queries.iter().map(|(id, _)| id.clone()).collect();
@@ -465,7 +465,7 @@ mod manager_tests {
         add_query(&manager, &graph, config.clone()).await.unwrap();
 
         let retrieved = manager.get_query_config("test-query").await;
-        assert!(retrieved.is_some());
+        assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, config.id);
@@ -786,7 +786,7 @@ mod manager_tests {
         // Generate a log via subscribe (which creates the channel) then check
         // First subscribe to create the channel
         let result = manager.subscribe_logs("cleanup-logs-query").await;
-        assert!(result.is_some(), "Expected to subscribe to query logs");
+        assert!(result.is_ok(), "Expected to subscribe to query logs");
 
         // Delete the query
         delete_query(&manager, &graph, "cleanup-logs-query")
@@ -795,7 +795,7 @@ mod manager_tests {
 
         // Verify logs are cleaned up (subscribe should fail for non-existent query)
         let result = manager.subscribe_logs("cleanup-logs-query").await;
-        assert!(result.is_none(), "Expected None for deleted query logs");
+        assert!(result.is_err(), "Expected an error for deleted query logs");
     }
 }
 

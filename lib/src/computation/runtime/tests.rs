@@ -203,6 +203,7 @@ struct SourceControl {
     fail_stop: AtomicBool,
     noop_stop: AtomicBool,
     pending_start: AtomicBool,
+    waiting_start: AtomicBool,
     starting_only: AtomicBool,
     subscription_fences: AtomicUsize,
     release_bootstrap_at_fence: AtomicBool,
@@ -512,7 +513,7 @@ async fn provider_recipes_are_derived_from_graph_owned_configuration() {
         .wait_created()
         .await
         .unwrap();
-    let mut detached = core.get_graph().await;
+    let mut detached = core.get_graph().await.expect("graph snapshot");
     detached
         .nodes
         .retain(|node| node.id != "source-bootstrap" && node.id != "identity-provider");
@@ -533,7 +534,11 @@ async fn provider_recipes_are_derived_from_graph_owned_configuration() {
         .edges
         .iter()
         .any(|edge| edge.from == "identity-provider" && edge.to == "source"));
-    assert!(core.get_graph().await.contains("source-bootstrap"));
+    assert!(core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("source-bootstrap"));
     core.remove_source("source", false).await.unwrap();
     let (replacement, _) = ControlledSource::new("source");
     core.add_source_with_handle(replacement)
@@ -566,7 +571,7 @@ async fn detached_snapshot_status_and_membership_cannot_change_public_inspection
         .wait_created()
         .await
         .unwrap();
-    let mut snapshot = core.get_graph().await;
+    let mut snapshot = core.get_graph().await.expect("graph snapshot");
     snapshot.nodes.push(crate::component_graph::ComponentNode {
         id: "phantom".into(),
         kind: crate::component_graph::ComponentKind::Query,
@@ -597,7 +602,11 @@ async fn detached_snapshot_status_and_membership_cannot_change_public_inspection
         .unwrap()
         .queries
         .is_empty());
-    assert!(!core.get_graph().await.contains("phantom"));
+    assert!(!core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("phantom"));
     core.shutdown().await.unwrap();
 }
 
@@ -641,7 +650,7 @@ async fn invalid_plugin_metadata_fails_the_added_node_not_the_add_call() {
 async fn detached_snapshot_cannot_veto_a_graph_addition() {
     let core = builder().build().await.unwrap();
     let runtime = core.computation_runtime.as_ref();
-    let mut detached = core.get_graph().await;
+    let mut detached = core.get_graph().await.expect("graph snapshot");
     detached.nodes.push(crate::component_graph::ComponentNode {
         id: "source".into(),
         kind: crate::component_graph::ComponentKind::Query,
@@ -653,7 +662,12 @@ async fn detached_snapshot_cannot_veto_a_graph_addition() {
     handle.wait_created().await.unwrap();
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 1);
     assert_eq!(
-        core.get_graph().await.get_component("source").unwrap().kind,
+        core.get_graph()
+            .await
+            .unwrap()
+            .get_component("source")
+            .unwrap()
+            .kind,
         crate::component_graph::ComponentKind::Source,
     );
     assert!(runtime
@@ -906,6 +920,10 @@ impl Source for ControlledSource {
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.control.starts.fetch_add(1, Ordering::AcqRel);
+        if self.control.waiting_start.load(Ordering::Acquire) {
+            self.control.entered.notify_one();
+            self.control.release.notified().await;
+        }
         if self.control.pending_start.load(Ordering::Acquire) {
             self.control.entered.notify_one();
             std::future::pending::<()>().await;
@@ -1493,12 +1511,20 @@ async fn missing_dependencies_wait_and_are_created_when_available() {
         .unwrap();
     let query = component_handle(&core, "query", "query").await;
     assert_waiting_for(&query, "source");
-    assert!(!core.get_graph().await.contains("source"));
+    assert!(!core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("source"));
 
     let (reaction, _, _) = ControlledReaction::new("reaction", &["missing-query"]);
     let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
     assert_waiting_for(&reaction, "missing-query");
-    assert!(!core.get_graph().await.contains("missing-query"));
+    assert!(!core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("missing-query"));
 
     let (source, _) = ControlledSource::new("source");
     core.add_source_with_handle(source)
@@ -3989,7 +4015,14 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
         .build()
         .await
         .unwrap();
-    core.start().await.unwrap();
+    let error = core
+        .start()
+        .await
+        .expect_err("failed query activation is reported");
+    assert!(error
+        .downcast_ref::<crate::error::PartialStartError>()
+        .is_some());
+    assert!(core.is_running().await);
     let query = core
         .query_manager()
         .get_query_instance("query")
@@ -4007,7 +4040,13 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
     let first = handle.observed().unwrap();
     assert!(format!("{:#}", first.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));
     core.stop().await.unwrap();
-    core.start().await.unwrap();
+    let error = core
+        .start()
+        .await
+        .expect_err("retry still reports the incompatible source");
+    assert!(error
+        .downcast_ref::<crate::error::PartialStartError>()
+        .is_some());
     let second = handle.observed().unwrap();
     assert!(second.operation.0 > first.operation.0);
     assert!(format!("{:#}", second.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));

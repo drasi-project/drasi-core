@@ -103,7 +103,16 @@ pub(super) fn observed_status(
     } else if observed.exhausted || observed.lifecycle == ComponentLifecycle::Stopped {
         ComponentStatus::Stopped
     } else {
-        ComponentStatus::Running
+        match observed.lifecycle {
+            ComponentLifecycle::Stopped => ComponentStatus::Stopped,
+            ComponentLifecycle::Starting => ComponentStatus::Starting,
+            ComponentLifecycle::Running => ComponentStatus::Running,
+            ComponentLifecycle::Quiescing | ComponentLifecycle::Quiesced => {
+                ComponentStatus::Reconfiguring
+            }
+            ComponentLifecycle::Stopping => ComponentStatus::Stopping,
+            ComponentLifecycle::Failed => ComponentStatus::Error,
+        }
     }
 }
 

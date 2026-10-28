@@ -363,9 +363,11 @@ impl Runtime {
         self: &Arc<Self>,
         graph_owner: &Arc<super::instance::InstanceGraph>,
     ) -> anyhow::Result<()> {
-        let mut builder = self
-            .services
-            .declare(ComputationGraph::builder("__drasi_lib_runtime__"))?;
+        let mut builder = self.services.declare(
+            ComputationGraph::builder("__drasi_lib_runtime__").activation_timeout(
+                std::time::Duration::from_secs(self.config.activation_timeout_secs.unwrap_or(300)),
+            ),
+        )?;
         for (name, provider) in self.config.index_factory.configured_providers() {
             // Provider names are configuration keys, not validated graph identifiers.
             let id = index_resource_id(&name)?;
@@ -1122,8 +1124,11 @@ impl Runtime {
             let report = control
                 .reconcile(preview, TopologyBindings::default())
                 .await?;
-            if report.summary != OperationSummary::Completed {
-                anyhow::bail!("native creation retry failed: {report:?}");
+            if !report.committed || report.summary != OperationSummary::Completed {
+                return Err(
+                    anyhow::Error::new(LifecycleReportError::Reconciliation(report))
+                        .context("native creation retry failed"),
+                );
             }
         } else if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
             self.stop_record(record).await?;
@@ -1455,8 +1460,11 @@ impl Runtime {
                     .with_cleanup(new.owner.clone()),
             );
             let report = control.reconcile(preview, bindings).await?;
-            if report.summary != OperationSummary::Completed {
-                anyhow::bail!("native reconfiguration failed: {report:?}");
+            if !report.committed || report.summary != OperationSummary::Completed {
+                return Err(
+                    anyhow::Error::new(LifecycleReportError::Reconciliation(report))
+                        .context("native reconfiguration failed"),
+                );
             }
             Ok::<_, anyhow::Error>(())
         }
@@ -1658,12 +1666,34 @@ impl Runtime {
     }
     pub(crate) async fn start_kind(self: &Arc<Self>, kind: &str) -> anyhow::Result<()> {
         let publication = self.control()?.registry_snapshot();
+        let mut failures = Vec::new();
         if kind == "query" {
             for id in self.ordinary_queries_at(&publication)?.keys() {
                 let observed = &publication.observed.components[id];
                 if publication.desired.lifecycle_policies[id].auto_start && !is_active(observed) {
                     if let Err(error) = self.start_component(id.as_str(), "query").await {
-                        log::warn!("Query startup failed: {error:#}");
+                        let observed = self.control()?.observed();
+                        let waiting = error
+                            .chain()
+                            .find_map(|cause| match cause.downcast_ref::<LifecycleReportError>() {
+                                Some(LifecycleReportError::Start(report))
+                                    if report.components.contains_key(id) =>
+                                {
+                                    Some(report)
+                                }
+                                _ => None,
+                            })
+                            .is_some_and(|report| {
+                                report.components.keys().all(|member| {
+                                    observed
+                                        .components
+                                        .get(member)
+                                        .is_some_and(|node| node.failure.is_none())
+                                }) && accept_waiting_start(report.clone(), &observed).is_ok()
+                            });
+                        if !waiting {
+                            failures.push(error.context(format!("query {id}")));
+                        }
                     }
                 }
             }
@@ -1678,7 +1708,6 @@ impl Runtime {
             })
             .cloned()
             .collect();
-        let mut failures = Vec::new();
         for record in records {
             let result = async {
                 if self.active(&record)? {
@@ -1701,7 +1730,6 @@ impl Runtime {
                     "{} was replaced or removed concurrently; its lifecycle is no longer this sweep's",
                     record.node
                 ),
-                Err(error) if kind == "query" => log::warn!("Query startup failed: {error:#}"),
                 Err(error) => failures.push(error),
             }
         }

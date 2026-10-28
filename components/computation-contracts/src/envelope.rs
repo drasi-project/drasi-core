@@ -214,14 +214,49 @@ impl SystemMetadata {
 /// Input identity and metadata retained by a derived output, without retaining
 /// the input payload. Prior ancestry is shared. This is single-input lineage,
 /// not a multi-input transactional or causal graph.
-#[derive(Debug)]
 pub struct Lineage {
     envelope_id: EnvelopeId,
     system: Arc<SystemMetadata>,
     parent: Option<Arc<Lineage>>,
+    depth: usize,
+}
+
+/// Maximum ancestry retained by a published or encoded envelope.
+pub const MAX_LINEAGE_DEPTH: usize = 1024;
+
+impl std::fmt::Debug for Lineage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Lineage")
+            .field("envelope_id", &self.envelope_id)
+            .field("system", &self.system)
+            .field("depth", &self.depth)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Lineage {
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(shared) = parent {
+            match Arc::try_unwrap(shared) {
+                Ok(mut owned) => parent = owned.parent.take(),
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 impl Lineage {
+    pub(super) fn validate_depth(depth: usize) -> Result<()> {
+        if depth > MAX_LINEAGE_DEPTH {
+            return Err(ContractError::LineageTooDeep {
+                limit: MAX_LINEAGE_DEPTH,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn restore(
         envelope_id: EnvelopeId,
         system: SystemMetadata,
@@ -230,6 +265,9 @@ impl Lineage {
         Arc::new(Self {
             envelope_id,
             system: Arc::new(system),
+            depth: parent
+                .as_ref()
+                .map_or(1, |parent| parent.depth.saturating_add(1)),
             parent,
         })
     }
@@ -382,6 +420,8 @@ impl ChangeEnvelope {
     /// An input sequence must not be reused as the sequence of multiple outputs.
     /// Context is inherited, but the input's control is not: the output has only
     /// the supplied metadata, while the input's control remains historical lineage.
+    /// Graph publication and codecs reject ancestry deeper than [`MAX_LINEAGE_DEPTH`].
+    /// Use [`Self::try_derive`] to reject that limit before constructing an output.
     pub fn derive(&self, id: EnvelopeId, changes: ChangeSetRef, system: SystemMetadata) -> Self {
         Self {
             event: Arc::new(ChangeEvent {
@@ -392,10 +432,31 @@ impl ChangeEnvelope {
                     envelope_id: self.id().clone(),
                     system: self.system().clone(),
                     parent: self.lineage().cloned(),
+                    depth: self.lineage_depth().saturating_add(1),
                 })),
             }),
             context: self.context.clone(),
         }
+    }
+
+    /// Derive an output within the shared graph/wire ancestry limit.
+    pub fn try_derive(
+        &self,
+        id: EnvelopeId,
+        changes: ChangeSetRef,
+        system: SystemMetadata,
+    ) -> Result<Self> {
+        Lineage::validate_depth(self.lineage_depth().saturating_add(1))?;
+        Ok(self.derive(id, changes, system))
+    }
+
+    pub fn lineage_depth(&self) -> usize {
+        self.lineage().map_or(0, |lineage| lineage.depth)
+    }
+
+    /// Validate the constant-time ancestry bound before publication or encoding.
+    pub fn validate_lineage(&self) -> Result<()> {
+        Lineage::validate_depth(self.lineage_depth())
     }
 
     pub fn event(&self) -> &Arc<ChangeEvent> {
@@ -482,6 +543,61 @@ mod tests {
 
     fn metadata(stream: &str, sequence: u64) -> SystemMetadata {
         SystemMetadata::new(StreamId::try_new(stream).unwrap(), sequence)
+    }
+
+    #[test]
+    fn lineage_limit_is_exact_and_deep_shared_chains_drop_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut envelope = ChangeEnvelope::new(
+                    EnvelopeId::try_new("root", Bytes::from_static(b"root")).unwrap(),
+                    fixture_changes(),
+                    metadata("root", 0),
+                );
+                for sequence in 1..=MAX_LINEAGE_DEPTH {
+                    envelope = envelope
+                        .try_derive(
+                            EnvelopeId::try_new(
+                                "bounded",
+                                Bytes::copy_from_slice(&sequence.to_be_bytes()),
+                            )
+                            .unwrap(),
+                            envelope.changes().clone(),
+                            metadata("bounded", sequence as u64),
+                        )
+                        .unwrap();
+                }
+                assert_eq!(envelope.lineage_depth(), MAX_LINEAGE_DEPTH);
+                assert!(matches!(
+                    envelope.try_derive(
+                        envelope.id().clone(),
+                        envelope.changes().clone(),
+                        metadata("over", 1),
+                    ),
+                    Err(ContractError::LineageTooDeep { .. })
+                ));
+                let shared = envelope.clone();
+                for sequence in MAX_LINEAGE_DEPTH..100_000 {
+                    envelope = envelope.derive(
+                        EnvelopeId::try_new(
+                            "deep",
+                            Bytes::copy_from_slice(&sequence.to_be_bytes()),
+                        )
+                        .unwrap(),
+                        envelope.changes().clone(),
+                        metadata("deep", sequence as u64),
+                    );
+                }
+                assert!(envelope.validate_lineage().is_err());
+                assert!(format!("{:?}", envelope.lineage().unwrap()).len() < 1024);
+                drop(envelope);
+                assert_eq!(shared.lineage_depth(), MAX_LINEAGE_DEPTH);
+                drop(shared);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

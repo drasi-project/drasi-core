@@ -93,6 +93,8 @@ pub enum GraphError {
         expected: GraphRevision,
         actual: GraphRevision,
     },
+    #[error("reconciliation impact changed at revision {revision:?}; obtain a new preview")]
+    StalePreview { revision: GraphRevision },
     #[error("observation or command targets an obsolete component generation or operation")]
     StaleGeneration,
     #[error("the graph controller is closed")]
@@ -259,30 +261,47 @@ fn validate_edge_contract(
 fn dependency_order(
     ids: &BTreeMap<ComponentId, usize>,
     edges: &[EdgeSnapshot],
+    subscriptions: &[(ComponentId, ComponentId)],
 ) -> GraphResult<Vec<usize>> {
-    let mut successors = vec![Vec::new(); ids.len()];
-    let mut indegree = vec![0; ids.len()];
-    for edge in edges {
-        let from = *ids
-            .get(&edge.definition.from.component)
-            .ok_or_else(|| topology("unknown producer"))?;
-        let to = *ids
-            .get(&edge.definition.to.component)
-            .ok_or_else(|| topology("unknown consumer"))?;
-        successors[from].push(to);
-        indegree[to] += 1;
+    let mut successors: BTreeMap<_, BTreeSet<_>> = ids
+        .values()
+        .map(|index| (*index, BTreeSet::new()))
+        .collect();
+    let mut indegree: BTreeMap<_, usize> = ids.values().map(|index| (*index, 0)).collect();
+    let links = edges
+        .iter()
+        .map(|edge| {
+            (
+                &edge.definition.from.component,
+                &edge.definition.to.component,
+            )
+        })
+        .chain(subscriptions.iter().map(|(from, to)| (from, to)));
+    for (from, to) in links {
+        let to = *ids.get(to).ok_or_else(|| topology("unknown consumer"))?;
+        // A declared subscription may wait for a producer that has not been added.
+        let Some(&from) = ids.get(from) else {
+            continue;
+        };
+        if successors
+            .get_mut(&from)
+            .expect("declared producer")
+            .insert(to)
+        {
+            *indegree.get_mut(&to).expect("declared consumer") += 1;
+        }
     }
     let mut ready: VecDeque<_> = indegree
         .iter()
-        .enumerate()
-        .filter_map(|(index, degree)| (*degree == 0).then_some(index))
+        .filter_map(|(index, degree)| (*degree == 0).then_some(*index))
         .collect();
     let mut order = Vec::new();
     while let Some(index) = ready.pop_front() {
         order.push(index);
-        for successor in &successors[index] {
-            indegree[*successor] -= 1;
-            if indegree[*successor] == 0 {
+        for successor in &successors[&index] {
+            let degree = indegree.get_mut(successor).expect("declared successor");
+            *degree -= 1;
+            if *degree == 0 {
                 ready.push_back(*successor);
             }
         }
@@ -654,6 +673,7 @@ pub struct ComputationGraphBuilder {
     requirements: PipeRequirements,
     recovery_requirements: Vec<super::RecoveryRequirement>,
     cleanup_timeout: Duration,
+    activation_timeout: Duration,
     lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
     relationship_policies: BTreeMap<EdgeDefinition, RelationshipPolicy>,
     resources: BTreeMap<ResourceId, ResourceSpecification>,
@@ -833,6 +853,13 @@ impl ComputationGraphBuilder {
         self
     }
 
+    /// Bounds each component's input binding, start hook and output binding.
+    /// Defaults to 300 seconds. A timeout quarantines interrupted work until cleanup.
+    pub fn activation_timeout(mut self, timeout: Duration) -> Self {
+        self.activation_timeout = timeout;
+        self
+    }
+
     pub fn build(mut self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
         if self
@@ -865,6 +892,15 @@ impl ComputationGraphBuilder {
         {
             return Err(topology(
                 "cleanup timeout must be nonzero and representable",
+            ));
+        }
+        if self.activation_timeout.is_zero()
+            || std::time::Instant::now()
+                .checked_add(self.activation_timeout)
+                .is_none()
+        {
+            return Err(topology(
+                "activation timeout must be nonzero and representable",
             ));
         }
         let mut ids = BTreeMap::new();
@@ -1127,7 +1163,7 @@ impl ComputationGraphBuilder {
                 resources,
             });
         }
-        let order = dependency_order(&ids, &edges)?;
+        let order = dependency_order(&ids, &edges, &[])?;
         if self
             .lifecycle_policies
             .keys()
@@ -1296,6 +1332,7 @@ impl ComputationGraphBuilder {
             reserved_components: BTreeSet::new(),
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
+            activation_timeout: self.activation_timeout,
             resource_handles: self.resource_handles,
             resource_constructors: self.resource_constructors,
             pending_resource_cleanup: BTreeMap::new(),
@@ -1496,6 +1533,7 @@ pub struct ComputationGraph {
     desired: watch::Sender<Arc<GraphSnapshot>>,
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
+    activation_timeout: Duration,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
     resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     pending_resource_cleanup: BTreeMap<ResourceId, ResourceHandle>,
@@ -1577,6 +1615,7 @@ impl ComputationGraph {
             requirements: PipeRequirements::default(),
             recovery_requirements: Vec::new(),
             cleanup_timeout: Duration::from_secs(5),
+            activation_timeout: Duration::from_secs(300),
             lifecycle_policies: BTreeMap::new(),
             relationship_policies: BTreeMap::new(),
             resources: BTreeMap::new(),
@@ -2992,6 +3031,7 @@ fn validate_emissions(
     let mut pending = sequences.clone();
     let mut identities = std::collections::HashSet::new();
     for emission in emissions {
+        emission.envelope.validate_lineage()?;
         let port = node
             .descriptor
             .ports()

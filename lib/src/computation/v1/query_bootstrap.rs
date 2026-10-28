@@ -195,6 +195,8 @@ pub struct QueryOptions {
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryRecoveryError {
+    #[error("durable query output belongs to a different producer; automatic reset is forbidden")]
+    OwnershipMismatch,
     #[error("source subscription requires reset/rebootstrap before this query can resume")]
     SourceResetRequired,
     #[error("query configuration changed; explicit reset/rebootstrap is required")]

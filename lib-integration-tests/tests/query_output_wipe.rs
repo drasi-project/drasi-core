@@ -386,7 +386,7 @@ async fn build_core_with_admission(
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let graph = core.get_graph().await;
+        let graph = core.get_graph().await.expect("graph snapshot");
         if graph
             .nodes
             .iter()
@@ -693,7 +693,13 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
             },
         )
         .await?;
-        core.start().await?;
+        let error = core
+            .start()
+            .await
+            .expect_err("missing source history must be reported by instance startup");
+        assert!(error
+            .downcast_ref::<drasi_lib::error::PartialStartError>()
+            .is_some());
         wait_for_status(&core, QUERY_ID, ComponentStatus::Error).await?;
         let observed = core.computation_component(QUERY_ID)?.observed()?;
         let failure = observed

@@ -113,11 +113,14 @@ pub(super) async fn start_query(
                         .and_then(ObservedComponent::waiting_reason)
                 })
                 .collect();
-            anyhow::ensure!(
-                waiting.is_empty(),
-                "Query '{id}' is not ready: {}",
-                waiting.into_iter().collect::<Vec<_>>().join("; ")
-            );
+            if !waiting.is_empty() {
+                return Err(
+                    anyhow::Error::new(LifecycleReportError::Start(report)).context(format!(
+                        "Query '{id}' is not ready: {}",
+                        waiting.into_iter().collect::<Vec<_>>().join("; ")
+                    )),
+                );
+            }
             return Err(LifecycleReportError::Start(report).into());
         }
     }
@@ -1147,14 +1150,19 @@ impl NativeQuery {
         tokio::pin!(operation);
         loop {
             let status = self.status_now();
-            if !matches!(status, ComponentStatus::Starting | ComponentStatus::Running) {
+            if !matches!(
+                status,
+                ComponentStatus::Starting
+                    | ComponentStatus::Running
+                    | ComponentStatus::Reconfiguring
+            ) {
                 return Err(FetchError::NotRunning { status });
             }
             tokio::select! {
                 result = &mut operation => {
                     self.handle.observed().map_err(|_| FetchError::NotRunning { status: ComponentStatus::Stopped })?;
                     let status = self.status_now();
-                    if !matches!(status, ComponentStatus::Starting | ComponentStatus::Running) {
+                    if !matches!(status, ComponentStatus::Starting | ComponentStatus::Running | ComponentStatus::Reconfiguring) {
                         return Err(FetchError::NotRunning { status });
                     }
                     return result;

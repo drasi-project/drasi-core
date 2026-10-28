@@ -720,7 +720,7 @@ async fn wait_for_status(
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let graph = core.get_graph().await;
+        let graph = core.get_graph().await.expect("graph snapshot");
         if graph
             .nodes
             .iter()

@@ -52,13 +52,15 @@ visible, supports dependency-aware changes and lets independent queries run in
 parallel. Existing source/reaction plugins remain usable through adapters;
 there is no second execution engine.
 
-The public `QueryBase`, `SequenceDedup` and old JSON `QueryOutputState` helpers are
-deprecated compatibility utilities, not the implementation of current queries.
-`QueryBase` and `SequenceDedup` now live under `compatibility`; their original
-imports remain available. The old output cache stays beside the existing public
-result-exchange types to preserve those APIs. Snapshot/outbox response and stream
-types are still used and are not deprecated. New query code should use the
-graph-owned construction, result and recovery APIs described below.
+`QueryBase`, `SequenceDedup` and the old JSON query-output cache have been removed;
+there is no compatibility module or second query executor. Snapshot/outbox
+response and stream types remain supported. Use the graph-owned construction,
+result and recovery APIs described below.
+
+`start()` reports requested component startup failures through a typed
+`PartialStartError` cause. Some independent components may already be running:
+inspect their status, then call `stop()` or `shutdown()` before retrying.
+Valid declarations waiting for missing dependencies are still accepted.
 
 Start with the guide for your task:
 
@@ -68,16 +70,14 @@ Start with the guide for your task:
 | [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
-| [Opt-in resilience and recovery plan](docs/computation-graph-reliability-plan.md) | Recovery design and dated framework-completion evidence; current actions are in the consolidated inventory |
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
-| [Consolidated outstanding-work inventory](docs/computation-graph-remaining-work.md) | Single current list: pre-review work, all review findings, post-merge status, priorities, completion criteria and tracking crosswalks |
-| [Historical CG backlog](docs/computation-graph-backlog.md) | Original CG-01 through CG-28 detail, design rationale and dated measurement evidence |
-| [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
+| [ComputationGraph remaining work](docs/computation-graph-remaining-work.md) | Single active list of validated issues, investigations, qualification gaps and improvements, with priorities, scope and completion criteria |
+| [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and interpretation of qualification evidence |
 
 From the drasi-core repository root, run a complete in-process example:
 
@@ -579,7 +579,9 @@ pub struct ComponentEvent {
 
 ## Component Dependency Graph
 
-DrasiLib maintains a directed graph of all components and their relationships, backed by [petgraph](https://docs.rs/petgraph/). The graph is the single source of truth for component metadata, runtime instances, and lifecycle events.
+DrasiLib exposes a read-only component view derived from its ComputationGraph
+registry. The native graph owns component metadata, instances and lifecycle;
+the compatibility view is not a second mutable registry.
 
 ```
 Instance ("my-app")
@@ -594,18 +596,21 @@ Instance ("my-app")
 
 ```rust
 // Full graph snapshot (serializable to JSON via serde)
-let snapshot: GraphSnapshot = core.get_graph().await;
+let snapshot: GraphSnapshot = core.get_graph().await?;
 let json = serde_json::to_string_pretty(&snapshot)?;
 
 // Find what depends on a component
-let dependents: Vec<ComponentNode> = core.get_dependents("orders-db").await;
+let dependents: Vec<ComponentNode> = core.get_dependents("orders-db").await?;
 
 // Find what a component depends on
-let deps: Vec<ComponentNode> = core.get_dependencies("my-query").await;
+let deps: Vec<ComponentNode> = core.get_dependencies("my-query").await?;
 
 // Check if safe to remove (errors if other components depend on it)
 core.can_remove_component("orders-db").await?;
 ```
+
+Graph inspection and manager inventory, configuration, labels and subscriptions
+return `Result`; unavailable state is an error, not an empty result or a panic.
 
 ### Relationship Types
 

@@ -251,6 +251,7 @@ async fn wait_for_legacy_status(drasi: &DrasiLib, id: &str, expected: ComponentS
     if drasi
         .get_graph()
         .await
+        .unwrap()
         .nodes
         .iter()
         .any(|node| node.id == id && node.status == expected)

@@ -94,6 +94,24 @@ pub struct ReconciliationPreview {
 }
 
 impl ReconciliationPreview {
+    fn same_impact(&self, other: &Self) -> bool {
+        self.desired == other.desired
+            && self.create == other.create
+            && self.replace == other.replace
+            && self.update == other.update
+            && self.remove == other.remove
+            && self.restart == other.restart
+            && self.reactivate == other.reactivate
+            && self.pause == other.pause
+            && self.rebind == other.rebind
+            && self.unbind == other.unbind
+            && self.resources == other.resources
+            && self.remove_resources == other.remove_resources
+            && self.observation_resources == other.observation_resources
+            && self.drain == other.drain
+            && self.epochs == other.epochs
+    }
+
     pub fn revision(&self) -> GraphRevision {
         self.revision
     }
@@ -137,6 +155,7 @@ impl ReconciliationPreview {
 /// in `failures` with `summary == CompletedWithFailures`, never surfaced as an
 /// `Err`. Only controller cancellation aborts a committed reconciliation.
 #[derive(Debug, Clone)]
+#[must_use = "inspect committed, summary and failures before treating reconciliation as successful"]
 pub struct ReconciliationReport {
     pub revision: GraphRevision,
     pub summary: OperationSummary,
@@ -153,6 +172,22 @@ pub struct ReconciliationReport {
     pub startup: Option<StartReport>,
     pub removed: BTreeSet<ComponentId>,
     pub failures: Vec<ComponentFailure>,
+}
+
+impl ReconciliationReport {
+    /// Require desired-state acceptance, not successful construction or readiness.
+    /// The error retains the complete uncommitted report and its failure causes.
+    pub fn ensure_committed(
+        &self,
+    ) -> std::result::Result<(), Box<crate::computation::v1::LifecycleReportError>> {
+        if self.committed {
+            Ok(())
+        } else {
+            Err(Box::new(
+                crate::computation::v1::LifecycleReportError::Reconciliation(self.clone()),
+            ))
+        }
+    }
 }
 
 impl GraphControl {
@@ -1115,7 +1150,7 @@ pub(super) fn preview(
         .map(|resource| &resource.id)
         .collect();
     observation_resources.retain(|id| retained_resources.contains(id));
-    describe(&desired)?;
+    validate_definition(&desired)?;
     let epochs = pause
         .iter()
         .map(|id| {
@@ -1297,7 +1332,7 @@ fn describe(
             }
         }
     }
-    let order = super::super::dependency_order(&ids, &edges)?;
+    let order = super::super::dependency_order(&ids, &edges, &desired.subscriptions)?;
     let mut resource_ids = BTreeSet::new();
     for resource in &desired.resources {
         if !resource_ids.insert(resource.id.clone()) {
@@ -1972,6 +2007,7 @@ async fn drive_reconciliation<T>(
 ) -> GraphResult<T> {
     let operation = tokio::time::timeout(deadline, operation);
     tokio::pin!(operation);
+    let mut peers = graph.peers.subscribe();
     loop {
         tokio::task::consume_budget().await;
         operations.advance_additions(graph)?;
@@ -1982,6 +2018,15 @@ async fn drive_reconciliation<T>(
         let drain_timeout = operations.next_drain_deadline();
         tokio::select! {
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            job = graph.tasks.resources.next(), if !graph.tasks.resources.is_empty() => {
+                if let Err(error) = super::super::resource_tasks::complete(graph, &job) {
+                    log::debug!("Resource callback completed with a retained failure: {error}");
+                }
+                operations.dependencies_changed();
+            }
+            changed = peers.changed() => {
+                changed.map_err(|_| GraphError::ControllerClosed)?;
+            }
             _ = drain_deadline(drain_timeout) => {},
             completion = operations.drain_futures.next(), if !operations.drain_futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete_drain(graph, completion); }
@@ -1995,7 +2040,9 @@ async fn drive_reconciliation<T>(
             }
             result = operations.retirements.next(), if !operations.retirements.is_empty() => {
                 if let Some(result) = result {
-                    operations.complete_retirement(graph, result)?;
+                    let completed = operations.complete_retirement(graph, result);
+                    if operations.retirements.is_empty() { operations.retiring.clear(); }
+                    completed?;
                 }
             }
             command = commands.recv() => {
@@ -2398,8 +2445,23 @@ pub(super) async fn execute(
     .await;
     operations.reconciliation = None;
     operations.dependencies_changed();
-    flush_metadata(graph, operations, controls, cancel, commands).await?;
-    result
+    let metadata = flush_metadata(graph, operations, controls, cancel, commands).await;
+    match result {
+        Ok(mut report) => {
+            record_committed(&mut report, FailurePhase::Control, metadata)?;
+            if !report.failures.is_empty() {
+                report.summary = OperationSummary::CompletedWithFailures;
+            }
+            Ok(report)
+        }
+        Err(primary) => match metadata {
+            Ok(()) => Err(primary),
+            Err(error) => Err(GraphError::Cleanup {
+                primary: Some(Box::new(primary)),
+                errors: vec![error],
+            }),
+        },
+    }
 }
 
 async fn execute_reserved(
@@ -2433,7 +2495,12 @@ async fn execute_reserved(
             return Err(GraphError::StaleGeneration);
         }
     }
-    let mut plan = preview(graph, supplied.changes)?;
+    let mut plan = preview(graph, supplied.changes.clone())?;
+    if !supplied.same_impact(&plan) {
+        return Err(GraphError::StalePreview {
+            revision: supplied.revision,
+        });
+    }
     if !supplied.deprovision.is_subset(&plan.remove) {
         return Err(topology(
             "state cleanup must only target removed components",
@@ -2571,7 +2638,8 @@ async fn execute_reserved(
         }
         report.failures.push(failure(error, FailurePhase::Removal));
         report.summary = OperationSummary::CompletedWithFailures;
-        resume(graph, operations, &plan.pause)?;
+        let resumed = resume(graph, operations, &plan.pause);
+        record_committed(&mut report, FailurePhase::Activation, resumed)?;
         return Ok(report);
     }
     let stop: BTreeSet<_> = plan
@@ -2592,7 +2660,8 @@ async fn execute_reserved(
                 }
                 report.failures.push(failure(error, FailurePhase::Control));
                 report.summary = OperationSummary::CompletedWithFailures;
-                resume(graph, operations, &plan.pause)?;
+                let resumed = resume(graph, operations, &plan.pause);
+                record_committed(&mut report, FailurePhase::Activation, resumed)?;
                 return Ok(report);
             }
         }
@@ -2705,11 +2774,12 @@ async fn execute_reserved(
             }
         }
         report.summary = OperationSummary::CompletedWithFailures;
-        resume(
+        let resumed = resume(
             graph,
             operations,
             &plan.pause.difference(&stop).cloned().collect(),
-        )?;
+        );
+        record_committed(&mut report, FailurePhase::Activation, resumed)?;
         return Ok(report);
     }
     let retirement_failures =
