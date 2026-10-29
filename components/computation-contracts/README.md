@@ -4,6 +4,10 @@ Shared identifiers, envelopes, schemas, message codecs and component interfaces
 belong here rather than in the query runtime. Both the host and native plugins
 use the same definitions and encoding implementations.
 
+See [CONTRACTS.md](CONTRACTS.md) for a reference covering every contract between
+components: envelopes, ports, codecs, output reads, bootstrap, source schema
+discovery, progress, admission and delivery.
+
 There is no graph executor, query evaluator, language parser or storage backend
 in this package. Sources, transformers and query outputs share the graph-change
 contract; query-specific metadata is optional for generic graph consumers.
