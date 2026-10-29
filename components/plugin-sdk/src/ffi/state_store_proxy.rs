@@ -31,27 +31,53 @@ pub struct FfiStateStoreProxy {
     pub(crate) vtable: *const StateStoreVtable,
 }
 
-unsafe impl Send for FfiStateStoreProxy {}
-unsafe impl Sync for FfiStateStoreProxy {}
+impl FfiStateStoreProxy {
+    /// Take ownership of a host-provided ABI 0.17 state-store vtable.
+    ///
+    /// # Safety
+    /// `vtable` must be a non-null, uniquely transferred `Box<StateStoreVtable>`
+    /// with valid callbacks and state. It must not be a borrowed/ABI 0.16 table.
+    pub unsafe fn new(vtable: *const StateStoreVtable) -> Self {
+        assert!(!vtable.is_null(), "state-store vtable must not be null");
+        Self { vtable }
+    }
 
-impl Drop for FfiStateStoreProxy {
-    fn drop(&mut self) {
-        if self.vtable.is_null() {
-            return;
-        }
+    /// Read the declaration without hiding an unsupported or failed description.
+    pub fn try_durability(&self) -> StateStoreResult<drasi_core::interface::StorageDurability> {
         unsafe {
             let vtable = &*self.vtable;
-            // Free the inner state (Box<Arc<dyn StateStoreProvider>>)
-            (vtable.drop_fn)(vtable.state);
-            // Free the vtable struct itself (allocated via Box::into_raw by the
-            // host when it built the FfiRuntimeContext)
-            let _ = Box::from_raw(self.vtable as *mut StateStoreVtable);
+            let mut out = std::mem::MaybeUninit::uninit();
+            (vtable.durability_fn)(vtable.state, out.as_mut_ptr())
+                .into_result()
+                .map_err(drasi_lib::StateStoreError::Other)?;
+            out.assume_init()
+                .try_into()
+                .map_err(drasi_lib::StateStoreError::Other)
         }
     }
 }
 
+impl Drop for FfiStateStoreProxy {
+    fn drop(&mut self) {
+        unsafe {
+            let vtable = Box::from_raw(self.vtable as *mut StateStoreVtable);
+            (vtable.drop_fn)(vtable.state);
+        }
+    }
+}
+
+unsafe impl Send for FfiStateStoreProxy {}
+unsafe impl Sync for FfiStateStoreProxy {}
+
 #[async_trait::async_trait]
 impl StateStoreProvider for FfiStateStoreProxy {
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.try_durability().unwrap_or_else(|error| {
+            log::error!("State-store durability could not be established: {error}");
+            drasi_core::interface::StorageDurability::UNKNOWN
+        })
+    }
+
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         unsafe {
             let vtable = &*self.vtable;
@@ -81,29 +107,15 @@ impl StateStoreProvider for FfiStateStoreProxy {
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        unsafe {
-            let vtable = &*self.vtable;
-            (vtable.delete_fn)(
-                vtable.state,
-                FfiStr::from_str(store_id),
-                FfiStr::from_str(key),
-            )
-            .into_result()
-            .map(|_| true)
-            .map_err(drasi_lib::StateStoreError::Other)
-        }
+        self.delete_many(store_id, &[key])
+            .await
+            .map(|count| count != 0)
     }
 
     async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        unsafe {
-            let vtable = &*self.vtable;
-            let result = (vtable.contains_key_fn)(
-                vtable.state,
-                FfiStr::from_str(store_id),
-                FfiStr::from_str(key),
-            );
-            result.into_result().map(|_| true).or(Ok(false))
-        }
+        // The legacy boolean slot conflates absence and errors. The get slot
+        // already has distinct found/error fields without changing the ABI.
+        self.get(store_id, key).await.map(|value| value.is_some())
     }
 
     async fn get_many(
@@ -130,13 +142,24 @@ impl StateStoreProvider for FfiStateStoreProxy {
     }
 
     async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
-        let mut count = 0;
-        for key in keys {
-            if self.delete(store_id, key).await? {
-                count += 1;
-            }
-        }
-        Ok(count)
+        let keys: Vec<_> = keys.iter().map(|key| FfiStr::from_str(key)).collect();
+        let count = unsafe {
+            let vtable = &*self.vtable;
+            (vtable.delete_many_fn)(
+                vtable.state,
+                FfiStr::from_str(store_id),
+                keys.as_ptr(),
+                keys.len(),
+            )
+        };
+        usize::try_from(count)
+            .ok()
+            .filter(|count| *count <= keys.len())
+            .ok_or_else(|| {
+                drasi_lib::StateStoreError::Other(
+                    "delete_many failed or returned an invalid count".into(),
+                )
+            })
     }
 
     async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
@@ -156,17 +179,16 @@ impl StateStoreProvider for FfiStateStoreProxy {
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
         unsafe {
             let vtable = &*self.vtable;
-            let array = (vtable.list_keys_fn)(vtable.state, FfiStr::from_str(store_id));
-            Ok(array.into_vec())
+            let mut array = std::mem::MaybeUninit::uninit();
+            (vtable.list_keys_fn)(vtable.state, FfiStr::from_str(store_id), array.as_mut_ptr())
+                .into_result()
+                .map_err(drasi_lib::StateStoreError::Other)?;
+            Ok(array.assume_init().into_vec())
         }
     }
 
     async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
-        unsafe {
-            let vtable = &*self.vtable;
-            let result = (vtable.store_exists_fn)(vtable.state, FfiStr::from_str(store_id));
-            result.into_result().map(|_| true).or(Ok(false))
-        }
+        self.key_count(store_id).await.map(|count| count != 0)
     }
 
     async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
@@ -196,143 +218,217 @@ mod tests {
     use super::*;
     use crate::ffi::{FfiGetResult, FfiResult, FfiStringArray};
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
-    static DROP_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-    extern "C" fn stub_get(_state: *mut c_void, _store_id: FfiStr, _key: FfiStr) -> FfiGetResult {
-        FfiGetResult::not_found()
+    extern "C" fn get(_: *mut c_void, _: FfiStr, key: FfiStr) -> FfiGetResult {
+        match unsafe { key.to_string() }.as_str() {
+            "missing" => FfiGetResult::not_found(),
+            "error" => FfiGetResult::err("storage unavailable".into()),
+            _ => FfiGetResult::found(vec![1]),
+        }
     }
-
-    extern "C" fn stub_set(
-        _state: *mut c_void,
-        _store_id: FfiStr,
-        _key: FfiStr,
-        _value: *const u8,
-        _value_len: usize,
+    extern "C" fn set(_: *mut c_void, _: FfiStr, _: FfiStr, _: *const u8, _: usize) -> FfiResult {
+        FfiResult::err("unused".into())
+    }
+    extern "C" fn boolean(_: *mut c_void, _: FfiStr, _: FfiStr) -> FfiResult {
+        FfiResult::err("ambiguous legacy slot".into())
+    }
+    extern "C" fn get_many(
+        _: *mut c_void,
+        _: FfiStr,
+        _: *const FfiStr,
+        _: usize,
+        _: *mut FfiGetResult,
     ) -> FfiResult {
-        FfiResult::ok()
+        FfiResult::err("unused".into())
     }
-
-    extern "C" fn stub_delete(_state: *mut c_void, _store_id: FfiStr, _key: FfiStr) -> FfiResult {
-        FfiResult::ok()
-    }
-
-    extern "C" fn stub_contains_key(
-        _state: *mut c_void,
-        _store_id: FfiStr,
-        _key: FfiStr,
+    extern "C" fn set_many(
+        _: *mut c_void,
+        _: FfiStr,
+        _: *const FfiStr,
+        _: *const *const u8,
+        _: *const usize,
+        _: usize,
     ) -> FfiResult {
+        FfiResult::err("unused".into())
+    }
+    extern "C" fn delete_many(_: *mut c_void, _: FfiStr, keys: *const FfiStr, count: usize) -> i64 {
+        let mut deleted = 0;
+        for key in unsafe { std::slice::from_raw_parts(keys, count) } {
+            match unsafe { key.to_string() }.as_str() {
+                "error" => return -1,
+                "invalid" => return count as i64 + 1,
+                "missing" => {}
+                _ => deleted += 1,
+            }
+        }
+        deleted
+    }
+    extern "C" fn count(_: *mut c_void, store: FfiStr) -> i64 {
+        match unsafe { store.to_string() }.as_str() {
+            "populated" => 2,
+            "empty" => 0,
+            _ => -1,
+        }
+    }
+    extern "C" fn list(_: *mut c_void, store: FfiStr, out_keys: *mut FfiStringArray) -> FfiResult {
+        let keys = match unsafe { store.to_string() }.as_str() {
+            "populated" => vec!["first".into(), "second".into()],
+            "empty" => vec![],
+            _ => return FfiResult::err("storage unavailable".into()),
+        };
+        unsafe { out_keys.write(FfiStringArray::from_vec(keys)) };
         FfiResult::ok()
     }
-
-    extern "C" fn stub_get_many(
-        _state: *mut c_void,
-        _store_id: FfiStr,
-        _keys: *const FfiStr,
-        _keys_count: usize,
-        _out_values: *mut FfiGetResult,
+    extern "C" fn exists(_: *mut c_void, _: FfiStr) -> FfiResult {
+        FfiResult::err("ambiguous legacy slot".into())
+    }
+    extern "C" fn sync(_: *mut c_void) -> FfiResult {
+        FfiResult::ok()
+    }
+    extern "C" fn release(_: *mut c_void) {}
+    extern "C" fn durability(
+        _: *mut c_void,
+        out: *mut super::super::durability::FfiStorageDurability,
     ) -> FfiResult {
+        unsafe { out.write(drasi_core::interface::StorageDurability::VOLATILE.into()) };
         FfiResult::ok()
     }
 
-    extern "C" fn stub_set_many(
-        _state: *mut c_void,
-        _store_id: FfiStr,
-        _keys: *const FfiStr,
-        _values: *const *const u8,
-        _value_lens: *const usize,
-        _count: usize,
-    ) -> FfiResult {
-        FfiResult::ok()
-    }
-
-    extern "C" fn stub_delete_many(
-        _state: *mut c_void,
-        _store_id: FfiStr,
-        _keys: *const FfiStr,
-        _keys_count: usize,
-    ) -> i64 {
-        0
-    }
-
-    extern "C" fn stub_clear_store(_state: *mut c_void, _store_id: FfiStr) -> i64 {
-        0
-    }
-
-    extern "C" fn stub_list_keys(_state: *mut c_void, _store_id: FfiStr) -> FfiStringArray {
-        FfiStringArray::from_vec(Vec::new())
-    }
-
-    extern "C" fn stub_store_exists(_state: *mut c_void, _store_id: FfiStr) -> FfiResult {
-        FfiResult::ok()
-    }
-
-    extern "C" fn stub_key_count(_state: *mut c_void, _store_id: FfiStr) -> i64 {
-        0
-    }
-
-    extern "C" fn stub_sync(_state: *mut c_void) -> FfiResult {
-        FfiResult::ok()
-    }
-
-    /// Mirrors the host's `ss_drop`: reclaims the boxed `Arc` behind `state`.
-    extern "C" fn counting_drop(state: *mut c_void) {
-        DROP_CALLS.fetch_add(1, Ordering::SeqCst);
-        unsafe { drop(Box::from_raw(state as *mut Arc<()>)) };
-    }
-
-    fn test_vtable(state: *mut c_void) -> StateStoreVtable {
+    fn test_table() -> StateStoreVtable {
         StateStoreVtable {
-            state,
-            get_fn: stub_get,
-            set_fn: stub_set,
-            delete_fn: stub_delete,
-            contains_key_fn: stub_contains_key,
-            get_many_fn: stub_get_many,
-            set_many_fn: stub_set_many,
-            delete_many_fn: stub_delete_many,
-            clear_store_fn: stub_clear_store,
-            list_keys_fn: stub_list_keys,
-            store_exists_fn: stub_store_exists,
-            key_count_fn: stub_key_count,
-            sync_fn: stub_sync,
-            drop_fn: counting_drop,
+            state: std::ptr::null_mut(),
+            get_fn: get,
+            set_fn: set,
+            delete_fn: boolean,
+            contains_key_fn: boolean,
+            get_many_fn: get_many,
+            set_many_fn: set_many,
+            delete_many_fn: delete_many,
+            clear_store_fn: count,
+            list_keys_fn: list,
+            store_exists_fn: exists,
+            key_count_fn: count,
+            sync_fn: sync,
+            drop_fn: release,
+            durability_fn: durability,
         }
     }
 
     #[test]
-    fn drop_invokes_vtable_drop_fn_and_releases_state() {
-        DROP_CALLS.store(0, Ordering::SeqCst);
-
-        // Stands in for the host's `Box<Arc<dyn StateStoreProvider>>`; the strong
-        // count shows whether the provider reference is actually released.
-        let provider = Arc::new(());
-        let state = Box::into_raw(Box::new(provider.clone())) as *mut c_void;
-        assert_eq!(Arc::strong_count(&provider), 2);
-
-        let vtable = Box::into_raw(Box::new(test_vtable(state)));
-        let proxy = FfiStateStoreProxy {
-            vtable: vtable as *const _,
-        };
-
-        drop(proxy);
-
-        assert_eq!(DROP_CALLS.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            Arc::strong_count(&provider),
-            1,
-            "provider reference must be released when the proxy is dropped"
-        );
+    fn abi_016_prefix_offsets_are_preserved() {
+        let table = test_table();
+        let base = &table as *const StateStoreVtable as usize;
+        let width = std::mem::size_of::<*mut c_void>();
+        for (index, address) in [
+            std::ptr::addr_of!(table.state) as usize,
+            std::ptr::addr_of!(table.get_fn) as usize,
+            std::ptr::addr_of!(table.set_fn) as usize,
+            std::ptr::addr_of!(table.delete_fn) as usize,
+            std::ptr::addr_of!(table.contains_key_fn) as usize,
+            std::ptr::addr_of!(table.get_many_fn) as usize,
+            std::ptr::addr_of!(table.set_many_fn) as usize,
+            std::ptr::addr_of!(table.delete_many_fn) as usize,
+            std::ptr::addr_of!(table.clear_store_fn) as usize,
+            std::ptr::addr_of!(table.list_keys_fn) as usize,
+            std::ptr::addr_of!(table.store_exists_fn) as usize,
+            std::ptr::addr_of!(table.key_count_fn) as usize,
+            std::ptr::addr_of!(table.sync_fn) as usize,
+            std::ptr::addr_of!(table.drop_fn) as usize,
+            std::ptr::addr_of!(table.durability_fn) as usize,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(address - base, index * width);
+        }
+        assert_eq!(std::mem::size_of::<StateStoreVtable>(), 15 * width);
     }
 
     #[test]
-    fn drop_is_a_noop_for_a_null_vtable() {
-        let proxy = FfiStateStoreProxy {
-            vtable: std::ptr::null(),
-        };
+    fn failed_or_invalid_durability_descriptions_are_not_evidence() {
+        use super::super::durability::FfiStorageDurability;
+        use drasi_core::interface::StorageDurability;
 
-        drop(proxy);
+        extern "C" fn failed(_: *mut c_void, _: *mut FfiStorageDurability) -> FfiResult {
+            FfiResult::err("description unavailable".into())
+        }
+        extern "C" fn invalid(_: *mut c_void, out: *mut FfiStorageDurability) -> FfiResult {
+            unsafe {
+                out.write(FfiStorageDurability {
+                    version: 2,
+                    process_restart: 2,
+                    power_loss: 2,
+                    storage_loss: 2,
+                })
+            };
+            FfiResult::ok()
+        }
+        for callback in [failed as extern "C" fn(_, _) -> _, invalid] {
+            let mut table = test_table();
+            table.durability_fn = callback;
+            let proxy = unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) };
+            assert!(proxy.try_durability().is_err());
+            assert_eq!(proxy.durability(), StorageDurability::UNKNOWN);
+        }
+    }
+
+    #[tokio::test]
+    async fn existence_and_deletion_preserve_absence_errors_and_exact_counts() {
+        let table = test_table();
+        let proxy = unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) };
+        assert_eq!(
+            proxy.durability(),
+            drasi_core::interface::StorageDurability::VOLATILE
+        );
+        assert!(proxy.contains_key("store", "present").await.unwrap());
+        assert!(!proxy.contains_key("store", "missing").await.unwrap());
+        assert!(proxy.contains_key("store", "error").await.is_err());
+        assert!(proxy.store_exists("populated").await.unwrap());
+        assert!(!proxy.store_exists("empty").await.unwrap());
+        assert!(proxy.store_exists("error").await.is_err());
+        assert_eq!(
+            proxy.list_keys("populated").await.unwrap(),
+            vec!["first", "second"]
+        );
+        assert!(proxy.list_keys("empty").await.unwrap().is_empty());
+        assert!(proxy
+            .list_keys("error")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("storage unavailable"));
+        assert!(proxy.delete("store", "present").await.unwrap());
+        assert!(!proxy.delete("store", "missing").await.unwrap());
+        assert_eq!(
+            proxy
+                .delete_many("store", &["one", "missing", "two"])
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(proxy.delete("store", "error").await.is_err());
+        assert!(proxy.delete("store", "invalid").await.is_err());
+    }
+
+    extern "C" fn release_boxed_arc(state: *mut c_void) {
+        // Mirrors the host's `ss_drop`, which reclaims the boxed provider `Arc`.
+        drop(unsafe { Box::from_raw(state.cast::<std::sync::Arc<()>>()) });
+    }
+
+    #[test]
+    fn drop_releases_the_transferred_vtable_and_its_state() {
+        let provider = std::sync::Arc::new(());
+        let mut table = test_table();
+        table.state = Box::into_raw(Box::new(provider.clone())).cast();
+        table.drop_fn = release_boxed_arc;
+        assert_eq!(std::sync::Arc::strong_count(&provider), 2);
+
+        drop(unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) });
+
+        assert_eq!(
+            std::sync::Arc::strong_count(&provider),
+            1,
+            "the provider reference must be released with the proxy"
+        );
     }
 }

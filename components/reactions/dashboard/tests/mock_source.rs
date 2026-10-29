@@ -72,7 +72,7 @@ impl MockSourceHandle {
             metadata: self.make_metadata(element_id, labels),
             properties,
         };
-        self.send(SourceChange::Update { element }).await
+        self.send(SourceChange::update(element)).await
     }
 
     pub async fn send_node_delete(

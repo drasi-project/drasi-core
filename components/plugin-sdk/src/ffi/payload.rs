@@ -380,6 +380,37 @@ mod tests {
     }
 
     #[test]
+    fn source_event_payload_requires_a_non_null_sequence() {
+        #[derive(Serialize)]
+        struct LegacyPayload {
+            source_id: String,
+            event: SourceEvent,
+            timestamp_us: i64,
+            sequence: Option<u64>,
+            source_position: Option<Vec<u8>>,
+        }
+        let mut payload = LegacyPayload {
+            source_id: "src-1".into(),
+            event: SourceEvent::Change(SourceChange::Insert {
+                element: sample_node(),
+            }),
+            timestamp_us: 1_771_000_000_000_000,
+            sequence: Some(42),
+            source_position: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).expect("serialize sequence");
+        assert_eq!(
+            decode_source_event_payload(&bytes)
+                .expect("decode required sequence")
+                .sequence,
+            42
+        );
+        payload.sequence = None;
+        let bytes = rmp_serde::to_vec_named(&payload).expect("serialize legacy null");
+        assert!(decode_source_event_payload(&bytes).is_none());
+    }
+
+    #[test]
     fn bootstrap_event_payload_roundtrips() {
         let record = BootstrapEvent {
             source_id: "src-1".to_string(),

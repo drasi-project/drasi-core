@@ -26,6 +26,32 @@ use crate::metrics::{
 };
 
 impl DrasiLib {
+    /// Read committed input and produced-output progress for ready queries.
+    ///
+    /// This bounded, synchronous observation performs no storage or network I/O
+    /// and is suitable for OpenTelemetry observable-instrument callbacks.
+    /// Stopped, unavailable and unready queries are omitted, never reported as
+    /// zero. Component generation/operation and output generation distinguish
+    /// replacement, lifecycle changes and output resets.
+    ///
+    /// These values do not prove delivery or completion of scheduled work.
+    pub fn get_query_progress_metrics(
+        &self,
+    ) -> Result<Vec<crate::metrics::QueryProgressMetricsSnapshot>> {
+        self.state_guard.require_initialized()?;
+        self.computation_runtime
+            .query_progress_metrics()
+            .map_err(|error| {
+                crate::DrasiError::operation_failed(
+                    "instance",
+                    &self.config.id,
+                    "get_query_progress_metrics",
+                    error.to_string(),
+                )
+                .with_cause(error)
+            })
+    }
+
     /// Get per-query output metrics for a specific query.
     ///
     /// # Errors

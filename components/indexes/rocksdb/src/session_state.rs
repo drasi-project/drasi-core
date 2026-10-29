@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, SessionControl};
-use rocksdb::Transaction;
+use rocksdb::{IteratorMode, Transaction, WriteBatchWithTransaction};
 
 /// Groups the active transaction and nesting depth under a single mutex.
 ///
@@ -182,6 +182,38 @@ impl RocksDbSessionState {
     /// Whether a session transaction is currently open.
     pub(crate) fn has_active_session(&self) -> Result<bool, IndexError> {
         Ok(self.lock()?.txn.is_some())
+    }
+
+    pub(crate) fn clear_column_families(
+        &self,
+        names: &[&str],
+        require_session: bool,
+    ) -> Result<(), IndexError> {
+        let guard = self.lock()?;
+        if require_session && guard.txn.is_none() {
+            return Err(IndexError::other(SessionStateError(
+                "clearing indexes requires the active session".into(),
+            )));
+        }
+        let mut batch = WriteBatchWithTransaction::<true>::default();
+        for name in names {
+            let cf = self.db.cf_handle(name).ok_or(IndexError::CorruptedData)?;
+            if let Some(txn) = &guard.txn {
+                for entry in txn.iterator_cf(&cf, IteratorMode::Start) {
+                    let (key, _) = entry.map_err(IndexError::other)?;
+                    txn.delete_cf(&cf, key).map_err(IndexError::other)?;
+                }
+            } else {
+                for entry in self.db.iterator_cf(&cf, IteratorMode::Start) {
+                    let (key, _) = entry.map_err(IndexError::other)?;
+                    batch.delete_cf(&cf, key);
+                }
+            }
+        }
+        if guard.txn.is_none() {
+            self.db.write(batch).map_err(IndexError::other)?;
+        }
+        Ok(())
     }
 
     /// Execute `f` against the active session transaction.

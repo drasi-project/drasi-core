@@ -30,41 +30,40 @@
 //!
 //! # Example - Source Plugin
 //!
-//! ```ignore
+//! ```no_run
 //! use drasi_lib::context::SourceRuntimeContext;
+//! use drasi_lib::sources::SourceBase;
 //!
-//! #[async_trait]
-//! impl Source for MySource {
-//!     async fn initialize(&self, context: SourceRuntimeContext) {
-//!         // Store context for later use
-//!         self.base.initialize(context).await;
-//!     }
-//!     // ...
+//! async fn initialize_source(base: &SourceBase, context: SourceRuntimeContext) {
+//!     // Called from the source's initialize method.
+//!     base.initialize(context).await;
 //! }
 //! ```
 //!
 //! # Example - Reaction Plugin
 //!
-//! ```ignore
+//! ```no_run
 //! use drasi_lib::context::ReactionRuntimeContext;
+//! use drasi_lib::reactions::ReactionBase;
 //!
-//! #[async_trait]
-//! impl Reaction for MyReaction {
-//!     async fn initialize(&self, context: ReactionRuntimeContext) {
-//!         // Store context for later use
-//!         self.base.initialize(context).await;
-//!     }
-//!     // ...
+//! async fn initialize_reaction(base: &ReactionBase, context: ReactionRuntimeContext) {
+//!     // Called from the reaction's initialize method.
+//!     base.initialize(context).await;
 //! }
 //! ```
 
 use std::sync::Arc;
 
-use crate::component_graph::ComponentUpdateSender;
+use crate::channels::ComponentUpdateSender;
 use crate::identity::IdentityProvider;
 use crate::reactions::SnapshotFetcher;
 use crate::state_store::StateStoreProvider;
 use crate::wal::WalProvider;
+
+pub mod resource_observer;
+pub mod workers;
+
+pub use resource_observer::{ComponentResource, ComponentResourceObserver, PluginOrigin};
 
 /// Context provided to Source plugins during initialization.
 ///
@@ -76,7 +75,8 @@ use crate::wal::WalProvider;
 /// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `source_id`: The unique identifier for this source instance
 /// - `state_store`: Optional persistent state storage (if configured)
-/// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
+/// - `update_tx`: lifecycle sender observed by the graph-owned adapter
+/// - `resource_observer`: Optional observation of the source's selected provider instances
 ///
 /// # Clone
 ///
@@ -96,10 +96,10 @@ pub struct SourceRuntimeContext {
     /// otherwise `None`. Sources can use this to persist state across restarts.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
 
-    /// mpsc sender for fire-and-forget component status updates.
+    /// Lifecycle sender for graph-owned status observation.
     ///
-    /// Status changes sent here are applied to the component graph by the
-    /// graph update loop, which emits broadcast events to all subscribers.
+    /// The graph-owned plugin adapter observes updates and reports lifecycle
+    /// outcomes to ComputationGraph, which publishes component events.
     pub update_tx: ComponentUpdateSender,
 
     /// Optional identity provider for credential injection.
@@ -115,6 +115,12 @@ pub struct SourceRuntimeContext {
     /// (HTTP, gRPC, Application) use this to persist incoming events before ACKing
     /// the caller, enabling crash recovery and replay for persistent queries.
     pub wal_provider: Option<Arc<dyn WalProvider>>,
+
+    /// Optional host-local observer for providers selected by this source.
+    ///
+    /// The computation runtime supplies an observer scoped to one component
+    /// generation. Legacy contexts and plugin-side FFI contexts leave this unset.
+    pub resource_observer: Option<Arc<dyn ComponentResourceObserver>>,
 }
 
 impl SourceRuntimeContext {
@@ -128,22 +134,23 @@ impl SourceRuntimeContext {
     /// * `instance_id` - The DrasiLib instance ID
     /// * `source_id` - The unique identifier for this source
     /// * `state_store` - Optional persistent state storage
-    /// * `update_tx` - mpsc sender for status updates to the component graph
+    /// * `update_tx` - lifecycle sender, or an ordinary MPSC sender for compatibility
     /// * `identity_provider` - Optional identity provider for credential injection
     pub fn new(
         instance_id: impl Into<String>,
         source_id: impl Into<String>,
         state_store: Option<Arc<dyn StateStoreProvider>>,
-        update_tx: ComponentUpdateSender,
+        update_tx: impl Into<ComponentUpdateSender>,
         identity_provider: Option<Arc<dyn IdentityProvider>>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             source_id: source_id.into(),
             state_store,
-            update_tx,
+            update_tx: update_tx.into(),
             identity_provider,
             wal_provider: None,
+            resource_observer: None,
         }
     }
 
@@ -187,6 +194,13 @@ impl std::fmt::Debug for SourceRuntimeContext {
                 "wal_provider",
                 &self.wal_provider.as_ref().map(|_| "<WalProvider>"),
             )
+            .field(
+                "resource_observer",
+                &self
+                    .resource_observer
+                    .as_ref()
+                    .map(|_| "<ComponentResourceObserver>"),
+            )
             .finish()
     }
 }
@@ -201,8 +215,9 @@ impl std::fmt::Debug for SourceRuntimeContext {
 /// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `reaction_id`: The unique identifier for this reaction instance
 /// - `state_store`: Optional persistent state storage (if configured)
-/// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
+/// - `update_tx`: lifecycle sender observed by the graph-owned adapter
 /// - `identity_provider`: Optional identity provider for credential injection
+/// - `resource_observer`: Optional observation of the reaction's selected provider instances
 ///
 /// # Clone
 ///
@@ -222,10 +237,10 @@ pub struct ReactionRuntimeContext {
     /// otherwise `None`. Reactions can use this to persist state across restarts.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
 
-    /// mpsc sender for fire-and-forget component status updates.
+    /// Lifecycle sender for graph-owned status observation.
     ///
-    /// Status changes sent here are applied to the component graph by the
-    /// graph update loop, which emits broadcast events to all subscribers.
+    /// The graph-owned plugin adapter observes updates and reports lifecycle
+    /// outcomes to ComputationGraph, which publishes component events.
     pub update_tx: ComponentUpdateSender,
 
     /// Optional identity provider for credential injection.
@@ -244,6 +259,12 @@ pub struct ReactionRuntimeContext {
     /// The fetcher is scoped to the reaction's configured query IDs — attempting to
     /// fetch a snapshot for an unsubscribed query will return an error.
     pub snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
+
+    /// Optional host-local observer for providers selected by this reaction.
+    ///
+    /// The computation runtime supplies an observer scoped to one component
+    /// generation. Legacy contexts and plugin-side FFI contexts leave this unset.
+    pub resource_observer: Option<Arc<dyn ComponentResourceObserver>>,
 }
 
 impl ReactionRuntimeContext {
@@ -257,22 +278,23 @@ impl ReactionRuntimeContext {
     /// * `instance_id` - The DrasiLib instance ID
     /// * `reaction_id` - The unique identifier for this reaction
     /// * `state_store` - Optional persistent state storage
-    /// * `update_tx` - mpsc sender for status updates to the component graph
+    /// * `update_tx` - lifecycle sender, or an ordinary MPSC sender for compatibility
     /// * `identity_provider` - Optional identity provider for credential injection
     pub fn new(
         instance_id: impl Into<String>,
         reaction_id: impl Into<String>,
         state_store: Option<Arc<dyn StateStoreProvider>>,
-        update_tx: ComponentUpdateSender,
+        update_tx: impl Into<ComponentUpdateSender>,
         identity_provider: Option<Arc<dyn IdentityProvider>>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             reaction_id: reaction_id.into(),
             state_store,
-            update_tx,
+            update_tx: update_tx.into(),
             identity_provider,
             snapshot_fetcher: None,
+            resource_observer: None,
         }
     }
 
@@ -313,6 +335,13 @@ impl std::fmt::Debug for ReactionRuntimeContext {
                 "snapshot_fetcher",
                 &self.snapshot_fetcher.as_ref().map(|_| "<SnapshotFetcher>"),
             )
+            .field(
+                "resource_observer",
+                &self
+                    .resource_observer
+                    .as_ref()
+                    .map(|_| "<ComponentResourceObserver>"),
+            )
             .finish()
     }
 }
@@ -337,10 +366,10 @@ pub struct QueryRuntimeContext {
     /// Unique identifier for this query instance
     pub query_id: String,
 
-    /// mpsc sender for fire-and-forget component status updates.
+    /// Lifecycle sender for graph-owned status observation.
     ///
-    /// Status changes sent here are applied to the component graph by the
-    /// graph update loop, which emits broadcast events to all subscribers.
+    /// Plugin-facing status channel. Graph-owned adapters report lifecycle
+    /// outcomes to ComputationGraph, which publishes component events.
     pub update_tx: ComponentUpdateSender,
 }
 
@@ -353,16 +382,16 @@ impl QueryRuntimeContext {
     ///
     /// * `instance_id` - The DrasiLib instance ID
     /// * `query_id` - The unique identifier for this query
-    /// * `update_tx` - mpsc sender for status updates to the component graph
+    /// * `update_tx` - lifecycle sender, or an ordinary MPSC sender for compatibility
     pub fn new(
         instance_id: impl Into<String>,
         query_id: impl Into<String>,
-        update_tx: ComponentUpdateSender,
+        update_tx: impl Into<ComponentUpdateSender>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             query_id: query_id.into(),
-            update_tx,
+            update_tx: update_tx.into(),
         }
     }
 
@@ -390,13 +419,11 @@ impl std::fmt::Debug for QueryRuntimeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component_graph::ComponentGraph;
     use crate::state_store::MemoryStateStoreProvider;
     use std::sync::Arc;
 
     fn test_update_tx() -> ComponentUpdateSender {
-        let (graph, _rx) = ComponentGraph::new("test-instance");
-        graph.update_sender()
+        tokio::sync::mpsc::channel(32).0.into()
     }
 
     #[tokio::test]

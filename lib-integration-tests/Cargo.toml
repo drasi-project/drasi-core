@@ -7,19 +7,30 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Requires a Redis-compatible external service (or Docker through the test helper).
+garnet-tests = ["drasi-index-garnet/computation"]
+computation-middleware-tests = ["drasi-lib/middleware-unwind"]
+
 [dependencies]
 # Test dependencies only - this crate has no library code
-drasi-lib.workspace = true
+drasi-lib = { workspace = true, features = ["test-support"] }
 drasi-core.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true
-drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
+drasi-bootstrap-application.workspace = true
+drasi-source-sqlite.workspace = true
+drasi-bootstrap-sqlite.workspace = true
+drasi-reaction-http.workspace = true
+drasi-reaction-grpc.workspace = true
+drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor", "computation"] }
+drasi-index-garnet.workspace = true
 drasi-plugin-sdk.workspace = true
-drasi-state-store-redb.workspace = true
+drasi-state-store-redb = { workspace = true, features = ["configuration"] }
 drasi-wal-redb.workspace = true
 
-tokio = { version = "1.6", features = ["full"] }
+tokio = { version = "1.6", features = ["full", "test-util"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio-postgres = "0.7"
@@ -32,5 +43,12 @@ anyhow = "1.0"
 tracing = "0.1"
 serial_test = "3"
 tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 bytes = "1"
 rmp-serde = "1"
+futures = "0.3"
+shared-tests = { path = "../shared-tests" }
+axum = "0.8"
+tonic = "0.14"
+prost-types = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }

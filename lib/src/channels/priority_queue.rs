@@ -12,49 +12,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::events::{Sequenced, Timestamped};
+use super::events::Timestamped;
 use log::{debug, trace};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
-/// Supplies the ordering key for a buffered queue entry.
-pub trait QueueOrder {
-    type Key: Ord;
-
-    fn order_key(&self) -> Self::Key;
-}
-
-impl<T: Timestamped + Sequenced> QueueOrder for T {
-    type Key = (chrono::DateTime<chrono::Utc>, u64);
-
-    fn order_key(&self) -> Self::Key {
-        (self.timestamp(), self.sequence())
+/// Ordering facts for both timestamped source events and native envelopes.
+pub(crate) trait QueueOrder {
+    fn priority_time(&self) -> Option<chrono::DateTime<chrono::Utc>>;
+    fn priority_rank(&self) -> Option<(usize, u64)> {
+        None
+    }
+    fn priority_stream(&self) -> Option<(&str, u64)> {
+        None
     }
 }
 
-/// Shared event ordered by its entry-specific key.
+impl<T: Timestamped> QueueOrder for T {
+    fn priority_time(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        Some(self.timestamp())
+    }
+    fn priority_rank(&self) -> Option<(usize, u64)> {
+        self.ordering_tie_breaker()
+    }
+    fn priority_stream(&self) -> Option<(&str, u64)> {
+        self.ordering_stream()
+    }
+}
+
+/// Wrapper for priority queue events with timestamp-based ordering
 #[derive(Clone)]
 struct PriorityQueueEvent<T>
 where
     T: QueueOrder + Clone + Send + Sync + 'static,
 {
     event: Arc<T>,
+    enqueue_order: u64,
 }
 
 impl<T> PriorityQueueEvent<T>
 where
     T: QueueOrder + Clone + Send + Sync + 'static,
 {
-    fn new(event: Arc<T>) -> Self {
-        Self { event }
-    }
-
-    fn order_key(&self) -> T::Key {
-        self.event.order_key()
+    fn new(event: Arc<T>, enqueue_order: u64) -> Self {
+        Self {
+            event,
+            enqueue_order,
+        }
     }
 }
 
@@ -64,7 +72,7 @@ where
     T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.order_key() == other.order_key()
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -84,8 +92,147 @@ where
     T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior: the smallest key dequeues first.
-        other.order_key().cmp(&self.order_key())
+        let sequence = |entry: &Self| {
+            entry
+                .event
+                .priority_rank()
+                .map(|(_, sequence)| sequence)
+                .or_else(|| entry.event.priority_stream().map(|(_, sequence)| sequence))
+        };
+        sequence(other)
+            .cmp(&sequence(self))
+            .then_with(|| other.event.priority_time().cmp(&self.event.priority_time()))
+            .then_with(|| other.event.priority_rank().cmp(&self.event.priority_rank()))
+            .then_with(|| other.enqueue_order.cmp(&self.enqueue_order))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum StreamKey {
+    Unordered,
+    Ranked(usize),
+    Named(String),
+}
+
+type Head = (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<(usize, u64)>,
+    u64,
+    StreamKey,
+);
+
+/// Orders each stream by its own progress, then merges the available heads by
+/// timestamp/rank. Heap size and memory remain bounded by the admitted events.
+pub(crate) struct OrderedHeap<T: QueueOrder + Clone + Send + Sync + 'static> {
+    streams: BTreeMap<StreamKey, BinaryHeap<PriorityQueueEvent<T>>>,
+    heads: BTreeSet<Head>,
+    len: usize,
+}
+
+impl<T: QueueOrder + Clone + Send + Sync + 'static> Default for OrderedHeap<T> {
+    fn default() -> Self {
+        Self {
+            streams: BTreeMap::new(),
+            heads: BTreeSet::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T: QueueOrder + Clone + Send + Sync + 'static> OrderedHeap<T> {
+    fn head(key: &StreamKey, entry: &PriorityQueueEvent<T>) -> Head {
+        (
+            entry.event.priority_time(),
+            entry.event.priority_rank(),
+            entry.enqueue_order,
+            key.clone(),
+        )
+    }
+    pub(crate) fn push(&mut self, event: Arc<T>, order: u64) {
+        let key = match event.priority_rank() {
+            Some((rank, _)) => StreamKey::Ranked(rank),
+            None => match event.priority_stream() {
+                Some((source, _)) => StreamKey::Named(source.to_owned()),
+                None => StreamKey::Unordered,
+            },
+        };
+        let stream = self.streams.entry(key.clone()).or_default();
+        if let Some(head) = stream.peek() {
+            self.heads.remove(&Self::head(&key, head));
+        }
+        stream.push(PriorityQueueEvent::new(event, order));
+        self.heads
+            .insert(Self::head(&key, stream.peek().expect("nonempty stream")));
+        self.len += 1;
+    }
+
+    fn first_head(&self) -> Option<&Head> {
+        let first = self.heads.first()?;
+        if first.0.is_some() {
+            return Some(first);
+        }
+        // Untimed heads delimit the time-ordered groups, without overtaking
+        // an earlier logical event from their own producer.
+        let barrier = self
+            .heads
+            .iter()
+            .take_while(|head| head.0.is_none())
+            .min_by_key(|head| head.2)?;
+        self.heads
+            .iter()
+            .find(|head| head.0.is_some() && head.2 < barrier.2)
+            .or(Some(barrier))
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<Arc<T>> {
+        let head = self.first_head()?.clone();
+        self.heads.remove(&head);
+        let key = head.3;
+        let stream = self.streams.get_mut(&key).expect("head owns a stream");
+        let entry = stream.pop().expect("head owns an event");
+        if let Some(head) = stream.peek() {
+            self.heads.insert(Self::head(&key, head));
+        } else {
+            self.streams.remove(&key);
+        }
+        self.len -= 1;
+        Some(entry.event)
+    }
+    pub(crate) fn peek(&self) -> Option<&Arc<T>> {
+        let (_, _, _, key) = self.first_head()?;
+        self.streams.get(key)?.peek().map(|entry| &entry.event)
+    }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.streams
+            .values()
+            .flat_map(|stream| stream.iter().map(|entry| entry.event.as_ref()))
+    }
+    pub(crate) fn retain(&mut self, mut predicate: impl FnMut(&T) -> bool) {
+        self.heads.clear();
+        self.len = 0;
+        self.streams.retain(|key, stream| {
+            stream.retain(|entry| predicate(&entry.event));
+            self.len += stream.len();
+            if let Some(head) = stream.peek() {
+                self.heads.insert(Self::head(key, head));
+                true
+            } else {
+                false
+            }
+        });
+    }
+    pub(crate) fn drain(&mut self) -> impl Iterator<Item = Arc<T>> {
+        let mut entries = Vec::with_capacity(self.len);
+        while let Some(entry) = self.pop() {
+            entries.push(entry);
+        }
+        entries.into_iter()
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -142,6 +289,9 @@ impl Default for PriorityQueueMetrics {
 
 /// Thread-safe generic priority queue for ordering events by timestamp
 ///
+/// Ranked event types break timestamp ties by their query-local source rank and
+/// source sequence. Remaining ties retain enqueue order, independently of metrics.
+///
 /// # Backpressure and Dispatch Modes
 ///
 /// This priority queue supports two enqueue strategies:
@@ -160,23 +310,31 @@ impl Default for PriorityQueueMetrics {
 ///
 /// # Usage with Dispatch Modes
 ///
-/// ```ignore
+/// ```no_run
+/// use drasi_lib::channels::DispatchMode;
+/// use drasi_lib::channels::priority_queue::PriorityQueue;
+/// use drasi_lib::channels::events::Timestamped;
+/// # async fn enqueue<T: Timestamped + Clone + std::fmt::Debug + Send + Sync + 'static>(
+/// #     priority_queue: &PriorityQueue<T>, event: std::sync::Arc<T>, dispatch_mode: DispatchMode,
+/// # ) {
 /// // Channel mode (isolated channels) - SAFE to use blocking enqueue
 /// if dispatch_mode == DispatchMode::Channel {
 ///     priority_queue.enqueue_wait(event).await;  // Blocks until space available
 /// } else {
 ///     // Broadcast mode (shared channel) - MUST use non-blocking
 ///     if !priority_queue.enqueue(event).await {
-///         warn!("Dropped event - queue at capacity");
+///         log::warn!("Dropped event - queue at capacity");
 ///     }
 /// }
+/// # }
 /// ```
 pub struct PriorityQueue<T>
 where
-    T: QueueOrder + Clone + Send + Sync + 'static,
+    T: Timestamped + Clone + Send + Sync + 'static,
 {
-    /// Internal heap storing events ordered by their entry-specific keys.
-    heap: Arc<Mutex<BinaryHeap<PriorityQueueEvent<T>>>>,
+    /// Internal heap storing events (min-heap by timestamp)
+    heap: Arc<Mutex<OrderedHeap<T>>>,
+    next_enqueue_order: Arc<AtomicU64>,
     /// Notification mechanism for waiting on new events
     notify: Arc<Notify>,
     /// Maximum queue capacity (for backpressure)
@@ -187,20 +345,28 @@ where
 
 impl<T> PriorityQueue<T>
 where
-    T: QueueOrder + Clone + Send + Sync + Debug + 'static,
+    T: Timestamped + Clone + Send + Sync + Debug + 'static,
 {
     /// Create a new priority queue with the specified maximum capacity
     pub fn new(max_capacity: usize) -> Self {
         Self {
-            heap: Arc::new(Mutex::new(BinaryHeap::new())),
+            heap: Arc::new(Mutex::new(OrderedHeap::default())),
+            next_enqueue_order: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(Notify::new()),
             max_capacity,
             metrics: Arc::new(PriorityQueueMetrics::default()),
         }
     }
 
+    fn allocate_enqueue_order(&self) -> u64 {
+        self.next_enqueue_order
+            .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("priority queue enqueue order exhausted")
+    }
+
     /// Enqueue an event into the priority queue
-    ///
     /// Returns true if enqueued, false if queue is at capacity
     pub async fn enqueue(&self, event: Arc<T>) -> bool {
         let mut heap = self.heap.lock().await;
@@ -230,7 +396,7 @@ where
         }
 
         // Enqueue event
-        heap.push(PriorityQueueEvent::new(event));
+        heap.push(event, self.allocate_enqueue_order());
 
         // Update metrics using atomic operations (lock-free)
         self.metrics
@@ -281,7 +447,7 @@ where
             // Check if there's capacity
             if heap.len() < self.max_capacity {
                 // Space available - enqueue the event
-                heap.push(PriorityQueueEvent::new(event));
+                heap.push(event, self.allocate_enqueue_order());
 
                 // Update metrics using atomic operations (lock-free)
                 self.metrics
@@ -342,7 +508,7 @@ where
     /// Returns None if queue is empty
     pub async fn try_dequeue(&self) -> Option<Arc<T>> {
         let mut heap = self.heap.lock().await;
-        let event = heap.pop().map(|pq_event| pq_event.event);
+        let event = heap.pop();
 
         if event.is_some() {
             self.metrics
@@ -370,8 +536,7 @@ where
             tokio::pin!(notified);
 
             let mut heap = self.heap.lock().await;
-            if let Some(pq_event) = heap.pop() {
-                let event = pq_event.event;
+            if let Some(event) = heap.pop() {
                 self.metrics
                     .total_dequeued
                     .fetch_add(1, AtomicOrdering::Relaxed);
@@ -435,7 +600,7 @@ where
     /// Drain all events from the queue (for shutdown)
     pub async fn drain(&self) -> Vec<Arc<T>> {
         let mut heap = self.heap.lock().await;
-        let events: Vec<Arc<T>> = heap.drain().map(|pq_event| pq_event.event).collect();
+        let events: Vec<Arc<T>> = heap.drain().collect();
 
         self.metrics.current_depth.store(0, AtomicOrdering::Relaxed);
 
@@ -446,11 +611,12 @@ where
 
 impl<T> Clone for PriorityQueue<T>
 where
-    T: QueueOrder + Clone + Send + Sync + 'static,
+    T: Timestamped + Clone + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
             heap: Arc::clone(&self.heap),
+            next_enqueue_order: Arc::clone(&self.next_enqueue_order),
             notify: Arc::clone(&self.notify),
             max_capacity: self.max_capacity,
             metrics: Arc::clone(&self.metrics),
@@ -463,11 +629,73 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    #[derive(Clone)]
+    struct OptionalTime {
+        name: &'static str,
+        time: Option<i64>,
+        rank: usize,
+        sequence: u64,
+    }
+    impl QueueOrder for OptionalTime {
+        fn priority_time(&self) -> Option<chrono::DateTime<Utc>> {
+            self.time
+                .map(|time| chrono::DateTime::from_timestamp_millis(time).unwrap())
+        }
+        fn priority_rank(&self) -> Option<(usize, u64)> {
+            Some((self.rank, self.sequence))
+        }
+    }
+
+    fn optional_trace(events: &[(&'static str, Option<i64>, usize, u64)]) -> Vec<&'static str> {
+        let mut heap = OrderedHeap::default();
+        for (order, &(name, time, rank, sequence)) in events.iter().enumerate() {
+            heap.push(
+                Arc::new(OptionalTime {
+                    name,
+                    time,
+                    rank,
+                    sequence,
+                }),
+                order as u64,
+            );
+        }
+        heap.drain().map(|event| event.name).collect()
+    }
+
+    #[test]
+    fn untimed_heads_separate_time_ordered_groups_without_inventing_time() {
+        assert_eq!(
+            optional_trace(&[
+                ("a", Some(300), 0, 1),
+                ("b", Some(100), 1, 1),
+                ("untimed", None, 2, 1),
+                ("later", Some(50), 3, 1),
+            ]),
+            ["b", "a", "untimed", "later"],
+        );
+        assert_eq!(
+            optional_trace(&[("a", None, 2, 1), ("b", None, 0, 1), ("c", None, 1, 1)]),
+            ["a", "b", "c"],
+        );
+    }
+
+    #[test]
+    fn producer_progress_still_orders_events_across_untimed_heads() {
+        assert_eq!(
+            optional_trace(&[
+                ("a2", Some(300), 0, 2),
+                ("untimed", None, 1, 1),
+                ("a1", Some(100), 0, 1),
+                ("other", Some(50), 2, 1),
+            ]),
+            ["untimed", "other", "a1", "a2"],
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct TestEvent {
         id: String,
         timestamp: chrono::DateTime<Utc>,
-        sequence: u64,
     }
 
     impl Timestamped for TestEvent {
@@ -476,29 +704,10 @@ mod tests {
         }
     }
 
-    impl Sequenced for TestEvent {
-        fn sequence(&self) -> u64 {
-            self.sequence
-        }
-    }
-
     fn create_test_event(id: &str, timestamp: chrono::DateTime<Utc>) -> Arc<TestEvent> {
         Arc::new(TestEvent {
             id: id.to_string(),
             timestamp,
-            sequence: 0,
-        })
-    }
-
-    fn create_test_event_seq(
-        id: &str,
-        timestamp: chrono::DateTime<Utc>,
-        sequence: u64,
-    ) -> Arc<TestEvent> {
-        Arc::new(TestEvent {
-            id: id.to_string(),
-            timestamp,
-            sequence,
         })
     }
 
@@ -526,35 +735,6 @@ mod tests {
 
         let dequeued3 = pq.try_dequeue().await.unwrap();
         assert_eq!(dequeued3.id, "event3"); // Newest
-    }
-
-    // Same-timestamp events dequeue in sequence order.
-    #[tokio::test]
-    async fn test_same_timestamp_same_source_ordered_by_sequence() {
-        let pq = PriorityQueue::new(100);
-        let now = Utc::now();
-
-        // Enqueue out of sequence order.
-        pq.enqueue(create_test_event_seq("seq7", now, 7)).await;
-        pq.enqueue(create_test_event_seq("seq5", now, 5)).await;
-        pq.enqueue(create_test_event_seq("seq6", now, 6)).await;
-
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "seq5");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "seq6");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "seq7");
-    }
-
-    #[tokio::test]
-    async fn test_timestamp_precedes_sequence() {
-        let pq = PriorityQueue::new(100);
-        let now = Utc::now();
-        let later = now + chrono::Duration::seconds(1);
-
-        pq.enqueue(create_test_event_seq("late", later, 0)).await;
-        pq.enqueue(create_test_event_seq("early", now, 5)).await;
-
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "early");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "late");
     }
 
     #[tokio::test]

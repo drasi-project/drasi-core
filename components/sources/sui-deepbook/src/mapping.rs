@@ -97,12 +97,10 @@ pub fn map_event_to_change(source_id: &str, event: &SuiEvent) -> SourceChange {
                 properties,
             },
         },
-        EventOperation::Update => SourceChange::Update {
-            element: Element::Node {
-                metadata,
-                properties,
-            },
-        },
+        EventOperation::Update => SourceChange::update(Element::Node {
+            metadata,
+            properties,
+        }),
         EventOperation::Delete => SourceChange::Delete { metadata },
     }
 }

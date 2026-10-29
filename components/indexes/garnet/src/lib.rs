@@ -41,10 +41,14 @@ pub mod element_index;
 pub mod future_queue;
 pub mod live_results;
 pub mod outbox;
+mod output_scope;
 mod plugin;
 pub mod result_index;
 pub(crate) mod session_state;
 mod storage_models;
+
+#[cfg(feature = "computation")]
+pub mod computation;
 
 // Re-export the plugin provider for easy access
 pub use checkpoint::GarnetCheckpointStore;

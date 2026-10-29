@@ -1,0 +1,37 @@
+[package]
+name = "stockroom"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+normalize = ["drasi-lib/middleware-parse-json", "drasi-lib/middleware-promote"]
+plugins = ["dep:drasi-host-sdk"]
+callbacks = ["dep:drasi-reaction-application"]
+persistence = ["dep:drasi-index-rocksdb", "dep:drasi-source-sqlite"]
+management = ["dep:drasi-state-store-redb"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "signal", "io-std", "io-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+drasi-core = { path = "../drasi-core/core", features = ["computation"] }
+drasi-lib = { path = "../drasi-core/lib" }
+drasi-host-sdk = { path = "../drasi-core/components/host-sdk", optional = true }
+drasi-reaction-application = { path = "../drasi-core/components/reactions/application", optional = true }
+drasi-index-rocksdb = { path = "../drasi-core/components/indexes/rocksdb", features = ["computation"], optional = true }
+drasi-source-sqlite = { path = "../drasi-core/components/sources/sqlite", optional = true }
+drasi-state-store-redb = { path = "../drasi-core/components/state_stores/redb", features = ["configuration"], optional = true }
+
+[dev-dependencies]
+bytes = "1"
+drasi-computation-contracts = { path = "../drasi-core/components/computation-contracts" }
+tempfile = "3.8"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"

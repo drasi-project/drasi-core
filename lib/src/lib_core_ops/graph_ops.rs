@@ -31,6 +31,8 @@ impl DrasiLib {
     /// The snapshot includes the instance root node, all component nodes
     /// (sources, queries, reactions), and all bidirectional relationship edges.
     /// The returned `GraphSnapshot` is serializable to JSON via serde.
+    /// The instance root is Running when [`Self::is_running`] is true and
+    /// Stopped otherwise. Component failures and readiness remain separate.
     ///
     /// This method does NOT require the server to be initialized or running.
     /// The graph is available immediately after construction.
@@ -39,15 +41,15 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let snapshot = core.get_graph().await;
+    /// let snapshot = core.get_graph().await?;
     /// println!("Instance: {}", snapshot.instance_id);
     /// println!("Components: {}", snapshot.nodes.len());
     /// println!("Relationships: {}", snapshot.edges.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_graph(&self) -> GraphSnapshot {
-        self.component_graph.read().await.snapshot()
+    pub async fn get_graph(&self) -> Result<GraphSnapshot> {
+        Ok(self.component_graph().snapshot().await?)
     }
 
     /// Get all components that depend on the given component.
@@ -62,21 +64,21 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let dependents = core.get_dependents("orders_db").await;
+    /// let dependents = core.get_dependents("orders_db").await?;
     /// for dep in &dependents {
     ///     println!("  {} ({:?}) depends on orders_db", dep.id, dep.kind);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_dependents(&self, id: &str) -> Vec<ComponentNode> {
-        self.component_graph
-            .read()
-            .await
+    pub async fn get_dependents(&self, id: &str) -> Result<Vec<ComponentNode>> {
+        Ok(self
+            .get_graph()
+            .await?
             .get_dependents(id)
             .into_iter()
             .cloned()
-            .collect()
+            .collect())
     }
 
     /// Get all components that the given component depends on.
@@ -91,21 +93,21 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let deps = core.get_dependencies("active_orders").await;
+    /// let deps = core.get_dependencies("active_orders").await?;
     /// for dep in &deps {
     ///     println!("  active_orders depends on {} ({:?})", dep.id, dep.kind);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_dependencies(&self, id: &str) -> Vec<ComponentNode> {
-        self.component_graph
-            .read()
-            .await
+    pub async fn get_dependencies(&self, id: &str) -> Result<Vec<ComponentNode>> {
+        Ok(self
+            .get_graph()
+            .await?
             .get_dependencies(id)
             .into_iter()
             .cloned()
-            .collect()
+            .collect())
     }
 
     /// Check if a component can be safely removed without breaking dependents.
@@ -125,14 +127,31 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn can_remove_component(&self, id: &str) -> Result<()> {
-        let graph = self.component_graph.read().await;
-        graph.can_remove(id).map_err(|dependent_ids| {
-            crate::error::DrasiError::validation(format!(
+        let id = crate::computation::v1::ComponentId::try_new(id)
+            .map_err(|error| crate::DrasiError::validation(error.to_string()).with_cause(error))?;
+        let control = self.computation_control()?;
+        let publication = control.registry_snapshot();
+        let mut dependents = publication.desired.data_dependents(&id);
+        if self
+            .computation_runtime
+            .ordinary_queries_at(&publication)?
+            .contains_key(&id)
+        {
+            let owned = crate::computation::runtime::native_query::query_members(&publication, &id);
+            dependents.retain(|dependent| !owned.contains_key(dependent));
+        }
+        if !dependents.is_empty() {
+            return Err(crate::error::DrasiError::validation(format!(
                 "Cannot remove '{}': depended on by: {}",
                 id,
-                dependent_ids.join(", ")
-            ))
-        })
+                dependents
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -154,7 +173,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = core.get_graph().await;
+        let snapshot = core.get_graph().await.expect("graph snapshot");
 
         assert_eq!(snapshot.instance_id, "empty-graph");
         // Instance root must be present
@@ -182,7 +201,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -190,7 +209,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = core.get_graph().await;
+        let snapshot = core.get_graph().await.expect("graph snapshot");
 
         assert_eq!(snapshot.instance_id, "graph-test");
         // instance + source + query
@@ -218,7 +237,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -226,7 +245,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dependents = core.get_dependents("src1").await;
+        let dependents = core.get_dependents("src1").await.unwrap();
 
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].id, "q1");
@@ -242,7 +261,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -251,7 +270,7 @@ mod tests {
             .unwrap();
 
         // q1 is a leaf — nothing depends on it
-        let dependents = core.get_dependents("q1").await;
+        let dependents = core.get_dependents("q1").await.unwrap();
         assert!(dependents.is_empty());
     }
 
@@ -268,7 +287,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -276,7 +295,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deps = core.get_dependencies("q1").await;
+        let deps = core.get_dependencies("q1").await.unwrap();
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].id, "src1");
@@ -293,7 +312,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deps = core.get_dependencies("src1").await;
+        let deps = core.get_dependencies("src1").await.unwrap();
         assert!(deps.is_empty());
     }
 
@@ -310,7 +329,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )
@@ -331,7 +350,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("src1")
+                    .from_input("src1")
                     .auto_start(false)
                     .build(),
             )

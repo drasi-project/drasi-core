@@ -23,12 +23,24 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
+exclude = [
+    "docs/runtime-architecture.html",
+    "docs/runtime-architecture.json",
+    "docs/runtime-dependencies.csv",
+    "**/__pycache__/**",
+]
 
 [lints]
 workspace = true
 
 [features]
 default = []
+
+# Explicit integration-test wiring; does not enable a backend in the default runtime.
+computation-rocksdb-tests = ["drasi-index-rocksdb/computation"]
+
+# Per-query clocks and awaited processing frontiers for managed-query tests.
+test-support = []
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
@@ -61,14 +73,26 @@ features = [
 name = "drasi_lib"
 path = "src/lib.rs"
 
+[[example]]
+name = "computation_graph"
+
+[[example]]
+name = "computation_instance"
+
+[[example]]
+name = "computation_runtime"
+
 [dependencies]
-drasi-core.workspace = true
+drasi-core-types = { workspace = true }
+drasi-computation-contracts = { workspace = true }
+drasi-reaction-common = { workspace = true }
+drasi-core = { workspace = true, features = ["computation"] }
 drasi-functions-cypher.workspace = true
 drasi-functions-gql.workspace = true
 drasi-query-ast.workspace = true
 drasi-query-cypher.workspace = true
 drasi-query-gql.workspace = true
-drasi-middleware = { workspace = true, optional = true }
+drasi-middleware = { workspace = true, optional = true, features = ["engine-adapter"] }
 
 # Note: Index backends (RocksDB, Garnet) are now plugins and NOT direct dependencies.
 # Users who need persistent storage should:
@@ -76,11 +100,12 @@ drasi-middleware = { workspace = true, optional = true }
 #   2. Create an IndexBackendPlugin instance
 #   3. Pass it to DrasiLib::builder().with_index_provider(...)
 
-bytes = "1"
-tokio = { version = "1.0", features = ["rt", "sync", "time", "macros"] }
+bytes = { version = "1", features = ["serde"] }
+tokio = { version = "1.53.3", features = ["rt", "sync", "time", "macros"] }
 tokio-stream = "0.1"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+serde_bytes = "0.11"
 serde_yaml = "0.9"
 anyhow = "1.0"
 thiserror = "2.0"
@@ -92,27 +117,34 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 ordered-float = "3.7"
-petgraph = "0.6"
 rand = "0.8"
 futures = "0.3"
 fnv = "1.0.7"
 im = { workspace = true }
+equivalent = "1"
 bincode = "1.3"
 rmp-serde = "1"
+sha2 = "0.10"
 
 
 
 [dev-dependencies]
+drasi-computation-contracts = { workspace = true, features = ["test-support"] }
 # Testing utilities
 tempfile = "3.8"
 mockall = "0.12"
 tokio-test = "0.4"
-tokio = { version = "1.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "test-util"] }
 assert_matches = "1.5"
 serial_test = "3.0"
 pretty_assertions = "1.4"
 test-case = "3.3"
 drasi-index-rocksdb = { path = "../components/indexes/rocksdb" }
+drasi-source-application = { path = "../components/sources/application" }
+drasi-wal-redb = { path = "../components/wals/redb" }
+drasi-state-store-redb = { path = "../components/state_stores/redb" }
+drasi-reaction-snapshot-test = { path = "../components/reactions/snapshot-test" }
+drasi-reaction-application = { path = "../components/reactions/application" }
 
 # Additional testing dependencies
 rstest = "0.18"

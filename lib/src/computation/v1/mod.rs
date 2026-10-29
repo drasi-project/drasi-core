@@ -1,0 +1,309 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Version 1 of the computation contracts and DAG runtime.
+//!
+//! [`ComputationGraph`] runs owned native sources, transformers and sinks without
+//! a Continuous Query. [`BoundedPipe`] supplies volatile FIFO/backpressure.
+//! It also powers every ordinary [`crate::DrasiLib`] source/query/reaction API,
+//! retaining the existing plugin contracts through explicit graph-owned adapters.
+//!
+//! Every data-plane boundary carries [`ChangeEnvelope`]: a shared immutable
+//! [`ChangeEvent`] describing a set diff and a branch-owned appendable list of
+//! immutable context entries. [`ChangeEnvelope::append_annotation`] extends only
+//! that envelope's history. Clones share the event and existing annotations;
+//! [`ChangeEnvelope::derive`] creates a new event without changing its input.
+//! [`Envelope`] remains a compatibility name for the same envelope type.
+//!
+//! Records contain immutable, schema-defined bytes. A [`RecordValidator`] must
+//! check their encoding, domain constraints, and embedded identity where applicable.
+//! [`RecordReference`] validates schema-specific keys even for image-less deletes.
+//! The library additionally checks complete schema descriptors, operation ordering,
+//! image roles, and cross-image identity. Providers are responsible for the truth
+//! of their validators and capability declarations.
+//!
+//! Records/envelopes do not implement automatic serialization. [`EnvelopeCodec`]
+//! explicitly encodes versioned computation storage and validates registered
+//! schemas when decoding. Record payload encoding is schema-specific, not a
+//! legacy Drasi wire standard. [`GraphChangeCodec`] and [`QueryChangeCodec`] preserve
+//! typed graph/query boundaries, while explicit source/reaction adapters retain
+//! legacy APIs. The optional SDK computation module bridges existing descriptors
+//! without changing their ABI; the embedding host remains responsible for loading.
+//!
+//! ```
+//! use drasi_lib::computation::v1::{
+//!     PipeCapabilities, PipeCapability, PipeRequirements, SchemaVersion,
+//! };
+//! use std::num::NonZeroUsize;
+//!
+//! assert!(SchemaVersion::try_new(0).is_err());
+//! let pipe = PipeCapabilities::volatile_bounded(NonZeroUsize::new(16).unwrap());
+//! let durable = PipeRequirements::new([PipeCapability::DurableAcceptance]);
+//! assert!(pipe.validate(&durable).is_err());
+//! ```
+//!
+//! # Scoped runtime lifecycle
+//!
+//! Build validates declared interfaces and graph constraints before pipe creation
+//! or lifecycle hooks. Missing resources, factories and port connections remain
+//! explicit [`DependencyWait`] entries; they are not terminal configuration errors.
+//! The existing controller resumes eligible work when the prerequisites arrive.
+//! [`ComputationGraph::start`] exclusively borrows the graph and returns a
+//! caller-polled [`GraphRun`]; constructing it alone runs nothing. Consumers are
+//! considered before producers, but activation is independent unless a relationship
+//! explicitly requires a running dependency. Every eligible component is attempted.
+//! Each top-level node runs in an independently scheduled, graph-owned Tokio
+//! task. Mutable operations on one instance remain serialized. A multithreaded
+//! runtime can run native CPU work in parallel; a current-thread runtime provides
+//! concurrency only. Cancellation is cooperative, not native fault isolation.
+//! Dropping the controller retains task joins and cleanup ownership on the graph.
+//!
+//! `Ready -> Starting -> Running -> Stopping -> Completed` is the clean path.
+//! Only `Completed` can restart with retained component ownership, retained
+//! sequence high-watermarks and fresh pipes. A native component's start hook may
+//! reset its finite input cursor, but must not regress its output stream sequence.
+//! Startup reports retain per-component successes and failures. Failed activation
+//! does not erase desired nodes, stop independent components, or close bound pipes.
+//! [`ComputationGraph::run`] separates deployment from activation and accepts live
+//! revision-checked lifecycle/policy commands through [`GraphControl`].
+//! Component generations and operation epochs reject stale health observations.
+//! [`ComponentSpecification`] and [`ComponentFactory`] separate desired definitions
+//! from constructed instances. Configuration, reference, role, implementation and
+//! resource-cardinality checks run before construction. [`ResourceSpecification`]
+//! describes scoped ownership; [`ResourceHandle`] holds an actual instance outside
+//! desired snapshots. [`ComputationGraph::dispose`] awaits owned-resource cleanup.
+//! [`GraphControl::preview`] and [`GraphControl::reconcile`] apply revision-bound
+//! desired mutations without restarting unaffected upstream components. Mutable
+//! processing is parked at safe boundaries; retained input ownership survives
+//! sink replacement. Changed bindings use provider-backed drain checks, not
+//! metrics or generation-local send counts. Cleanup failures preserve desired
+//! specifications and keep invalidated bindings quiesced. [`RemovalPolicy`]
+//! makes rejection, dependent cascade, permissible orphaning and handled drain
+//! explicit; accepted-only external effects are never promoted to handled drain.
+//! Cancellation is not rollback. Cleanup errors preserve their causes and leave
+//! `CleanupRequired`.
+//!
+//! Use [`GraphControl::stop_components`] for graceful drain of selected components.
+//! A drain timeout does not authorize abandoning accepted work. For explicit
+//! cancellation, call [`GraphControl::cancel`] and keep awaiting the run so the
+//! graph can join its owned work and attempt stop hooks. Cancellation is a request,
+//! not proof that a task or external effect has ended.
+//!
+//! Dropping an unfinished [`GraphRun`] requests cancellation, drops the caller's
+//! controller future and publishes [`GraphState::CleanupRequired`]. Component
+//! tasks and resources remain tracked by the graph until cleanup is awaited.
+//! Call [`ComputationGraph::shutdown`] afterwards; use
+//! [`ComputationGraph::dispose`] to also release graph-owned external resources.
+//! The configured cleanup timeout is reused by cleanup operations; it is not one
+//! overall startup/shutdown deadline. No asynchronous cleanup is performed by
+//! `Drop`, and arbitrary component-owned threads or blocking work cannot be
+//! assumed stopped when a run is dropped.
+//!
+//! # Routing and volatile boundaries
+//!
+//! Each output port explicitly binds one unique producer stream. Emissions must
+//! use that stream and an increasing sequence, irrespective of timestamp. Full
+//! schema descriptors and all outputs in a transform result are checked before
+//! forwarding any of that result. Opaque logical envelope IDs remain caller-owned;
+//! duplicates within a result are rejected, but there is no unbounded global ID
+//! deduplication index. [`emission_id`] is an optional stream/sequence ID convention.
+//!
+//! Every declared port must connect; sources have outputs only, sinks inputs only,
+//! and transformers both. Complete disconnected pipelines are allowed. Graph IDs
+//! are local, not registered process-wide. Exact duplicate edges, cycles,
+//! unbounded pipes and unsupported delivery capabilities are errors. Broadcast
+//! lag is explicit. Retained providers name their actual registered store resource
+//! and acknowledge local handling separately from enqueue acceptance.
+//! A producer output may not route through multiple input ports of the same
+//! component; independent queues for that one stream could violate its FIFO.
+//!
+//! Fanout sends sequentially in edge declaration order, shares immutable payloads,
+//! and preserves branch-local context. A slow branch applies backpressure to its
+//! producer (not isolation from other branches). Fanin preserves each stream's
+//! FIFO for FIFO transports, not a global order. [`InputMergePolicy::EventTimeAcrossStreams`] orders
+//! currently available stream heads without violating that FIFO or waiting on an
+//! unavailable source. Only actual finite exhaustion closes outgoing pipes,
+//! so filters and fanin drain naturally even if providers retained sender clones.
+//! Failed or stopped producers leave their bindings idle, not falsely exhausted.
+//! Count-only capacity is the default. [`ByteBoundedPipeConfig`] and optional
+//! retained/non-shared QoS journal budgets also charge full binary-envelope size.
+//! They do not bound component-local state, in-flight processing, or a transform's
+//! caller-allocated result vector. Persistent journals can opt into bounded
+//! history pages without weakening full startup validation.
+//! Ordinary continuous-query pipelines explicitly use [`RankedInputQueue`]:
+//! one shared bounded queue ordered by producer progress, merging available
+//! stream heads by wrapper event time and declaration rank. Scheduled signals
+//! have their own stream and due time.
+//! [`PipeCapability::RankedEventOrder`] is distinct from producer FIFO. This
+//! orders admitted events, without waiting for quiet sources or promising a
+//! watermark over unseen events.
+//! For explicit bounded waiting and within-source timestamp reordering, use
+//! [`SourceTimeMergeTransformer`]. Its source timestamps are mandatory; late
+//! inputs follow an explicit policy rather than entering an already-advanced
+//! ordered output. It does not change ordinary pipe/query scheduling.
+//!
+//! Acceptance is not handling, acknowledgement or durability. Operational errors
+//! remain visible on their component; independent components remain activated.
+//! Contract violations and forwarding errors terminate the run with their causes.
+//! A forwarding error reports prior branch acceptances;
+//! cancellation can also leave partial fanout or external effects. Neither is
+//! retried or rolled back. Explicit pipe close drains accepted events; cancellation
+//! may discard volatile queued/in-flight events. [`RetainedPipe`] preserves
+//! unacknowledged stored work; durable providers distinguish uncertain commit
+//! outcomes rather than claiming definite rejection. Generic cross-component
+//! transactions and exactly-once external effects are not inferred from these
+//! profiles. [`ContinuousQueryTransformer`] owns query evaluation/publication and
+//! scheduled work; [`LegacyReactionSink`] remains acceptance-only.
+//! [`MiddlewareTransformer::new_durable`] adds restart-safe graph-change
+//! middleware using an atomic persistent index bundle and lossless durable
+//! outgoing pipes. [`GraphProducerProgress`] separates logical replay identity
+//! from fresh transport emissions and preserved raw source provenance.
+//! [`TransactionTransformer`] runs a configured linear sequence of opt-in
+//! [`TransactionalTransformer`] implementations in one shared storage transaction,
+//! with isolated step state and no internal pipes or independently scheduled nodes.
+
+pub use super::components::{ComponentBatch, ComponentBatchBuilder};
+pub use super::instance::{ComputationCleanupError, ComputationInfo};
+pub use super::instance_ops::InstanceConfigurationSnapshot;
+
+mod binary_codec;
+mod bounded_pipe;
+mod broadcast_pipe;
+mod codec;
+mod component;
+mod output_bindings;
+mod output_identity;
+mod shared_storage;
+pub use output_bindings::{OutputBindingError, OutputBindings, OutputDestination};
+pub use shared_storage::SharedStorageGroup;
+mod recovery;
+pub use recovery::*;
+mod control;
+pub use control::*;
+mod entities;
+pub use entities::*;
+mod consumer_recovery;
+mod delivery;
+pub use delivery::*;
+mod data;
+mod envelope;
+mod error;
+mod factories;
+mod graph;
+mod graph_codec;
+mod legacy_index;
+mod legacy_reaction;
+mod legacy_resources;
+mod source_transaction;
+pub use legacy_index::*;
+pub use legacy_resources::GraphResourceObserver;
+pub(crate) mod plugin_services;
+pub use plugin_services::*;
+mod plugin_source;
+pub use plugin_source::*;
+mod plugin_reaction;
+pub use plugin_reaction::*;
+mod pipeline;
+pub use pipeline::*;
+mod ranked_pipe;
+pub use ranked_pipe::*;
+mod query_scheduling;
+pub use query_scheduling::*;
+mod legacy_source;
+mod lifecycle;
+mod middleware;
+pub use middleware::*;
+mod middleware_recovery;
+pub use middleware_recovery::{DurableMiddlewareOptions, MiddlewareRecoveryError};
+mod transaction_state;
+pub use transaction_state::TransactionContext;
+mod transaction_transformer;
+pub use transaction_transformer::*;
+mod time_merge;
+pub use time_merge::*;
+mod pipe;
+mod pipe_metrics;
+mod ports;
+mod producer_progress;
+pub use producer_progress::{GraphProducerIdentity, GraphProducerProgress};
+mod query;
+mod query_api;
+pub use query_api::QueryApi;
+mod query_identity;
+pub use query_identity::*;
+mod query_configuration;
+pub use query_configuration::QueryMiddlewareResource as MiddlewareRegistryResource;
+pub use query_configuration::*;
+mod query_catalog;
+pub use query_catalog::*;
+mod output_bootstrap;
+mod output_catalogue;
+pub use output_catalogue::*;
+mod query_output;
+pub use drasi_computation_contracts::{
+    OutputCapability, OutputCursor, OutputEndpoint, OutputFollow, OutputFollowHub,
+    OutputFollowLimits, OutputPortReaders, OutputReadError, OutputReaders, OutputReplay,
+    OutputSnapshot, OutputSnapshotFollow, ReplayProvider, SnapshotFollowProvider, SnapshotProvider,
+    WeakOutputPortReaders, WeakOutputReaders,
+};
+mod inspection;
+pub use inspection::*;
+mod inventory;
+pub use inventory::*;
+mod composite_bootstrap;
+mod consumer_progress;
+mod journal_budget;
+mod qos_pipe;
+mod query_bootstrap;
+mod query_codec;
+mod retained_pipe;
+mod retained_store;
+mod source_progress;
+mod wal_source;
+pub use consumer_progress::*;
+pub use source_progress::*;
+
+pub use binary_codec::{
+    decode_bounded_messagepack, encode_bounded_messagepack, BinaryEnvelopeCodec,
+    BinaryEnvelopeCodecError,
+};
+pub use bounded_pipe::*;
+pub use broadcast_pipe::*;
+pub use codec::*;
+pub use component::*;
+pub use composite_bootstrap::{
+    CompositeBootstrapProvider, MAX_COMPOSITE_BOOTSTRAP_PROVIDERS,
+    MAX_COMPOSITE_BOOTSTRAP_WATERMARKS,
+};
+pub use consumer_recovery::*;
+pub use data::*;
+pub use envelope::*;
+pub use error::{ContractError, Result};
+pub(crate) use graph::RejectedResources;
+pub use graph::*;
+pub use graph_codec::*;
+pub use legacy_reaction::*;
+pub use legacy_source::*;
+pub use lifecycle::*;
+pub use pipe::*;
+pub use pipe_metrics::PipeMetricsSnapshot;
+pub use ports::*;
+pub use qos_pipe::*;
+pub use query::*;
+pub use query_bootstrap::*;
+pub use query_codec::*;
+pub use retained_pipe::*;
+pub use retained_store::*;
+pub use source_transaction::*;
+pub use wal_source::*;

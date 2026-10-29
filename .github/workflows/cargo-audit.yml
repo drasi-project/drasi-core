@@ -11,33 +11,17 @@ jobs:
   audit:
     uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@main
     with:
-      # rustls-webpki 0.101.7 vulns — aws-smithy-http-client 1.1.13 bundles both
-      # rustls 0.21 and 0.23 backends; workspace feature unification activates both.
-      # Cannot resolve without upstream AWS SDK dropping the old rustls-0-21 backend.
-      #
-      # quick-xml < 0.41 DoS advisories:
-      #   RUSTSEC-2026-0194 (quadratic duplicate-attribute-name check)
-      #   RUSTSEC-2026-0195 (unbounded namespace allocation in NsReader)
-      # Both fixed in quick-xml >= 0.41. quick-xml enters the tree from multiple
-      # sources: as a direct dependency of drasi-source-http (0.37) and
-      # drasi-bootstrap-http (0.31), and transitively via azure_core 0.21.0, which
-      # pins "^0.31" (pulled in by drasi-reaction-azure-storage). Bumping our direct
-      # deps alone would not remove the azure_core-pinned 0.31.0, so clearing these
-      # fully requires a major Azure SDK upgrade. These are DoS advisories in the
-      # XML parser used by the optional HTTP/Azure source/bootstrap plugins, whose
-      # input may come from external endpoints; accepted as a known risk pending
-      # the Azure SDK upgrade.
-      # RUSTSEC-2026-0275 (medium): legacy azure_core 0.21.0 writes the
-      # `authorization` header value to logs. Pulled in transitively by
-      # drasi-reaction-azure-storage via the azure_storage_* 0.21 family; the
-      # fix (azure_core >= 0.22) requires the same major Azure SDK upgrade noted
-      # above. Accepted as a known risk pending that upgrade — the affected code
-      # path is the optional Azure storage reaction plugin.
+      # Existing legacy-Azure exceptions remain limited to the reviewed storage
+      # clients. SharedKey/Table support still requires azure_core 0.21:
+      # - 0194: quick-xml 0.41 preflight rejects duplicate/excessive attributes
+      #   before legacy service-metadata parsing; blob content stays streamed.
+      # - 0195: the affected NsReader path is not used by Azure deserialization.
+      # - 0275: a per-call transport policy keeps SDK authentication/TLS intact
+      #   and redacts authorization before retry/success/cancellation logging.
+      # HTTP webhook/bootstrap paths use quick-xml 0.41 directly.
+      # See components/reactions/azure-storage/README.md for the exact boundary.
+      # Other retained findings remain visible; no new exceptions are added here.
       audit-args: >-
-        --ignore RUSTSEC-2026-0098
-        --ignore RUSTSEC-2026-0099
-        --ignore RUSTSEC-2026-0104
         --ignore RUSTSEC-2026-0194
         --ignore RUSTSEC-2026-0195
-        --ignore RUSTSEC-2026-0235
         --ignore RUSTSEC-2026-0275

@@ -194,13 +194,15 @@ pub async fn fetch_from_http(url: &str, dest_dir: &Path) -> Result<FetchedPlugin
     })
 }
 
-/// Metadata extracted from a plugin binary's `drasi_plugin_metadata()` export.
+/// Metadata extracted from the binary's explicit plugin ABI family.
 #[derive(Debug, Clone, Default)]
 pub struct PluginBinaryMetadata {
     /// Plugin's own version.
     pub plugin_version: String,
     /// drasi-plugin-sdk version.
     pub sdk_version: String,
+    pub abi_family: Option<String>,
+    pub abi_version: Option<String>,
     /// drasi-core version.
     pub core_version: String,
     /// drasi-lib version.
@@ -213,19 +215,40 @@ pub struct PluginBinaryMetadata {
     pub build_timestamp: String,
 }
 
-/// Load a plugin binary just enough to read its metadata, then unload it.
+/// Read metadata without creating components. Identified native libraries stay
+/// process-pinned; legacy metadata follows the existing metadata-only path.
 ///
 /// Returns `None` if the binary cannot be loaded or doesn't export metadata.
 pub fn read_plugin_metadata(path: &Path) -> Option<PluginBinaryMetadata> {
     use drasi_plugin_sdk::ffi::metadata::PluginMetadata;
 
     let lib = match unsafe { libloading::Library::new(path) } {
-        Ok(lib) => lib,
+        Ok(lib) => std::sync::Arc::new(lib),
         Err(e) => {
             log::warn!("Could not load plugin to read metadata: {e}");
             return None;
         }
     };
+    match crate::computation::try_read_metadata(lib.clone()) {
+        Ok(Some(metadata)) => {
+            return Some(PluginBinaryMetadata {
+                plugin_version: metadata.plugin.version.to_string(),
+                sdk_version: metadata.abi_version.clone(),
+                abi_family: Some("computation".into()),
+                abi_version: Some(metadata.abi_version),
+                target_triple: drasi_computation_plugin_sdk::metadata::TARGET.to_owned(),
+                ..Default::default()
+            })
+        }
+        Ok(None) => {}
+        Err(error) => {
+            log::error!(
+                "Invalid native plugin metadata in {}: {error:#}",
+                path.display()
+            );
+            return None;
+        }
+    }
 
     let meta_fn = match unsafe {
         lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata")
@@ -247,6 +270,8 @@ pub fn read_plugin_metadata(path: &Path) -> Option<PluginBinaryMetadata> {
     Some(PluginBinaryMetadata {
         plugin_version: unsafe { meta.plugin_version.to_string() },
         sdk_version: unsafe { meta.sdk_version.to_string() },
+        abi_family: None,
+        abi_version: None,
         core_version: unsafe { meta.core_version.to_string() },
         lib_version: unsafe { meta.lib_version.to_string() },
         target_triple: unsafe { meta.target_triple.to_string() },

@@ -63,10 +63,11 @@
 //!
 //! # Bootstrap Support
 //!
-//! The application source supports pluggable bootstrap providers via the `BootstrapProvider`
-//! trait. Configure a bootstrap provider using `set_bootstrap_provider()` or through the
-//! builder pattern. Common options include `ApplicationBootstrapProvider` for replaying
-//! stored events, or any other `BootstrapProvider` implementation.
+//! Native application input uses query-owned bootstrap: attach an
+//! `ApplicationBootstrapProvider` through `ContinuousQueryTransformer::with_bootstrap`.
+//! Application code owns its snapshot data; live input does not maintain it.
+//! The existing Source-plugin implementation still accepts its separate
+//! `BootstrapProvider` interface, not the native application snapshot provider.
 //!
 //! # Example Configuration (YAML)
 //!
@@ -136,6 +137,8 @@
 
 pub mod config;
 pub use config::ApplicationSourceConfig;
+pub mod native;
+pub use native::ApplicationSource as NativeApplicationSource;
 
 mod property_builder;
 mod time;
@@ -145,7 +148,7 @@ mod tests;
 
 pub use property_builder::PropertyMapBuilder;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
@@ -175,6 +178,7 @@ struct InternalEvent {
 pub struct ApplicationSourceHandle {
     tx: mpsc::Sender<InternalEvent>,
     source_id: String,
+    requires_wal: bool,
     /// Shared WAL reference — populated when the source is started with durability enabled
     wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
     enqueue_order: Arc<tokio::sync::Mutex<()>>,
@@ -201,6 +205,10 @@ impl ApplicationSourceHandle {
                     }
                 }
             } else {
+                anyhow::ensure!(
+                    !self.requires_wal,
+                    "Durable application source is not ready: WAL has not been initialized"
+                );
                 None
             }
         };
@@ -263,7 +271,7 @@ impl ApplicationSourceHandle {
             properties,
         };
 
-        self.send(SourceChange::Update { element }).await
+        self.send(SourceChange::update(element)).await
     }
 
     /// Delete a node or relationship from the graph
@@ -356,8 +364,8 @@ pub struct ApplicationSource {
     base: SourceBase,
     /// Application source configuration
     config: ApplicationSourceConfig,
-    /// Receiver for events from handles (taken when processing starts)
-    app_rx: Arc<RwLock<Option<mpsc::Receiver<InternalEvent>>>>,
+    /// Input ownership survives cancellation of an individual processing task.
+    app_rx: Arc<tokio::sync::Mutex<ApplicationInput>>,
     /// Sender for creating new handles
     app_tx: mpsc::Sender<InternalEvent>,
     /// WAL provider for durable event persistence (shared with handles for WAL-before-ACK)
@@ -366,6 +374,11 @@ pub struct ApplicationSource {
     enqueue_order: Arc<tokio::sync::Mutex<()>>,
     /// Handle to the WAL pruning background task (if running)
     prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
+}
+
+struct ApplicationInput {
+    receiver: mpsc::Receiver<InternalEvent>,
+    pending: Option<SourceEventWrapper>,
 }
 
 impl ApplicationSource {
@@ -411,6 +424,10 @@ impl ApplicationSource {
         let handle = ApplicationSourceHandle {
             tx: app_tx.clone(),
             source_id: id.clone(),
+            requires_wal: config
+                .durability
+                .as_ref()
+                .is_some_and(|durability| durability.enabled),
             wal: shared_wal.clone(),
             enqueue_order: enqueue_order.clone(),
         };
@@ -418,7 +435,10 @@ impl ApplicationSource {
         let source = Self {
             base: SourceBase::new(params)?,
             config,
-            app_rx: Arc::new(RwLock::new(Some(app_rx))),
+            app_rx: Arc::new(tokio::sync::Mutex::new(ApplicationInput {
+                receiver: app_rx,
+                pending: None,
+            })),
             app_tx,
             wal: shared_wal,
             enqueue_order,
@@ -436,18 +456,23 @@ impl ApplicationSource {
         ApplicationSourceHandle {
             tx: self.app_tx.clone(),
             source_id: self.base.id.clone(),
+            requires_wal: self
+                .config
+                .durability
+                .as_ref()
+                .is_some_and(|durability| durability.enabled),
             wal: self.wal.clone(),
             enqueue_order: self.enqueue_order.clone(),
         }
     }
 
     async fn process_events(&self) -> Result<()> {
-        let mut rx = self
-            .app_rx
-            .write()
-            .await
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
+        let mut task_slot = self.base.task_handle.write().await;
+        anyhow::ensure!(
+            task_slot.is_none(),
+            "Application source processor is already started"
+        );
+        let input = self.app_rx.clone();
 
         let source_name = self.base.id.clone();
         let base = self.base.clone_shared();
@@ -479,32 +504,43 @@ impl ApplicationSource {
                     )
                     .await;
 
-                while let Some(event) = rx.recv().await {
-                    debug!(
-                        "ApplicationSource '{source_name}' received event: {:?}",
-                        event.change
-                    );
+                let mut input = input.lock().await;
+                loop {
+                    if input.pending.is_none() {
+                        let Some(event) = input.receiver.recv().await else {
+                            break;
+                        };
+                        debug!(
+                            "ApplicationSource '{source_name}' received event: {:?}",
+                            event.change
+                        );
 
-                    let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                    profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let mut wrapper = SourceEventWrapper::with_profiling(
-                        source_name.clone(),
-                        SourceEvent::Change(event.change),
-                        chrono::Utc::now(),
-                        profiling,
-                        event.wal_seq.unwrap_or_else(|| base.next_sequence()),
-                    );
+                        let mut wrapper = SourceEventWrapper::with_profiling(
+                            source_name.clone(),
+                            SourceEvent::Change(event.change),
+                            chrono::Utc::now(),
+                            profiling,
+                            event.wal_seq.unwrap_or_else(|| base.next_sequence()),
+                        );
 
-                    // Use pre-assigned WAL sequence from handle (WAL-before-ACK)
-                    if let Some(seq) = event.wal_seq {
-                        wrapper.source_position =
-                            Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                        // Use pre-assigned WAL sequence from handle (WAL-before-ACK)
+                        if let Some(seq) = event.wal_seq {
+                            wrapper.source_position =
+                                Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                        }
+                        input.pending = Some(wrapper);
                     }
 
-                    if let Err(e) = base.dispatch_event(wrapper).await {
+                    if let Err(e) = base
+                        .dispatch_event(input.pending.as_ref().expect("pending input").clone())
+                        .await
+                    {
                         debug!("Failed to dispatch change (no subscribers): {e}");
                     }
+                    input.pending = None;
                 }
 
                 info!("ApplicationSource '{source_name}' event processor stopped");
@@ -512,7 +548,7 @@ impl ApplicationSource {
             .instrument(span),
         );
 
-        *self.base.task_handle.write().await = Some(handle);
+        *task_slot = Some(handle);
         Ok(())
     }
 }
@@ -578,7 +614,9 @@ impl Source for ApplicationSource {
                 );
 
                 // Resume sequence counter from WAL head
-                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                let head = wal.head_sequence(&self.base.id).await.with_context(|| {
+                    format!("Failed to read WAL head for source '{}'", self.base.id)
+                })?;
                 if head > 0 {
                     self.base.set_next_sequence(head);
                     info!(
@@ -601,7 +639,7 @@ impl Source for ApplicationSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            let prune_handle = tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -624,8 +662,9 @@ impl Source for ApplicationSource {
                         }
                     }
                 }
-            });
-            *self.prune_task.write().await = Some(prune_handle);
+            })
+            .await
+            .with_context(|| format!("Application source '{}' WAL pruner registration", self.base.id))?;
         }
 
         Ok(())
@@ -641,22 +680,27 @@ impl Source for ApplicationSource {
             )
             .await;
 
-        // Cancel WAL pruning task
-        if let Some(handle) = self.prune_task.write().await.take() {
-            handle.abort();
+        if let Some(task) = self.base.task_handle.read().await.as_ref() {
+            task.abort();
         }
-
-        if let Some(handle) = self.base.task_handle.write().await.take() {
-            handle.abort();
-        }
-
+        drasi_lib::context::workers::cancel_owned_worker(
+            &mut *self.prune_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Application source '{}' WAL pruning cleanup", self.base.id))?;
+        drasi_lib::context::workers::join_owned_worker(
+            &mut *self.base.task_handle.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Application source '{}' dispatch cleanup", self.base.id))?;
         self.base
             .set_status(
                 ComponentStatus::Stopped,
                 Some("Application source stopped".to_string()),
             )
             .await;
-
         Ok(())
     }
 
@@ -668,42 +712,13 @@ impl Source for ApplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        // Replay when the query asked to resume, or when bootstrap is
-        // requested but no provider is configured (WAL-only application
-        // sources). A configured provider must still run on a restart
-        // with no checkpoint — resume_sequence=0 would skip it.
-        let wal_guard = self.wal.read().await;
-        if let Some(wal) = wal_guard.as_ref() {
-            let resume_seq = if let Some(ref resume_from) = settings.resume_from {
-                if resume_from.len() >= 8 {
-                    Some(u64::from_be_bytes(
-                        resume_from[..8].try_into().unwrap_or_default(),
-                    ))
-                } else {
-                    drop(wal_guard);
-                    return Err(anyhow::anyhow!(
-                        "Invalid resume_from position: expected at least 8 bytes, got {}",
-                        resume_from.len()
-                    ));
-                }
-            } else {
-                settings.resume_sequence
-            };
-            let replay_seq = match resume_seq {
-                Some(seq) => Some(seq),
-                None if settings.enable_bootstrap && !self.base.has_bootstrap_provider() => Some(0),
-                None => None,
-            };
-            if let Some(seq) = replay_seq {
-                let wal_clone = wal.clone();
-                drop(wal_guard);
-                return self
-                    .base
-                    .subscribe_with_replay(&settings, wal_clone.as_ref(), seq, "Application")
-                    .await;
-            }
+        let wal = self.wal.read().await.clone();
+        if let Some(wal) = wal {
+            return self
+                .base
+                .subscribe_with_wal(&settings, wal.as_ref(), "Application")
+                .await;
         }
-        drop(wal_guard);
         self.base
             .subscribe_with_bootstrap(&settings, "Application")
             .await

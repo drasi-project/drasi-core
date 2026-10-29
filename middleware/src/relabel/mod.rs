@@ -14,12 +14,12 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+#[cfg(feature = "engine-adapter")]
 use async_trait::async_trait;
-use drasi_core::{
-    interface::{
-        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
-        SourceMiddlewareFactory,
-    },
+#[cfg(feature = "engine-adapter")]
+use drasi_core::interface::{ElementIndex, SourceMiddleware, SourceMiddlewareFactory};
+use drasi_core_types::{
+    interface::{MiddlewareError, MiddlewareSetupError},
     models::{Element, ElementMetadata, SourceChange, SourceMiddlewareConfig},
 };
 use serde::Deserialize;
@@ -83,12 +83,10 @@ impl RelabelMiddleware {
     }
 }
 
-#[async_trait]
-impl SourceMiddleware for RelabelMiddleware {
-    async fn process(
+impl RelabelMiddleware {
+    pub async fn apply(
         &self,
         source_change: SourceChange,
-        _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         match source_change {
             SourceChange::Insert { element } => {
@@ -97,10 +95,17 @@ impl SourceMiddleware for RelabelMiddleware {
                     element: relabeled_element,
                 }])
             }
-            SourceChange::Update { element } => {
+            SourceChange::Replace { element } => Ok(vec![SourceChange::Replace {
+                element: self.relabel_element(element),
+            }]),
+            SourceChange::Update {
+                element,
+                removed_properties,
+            } => {
                 let relabeled_element = self.relabel_element(element);
                 Ok(vec![SourceChange::Update {
                     element: relabeled_element,
+                    removed_properties,
                 }])
             }
             SourceChange::Delete { metadata } => {
@@ -144,15 +149,14 @@ impl Default for RelabelMiddlewareFactory {
     }
 }
 
-impl SourceMiddlewareFactory for RelabelMiddlewareFactory {
-    fn name(&self) -> String {
-        "relabel".to_string()
+impl RelabelMiddlewareFactory {
+    pub fn name(&self) -> String {
+        "relabel".to_owned()
     }
-
-    fn create(
+    pub fn build(
         &self,
         config: &SourceMiddlewareConfig,
-    ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+    ) -> Result<RelabelMiddleware, MiddlewareSetupError> {
         let relabel_config: RelabelMiddlewareConfig =
             match serde_json::from_value(serde_json::Value::Object(config.config.clone())) {
                 Ok(cfg) => cfg,
@@ -177,6 +181,32 @@ impl SourceMiddlewareFactory for RelabelMiddlewareFactory {
             relabel_config.label_mappings.len()
         );
 
-        Ok(Arc::new(RelabelMiddleware::new(relabel_config)))
+        Ok(RelabelMiddleware::new(relabel_config))
+    }
+}
+
+#[cfg(feature = "engine-adapter")]
+#[async_trait]
+impl SourceMiddleware for RelabelMiddleware {
+    async fn process(
+        &self,
+        change: SourceChange,
+        _index: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        self.apply(change).await
+    }
+}
+
+#[cfg(feature = "engine-adapter")]
+impl SourceMiddlewareFactory for RelabelMiddlewareFactory {
+    fn name(&self) -> String {
+        RelabelMiddlewareFactory::name(self)
+    }
+    fn create(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|value| Arc::new(value) as Arc<dyn SourceMiddleware>)
     }
 }

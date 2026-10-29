@@ -81,7 +81,9 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                         },
                         Err(e) => return Err(IndexError::other(e)),
                     };
-                Ok(Some(Arc::new(stored_element.into())))
+                Element::try_from(stored_element)
+                    .map(|element| Some(Arc::new(element)))
+                    .map_err(IndexError::other)
             }
             Ok(Ok(None)) => Ok(None),
             Ok(Err(e)) => Err(e),
@@ -184,15 +186,21 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                                 match StoredElementContainer::decode(data.as_ref()) {
                                     Ok(container) => match container.element {
                                         Some(element) => element,
-                                        None => continue,
+                                        None => {
+                                            results.push(Err(IndexError::CorruptedData));
+                                            break;
+                                        }
                                     },
                                     Err(e) => {
                                         results.push(Err(IndexError::other(e)));
                                         break;
                                     }
                                 };
-                            let element: Element = stored_element.into();
-                            results.push(Ok(Arc::new(element)));
+                            results.push(
+                                Element::try_from(stored_element)
+                                    .map(Arc::new)
+                                    .map_err(IndexError::other),
+                            );
                         }
                         Err(e) => results.push(Err(IndexError::other(e))),
                     }
@@ -211,28 +219,14 @@ impl ElementArchiveIndex for RocksDbElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let context = self.context.clone();
-
+        let require_session = context.session_state.has_active_session()?;
         let task = task::spawn_blocking(move || {
-            let options = &context.options;
-            let block_cache = options.memory_budget().block_cache();
-            match context.db.drop_cf(ARCHIVE_CF) {
-                Ok(()) => {}
-                Err(err) => {
-                    let msg = err.to_string();
-                    if msg.contains("Invalid column family") {
-                        // Column family doesn't exist — nothing to clear
-                        return Ok(());
-                    }
-                    return Err(IndexError::other(err));
-                }
+            if context.db.cf_handle(ARCHIVE_CF).is_none() {
+                return Ok(());
             }
-            if let Err(err) = context.db.create_cf(
-                ARCHIVE_CF,
-                &crate::sizing::sized(ARCHIVE_CF, get_archive_cf_options(block_cache), options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-            Ok(())
+            context
+                .session_state
+                .clear_column_families(&[ARCHIVE_CF], require_session)
         });
 
         task.await.expect("Failed to clear archive")

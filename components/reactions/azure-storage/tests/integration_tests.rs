@@ -152,7 +152,7 @@ async fn start_drasi_with_reaction(
     )?;
     let query = Query::cypher(query_id)
         .query("MATCH (n:Sensor) RETURN n.id AS id, n.name AS name, n.region AS region, n.value AS value")
-        .from_source("app-source")
+        .from_input("app-source")
         .auto_start(true)
         .build();
 
@@ -370,7 +370,7 @@ async fn test_queue_reaction_aggregation() {
 
     let query = Query::cypher("agg-query")
         .query("MATCH (n:Sensor) RETURN sum(n.value) AS total_value")
-        .from_source("app-source")
+        .from_input("app-source")
         .auto_start(true)
         .build();
 

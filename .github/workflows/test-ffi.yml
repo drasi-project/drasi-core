@@ -46,6 +46,9 @@ jobs:
       - name: Show Rust toolchain
         run: rustup show
 
+      - name: Install pinned Protobuf compiler
+        uses: ./.github/actions/setup-protoc
+
       - name: Cache Cargo registry
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
@@ -66,9 +69,9 @@ jobs:
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: target
-          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-ffi-${{ hashFiles('ci/install_protoc.py') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-ffi-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-ffi-${{ hashFiles('ci/install_protoc.py') }}-
 
       - name: Build test plugins (cdylib)
         shell: bash
@@ -80,6 +83,12 @@ jobs:
           cargo build --lib -p drasi-reaction-snapshot-test
           cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
           cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+          cargo build --lib -p drasi-computation-source-counter -p drasi-computation-transformer-middleware -p drasi-computation-sink-capture -p drasi-computation-transformer-arithmetic --features dynamic-plugin
+          cargo build --lib -p drasi-computation-source-http -p drasi-computation-source-grpc -p drasi-computation-sink-http -p drasi-computation-sink-grpc -p drasi-computation-sink-sse --features dynamic-plugin
+
+      - name: Check native dependency isolation
+        shell: bash
+        run: python ci/check_native_dependencies.py
 
       - name: Copy plugins to test directory
         shell: bash
@@ -87,7 +96,7 @@ jobs:
           mkdir -p target/debug/plugins
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_source_counter drasi_computation_transformer_middleware drasi_computation_sink_capture drasi_computation_transformer_arithmetic drasi_computation_source_http drasi_computation_source_grpc drasi_computation_sink_http drasi_computation_sink_grpc drasi_computation_sink_sse; do
             SRC="target/debug/${PREFIX}${name}.${EXT}"
             if [ -f "$SRC" ]; then
               cp "$SRC" target/debug/plugins/
@@ -103,7 +112,7 @@ jobs:
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
           MISSING=0
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_source_counter drasi_computation_transformer_middleware drasi_computation_sink_capture drasi_computation_transformer_arithmetic drasi_computation_source_http drasi_computation_source_grpc drasi_computation_sink_http drasi_computation_sink_grpc drasi_computation_sink_sse; do
             FILE="target/debug/plugins/${PREFIX}${name}.${EXT}"
             if [ ! -f "$FILE" ]; then
               echo "ERROR: Expected plugin not found: $FILE"
@@ -115,10 +124,16 @@ jobs:
             ls -la target/debug/plugins/ || true
             exit 1
           fi
-          echo "All 6 test plugins verified."
+          echo "All 15 test plugins verified."
 
       - name: Run host-sdk FFI integration tests
         shell: bash
         env:
           RUST_BACKTRACE: full
-        run: cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1 --nocapture
+        run: cargo test -p drasi-host-sdk --test integration_test --test native_computation_pipeline -- --test-threads=1 --nocapture
+
+      - name: Run native network FFI loopback and wire tests
+        shell: bash
+        env:
+          RUST_BACKTRACE: full
+        run: cargo test -p drasi-host-sdk --test native_network_loopback --test native_network_wire -- --nocapture

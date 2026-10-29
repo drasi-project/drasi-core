@@ -32,7 +32,7 @@
 //! # Protocol Buffer Format
 //!
 //! Events are submitted using the `SourceChange` protobuf message. See the
-//! `proto/drasi/v1/source.proto` file for the full schema.
+//! `components/grpc-common/proto/source/drasi/v1/source.proto` for the full schema.
 //!
 //! ## Insert/Update
 //!
@@ -108,7 +108,7 @@ pub mod descriptor;
 mod tests;
 pub use config::GrpcSourceConfig;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
@@ -118,7 +118,7 @@ use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::managers::{log_component_start, log_component_stop};
+use drasi_lib::observability::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
@@ -128,7 +128,7 @@ use tracing::Instrument;
 // Allow unwrap in generated proto code - tonic generates code with unwrap() for HTTP response building
 #[allow(clippy::unwrap_used)]
 pub mod proto {
-    tonic::include_proto!("drasi.v1");
+    pub use drasi_grpc_common::source::*;
 }
 
 use proto::{
@@ -280,6 +280,10 @@ impl Source for GrpcSource {
     }
 
     async fn start(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.prune_task.read().await.is_none(),
+            "Previous WAL pruning cleanup must finish before restart"
+        );
         log_component_start("gRPC Source", &self.base.id);
 
         self.base
@@ -322,7 +326,11 @@ impl Source for GrpcSource {
                 );
 
                 // Resume sequence counter from WAL head
-                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                let head = wal
+                    .head_sequence(&self.base.id)
+                    .await
+                    .context("Cannot restore the committed gRPC WAL head")?;
+                self.base.begin_wal_subscriptions(head);
                 if head > 0 {
                     self.base.set_next_sequence(head);
                     info!(
@@ -381,7 +389,8 @@ impl Source for GrpcSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        let task = tokio::spawn(
+        drasi_lib::context::workers::spawn_owned_worker(
+            &self.base.task_handle,
             async move {
                 reporter
                     .set_status(
@@ -406,39 +415,34 @@ impl Source for GrpcSource {
                 reporter.set_status(ComponentStatus::Stopped, None).await;
             }
             .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(task);
+        )
+        .await
+        .with_context(|| format!("gRPC source '{}' listener registration", self.base.id))?;
 
         // Spawn WAL pruning task if durability is enabled
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            let prune_handle = tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
+                let mut stopping = base.subscribe_wal_pruning_stop();
                 loop {
-                    interval.tick().await;
-                    if let Some(confirmed) = base.compute_confirmed_position().await {
-                        if confirmed > 0 {
-                            match wal.prune_up_to(&source_id, confirmed).await {
-                                Ok(pruned) => {
-                                    if pruned > 0 {
-                                        let remaining =
-                                            wal.event_count(&source_id).await.unwrap_or(0);
-                                        debug!(
-                                            "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("[{source_id}] WAL prune failed: {e}");
-                                }
-                            }
+                    tokio::select! {
+                        biased;
+                        _ = stopping.wait_for(|stopping| *stopping) => break,
+                        _ = interval.tick() => {}
+                    }
+                    match base.prune_confirmed_wal(wal.as_ref()).await {
+                        Ok(pruned) if pruned > 0 => {
+                            debug!("[{source_id}] WAL pruned: count={pruned}");
                         }
+                        Ok(_) => {}
+                        Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
                     }
                 }
-            });
-            *self.prune_task.write().await = Some(prune_handle);
+            })
+            .await
+            .with_context(|| format!("gRPC source '{}' WAL pruner registration", self.base.id))?;
         }
 
         Ok(())
@@ -446,10 +450,23 @@ impl Source for GrpcSource {
 
     async fn stop(&self) -> Result<()> {
         log_component_stop("gRPC Source", &self.base.id);
-        // Cancel WAL pruning task
-        if let Some(handle) = self.prune_task.write().await.take() {
-            handle.abort();
+        if let Some(tx) = self.base.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
         }
+        self.base.stop_wal_pruning();
+        let pruning = drasi_lib::context::workers::join_owned_worker_gracefully(
+            &mut *self.prune_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("gRPC source '{}' WAL pruning cleanup", self.base.id))?;
+        anyhow::ensure!(
+            !matches!(
+                pruning,
+                drasi_lib::context::workers::WorkerCompletion::Cancelled
+            ),
+            "WAL pruning was cancelled before its operation completed"
+        );
         self.base.stop_common().await
     }
 
@@ -461,33 +478,22 @@ impl Source for GrpcSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        // If WAL is enabled and subscriber is resuming, use WAL replay
-        let wal_guard = self.wal.read().await;
-        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
-            // Decode resume_from as big-endian u64 sequence
-            if resume_from.len() >= 8 {
-                let resume_seq =
-                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
-                let wal_clone = wal.clone();
-                drop(wal_guard);
-                return self
-                    .base
-                    .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "gRPC")
-                    .await;
-            } else {
-                drop(wal_guard);
-                return Err(anyhow::anyhow!(
-                    "Invalid resume_from position: expected at least 8 bytes, got {}",
-                    resume_from.len()
-                ));
-            }
+        let wal = self.wal.read().await.clone();
+        if let Some(wal) = wal {
+            return self
+                .base
+                .subscribe_with_wal(&settings, wal.as_ref(), "gRPC")
+                .await;
         }
-        drop(wal_guard);
         self.base.subscribe_with_bootstrap(&settings, "gRPC").await
     }
 
     fn supports_replay(&self) -> bool {
         self.config.durability.as_ref().is_some_and(|d| d.enabled)
+    }
+
+    async fn on_subscriptions_complete(&self) {
+        self.base.complete_wal_subscriptions();
     }
 
     async fn deprovision(&self) -> Result<()> {
@@ -851,7 +857,7 @@ fn convert_proto_to_source_change(
             if change_type == proto::ChangeType::Insert {
                 Ok(SourceChange::Insert { element })
             } else {
-                Ok(SourceChange::Update { element })
+                Ok(SourceChange::update(element))
             }
         }
         (proto::ChangeType::Delete, Some(Change::Metadata(proto_metadata))) => {

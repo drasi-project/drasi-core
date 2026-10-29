@@ -1,0 +1,175 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::config::{
+    QueryConfig, QueryInputConfig, QueryJoinConfig, QueryResultConfig, SourceSubscriptionSettings,
+};
+use drasi_core::{
+    middleware::MiddlewareTypeRegistry, models::SourceMiddlewareConfig, query::QueryBuilder,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, sync::Arc};
+
+/// Native query execution settings, independent of the legacy QueryManager.
+/// The existing DTOs describe inputs, result options, joins and middleware without
+/// owning runtime state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryExecutionSettings {
+    #[serde(default)]
+    pub joins: Vec<QueryJoinConfig>,
+    #[serde(default)]
+    pub middleware: Vec<SourceMiddlewareConfig>,
+    #[serde(default)]
+    pub inputs: Vec<QueryInputConfig>,
+    #[serde(default, skip_serializing_if = "QueryResultConfig::is_default")]
+    pub result: QueryResultConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transactions: Option<super::SourceTransactionLimits>,
+}
+
+pub struct QueryMiddlewareResource(pub Arc<MiddlewareTypeRegistry>);
+
+/// Ordinary API declaration metadata, not an execution or lifecycle owner.
+#[derive(Clone)]
+pub(crate) struct OrdinaryQueryDeclaration {
+    pub(crate) id: super::ComponentId,
+    pub(crate) failure: Option<Arc<super::GraphError>>,
+    pub(crate) backend: Option<Arc<dyn drasi_core::interface::IndexBackendPlugin>>,
+    pub(crate) default_dispatch_capacity: usize,
+    pub(crate) sources: Vec<Arc<super::SourcePluginHost>>,
+}
+
+impl QueryExecutionSettings {
+    pub(super) fn fingerprint_settings(&self) -> Self {
+        let mut settings = self.clone();
+        for input in &mut settings.inputs {
+            input.nodes.sort();
+            input.nodes.dedup();
+            input.relations.sort();
+            input.relations.dedup();
+        }
+        settings.joins.sort_by(|left, right| left.id.cmp(&right.id));
+        for join in &mut settings.joins {
+            join.keys.sort_by(|left, right| {
+                (&left.label, &left.property).cmp(&(&right.label, &right.property))
+            });
+        }
+        settings
+    }
+
+    pub(crate) fn query_configuration(
+        &self,
+        definition: &super::ContinuousQueryDefinition,
+        bootstrap: bool,
+        recovery: super::QueryRecoveryPolicy,
+    ) -> QueryConfig {
+        let mut config = crate::Query::cypher(definition.id.as_str())
+            .query(definition.query.clone())
+            .enable_bootstrap(bootstrap)
+            .with_outbox_capacity(definition.outbox_capacity.get())
+            .build();
+        config.query_language = match definition.language {
+            super::ComputationQueryLanguage::Cypher => crate::config::QueryLanguage::Cypher,
+            super::ComputationQueryLanguage::Gql => crate::config::QueryLanguage::GQL,
+        };
+        config.inputs = self.inputs.clone();
+        config.result = self.result.clone();
+        config.middleware = self.middleware.clone();
+        config.joins = (!self.joins.is_empty()).then(|| self.joins.clone());
+        config.recovery_policy = Some(match recovery {
+            super::QueryRecoveryPolicy::Strict => crate::RecoveryPolicy::Strict,
+            super::QueryRecoveryPolicy::AutoReset => crate::RecoveryPolicy::AutoReset,
+        });
+        config
+    }
+
+    pub fn from_legacy_config(config: &QueryConfig) -> Self {
+        Self {
+            joins: config.joins.clone().unwrap_or_default(),
+            middleware: config.middleware.clone(),
+            inputs: config.inputs.clone(),
+            result: config.result.clone(),
+            source_transactions: None,
+        }
+    }
+
+    /// Derive exactly the same source label interests as the legacy configuration
+    /// path. The compatibility source adapter supplies its own scoped subscriber ID.
+    pub fn legacy_subscriptions(
+        config: &QueryConfig,
+    ) -> anyhow::Result<Vec<SourceSubscriptionSettings>> {
+        let labels =
+            crate::queries::LabelExtractor::extract_labels(&config.query, &config.query_language)?;
+        crate::queries::SubscriptionSettingsBuilder::build_subscription_settings(config, &labels)
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.joins.is_empty()
+            && self.middleware.is_empty()
+            && self.inputs.is_empty()
+            && self.result.is_default()
+            && self.source_transactions.is_none()
+    }
+
+    pub(super) fn validate(&self, registry: Option<&MiddlewareTypeRegistry>) -> anyhow::Result<()> {
+        let mut joins = BTreeSet::new();
+        for join in &self.joins {
+            super::data::validate_identifier("join", &join.id)?;
+            if !joins.insert(&join.id) || join.keys.len() < 2 {
+                anyhow::bail!("synthetic joins require unique IDs and at least two keys");
+            }
+            for key in &join.keys {
+                super::data::validate_identifier("join label", &key.label)?;
+                super::data::validate_identifier("join property", &key.property)?;
+            }
+        }
+        let middleware =
+            super::middleware::validate_middleware_configs(&self.middleware, registry)?;
+        self.result.validate()?;
+        let mut inputs = BTreeSet::new();
+        for input in &self.inputs {
+            input.validate()?;
+            if !inputs.insert(&input.component) {
+                anyhow::bail!("duplicate query input '{}'", input.component);
+            }
+            for name in &input.pipeline {
+                if !middleware.contains(name.as_str()) {
+                    anyhow::bail!("input pipeline references undeclared middleware {name}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn configure(
+        &self,
+        mut builder: QueryBuilder,
+        registry: Option<Arc<MiddlewareTypeRegistry>>,
+    ) -> anyhow::Result<QueryBuilder> {
+        self.validate(registry.as_deref())?;
+        if !self.middleware.is_empty() {
+            builder = builder.with_middleware_registry(registry.ok_or_else(|| {
+                anyhow::anyhow!("query middleware requires a registered middleware resource")
+            })?);
+        }
+        for config in &self.middleware {
+            builder = builder.with_source_middleware(Arc::new(config.clone()));
+        }
+        for input in &self.inputs {
+            builder = builder.with_source_pipeline(&input.component, &input.pipeline);
+        }
+        Ok(builder.with_joins(self.joins.iter().cloned().map(Into::into).collect()))
+    }
+}

@@ -202,7 +202,7 @@ async fn build_core_custom(
 
     let query = Query::cypher("test-query")
         .query(cypher)
-        .from_source("pg-test-source")
+        .from_input("pg-test-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -877,7 +877,9 @@ async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
                     if let Some(id) = element_id_int(change.get_reference().element_id.as_ref()) {
                         match change {
                             SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
-                            SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                            SourceChange::Update { .. } | SourceChange::Replace { .. } => {
+                                *updates.entry(id).or_default() += 1
+                            }
                             SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
                             SourceChange::Future { .. } => {}
                         }
@@ -1007,7 +1009,7 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
             RETURN p.id AS id, p.price AS price, p.quantity AS quantity, p.total AS total
             "#,
         )
-        .from_source("pg-decimal-test-source")
+        .from_input("pg-decimal-test-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -1172,7 +1174,7 @@ async fn test_timestamptz_short_offset_serialization() -> Result<()> {
             RETURN e.id AS id, e.created_at AS created_at
             "#,
         )
-        .from_source("pg-ts-test-source")
+        .from_input("pg-ts-test-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -1340,7 +1342,7 @@ async fn test_boolean_datatype_bootstrap_and_cdc() -> Result<()> {
             RETURN f.id AS id, f.active AS active
             "#,
         )
-        .from_source("pg-bool-test-source")
+        .from_input("pg-bool-test-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -1820,7 +1822,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
             RETURN u.id AS id, u.name AS name
             "#,
         )
-        .from_source("pg-mq-source")
+        .from_input("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1833,7 +1835,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
             RETURN u.id AS id, u.name AS name
             "#,
         )
-        .from_source("pg-mq-source")
+        .from_input("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -2067,7 +2069,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
             RETURN u.id AS id, u.name AS name
             "#,
         )
-        .from_source("kr-source")
+        .from_input("kr-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -2526,7 +2528,7 @@ async fn test_toast_unchanged_omitted_on_update() -> Result<()> {
     while Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
             Ok(Ok(wrapper)) => {
-                if let SourceEvent::Change(SourceChange::Update { element }) = &wrapper.event {
+                if let SourceEvent::Change(SourceChange::Update { element, .. }) = &wrapper.event {
                     if element.get_property("id") == &ElementValue::Integer(1) {
                         saw_update = true;
                         big_on_update = element.get_properties().get("big").cloned();

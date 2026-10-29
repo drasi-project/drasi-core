@@ -57,9 +57,11 @@ pub fn map_updated_event(
     let mut changes = Vec::new();
     let effective_from = event_effective_from(current);
 
-    changes.push(SourceChange::Update {
-        element: build_event_node(current, source_id, effective_from),
-    });
+    changes.push(SourceChange::update(build_event_node(
+        current,
+        source_id,
+        effective_from,
+    )));
 
     append_road_deletes(previous, source_id, effective_from, &mut changes);
     append_road_inserts(current, source_id, effective_from, &mut changes);

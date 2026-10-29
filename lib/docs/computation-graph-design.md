@@ -1,0 +1,293 @@
+# ComputationGraph design
+
+[Usage](computation-graph-usage.md) |
+[Configuration](computation-graph-configuration.md) |
+[Schemas, ports, and pipes](computation-graph-schemas-ports-pipes.md) |
+[Implementation reference](computation-graph-reference.md)
+
+ComputationGraph manages components and moves changes between them inside a
+DrasiLib instance. Each instance has one ComputationGraph. It owns the components, their connections, their resources
+and the decisions about when to create, start, stop or replace them.
+
+This describes the implementation in this branch.
+**ComputationGraph is the only execution engine.**
+
+For a detailed implementation-oriented explanation, including the shift from
+ComponentGraph and where to work in the code, see the
+[maintainer's guide](computation-graph-maintainers-guide.md).
+
+Optional [managed configuration](managed-configuration.md) adds durable
+desired-state acceptance, component reconciliation and named snapshots
+directly to DrasiLib. Factories, storage and provider resolution are supplied
+externally; ordinary object injection remains the default without persistence.
+
+## One runtime, existing plugin contracts
+
+You can keep using the existing source, query and reaction APIs and plugins.
+Those APIs use ComputationGraph directly; there is no engine selector or fallback
+query manager. Existing plugin contracts remain supported through adapters, not
+through a second execution engine.
+
+The graph can also run custom sources, transformers, sinks and services without
+a continuous query. A service is a component with background work but no data
+input or output ports.
+
+```mermaid
+flowchart LR
+    S["Source: produces changes"] --> Q["Query or transformer: processes changes"]
+    Q --> R["Reaction or sink: handles results"]
+    G["ComputationGraph: owns components and connections"] -. manages .-> S
+    G -. manages .-> Q
+    G -. manages .-> R
+```
+
+The existing ComponentGraph-shaped inspection and event APIs remain available
+as read-only compatibility views of ComputationGraph publications. There is no
+second mutable ComponentGraph or background task copying runtime state into it.
+These APIs describe what is happening; they do not decide which components exist
+or control execution.
+
+## A node appears before initialization
+
+An accepted `add_source`, `add_query` or `add_reaction` call records the node
+before its initialization and startup complete.
+
+```mermaid
+flowchart LR
+    A["Add the node"] --> C["Create or initialize the component"]
+    C -->|success| S["Start when requested and dependencies are ready"]
+    C -->|failure| E["Keep the node and record the error"]
+    S -->|success| R["Report readiness"]
+    S -->|failure| E
+```
+
+This means a bad query or failed initialization is visible as a failed component,
+not a component that silently vanished.
+
+There are two important limits:
+
+- An addition can still be rejected, for example because its ID already exists,
+  ownership conflicts, or the instance is closed.
+- Source and reaction objects passed to the standard APIs are constructed by the
+  caller. If their constructor fails before the call, DrasiLib has no object to
+  add. Query construction happens inside DrasiLib after its node is added.
+
+Adding a node, finishing its creation and becoming ready are separate events.
+Use the returned component handle when you need to wait for a particular one.
+The [usage guide](computation-graph-usage.md#add-a-component-and-wait-for-readiness)
+shows the difference.
+
+## Components have more than one kind of status
+
+Inspection answers separate questions:
+
+| Question | Examples |
+|---|---|
+| Has the component been created? | Waiting, being created, missing a dependency, created, creation failed |
+| What is its execution doing? | Stopped, starting, running, pausing, paused, stopping, failed |
+| What is known about its health? | Unknown, healthy, degraded, unavailable |
+
+A stopped component may still have an initialization error. A running graph
+does not mean every component is running. The older status API has fewer states
+and cannot show all these distinctions.
+The instance running flag records admitted startup, including partial startup;
+it is not aggregate component readiness or proof of completed cleanup.
+
+Pausing keeps the component and its state so processing can resume without
+running its start hook again. Stopping calls its stop hook. Restarting also
+depends on what the plugin supports; some plugins need a fresh object.
+Exact API state names and transitions are in the
+[state reference](computation-graph-reference.md#states-and-readiness).
+
+## Queries run independently
+
+A query added through DrasiLib is a `ContinuousQueryTransformer` in the
+instance's ComputationGraph. Its source readers, scheduled-work source and
+result outlet are components in that same graph, not a private query graph.
+
+The graph owns independently scheduled component tasks. Independent queries
+can therefore run on different workers in a multi-thread runtime. A
+single-thread runtime also works. ComputationGraph does not allocate one
+dedicated thread per component.
+
+Generation-fenced lifecycle groups start and stop a query and its exclusive
+helpers without stopping a shared source. Shutdown waits for owned tasks and
+cleanup before releasing query resources. Cancelling the caller's wait does
+not abandon that work.
+
+## Lifecycle budgets and interruption
+
+Instance startup has a configurable 600-second overall budget; stop and shutdown
+have 60 seconds. Separate construction/configuration, resource-construction,
+activation and cleanup limits default to 5, 30, 300 and 5 seconds. These limits
+cover cooperative asynchronous work, not preemption of non-yielding native code.
+
+A small instance-owned startup task preserves operation ownership independently
+of the caller. Stop and permanent shutdown supersede its startup wait, so an
+unpolled or abandoned start request cannot retain the lifecycle gate indefinitely.
+Accepted component work still belongs to the graph and is stopped through its
+normal lifecycle operations. A late startup completion cannot mark a stopped
+instance running again. This task coordinates lifecycle calls; it is not another
+graph or query executor.
+
+Managed reconciliation retains its accepted graph request while releasing the
+instance gate before construction and activation waits. A stop can interrupt that
+wait without losing the accepted definition or the eventual reconciliation result.
+Configuration acceptance and protected resource-retirement checks remain
+serialized; interruption is not permission to discard an uncertain commit.
+See the [configuration guide](computation-graph-configuration.md#library-settings)
+for the settings and retry behavior.
+
+## How events are ordered and buffered
+
+Each continuous query has one bounded input queue shared by its sources.
+Within a source, admitted events are ordered by that source's logical sequence.
+The available source heads are compared in this order:
+
+1. The event timestamp reported by the source.
+2. The source's position in that query's source list.
+3. The sequence number maintained by that source.
+
+A backwards timestamp cannot move a later source event ahead of an earlier
+unprocessed one. The same rule protects reaction checkpoints. This avoids
+mistaking an unprocessed event for a duplicate after advancing a high-water mark.
+
+The same source can have a different position in another query. Its sequence
+number is assigned before the event is sent to subscribers; a query does not
+invent a replacement sequence. Changing source order changes the query's
+configuration identity, so old checkpoints cannot silently be reused under a
+different ordering.
+
+This orders **events already in the queue**. It does not wait for a quiet source
+or promise an order over events that have not arrived. Scheduled query work uses
+the same queue, with its due time and a rank after the configured sources.
+
+A Channel source waits when the queue is full. A Broadcast source can lose
+events when the queue is full; selecting it is an explicit loss/backpressure
+choice. Other source, output and reaction queues have their own limits.
+
+Custom graphs can use FIFO, broadcast or retained/replayable connections.
+The [QoS channel](computation-graph-qos.md) adds shared blocking or lossy
+multicast and durable multicast with separate subscriber progress.
+The selected connection and consumer must support the guarantees requested.
+Putting a result in a queue is not the same as finishing its handling.
+
+## Readiness messages are separate from data
+
+Connected components can exchange readiness and availability messages through
+small, separate queues. A full data queue therefore does not by itself prevent
+a readiness notification.
+
+A component can contact only its connected neighbours. Old connections and old
+component handles cannot control replacement instances. Waiting for downstream
+readiness is optional; a cycle in which each side waits for the other still
+prevents successful startup. Deadlines report that failure; they do not repair
+the application's readiness protocol.
+
+## Storage and recovery
+
+Queries keep current result rows, source progress, output sequence numbers and
+recent output history. The recent history lets consumers recover missed results
+without always rebuilding from a full snapshot.
+
+Query factories construct `ContinuousQueryTransformer` directly. It invokes the
+same `QueryEvaluator` as the standalone query API; solving, change detection and
+aggregation are not reimplemented. With a storage provider that supports atomic query output, index changes,
+source checkpoints, output sequence, retained outputs and current rows commit
+together. Only committed results become visible. Unconfirmed output is replayed
+after restart without reevaluating the input. Query-result positions remain
+stable while replay uses new transport delivery numbers.
+
+An independent `QueryScheduledSource` observes a read-only committed future
+queue. It emits ordinary routed, typed due-work notifications without removing
+work. The query transaction removes actual due work, reevaluates it using the
+existing logic and stages output atomically. Lost/duplicate hints cannot lose
+the stored work.
+
+The middleware transformer also has a durable mode. It saves previous elements,
+input progress and pending transformed output together, then uses durable output
+connections. After a restart it resends unconfirmed output instead of running
+stateful middleware twice. A persistent query rejects known memory-only
+middleware output; query storage cannot repair lost transformer state.
+
+Persistent indexes alone do not make query output durable. A reaction that saves
+progress needs both persistent reaction state and persistent output from its
+queries. The reaction records completed handling, not merely queue acceptance.
+
+Native admission QoS, retained inputs and shared journals have RocksDB-backed
+process-crash coverage with eager/paged storage on both Tokio runtimes. The
+[28-case crash matrix](../../lib-integration-tests/tests/native_input_crash_recovery.rs)
+checks pending accepted input, lost admission replies and pre/post-query-commit
+reconstruction against exact identities, progress and output. This does not
+qualify memory-only queries, arbitrary connectors, power loss or exactly-once
+external effects.
+
+Recovery can fail rather than skip data, rebuild from a snapshot where supported,
+or deliberately skip a gap for reactions configured to allow that. Fresh trigger
+reactions start from their subscription point rather than replaying old outputs.
+Reset and deletion preserve enough query identity to reject checkpoints from an
+unrelated earlier use of the same query ID.
+
+These guarantees do not automatically combine independent components into one
+transaction. A [TransactionTransformer](computation-graph-transactions.md) can
+explicitly group a linear sequence of opt-in transformers under one commit.
+Its steps have isolated areas in the same transactional storage and exchange
+events directly, without pipes. Sources, reactions and external side effects
+remain outside that boundary.
+
+## Changes, removal and cleanup
+
+The graph can preview the effects of a change before applying it. It checks that
+the graph and affected component instances have not changed since that preview.
+It then pauses, stops, reconnects or replaces the affected parts as needed.
+Unchanged components can continue running.
+
+Removal can refuse a dependency-breaking change, include dependents, retain an
+explicitly allowed missing connection, or wait for supported pending work to
+finish. A failed cleanup remains visible and retryable.
+
+This is not all-or-nothing deployment of a fully initialized batch. A failure can
+leave some components stopped or new declarations showing errors. That is
+consistent with making additions visible immediately.
+
+Always await shutdown. Dropping an instance cannot finish asynchronous cleanup.
+Borrowed providers remain the responsibility of their owner.
+
+## What inspection shows
+
+Inspection includes the instance's ComputationGraph, with queries and their
+helpers alongside other components. It shows connections, known resources,
+plugin versions and dependencies. Component IDs share the DrasiLib instance
+namespace; ordinary query APIs identify their exclusive lifecycle helpers.
+
+It reports actual supplied or reported objects, not guesses about private plugin
+internals. Resource links do not prove that a provider was used for every event.
+Plugin references describe components' implementations, not every installed
+plugin binary.
+
+Logs, metrics, recent state changes and per-change timing data support diagnosis.
+The inventory comes from one coherent graph registry publication, not a
+combination of separately observed query graphs. It is not an atomic snapshot
+of every provider's private processing state.
+
+Observation-only publications share immutable desired snapshots, persistent
+observed/registry maps and completed reports. Component slots explicitly mark
+configuration and read-capability captures dirty; newly constructed capabilities
+can therefore become visible without a topology revision. The event translator
+visits changed members and reuses immutable kind lookups. Full topology exports
+still cost work proportional to the exported graph.
+
+## Current limits
+
+- Standard source/reaction additions still require preconstructed objects.
+- Some providers' dependencies and plugin/version information are not reported.
+- Graph export is not a complete recipe for rebuilding every plugin and provider.
+- Server still owns solution-deployment and cloning work and does not expose
+  every lower-level graph operation.
+- There is no separate atomic batch-deployment API or automatic migration from
+  ComponentGraph's stored state.
+- Compatibility adapters still convert events and results between formats.
+  Performance depends on the workload; parity with ComponentGraph is not claimed.
+
+For exact types, connection guarantees, failure behaviour and code locations,
+use the [implementation reference](computation-graph-reference.md).

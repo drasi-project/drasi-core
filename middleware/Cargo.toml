@@ -13,17 +13,19 @@ readme = "../readme.md"
 workspace = true
 
 [features]
-default = []
+default = ["engine-adapter"]
+# Existing query-engine middleware interfaces; native map/relabel do not need them.
+engine-adapter = ["dep:drasi-core"]
 
 # Individual middleware features
-jq = ["dep:jq-rs"]
+jq = ["engine-adapter", "dep:jq-rs"]
 bundled-jq = ["jq", "jq-rs/bundled"]
-decoder = []
+decoder = ["engine-adapter"]
 map = []
-parse_json = []
-promote = []
+parse_json = ["engine-adapter"]
+promote = ["engine-adapter"]
 relabel = []
-unwind = []
+unwind = ["engine-adapter"]
 
 # Convenience feature to enable all middleware
 all = ["jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
@@ -34,7 +36,8 @@ features = ["bundled-jq", "decoder", "map", "parse_json", "promote", "relabel", 
 [dependencies]
 # Core dependencies (always needed)
 async-trait = "0.1.68"
-drasi-core.workspace = true
+drasi-core = { workspace = true, optional = true }
+drasi-core-types = { workspace = true }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

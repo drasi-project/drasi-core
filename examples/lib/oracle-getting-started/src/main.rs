@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
             RETURN p.id AS id, p.name AS name, p.price AS price
         "#,
         )
-        .from_source("oracle-source")
+        .from_input("oracle-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

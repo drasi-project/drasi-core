@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Test reaction that exercises the streaming FFI bootstrap and snapshot
-//! fetcher vtable paths.
+//! fetcher vtable paths, and injected initialization failure.
 //!
 //! This crate compiles as a cdylib and exercises:
 //! - All 4 `BootstrapContext` callbacks through the FFI boundary
@@ -58,6 +58,8 @@ pub struct SnapshotTestReaction {
     status: Mutex<ComponentStatus>,
     report: Arc<Mutex<BootstrapReport>>,
     snapshot_fetcher: Mutex<Option<Arc<dyn SnapshotFetcher>>>,
+    panic_on_initialize: bool,
+    failed_initialization_store: Mutex<Option<Arc<dyn drasi_lib::StateStoreProvider>>>,
 }
 
 impl SnapshotTestReaction {
@@ -69,6 +71,8 @@ impl SnapshotTestReaction {
             status: Mutex::new(ComponentStatus::Added),
             report: report.clone(),
             snapshot_fetcher: Mutex::new(None),
+            panic_on_initialize: false,
+            failed_initialization_store: Mutex::new(None),
         };
         (reaction, report)
     }
@@ -105,10 +109,18 @@ impl Reaction for SnapshotTestReaction {
     }
 
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        std::collections::HashMap::new()
+        std::collections::HashMap::from([(
+            "panic_on_initialize".into(),
+            serde_json::Value::Bool(self.panic_on_initialize),
+        )])
     }
 
     async fn initialize(&self, context: ReactionRuntimeContext) {
+        if self.panic_on_initialize {
+            *self.failed_initialization_store.lock().await = context.state_store;
+            tokio::task::yield_now().await;
+            panic!("snapshot-test initialization panic");
+        }
         // Test-only: exercise the FFI identity-provider clone/drop path across the reaction
         // plugin boundary. Gated entirely behind the
         // `DRASI_SNAPSHOT_TEST_IDENTITY_CLONE_STRESS` environment variable (read only here) so
@@ -165,6 +177,7 @@ impl Reaction for SnapshotTestReaction {
     }
 
     async fn stop(&self) -> Result<()> {
+        self.failed_initialization_store.lock().await.take();
         *self.status.lock().await = ComponentStatus::Stopped;
         Ok(())
     }
@@ -226,9 +239,12 @@ impl Reaction for SnapshotTestReaction {
     }
 }
 
-/// Empty config DTO.
+/// Failure injection belongs only to this unpublished test fixture.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotTestConfig {}
+pub struct SnapshotTestConfig {
+    #[serde(default)]
+    pub panic_on_initialize: bool,
+}
 
 /// Plugin descriptor for the snapshot-test reaction.
 pub use descriptor::SnapshotTestReactionDescriptor;

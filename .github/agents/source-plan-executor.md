@@ -213,7 +213,7 @@ mod integration_tests {
         // 3. Create query
         let query = Query::cypher("test-query")
             .query("MATCH (n:file) RETURN n.path AS path, n.content AS content")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(true)
             .build();
         
@@ -381,7 +381,7 @@ mod integration_tests {
         // 3. Create query
         let query = Query::cypher("test-query")
             .query("MATCH (n:test_table) RETURN n.id AS id, n.name AS name")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(true)
             .enable_bootstrap(true)
             // Recovery options (use as appropriate):
@@ -520,7 +520,7 @@ mod integration_tests {
         // 3. Create query
         let query = Query::cypher("test-query")
             .query("MATCH (n:item) RETURN n.id AS id, n.data AS data")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(true)
             .build();
         

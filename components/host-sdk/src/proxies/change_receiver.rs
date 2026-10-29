@@ -22,7 +22,12 @@
 //! The cross-boundary channel uses `std::sync::mpsc` (not `tokio::sync::mpsc`)
 //! because the callback runs on the plugin's tokio runtime, which is a
 //! separate cdylib copy of tokio with incompatible internal state.
+//!
+//! A change event the host cannot decode **terminates** the change stream with
+//! [`UndecodableSourceEvent`]. Skipping it would let the consumer confirm later
+//! source positions past the lost change, so the loss could never be replayed.
 
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,14 +37,57 @@ use drasi_lib::channels::ChangeReceiver;
 use drasi_plugin_sdk::ffi::payload::{consume_bootstrap_event, consume_source_event};
 use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent};
 
+/// A plugin delivered a change event whose payload the host could not decode.
+///
+/// [`ChangeReceiverProxy::recv`] returns this (inside `anyhow::Error`) and the
+/// stream ends: the forwarder is stopped and every later `recv` fails. Ending
+/// the stream instead of skipping the event means the consumer never confirms a
+/// position beyond the lost change, so a restart resumes from before it. The
+/// specific cause (oversized, null or malformed payload) is logged where the
+/// payload is consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndecodableSourceEvent {
+    payload_len: usize,
+    timestamp_us: i64,
+}
+
+impl UndecodableSourceEvent {
+    /// Size in bytes of the payload that failed to decode.
+    pub fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    /// Event timestamp (microseconds) the plugin reported for the lost change.
+    pub fn timestamp_us(&self) -> i64 {
+        self.timestamp_us
+    }
+}
+
+impl fmt::Display for UndecodableSourceEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "change stream terminated: undecodable source event \
+             ({} byte payload, timestamp {} us)",
+            self.payload_len, self.timestamp_us
+        )
+    }
+}
+
+impl std::error::Error for UndecodableSourceEvent {}
+
+/// An item on the host-side change channel: a decoded event, or the decode
+/// failure that ends the stream.
+type PushedChange = Result<Arc<SourceEventWrapper>, UndecodableSourceEvent>;
+
 /// Decode a plugin-sent `FfiSourceEvent` into a **host-owned** `SourceEventWrapper`.
 ///
 /// The payload crosses the cdylib boundary as MessagePack bytes (issue #602): the
 /// host deserializes its own copy and frees the plugin's buffer via the
 /// plugin-supplied `payload_drop_fn`. The host never reads or drops the plugin's
 /// `repr(Rust)` memory. Returns `None` if the payload cannot be decoded (the
-/// plugin buffer is freed regardless). Delegates to the canonical
-/// [`consume_source_event`], where the size/null hardening lives.
+/// plugin buffer is freed regardless and the reason is logged). Delegates to the
+/// canonical [`consume_source_event`], where the size/null hardening lives.
 fn decode_source_event(ffi_event: &FfiSourceEvent) -> Option<SourceEventWrapper> {
     unsafe { consume_source_event(ffi_event) }
 }
@@ -53,12 +101,15 @@ fn decode_bootstrap_event(ffi_event: &FfiBootstrapEvent) -> Option<BootstrapEven
 /// Context passed to the push callback. Holds the std mpsc sender and a
 /// tokio Notify to wake the host receiver.
 struct PushCallbackContext {
-    tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Arc<SourceEventWrapper>>>>,
+    tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<PushedChange>>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
 /// The push callback invoked by the plugin forwarder for each event.
 /// Uses `std::sync::mpsc` which is safe to call from any runtime.
+///
+/// Returns `true` to keep the forwarder running and `false` to stop it: on
+/// shutdown, on a closed host receiver, and after an undecodable event.
 extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     // Catch panics to prevent unwinding across the extern "C" boundary (which is UB).
     // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here;
@@ -93,14 +144,17 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
     }
 
     let ffi_event = unsafe { &*event };
-    let decoded = decode_source_event(ffi_event);
+    let lost = UndecodableSourceEvent {
+        payload_len: ffi_event.payload_len,
+        timestamp_us: ffi_event.timestamp_us,
+    };
+    let item = decode_source_event(ffi_event).map(Arc::new).ok_or(lost);
     // Free the plugin-allocated `#[repr(C)]` envelope (POD; no recursive Drop).
     unsafe { drop(Box::from_raw(event)) };
 
-    let Some(wrapper) = decoded else {
-        // Undecodable payload — skip without tearing down the stream.
-        return true;
-    };
+    // A decode failure is delivered in order, after every earlier event, and
+    // then stops the forwarder so nothing after the lost change is consumed.
+    let keep_running = item.is_ok();
 
     // Forward to the host receiver. On any failure (receiver gone or a poisoned
     // lock) return false to stop the forwarder, but do NOT reclaim the leaked Arc
@@ -111,14 +165,12 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
     let Some(tx) = guard.as_ref() else {
         return false;
     };
-    let ok = tx.send(Arc::new(wrapper)).is_ok();
+    let sent = tx.send(item).is_ok();
     drop(guard);
-    if ok {
+    if sent {
         context.notify.notify_one();
-        true
-    } else {
-        false
     }
+    sent && keep_running
 }
 
 /// FFI state that owns the plugin-side receiver and manages its lifetime.
@@ -148,7 +200,7 @@ impl Drop for FfiReceiverState {
 /// waits on a `tokio::sync::Notify` and then drains from the std channel,
 /// avoiding any cross-cdylib tokio usage.
 pub struct ChangeReceiverProxy {
-    rx: std::sync::mpsc::Receiver<Arc<SourceEventWrapper>>,
+    rx: std::sync::mpsc::Receiver<PushedChange>,
     notify: Arc<tokio::sync::Notify>,
     /// Prevent the callback context from being freed while the plugin forwarder runs.
     _callback_ctx: Arc<PushCallbackContext>,
@@ -175,9 +227,9 @@ impl ChangeReceiverProxy {
             state: inner.state,
         });
 
-        // Increment the Arc refcount for the plugin forwarder's use.
-        // This leaked reference is reclaimed in the callback when
-        // the channel closes (null event) or the callback returns false.
+        // Increment the Arc refcount for the plugin forwarder's use. This
+        // leaked reference is reclaimed exactly once, by the null sentinel the
+        // plugin sends when its forwarder exits (never on a `false` return).
         let ctx_for_plugin = callback_ctx.clone();
         let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut std::ffi::c_void;
 
@@ -196,11 +248,17 @@ impl ChangeReceiverProxy {
 
 #[async_trait]
 impl ChangeReceiver<SourceEventWrapper> for ChangeReceiverProxy {
+    /// Receive the next change event.
+    ///
+    /// Fails with [`UndecodableSourceEvent`] when the plugin delivered a change
+    /// the host could not decode, and with a "Channel closed" error once the
+    /// stream has ended. Both are terminal.
     async fn recv(&mut self) -> anyhow::Result<Arc<SourceEventWrapper>> {
         loop {
             // Try to receive without blocking first
             match self.rx.try_recv() {
-                Ok(event) => return Ok(event),
+                Ok(Ok(event)) => return Ok(event),
+                Ok(Err(lost)) => return Err(lost.into()),
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     // Wait for the plugin to notify us of a new event
                     self.notify.notified().await;
@@ -570,6 +628,102 @@ mod ownership_tests {
         unsafe { drop(Box::from_raw(raw)) };
     }
 
+    // ---- an undecodable change event ends the stream instead of being skipped ----
+
+    /// Stands in for the plugin forwarder: records the push callback that
+    /// `ChangeReceiverProxy::new` registers so the test can drive it.
+    #[derive(Default)]
+    struct FakeForwarder {
+        registered:
+            std::sync::Mutex<Option<(drasi_plugin_sdk::ffi::FfiChangePushCallbackFn, usize)>>,
+    }
+
+    impl FakeForwarder {
+        fn registered(
+            &self,
+        ) -> (
+            drasi_plugin_sdk::ffi::FfiChangePushCallbackFn,
+            *mut std::ffi::c_void,
+        ) {
+            let (callback, ctx) = self.registered.lock().unwrap().expect("push started");
+            (callback, ctx as *mut std::ffi::c_void)
+        }
+    }
+
+    extern "C" fn capture_push(
+        state: *mut std::ffi::c_void,
+        callback: drasi_plugin_sdk::ffi::FfiChangePushCallbackFn,
+        ctx: *mut std::ffi::c_void,
+    ) {
+        let forwarder = unsafe { &*(state as *const FakeForwarder) };
+        *forwarder.registered.lock().unwrap() = Some((callback, ctx as usize));
+    }
+
+    extern "C" fn unused_executor(_: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
+        unreachable!("the push model never drives the plugin executor")
+    }
+
+    extern "C" fn forwarder_owned_by_test(_: *mut std::ffi::c_void) {}
+
+    fn change(sequence: u64) -> *mut FfiSourceEvent {
+        make_source_event(
+            &SourceEventPayload {
+                source_id: "s".to_string(),
+                event: SourceEvent::Change(SourceChange::Insert { element: node() }),
+                timestamp_us: 0,
+                sequence,
+                source_position: Some(sequence.to_be_bytes().to_vec()),
+            },
+            free_only_drop,
+        )
+    }
+
+    fn undecodable_change() -> *mut FfiSourceEvent {
+        let bytes = vec![0xFFu8; 8];
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        Box::into_raw(Box::new(FfiSourceEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(free_only_drop),
+            op: FfiChangeOp::Insert,
+            timestamp_us: 42,
+        }))
+    }
+
+    /// Skipping a lost event would let the next event's source position be
+    /// confirmed past it, so a restart could never recover the loss. The proxy
+    /// must deliver what preceded the loss, then fail the stream.
+    #[tokio::test]
+    async fn undecodable_change_event_ends_the_stream_with_an_error() {
+        let forwarder = Box::new(FakeForwarder::default());
+        let mut proxy = ChangeReceiverProxy::new(FfiChangeReceiver {
+            state: &*forwarder as *const FakeForwarder as *mut std::ffi::c_void,
+            executor: unused_executor,
+            start_push_fn: capture_push,
+            drop_fn: forwarder_owned_by_test,
+        });
+        let (callback, ctx) = forwarder.registered();
+
+        assert!(callback(ctx, change(1)));
+        assert!(
+            !callback(ctx, undecodable_change()),
+            "the forwarder must stop at the lost event"
+        );
+
+        let delivered = proxy.recv().await.expect("the event before the loss");
+        assert_eq!(delivered.sequence, 1);
+        let error = proxy.recv().await.expect_err("the loss must surface");
+        let lost = error
+            .downcast_ref::<UndecodableSourceEvent>()
+            .unwrap_or_else(|| panic!("typed decode failure, got {error:#}"));
+        assert_eq!((lost.payload_len(), lost.timestamp_us()), (8, 42));
+
+        // The stopped forwarder sends its exit sentinel; the stream stays closed.
+        assert!(!callback(ctx, std::ptr::null_mut()));
+        assert!(proxy.recv().await.is_err());
+    }
+
     // ---- leaked-Arc reclaim exactly once (macOS arm64 teardown double-free) ----
     //
     // The plugin forwarder leaks one Arc ref to the callback context (see
@@ -587,7 +741,7 @@ mod ownership_tests {
 
     #[test]
     fn change_callback_reclaims_leaked_arc_exactly_once_on_send_failure() {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<SourceEventWrapper>>(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<PushedChange>(4);
         let ctx = Arc::new(PushCallbackContext {
             tx: std::sync::Mutex::new(Some(tx)),
             notify: Arc::new(tokio::sync::Notify::new()),

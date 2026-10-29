@@ -16,12 +16,11 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
-    use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::queries::output_state::FetchError;
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
-    use crate::sources::SourceManager;
+    use crate::test_helpers::managers::{QueryManager, SourceManager};
     use crate::test_helpers::wait_for_component_status;
-    use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
@@ -43,19 +42,19 @@ mod manager_tests {
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -63,6 +62,7 @@ mod manager_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -73,19 +73,19 @@ mod manager_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::GQL,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -93,66 +93,28 @@ mod manager_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
     async fn create_test_manager() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        // Spawn a mini graph update loop for tests
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let source_manager = Arc::new(SourceManager::new(
-            "test-instance",
-            log_registry.clone(),
-            graph.clone(),
-            update_tx.clone(),
-        ));
-
-        // Create a test IndexFactory with empty backends (no plugin, memory only)
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
-            vec![],
-            std::collections::HashMap::new(),
-        ));
-
-        // Create a test middleware registry
-        let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
-
-        let query_manager = Arc::new(QueryManager::new(
-            "test-instance",
-            source_manager.clone(),
-            index_factory,
-            middleware_registry,
-            log_registry,
-            graph.clone(),
-            update_tx,
-            None,
-        ));
-
-        (query_manager, source_manager, graph)
+        let core = crate::test_helpers::managers::empty_core().await;
+        (
+            Arc::new(QueryManager(core.clone())),
+            Arc::new(SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Alias for backward compatibility
     async fn create_test_manager_with_graph() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
         create_test_manager().await
     }
@@ -160,56 +122,29 @@ mod manager_tests {
     /// Helper: register a source in the graph, then provision it in the source manager.
     async fn add_source(
         source_manager: &SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl crate::sources::Source + 'static,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-        let auto_start = source.auto_start();
-        {
-            let mut g = graph.write().await;
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), auto_start.to_string());
-            g.register_source(&source_id, metadata)?;
-        }
-        source_manager.provision_source(source).await
+        source_manager.add(source).await
     }
 
     /// Helper: register a query in the graph, then provision it in the query manager.
     /// Registers placeholder source nodes for any referenced sources not already in the graph.
     async fn add_query(
         manager: &QueryManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
-        {
-            let mut g = graph.write().await;
-            // Ensure referenced sources exist as placeholder nodes
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            for sid in &source_ids {
-                if !g.contains(sid) {
-                    g.register_source(sid, std::collections::HashMap::new())?;
-                }
-            }
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            g.register_query(&config.id, metadata, &source_ids)?;
-        }
-        manager.provision_query(config).await
+        manager.declare(config).await
     }
 
     /// Helper: teardown a query in the manager, then deregister from the graph.
     async fn delete_query(
         manager: &QueryManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         id: &str,
     ) -> anyhow::Result<()> {
-        manager.teardown_query(id.to_string()).await?;
-        let mut g = graph.write().await;
-        g.deregister(id)?;
-        Ok(())
+        manager.delete(id).await
     }
 
     #[tokio::test]
@@ -222,7 +157,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify query was added
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].0, "test-query");
     }
@@ -239,7 +174,24 @@ mod manager_tests {
         // Try to add same query again
         let result = add_query(&manager, &graph, config).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists"));
+        let error = result.unwrap_err();
+        {
+            use crate::computation::v1::GraphError;
+
+            let GraphError::AdditionRejected { cause, addition } = error
+                .downcast_ref::<GraphError>()
+                .expect("native graph error")
+            else {
+                panic!("expected a rejected addition: {error:?}");
+            };
+            assert!(
+                matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component test-query"),
+                "unexpected rejection cause: {cause:?}"
+            );
+            let rejected = addition.take().await.expect("retained rejected query");
+            assert_eq!(rejected.definition.descriptor.id().as_str(), "test-query");
+        }
     }
 
     #[tokio::test]
@@ -254,7 +206,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify query was removed
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 0);
     }
 
@@ -263,7 +215,7 @@ mod manager_tests {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add a source first using instance-based approach
         let source = create_test_mock_source("source1".to_string());
@@ -305,7 +257,7 @@ mod manager_tests {
         let (manager, source_manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add a source using instance-based approach
         let source = create_test_mock_source("source1".to_string());
@@ -353,7 +305,7 @@ mod manager_tests {
         add_source(&source_manager, &graph, source).await.unwrap();
 
         // Subscribe to graph events BEFORE starting the query
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add the query and start it
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
@@ -395,55 +347,36 @@ mod manager_tests {
     }
 
     #[tokio::test]
-    async fn test_partial_subscription_failure_cleans_up_tasks() {
+    async fn test_missing_subscription_waits_without_leaking_tasks() {
         let (manager, source_manager, graph) = create_test_manager().await;
 
-        // Subscribe to graph events BEFORE starting the query
-        let mut event_rx = graph.read().await.subscribe();
-
-        // Add only source1 - source2 will be missing to trigger failure
         let source1 = create_test_mock_source("source1".to_string());
         add_source(&source_manager, &graph, source1).await.unwrap();
 
-        // Create query that subscribes to TWO sources - source2 is missing
         let config = create_test_query_config(
             "test-query",
             vec!["source1".to_string(), "source2".to_string()],
         );
         add_query(&manager, &graph, config).await.unwrap();
 
-        // Starting should fail because source2 doesn't exist
         let result = manager.start_query("test-query".to_string()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("source2"));
-
-        // Wait for query to reach Error state via graph update
-        wait_for_component_status(
-            &mut event_rx,
-            "test-query",
-            ComponentStatus::Error,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
         let status = manager
             .get_query_status("test-query".to_string())
             .await
             .unwrap();
-        assert!(
-            matches!(status, ComponentStatus::Error),
-            "Expected Error status after failed start"
-        );
-
-        // Crucially: subscription tasks from source1 should have been cleaned up
+        assert_ne!(status, ComponentStatus::Error);
         let query = manager.get_query_instance("test-query").await.unwrap();
-
-        // The forwarder task for source1 was spawned before source2 subscription failed,
-        // so the rollback code should have aborted it
         assert_eq!(
             query.subscription_count().await,
             0,
-            "Subscription tasks should be cleaned up after partial failure"
+            "Waiting for another source must not leak partially started subscriptions"
         );
+        delete_query(&manager, &graph, "test-query").await.unwrap();
+        let source2 = create_test_mock_source("source2".to_string());
+        add_source(&source_manager, &graph, source2).await.unwrap();
+        assert!(manager.list_queries().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -456,7 +389,7 @@ mod manager_tests {
         assert!(result.is_ok());
 
         // Verify query was added
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].0, "test-gql-query");
     }
@@ -466,7 +399,7 @@ mod manager_tests {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add a source first using instance-based approach
         let source = create_test_mock_source("source1".to_string());
@@ -516,7 +449,7 @@ mod manager_tests {
         assert!(add_query(&manager, &graph, gql_config).await.is_ok());
 
         // Verify both queries were added
-        let queries = manager.list_queries().await;
+        let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 2);
 
         let query_ids: Vec<String> = queries.iter().map(|(id, _)| id.clone()).collect();
@@ -532,12 +465,12 @@ mod manager_tests {
         add_query(&manager, &graph, config.clone()).await.unwrap();
 
         let retrieved = manager.get_query_config("test-query").await;
-        assert!(retrieved.is_some());
+        assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, config.id);
         assert_eq!(retrieved.query, config.query);
-        assert_eq!(retrieved.sources.len(), config.sources.len());
+        assert_eq!(retrieved.inputs.len(), config.inputs.len());
     }
 
     #[tokio::test]
@@ -550,24 +483,10 @@ mod manager_tests {
         // Update config
         config.query = "MATCH (n:Updated) RETURN n".to_string();
 
-        // Perform update: teardown → deregister → re-register → provision
         manager
-            .teardown_query("test-query".to_string())
+            .update_query("test-query".into(), config.clone())
             .await
             .unwrap();
-        {
-            let mut g = graph.write().await;
-            let _ = g.deregister("test-query");
-        }
-        {
-            let mut g = graph.write().await;
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            g.register_query(&config.id, metadata, &source_ids).unwrap();
-        }
-        manager.provision_query(config.clone()).await.unwrap();
 
         // Verify update
         let retrieved = manager.get_query_config("test-query").await.unwrap();
@@ -594,7 +513,7 @@ mod manager_tests {
         assert!(matches!(status, ComponentStatus::Added));
 
         // Subscribe to graph events BEFORE starting the query
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Start the query
         manager.start_query("test-query".to_string()).await.unwrap();
@@ -691,7 +610,7 @@ mod manager_tests {
         );
 
         // Subscribe to graph events BEFORE starting the query
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Manually start the query
         manager
@@ -759,16 +678,10 @@ mod manager_tests {
         let config = create_test_query_config("cleanup-events-query", vec![]);
         add_query(&manager, &graph, config).await.unwrap();
 
-        // Record an event manually to simulate lifecycle
         manager
-            .record_event(ComponentEvent {
-                component_id: "cleanup-events-query".to_string(),
-                component_type: ComponentType::Query,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some("Test event".to_string()),
-            })
-            .await;
+            .start_query_and_wait("cleanup-events-query".into())
+            .await
+            .unwrap();
 
         // Verify events exist
         let events = manager.get_query_events("cleanup-events-query").await;
@@ -795,7 +708,7 @@ mod manager_tests {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Create a bootstrap channel — test controls the sender
         let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
@@ -873,7 +786,7 @@ mod manager_tests {
         // Generate a log via subscribe (which creates the channel) then check
         // First subscribe to create the channel
         let result = manager.subscribe_logs("cleanup-logs-query").await;
-        assert!(result.is_some(), "Expected to subscribe to query logs");
+        assert!(result.is_ok(), "Expected to subscribe to query logs");
 
         // Delete the query
         delete_query(&manager, &graph, "cleanup-logs-query")
@@ -882,7 +795,7 @@ mod manager_tests {
 
         // Verify logs are cleaned up (subscribe should fail for non-existent query)
         let result = manager.subscribe_logs("cleanup-logs-query").await;
-        assert!(result.is_none(), "Expected None for deleted query logs");
+        assert!(result.is_err(), "Expected an error for deleted query logs");
     }
 }
 
@@ -904,11 +817,10 @@ mod query_core_tests {
                 query: query.to_string(),
                 query_language: crate::config::QueryLanguage::Cypher,
                 middleware: vec![],
-                sources: vec![],
+                inputs: vec![],
                 auto_start: false,
                 joins: None,
                 enable_bootstrap: true,
-                bootstrap_buffer_size: 10000,
                 priority_queue_capacity: None,
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
@@ -916,6 +828,7 @@ mod query_core_tests {
                 recovery_policy: None,
                 outbox_capacity: 1000,
                 bootstrap_timeout_secs: 300,
+                result: Default::default(),
             };
 
             // Just verify the config can be created
@@ -930,11 +843,10 @@ mod query_core_tests {
             query: "".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            sources: vec![],
+            inputs: vec![],
             auto_start: false,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -942,6 +854,7 @@ mod query_core_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         };
 
         // Empty queries should be caught during validation
@@ -956,12 +869,11 @@ mod query_core_tests {
 mod output_state_integration_tests {
     use super::super::*;
     use crate::channels::*;
-    use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::queries::output_state::FetchError;
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
-    use crate::sources::SourceManager;
+    use crate::test_helpers::managers::{QueryManager, SourceManager};
     use crate::test_helpers::wait_for_component_status;
-    use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
@@ -974,19 +886,19 @@ mod output_state_integration_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .iter()
-                .map(|s| SourceSubscriptionConfig {
+                .map(|s| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id: s.clone(),
+                    component: s.clone(),
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -994,95 +906,37 @@ mod output_state_integration_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
     async fn create_test_manager_with_graph() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        // Spawn a mini graph update loop for tests
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let source_manager = Arc::new(SourceManager::new(
-            "test-instance",
-            log_registry.clone(),
-            graph.clone(),
-            update_tx.clone(),
-        ));
-
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
-            vec![],
-            std::collections::HashMap::new(),
-        ));
-        let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
-
-        let query_manager = Arc::new(QueryManager::new(
-            "test-instance",
-            source_manager.clone(),
-            index_factory,
-            middleware_registry,
-            log_registry,
-            graph.clone(),
-            update_tx,
-            None,
-        ));
-
-        (query_manager, source_manager, graph)
+        let core = crate::test_helpers::managers::empty_core().await;
+        (
+            Arc::new(QueryManager(core.clone())),
+            Arc::new(SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     async fn add_source(
         source_manager: &SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl crate::sources::Source + 'static,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-        let auto_start = source.auto_start();
-        {
-            let mut g = graph.write().await;
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), auto_start.to_string());
-            g.register_source(&source_id, metadata)?;
-        }
-        source_manager.provision_source(source).await
+        source_manager.add(source).await
     }
 
     async fn add_query(
         manager: &QueryManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
-        {
-            let mut g = graph.write().await;
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            for sid in &source_ids {
-                if !g.contains(sid) {
-                    g.register_source(sid, std::collections::HashMap::new())?;
-                }
-            }
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            g.register_query(&config.id, metadata, &source_ids)?;
-        }
-        manager.provision_query(config).await
+        manager.declare(config).await
     }
 
     /// Helper: create a SourceChange::Insert for a Person node
@@ -1116,7 +970,7 @@ mod output_state_integration_tests {
     #[tokio::test]
     async fn test_fetch_snapshot_blocks_during_bootstrap() {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Create a bootstrap channel — test controls the sender
         let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
@@ -1137,17 +991,11 @@ mod output_state_integration_tests {
         )
         .await;
 
-        // fetch_snapshot should block while Starting — spawn it and check it doesn't resolve
         let query = manager.get_query_instance("snap-query").await.unwrap();
-        let snapshot_handle = tokio::spawn({
-            let q = query.clone();
-            async move { q.fetch_snapshot().await }
-        });
-
-        // Give it a moment — it should NOT resolve yet
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let snapshot_request = query.fetch_snapshot();
+        tokio::pin!(snapshot_request);
         assert!(
-            !snapshot_handle.is_finished(),
+            futures::poll!(&mut snapshot_request).is_pending(),
             "fetch_snapshot should block during bootstrap"
         );
 
@@ -1169,24 +1017,30 @@ mod output_state_integration_tests {
         .await;
 
         // Now fetch_snapshot should resolve
-        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), snapshot_handle)
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), snapshot_request)
             .await
             .expect("fetch_snapshot should complete after bootstrap")
-            .unwrap()
             .expect("fetch_snapshot should return Ok");
 
         // After bootstrap: results should contain the bootstrapped data,
         // sequence should be 0 (bootstrap doesn't advance sequence)
         assert_eq!(snapshot.as_of_sequence, 0);
-        // The result set may or may not contain the bootstrap row depending on
-        // whether the query engine matched it. The important invariant is that
-        // the snapshot resolved and as_of_sequence is 0.
+        assert_eq!(
+            snapshot.len(),
+            1,
+            "the matching bootstrap row must be present"
+        );
+        assert_eq!(
+            snapshot.to_vec(),
+            vec![serde_json::json!({"name": "Alice"})]
+        );
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_fetch_snapshot_and_outbox_after_live_events() {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Use a regular mock source (no bootstrap channel → immediate Running)
         let source = create_test_mock_source("live-src".to_string());
@@ -1217,6 +1071,7 @@ mod output_state_integration_tests {
         assert!(outbox.results.is_empty());
         assert_eq!(outbox.latest_sequence, 0);
 
+        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
         // Inject a live event via the source manager
         let source_arc = source_manager
             .get_source_instance("live-src")
@@ -1229,26 +1084,30 @@ mod output_state_integration_tests {
         let insert = make_person_insert("live-src", "p1", "Bob");
         mock_source.inject_event(insert).await.unwrap();
 
-        // Give the query time to process
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // After a live event that produces results, sequence should advance
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .expect("matching input must produce a result")
+            .unwrap();
         let snap = query.fetch_snapshot().await.unwrap();
-        // The sequence may or may not advance depending on whether the query
-        // engine matched the node. If it did match (MATCH (n) RETURN n), then
-        // sequence should be >= 1 and outbox should have entries.
-        if snap.as_of_sequence > 0 {
-            let outbox = query.fetch_outbox(0).await.unwrap();
-            assert_eq!(outbox.results.len(), snap.as_of_sequence as usize);
-            assert_eq!(outbox.results[0].sequence, 1);
-            assert_eq!(outbox.latest_sequence, snap.as_of_sequence);
-        }
+        assert_eq!(result.sequence, 1);
+        assert_eq!(snap.as_of_sequence, 1);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.to_vec(), vec![serde_json::json!({"name": "Bob"})]);
+        let outbox = query.fetch_outbox(0).await.unwrap();
+        assert_eq!(outbox.results.len(), 1);
+        assert_eq!(outbox.results[0].sequence, 1);
+        assert_eq!(outbox.latest_sequence, 1);
+        assert_eq!(
+            serde_json::to_value(&outbox.results[0]).unwrap(),
+            serde_json::to_value(result.as_ref()).unwrap()
+        );
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_fetch_outbox_gap_error() {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = create_test_mock_source("gap-src".to_string());
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -1259,16 +1118,16 @@ mod output_state_integration_tests {
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: vec![SourceSubscriptionConfig {
+            inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                source_id: "gap-src".to_string(),
+                component: "gap-src".to_string(),
                 pipeline: vec![],
+                port: None,
             }],
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -1276,6 +1135,7 @@ mod output_state_integration_tests {
             recovery_policy: None,
             outbox_capacity: 2, // Very small — will evict quickly
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("gap-query".to_string()).await.unwrap();
@@ -1290,6 +1150,7 @@ mod output_state_integration_tests {
 
         let query = manager.get_query_instance("gap-query").await.unwrap();
 
+        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
         // Inject multiple events to fill and overflow the outbox
         let source_arc = source_manager.get_source_instance("gap-src").await.unwrap();
         let mock_source = source_arc
@@ -1299,26 +1160,38 @@ mod output_state_integration_tests {
         for i in 0..5 {
             let insert = make_person_insert("gap-src", &format!("p{i}"), &format!("Person{i}"));
             mock_source.inject_event(insert).await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+                .await
+                .expect("each matching input must be evaluated")
+                .unwrap();
+            assert_eq!(result.sequence, i + 1);
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         let snap = query.fetch_snapshot().await.unwrap();
-        if snap.as_of_sequence > 2 {
-            // Requesting after seq 0 when outbox only holds recent entries → gap
-            let result = query.fetch_outbox(0).await;
-            assert!(
-                matches!(result, Err(FetchError::OutboxGap(_))),
-                "Expected OutboxGap error when requesting evicted position, got {result:?}"
-            );
-        }
+        assert_eq!(snap.as_of_sequence, 5);
+        assert_eq!(snap.len(), 5);
+        let result = query.fetch_outbox(0).await;
+        assert!(
+            matches!(result, Err(FetchError::OutboxGap(_))),
+            "Expected OutboxGap error when requesting evicted position, got {result:?}"
+        );
+        let retained = query.fetch_outbox(3).await.unwrap();
+        assert_eq!(
+            retained
+                .results
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>(),
+            [4, 5]
+        );
+        assert_eq!(retained.latest_sequence, 5);
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_wait_until_running_returns_not_running_on_error() {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Use a regular mock source
         let source = create_test_mock_source("err-src".to_string());
@@ -1368,7 +1241,7 @@ mod output_state_integration_tests {
     #[tokio::test]
     async fn test_bootstrap_populates_results_but_not_outbox() {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
@@ -1417,6 +1290,20 @@ mod output_state_integration_tests {
             snap.as_of_sequence, 0,
             "Bootstrap should not advance the sequence counter"
         );
+        let mut names: Vec<_> = snap
+            .to_vec()
+            .iter()
+            .map(|row| row["name"].clone())
+            .collect();
+        names.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        assert_eq!(
+            names,
+            vec![
+                serde_json::json!("BSPerson0"),
+                serde_json::json!("BSPerson1"),
+                serde_json::json!("BSPerson2")
+            ]
+        );
 
         let outbox = query.fetch_outbox(0).await.unwrap();
         assert!(
@@ -1424,6 +1311,7 @@ mod output_state_integration_tests {
             "Outbox should be empty after bootstrap (only live events populate it)"
         );
         assert_eq!(outbox.latest_sequence, 0);
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1431,7 +1319,7 @@ mod output_state_integration_tests {
         // Use a query that only matches "Person" labels, then send a node
         // with a non-matching label. This exercises the Noop filtering path.
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = create_test_mock_source("noop-src".to_string());
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -1442,16 +1330,16 @@ mod output_state_integration_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: vec![SourceSubscriptionConfig {
+            inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                source_id: "noop-src".to_string(),
+                component: "noop-src".to_string(),
                 pipeline: vec![],
+                port: None,
             }],
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -1459,6 +1347,7 @@ mod output_state_integration_tests {
             recovery_policy: None,
             outbox_capacity: 100,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("noop-query".to_string()).await.unwrap();
@@ -1472,6 +1361,7 @@ mod output_state_integration_tests {
         .await;
 
         let query = manager.get_query_instance("noop-query").await.unwrap();
+        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
 
         // Send a node with a different label (Vehicle) — should not match the query
         let source_arc = source_manager
@@ -1501,20 +1391,30 @@ mod output_state_integration_tests {
             .await
             .unwrap();
 
-        // Give time to process
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Non-matching event should NOT advance the sequence
-        let snap = query.fetch_snapshot().await.unwrap();
+        // A later matching input is a FIFO processing barrier for the non-match.
+        mock_source
+            .inject_event(make_person_insert("noop-src", "p1", "Alice"))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .expect("matching barrier must complete")
+            .unwrap();
         assert_eq!(
-            snap.as_of_sequence, 0,
-            "Non-matching events should not advance the sequence counter"
+            result.sequence, 1,
+            "the preceding non-match must not allocate a result sequence"
         );
-
+        let snap = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snap.as_of_sequence, 1);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.to_vec(), vec![serde_json::json!({"name": "Alice"})]);
         let outbox = query.fetch_outbox(0).await.unwrap();
-        assert!(
-            outbox.results.is_empty(),
-            "Non-matching events should not populate the outbox"
+        assert_eq!(outbox.results.len(), 1);
+        assert_eq!(outbox.results[0].sequence, 1);
+        assert_eq!(
+            serde_json::to_value(&outbox.results[0]).unwrap(),
+            serde_json::to_value(result.as_ref()).unwrap()
         );
+        manager.0.shutdown().await.unwrap();
     }
 }

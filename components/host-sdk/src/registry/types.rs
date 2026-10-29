@@ -68,6 +68,10 @@ pub struct ResolvedPlugin {
     pub version: String,
     /// SDK version of the plugin.
     pub sdk_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_version: Option<String>,
     /// Core version of the plugin.
     pub core_version: String,
     /// Lib version of the plugin.
@@ -94,6 +98,12 @@ pub struct PluginMetadataJson {
     pub version: String,
     /// drasi-plugin-sdk version.
     pub sdk_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
     /// drasi-core version.
     pub core_version: String,
     /// drasi-lib version.
@@ -268,6 +278,9 @@ pub mod annotations {
     pub const PLUGIN_KIND: &str = "io.drasi.plugin.kind";
     pub const PLUGIN_TYPE: &str = "io.drasi.plugin.type";
     pub const SDK_VERSION: &str = "io.drasi.plugin.sdk-version";
+    pub const ABI_FAMILY: &str = "io.drasi.plugin.abi-family";
+    pub const ABI_VERSION: &str = "io.drasi.plugin.abi-version";
+    pub const FILENAME: &str = "io.drasi.plugin.filename";
     pub const CORE_VERSION: &str = "io.drasi.plugin.core-version";
     pub const LIB_VERSION: &str = "io.drasi.plugin.lib-version";
     pub const TARGET_TRIPLE: &str = "io.drasi.plugin.target-triple";

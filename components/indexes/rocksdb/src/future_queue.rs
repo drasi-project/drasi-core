@@ -19,11 +19,11 @@ use std::{
 
 use crate::IndexDb;
 use async_trait::async_trait;
+use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
     interface::{FutureElementRef, FutureQueue, IndexError, PushType},
     models::{ElementReference, ElementTimestamp},
 };
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::{bytes::Bytes, Message};
 use rocksdb::{AsColumnFamilyRef, Cache, Options, ReadOptions, SliceTransform, Transaction};
 use tokio::task;
@@ -39,7 +39,8 @@ use crate::{RocksDbSessionState, RocksIndexOptions};
 pub struct RocksDbFutureQueue {
     db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
-    options: RocksIndexOptions,
+    // Retain the shared memory-budget/monitor lease for the queue lifetime.
+    _options: RocksIndexOptions,
 }
 
 const QUEUE_CF: &str = "fqueue";
@@ -58,7 +59,7 @@ impl RocksDbFutureQueue {
         Self {
             db,
             session_state,
-            options,
+            _options: options,
         }
     }
 }
@@ -263,32 +264,10 @@ impl FutureQueue for RocksDbFutureQueue {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        let db = self.db.clone();
-        let options = self.options.clone();
+        let session_state = self.session_state.clone();
+        let require_session = session_state.has_active_session()?;
         let task = task::spawn_blocking(move || {
-            let block_cache = options.memory_budget().block_cache();
-            if let Err(err) = db.drop_cf(QUEUE_CF) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = db.create_cf(
-                QUEUE_CF,
-                &crate::sizing::sized(QUEUE_CF, get_fqueue_cf_options(block_cache), &options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = db.drop_cf(INDEX_CF) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = db.create_cf(
-                INDEX_CF,
-                &crate::sizing::sized(INDEX_CF, get_findex_cf_options(block_cache), &options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-            Ok(())
+            session_state.clear_column_families(&[QUEUE_CF, INDEX_CF], require_session)
         });
 
         match task.await {

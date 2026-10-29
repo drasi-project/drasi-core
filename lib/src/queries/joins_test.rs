@@ -16,11 +16,10 @@
 mod query_joins_tests {
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryJoinConfig, QueryJoinKeyConfig};
-    use crate::queries::QueryManager;
+    use crate::sources::convert_json_to_element_value;
     use crate::sources::tests::{create_test_mock_source, TestMockSource};
-    use crate::sources::{convert_json_to_element_value, SourceManager};
+    use crate::test_helpers::managers::{QueryManager, SourceManager};
     use crate::test_helpers::wait_for_component_status;
-    use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
@@ -46,25 +45,25 @@ mod query_joins_tests {
         sources: Vec<String>,
         joins: Vec<QueryJoinConfig>,
     ) -> QueryConfig {
-        use crate::config::SourceSubscriptionConfig;
+        use crate::config::QueryInputConfig;
         QueryConfig {
             id: id.to_string(),
             query: query.to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: false,
             joins: Some(joins),
             enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -72,6 +71,7 @@ mod query_joins_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -112,96 +112,33 @@ mod query_joins_tests {
     async fn create_test_environment() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
-        // Use the global shared log registry for test isolation with tracing
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        // Spawn a mini graph update loop for tests
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let source_manager = Arc::new(SourceManager::new(
-            "test-instance",
-            log_registry.clone(),
-            graph.clone(),
-            update_tx.clone(),
-        ));
-
-        // Create a test IndexFactory with empty backends (no plugin, memory only)
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
-            vec![],
-            std::collections::HashMap::new(),
-        ));
-
-        // Create a test middleware registry
-        let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
-
-        let query_manager = Arc::new(QueryManager::new(
-            "test-instance",
-            source_manager.clone(),
-            index_factory,
-            middleware_registry,
-            log_registry,
-            graph.clone(),
-            update_tx,
-            None,
-        ));
-
-        (query_manager, source_manager, graph)
+        let core = crate::test_helpers::managers::empty_core().await;
+        (
+            Arc::new(QueryManager(core.clone())),
+            Arc::new(SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Helper: register a source in the graph, then provision it in the source manager.
     async fn add_source(
         source_manager: &SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl crate::sources::Source + 'static,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-        let auto_start = source.auto_start();
-        {
-            let mut g = graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), auto_start.to_string());
-            g.register_source(&source_id, metadata)?;
-        }
-        source_manager.provision_source(source).await
+        source_manager.add(source).await
     }
 
     /// Helper: register a query in the graph, then provision it in the query manager.
     /// Registers placeholder source nodes for any referenced sources not already in the graph.
     async fn add_query(
         manager: &QueryManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
-        {
-            let mut g = graph.write().await;
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            for sid in &source_ids {
-                if !g.contains(sid) {
-                    g.register_source(sid, HashMap::new())?;
-                }
-            }
-            let mut metadata = HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            g.register_query(&config.id, metadata, &source_ids)?;
-        }
-        manager.provision_query(config).await
+        manager.add(config).await
     }
 
     #[tokio::test]
@@ -240,7 +177,7 @@ mod query_joins_tests {
             .unwrap();
 
         // Start the query - it will subscribe directly to sources
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("vehicle-driver-query".to_string())
             .await
@@ -363,7 +300,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("order-restaurant-query".to_string())
             .await
@@ -456,6 +393,7 @@ mod query_joins_tests {
         );
         orders_source
             .inject_event(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: updated_order,
             })
             .await
@@ -549,7 +487,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("full-order-query".to_string())
             .await
@@ -678,7 +616,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("non-matching-query".to_string())
             .await
@@ -779,7 +717,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("null-property-query".to_string())
             .await
@@ -884,7 +822,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("product-category-query".to_string())
             .await
@@ -996,7 +934,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("user-posts-query".to_string())
             .await

@@ -19,7 +19,7 @@ use crate::config::{
     SourceMapping, TimestampFormat,
 };
 use anyhow::{anyhow, Result};
-use drasi_core::models::{
+use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use handlebars::{
@@ -113,7 +113,7 @@ impl SourceMappingEngine {
         // Create the appropriate SourceChange
         match operation {
             OperationType::Insert => Ok(SourceChange::Insert { element }),
-            OperationType::Update => Ok(SourceChange::Update { element }),
+            OperationType::Update => Ok(SourceChange::update(element)),
             OperationType::Delete => {
                 // For delete, we only need metadata
                 let metadata = match element {

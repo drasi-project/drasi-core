@@ -184,13 +184,13 @@ async fn test_change_detection_with_websocket_harness() {
             "MATCH (peer:Peer)-[r:ROUTES]->(p:Prefix) \
              RETURN peer.peer_ip AS peer, p.prefix AS prefix, r.next_hop AS next_hop",
         )
-        .from_source("ris-source")
+        .from_input("ris-source")
         .auto_start(true)
         .build();
 
     let peer_query = Query::cypher("peer-query")
         .query("MATCH (peer:Peer) RETURN peer.peer_ip AS peer, peer.state AS state")
-        .from_source("ris-source")
+        .from_input("ris-source")
         .auto_start(true)
         .build();
 

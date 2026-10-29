@@ -78,7 +78,7 @@ use tokio::sync::{broadcast, mpsc};
 /// queries:
 ///   - id: my_query
 ///     query: "MATCH (n) RETURN n"
-///     sources: [data_source]
+///     inputs: [data_source]
 ///     dispatch_mode: channel
 /// ```
 ///
@@ -110,7 +110,7 @@ use tokio::sync::{broadcast, mpsc};
 ///     .with_query(
 ///         Query::cypher("active_orders")
 ///             .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o")
-///             .from_source("orders_db")
+///             .from_input("orders_db")
 ///             .with_dispatch_mode(DispatchMode::Channel)    // Default, independent processing
 ///             .build()
 ///     )
@@ -133,10 +133,10 @@ use tokio::sync::{broadcast, mpsc};
 /// queries:
 ///   - id: query1
 ///     query: "MATCH (n:Type1) RETURN n"
-///     sources: [event_stream]
+///     inputs: [event_stream]
 ///   - id: query2
 ///     query: "MATCH (n:Type2) RETURN n"
-///     sources: [event_stream]
+///     inputs: [event_stream]
 ///   # ... 20 more queries subscribing to event_stream
 /// ```
 ///
@@ -151,12 +151,12 @@ use tokio::sync::{broadcast, mpsc};
 /// queries:
 ///   - id: real_time_alerts
 ///     query: "MATCH (s:Sensor) WHERE s.value > 100 RETURN s"
-///     sources: [sensor_data]
+///     inputs: [sensor_data]
 ///     # Fast processing
 ///
 ///   - id: historical_analysis
 ///     query: "MATCH (s:Sensor) RETURN s"
-///     sources: [sensor_data]
+///     inputs: [sensor_data]
 ///     # Slow processing - won't affect real_time_alerts
 /// ```
 ///

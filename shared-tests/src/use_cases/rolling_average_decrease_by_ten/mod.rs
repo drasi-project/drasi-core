@@ -87,6 +87,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
         //     .unwrap();
 
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -113,6 +114,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
     {
         for i in 1..6 {
             let node_change = SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -140,6 +142,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
     // Previous average is 42.5 and we should be getting a result
     {
         let node_change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -172,6 +175,7 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
     //Result set should be empty
     {
         let node_change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),

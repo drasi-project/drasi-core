@@ -19,6 +19,7 @@
 //! from the query outbox.
 
 mod mock_source;
+mod runtime_support;
 
 use anyhow::Result;
 use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -37,7 +38,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 
 // ============================================================================
@@ -156,6 +157,7 @@ struct RecordingReaction {
     snapshot_on_fresh: bool,
     bootstrap_count: Arc<AtomicUsize>,
     bootstrap_as_of: Arc<AtomicU64>,
+    enqueue_gate: Option<Arc<Semaphore>>,
 }
 
 /// Receiver side of the recording reaction.
@@ -235,6 +237,7 @@ fn recording_reaction_with_auto_start(
             snapshot_on_fresh,
             bootstrap_count: bootstrap_count.clone(),
             bootstrap_as_of: bootstrap_as_of.clone(),
+            enqueue_gate: None,
         },
         RecordingReceiver {
             rx,
@@ -303,6 +306,9 @@ impl Reaction for RecordingReaction {
     }
 
     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        if let Some(gate) = &self.enqueue_gate {
+            gate.acquire().await?.forget();
+        }
         let query_id = result.query_id.clone();
         let sequence = result.sequence;
 
@@ -417,7 +423,7 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -433,7 +439,7 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("catchup-test")
             .with_source(mock_source)
             .with_query(query)
@@ -500,7 +506,7 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -516,7 +522,7 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("clean-restart-test")
             .with_source(mock_source)
             .with_query(query)
@@ -568,7 +574,7 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
     // Small outbox capacity so it overflows
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(2)
         .auto_start(true)
         .build();
@@ -584,7 +590,7 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("skip-gap-test")
             .with_source(mock_source)
             .with_query(query)
@@ -647,7 +653,7 @@ async fn test_reaction_outbox_gap_auto_reset() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(2)
         .auto_start(true)
         .build();
@@ -663,7 +669,7 @@ async fn test_reaction_outbox_gap_auto_reset() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("autoreset-test")
             .with_source(mock_source)
             .with_query(query)
@@ -715,7 +721,7 @@ async fn test_reaction_live_delivery_after_restart() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -731,7 +737,7 @@ async fn test_reaction_live_delivery_after_restart() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("live-after-restart-test")
             .with_source(mock_source)
             .with_query(query)
@@ -785,7 +791,7 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     // Use broadcast mode with a very small buffer to induce lag.
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_dispatch_mode(DispatchMode::Broadcast)
         .with_dispatch_buffer_capacity(2)
         .with_outbox_capacity(100)
@@ -794,21 +800,22 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
 
-    let (reaction, mut receiver) = recording_reaction(
+    let (mut reaction, mut receiver) = recording_reaction(
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::AutoSkipGap,
         false,
         false,
     );
-
+    let gate = Arc::new(Semaphore::new(1));
+    reaction.enqueue_gate = Some(gate.clone());
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("runtime-gap-test")
             .with_source(mock_source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_state_store_provider(state_store)
+            .with_state_store_provider(state_store.clone())
             .build()
             .await?,
     );
@@ -826,6 +833,19 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
+    wait_for_query_result_count(&core, "q1", 21).await?;
+    gate.add_permits(64);
+    runtime_support::wait_for_gap_recovery(&core, state_store.as_ref(), "rec", "q1", 21).await?;
+    assert_eq!(
+        receiver
+            .drain_available()
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        (2..=21).collect::<Vec<_>>(),
+        "Available retained history must be replayed before considering a lossy skip"
+    );
+
     // Verify that live delivery still works after the gap.
     // With AutoSkipGap, the forwarder skips the gap and resumes.
     // wait_for_count has its own timeout — no bare sleep needed.
@@ -836,6 +856,7 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
         1,
         "Should receive live event after gap recovery"
     );
+    assert_eq!(after[0].sequence, 22);
 
     core.stop().await?;
     Ok(())
@@ -849,7 +870,7 @@ async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_dispatch_mode(DispatchMode::Broadcast)
         .with_dispatch_buffer_capacity(2)
         .with_outbox_capacity(100)
@@ -858,16 +879,17 @@ async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
 
-    let (reaction, mut receiver) = recording_reaction(
+    let (mut reaction, mut receiver) = recording_reaction(
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::Strict,
         false,
         false,
     );
-
+    let gate = Arc::new(Semaphore::new(1));
+    reaction.enqueue_gate = Some(gate.clone());
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("strict-gap-test")
             .with_source(mock_source)
             .with_query(query)
@@ -886,7 +908,17 @@ async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
     for i in 0..20 {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
-
+    wait_for_query_result_count(&core, "q1", 21).await?;
+    gate.add_permits(64);
+    let recovered = receiver.wait_for_count(20, Duration::from_secs(5)).await;
+    assert_eq!(
+        recovered
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        (2..=21).collect::<Vec<_>>(),
+        "Strict must replay the covered gap in order"
+    );
     insert_person(&handle, "p-after", "After", 99).await?;
     let after = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(
@@ -894,11 +926,73 @@ async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
         1,
         "Strict trigger recovers broadcast lag from the outbox and keeps receiving live results"
     );
+    assert_eq!(after[0].sequence, 22);
     assert_eq!(
         core.get_reaction_status("rec").await?,
         ComponentStatus::Running
     );
 
+    core.stop().await?;
+    Ok(())
+}
+
+/// Strict stops when blocked delivery loses both broadcast and retained history.
+#[tokio::test]
+async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_input("test-source")
+        .with_dispatch_mode(DispatchMode::Broadcast)
+        .with_dispatch_buffer_capacity(2)
+        .with_outbox_capacity(2)
+        .auto_start(true)
+        .build();
+    let (mut reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        false,
+        false,
+    );
+    let gate = Arc::new(Semaphore::new(1));
+    reaction.enqueue_gate = Some(gate.clone());
+    let core = runtime_support::builder()
+        .with_id("unrecoverable-strict-gap-test")
+        .with_source(mock_source)
+        .with_query(query)
+        .with_reaction(reaction)
+        .with_state_store_provider(Arc::new(DurableMemoryStateStoreProvider::new()))
+        .build()
+        .await?;
+    core.start().await?;
+    insert_person(&handle, "initial", "Initial", 1).await?;
+    assert_eq!(
+        receiver
+            .wait_for_count(1, Duration::from_secs(5))
+            .await
+            .len(),
+        1
+    );
+    for index in 0..20 {
+        insert_person(
+            &handle,
+            &format!("blocked-{index}"),
+            &format!("Blocked-{index}"),
+            index,
+        )
+        .await?;
+    }
+    wait_for_query_result_count(&core, "q1", 21).await?;
+    gate.add_permits(64);
+    wait_for_reaction_status(&core, "rec", ComponentStatus::Error).await?;
+    receiver.drain_available();
+    insert_person(&handle, "after-error", "AfterError", 99).await?;
+    wait_for_query_result_count(&core, "q1", 22).await?;
+    assert!(receiver
+        .wait_for_count(1, Duration::from_millis(200))
+        .await
+        .is_empty());
     core.stop().await?;
     Ok(())
 }
@@ -909,7 +1003,7 @@ async fn test_fresh_trigger_does_not_replay_retained_history() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -964,7 +1058,7 @@ async fn test_fresh_state_sync_bootstraps_snapshot_and_dedupes_live() -> Result<
     let (mock_source, handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -1034,7 +1128,7 @@ async fn test_trigger_autoreset_is_rejected() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let core = Arc::new(
@@ -1079,7 +1173,7 @@ async fn test_durable_reaction_rejects_volatile_query() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
@@ -1136,7 +1230,7 @@ async fn test_durable_reaction_rejects_volatile_query() -> Result<()> {
 fn volatile_person_query(id: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(id)
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build()
 }
@@ -1144,7 +1238,7 @@ fn volatile_person_query(id: &str) -> drasi_lib::config::QueryConfig {
 fn persistent_person_query(id: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(id)
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
         .build()
@@ -1222,6 +1316,7 @@ async fn test_durable_reaction_rejects_volatile_store_with_persistent_query() ->
             .await?,
     );
     core.start().await?;
+    core.computation_component("q1")?.wait_started().await?;
 
     let (reaction, _receiver) = recording_reaction_with_auto_start(
         "rec",
@@ -1306,6 +1401,9 @@ async fn test_durable_reaction_rejects_if_any_subscribed_query_is_volatile() -> 
             .await?,
     );
     core.start().await?;
+    for query in ["q-persistent", "q-volatile"] {
+        core.computation_component(query)?.wait_started().await?;
+    }
 
     let (reaction, _receiver) = recording_reaction_with_auto_start(
         "rec",
@@ -1344,9 +1442,9 @@ async fn test_durable_reaction_rejects_if_any_subscribed_query_is_volatile() -> 
     Ok(())
 }
 
-/// `add_reaction` with auto-start also rejects durable-on-volatile-query.
+/// Node-first addition retains the rejected auto-start outcome on the reaction handle.
 #[tokio::test]
-async fn test_add_reaction_auto_start_rejects_durable_on_volatile_query() -> Result<()> {
+async fn test_reaction_auto_start_reports_durable_on_volatile_query() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
@@ -1368,10 +1466,11 @@ async fn test_add_reaction_auto_start_rejects_durable_on_volatile_query() -> Res
         false,
         true,
     );
-    let result = core.add_reaction(reaction).await;
+    let reaction = core.add_reaction_with_handle(reaction).await?;
+    let result = reaction.wait_started().await;
     assert!(
         result.is_err(),
-        "add_reaction+auto-start unexpectedly succeeded for durable+volatile"
+        "reaction auto-start unexpectedly succeeded for durable+volatile"
     );
     let msg = format!("{}", result.unwrap_err());
     assert!(

@@ -823,11 +823,10 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
         core.start().await.unwrap();
         core.start_source("test-source").await.unwrap();
         let graph = core.component_graph();
-        let runtime = graph
-            .read()
+        let runtime = core
+            .source_manager()
+            .get_source_instance("test-source")
             .await
-            .get_runtime::<Arc<dyn Source>>("test-source")
-            .cloned()
             .unwrap();
         let source = runtime.as_any().downcast_ref::<KubernetesSource>().unwrap();
         let mut receiver = source.base.create_streaming_receiver().await.unwrap();
@@ -867,7 +866,6 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
                     .unwrap()
                     .is_err()
             );
-            receiver = source.base.create_streaming_receiver().await.unwrap();
         }
         let expected_watches = *api.state.watch_count.borrow() + 2;
         core.start_source(source.id()).await.unwrap();
@@ -882,6 +880,14 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
         api.wait_for_watches(expected_watches).await;
         assert!(old_task.is_finished());
         assert_eq!(source.status().await, ComponentStatus::Running);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .is_err(),
+            "graph recovery must fence the stopped source's old subscription"
+        );
+        receiver = source.base.create_streaming_receiver().await.unwrap();
         api.send_watch_event(json!({
             "type": "ADDED",
             "object": {
@@ -920,7 +926,10 @@ async fn recovery_joins_failed_worker_before_restarting() {
     }
     impl Drop for TaskResource {
         fn drop(&mut self) {
-            assert!(self.base.task_handle.try_write().is_ok());
+            assert!(
+                self.base.task_handle.try_write().is_err(),
+                "joining must retain exclusive ownership of the task slot"
+            );
             self.released.store(true, Ordering::SeqCst);
         }
     }
@@ -969,10 +978,10 @@ async fn recovery_reports_worker_panic_before_retrying() {
         .start()
         .await
         .expect_err("unexpected task failure must be reported");
-    assert!(error
-        .downcast_ref::<tokio::task::JoinError>()
-        .unwrap()
-        .is_panic());
+    assert!(matches!(
+        error.downcast_ref::<drasi_lib::context::workers::WorkerCleanupError>(),
+        Some(drasi_lib::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+    ));
     assert_eq!(*api.state.watch_count.borrow(), 0);
     assert_eq!(source.status().await, ComponentStatus::Error);
     assert!(source.base.task_handle.read().await.is_none());
@@ -1112,6 +1121,36 @@ async fn startup_retries_are_bounded() {
     assert!(source.base.task_handle.read().await.is_none());
     assert!(source.base.shutdown_tx.read().await.is_none());
     source.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_stop_retains_worker_until_cleanup_is_retried() {
+    let api = MockApi::new().await;
+    let source = api.source();
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _ = wait.await;
+    });
+    let old_task = task.abort_handle();
+    source.base.set_task_handle(task).await;
+    source.base.set_status(ComponentStatus::Running, None).await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), source.stop())
+            .await
+            .is_err()
+    );
+    assert!(source.base.task_handle.read().await.is_some());
+    assert!(!old_task.is_finished());
+    assert_eq!(source.status().await, ComponentStatus::Stopping);
+    assert!(source.start().await.is_err());
+    assert_eq!(*api.state.watch_count.borrow(), 0);
+
+    release.send(()).unwrap();
+    source.stop().await.unwrap();
+    assert!(old_task.is_finished());
+    assert!(source.base.task_handle.read().await.is_none());
+    assert_eq!(source.status().await, ComponentStatus::Stopped);
 }
 
 #[tokio::test]

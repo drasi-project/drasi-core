@@ -28,7 +28,7 @@ use crate::batch::{merge_metadata, BatchKey, PendingBatch};
 use crate::config::GrpcReactionConfig;
 use crate::connection::{create_client_with_retry, ConnectionState};
 use crate::proto::ReactionServiceClient;
-use crate::send::{send_batch_with_retry, send_batch_with_retry_with_limit};
+use crate::send::send_batch_with_retry;
 use crate::templates::{build_proto_item, QueryEmissionContext, TemplateEngine};
 use drasi_lib::reactions::common::{CheckpointState, FailureAction};
 
@@ -114,7 +114,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                         base_backoff,
                         max_backoff,
                         &mut pending,
-                        None,
                         &base,
                         &mut checkpoints,
                         policy,
@@ -133,11 +132,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             "Dequeued query result with {} items for processing",
             query_result.results.len()
         );
-
-        if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
-            info!("[{reaction_name}] Reaction status changed to non-running, exiting main loop");
-            return;
-        }
 
         if query_result.results.is_empty() {
             debug!("[{reaction_name}] Received empty result set from query");
@@ -194,7 +188,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     base_backoff,
                     max_backoff,
                     &mut pending,
-                    None,
                     &base,
                     &mut checkpoints,
                     policy,
@@ -227,7 +220,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     base_backoff,
                     max_backoff,
                     &mut pending,
-                    None,
                     &base,
                     &mut checkpoints,
                     policy,
@@ -256,7 +248,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             base_backoff,
             max_backoff,
             &mut pending,
-            Some(Duration::from_millis(1500)),
             &base,
             &mut checkpoints,
             policy,
@@ -299,7 +290,6 @@ async fn flush_pending(
     base_backoff: Duration,
     max_backoff: Duration,
     pending: &mut Option<PendingBatch>,
-    retry_limit: Option<Duration>,
     base: &ReactionBase,
     checkpoints: &mut CheckpointState,
     policy: ReactionRecoveryPolicy,
@@ -346,7 +336,6 @@ async fn flush_pending(
             connection_state,
             consecutive_failures,
             last_connection_attempt,
-            retry_limit,
         )
         .await
     };
@@ -480,37 +469,22 @@ async fn send_with_swap(
     connection_state: &mut ConnectionState,
     consecutive_failures: &mut u32,
     last_connection_attempt: &mut std::time::Instant,
-    retry_limit: Option<Duration>,
 ) -> bool {
     let mut retry_swaps = 0u32;
     loop {
         let Some(c) = client.as_mut() else {
             return false;
         };
-        let result = if let Some(limit) = retry_limit {
-            send_batch_with_retry_with_limit(
-                c,
-                batch.to_vec(),
-                query_id,
-                metadata,
-                max_retries,
-                endpoint,
-                timeout_ms,
-                limit,
-            )
-            .await
-        } else {
-            send_batch_with_retry(
-                c,
-                batch.to_vec(),
-                query_id,
-                metadata,
-                max_retries,
-                endpoint,
-                timeout_ms,
-            )
-            .await
-        };
+        let result = send_batch_with_retry(
+            c,
+            batch.to_vec(),
+            query_id,
+            metadata,
+            max_retries,
+            endpoint,
+            timeout_ms,
+        )
+        .await;
 
         match result {
             Ok((needs_new_client, new_client)) => {

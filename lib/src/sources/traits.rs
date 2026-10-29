@@ -48,12 +48,19 @@ use crate::context::SourceRuntimeContext;
 ///
 /// Sources return these errors (via `anyhow::Error`) from trait methods like `subscribe()`.
 /// The orchestration layer can downcast to check for specific error variants:
-/// ```ignore
+/// ```rust
+/// use drasi_lib::sources::SourceError;
+/// let err = anyhow::Error::new(SourceError::PositionUnavailable {
+///     source_id: "source".into(),
+///     requested: bytes::Bytes::from_static(b"last-position"),
+///     earliest_available: None,
+/// });
 /// if let Some(source_err) = err.downcast_ref::<SourceError>() {
 ///     match source_err {
 ///         SourceError::PositionUnavailable { .. } => { /* handle */ }
 ///     }
 /// }
+/// assert!(err.downcast_ref::<SourceError>().is_some());
 /// ```
 #[derive(Error, Debug)]
 pub enum SourceError {
@@ -115,10 +122,24 @@ impl PositionComparator for ByteLexPositionComparator {
 ///
 /// # Example Implementation
 ///
-/// ```ignore
+/// This compile-checked skeleton leaves connector-specific work to the implementer;
+/// the omitted lifecycle methods and `todo!` bodies are not a runnable source.
+///
+/// ```no_run
 /// use drasi_lib::Source;
 /// use drasi_lib::sources::{SourceBase, SourceBaseParams};
 /// use drasi_lib::context::SourceRuntimeContext;
+/// # use anyhow::Result;
+/// # use async_trait::async_trait;
+/// # use std::collections::HashMap;
+/// # use serde_json::Value;
+/// # use drasi_lib::channels::{ComponentStatus, DispatchMode, SubscriptionResponse};
+/// # use drasi_lib::config::SourceSubscriptionSettings;
+/// # pub struct MySourceConfig {
+/// #     id: String,
+/// #     dispatch_mode: DispatchMode,
+/// #     buffer_capacity: usize,
+/// # }
 ///
 /// pub struct MySource {
 ///     base: SourceBase,
@@ -148,7 +169,7 @@ impl PositionComparator for ByteLexPositionComparator {
 ///     }
 ///
 ///     fn properties(&self) -> HashMap<String, Value> {
-///         // Return plugin-specific properties
+///         todo!("Return every declared configuration property")
 ///     }
 ///
 ///     async fn initialize(&self, context: SourceRuntimeContext) {
@@ -156,6 +177,13 @@ impl PositionComparator for ByteLexPositionComparator {
 ///     }
 ///
 ///     // ... implement other methods
+/// #     async fn start(&self) -> Result<()> { todo!("Start owned connector work") }
+/// #     async fn stop(&self) -> Result<()> { todo!("Await connector cleanup") }
+/// #     async fn status(&self) -> ComponentStatus { self.base.get_status().await }
+/// #     async fn subscribe(&self, _: SourceSubscriptionSettings) -> Result<SubscriptionResponse> {
+/// #         todo!("Return the actual source subscription")
+/// #     }
+/// #     fn as_any(&self) -> &dyn std::any::Any { self }
 /// }
 /// ```
 #[async_trait]
@@ -318,12 +346,8 @@ pub trait Source: Send + Sync {
     ///
     /// The default is a no-op for sources that do not manage position handles.
     ///
-    /// **Note:** This method has no FFI vtable entry yet. `SourceProxy`
-    /// overrides it with an explicit no-op + log message, and overrides
-    /// `supports_replay()` to return `false` so the orchestration layer
-    /// does not expect plugin sources to support position handles. A future
-    /// FFI SDK update (see issue #371) will add the vtable entry so plugin
-    /// sources can participate in position-handle cleanup.
+    /// Dynamically loaded sources use the same cleanup contract: `SourceProxy`
+    /// forwards this call through the source FFI vtable.
     async fn remove_position_handle(&self, _query_id: &str) {}
 
     /// Signal that the initial batch of query subscriptions is complete.

@@ -94,6 +94,7 @@ pub async fn get_version_by_timestamp(config: &(impl QueryTestConfig + Send)) {
 
         _ = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: v1.clone(),
             })
             .await
@@ -101,6 +102,7 @@ pub async fn get_version_by_timestamp(config: &(impl QueryTestConfig + Send)) {
     }
 
     let change = SourceChange::Update {
+        removed_properties: Default::default(),
         element: v2.clone(),
     };
 

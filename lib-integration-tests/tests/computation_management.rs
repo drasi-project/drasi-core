@@ -1,0 +1,1816 @@
+// Copyright 2026 The Drasi Authors.
+// Licensed under the Apache License, Version 2.0.
+
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+use anyhow::Result;
+use async_trait::async_trait;
+use drasi_lib::{computation::v1::*, management::*, DrasiLib};
+use drasi_state_store_redb::{ConfigurationStoreOptions, RedbConfigurationStore};
+use serde_json::{json, Value};
+
+struct Service {
+    descriptor: ComponentDescriptor,
+    config: Value,
+}
+
+#[async_trait]
+impl ComputationComponent for Service {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn configuration(&self) -> Result<Value> {
+        Ok(self.config.clone())
+    }
+    async fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+#[async_trait]
+impl ComputationService for Service {
+    async fn run(&mut self) -> Result<()> {
+        std::future::pending().await
+    }
+}
+
+struct Factory {
+    descriptor: FactoryDescriptor,
+    created: Arc<AtomicUsize>,
+    create_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+}
+
+impl Factory {
+    fn new(created: Arc<AtomicUsize>) -> Self {
+        Self {
+            created,
+            create_gate: None,
+            descriptor: FactoryDescriptor {
+                implementation: ImplementationIdentity::try_new("test/managed-service", "1")
+                    .expect("implementation"),
+                role: ComponentRole::Service,
+                configuration_version: 1,
+                configuration: ConfigurationSchema {
+                    fields: BTreeMap::new(),
+                    allow_additional: true,
+                },
+                dependencies: BTreeMap::new(),
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl ComponentFactory for Factory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, _: &ComponentSpecification) -> Result<()> {
+        Ok(())
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        if let Some((entered, release)) = &self.create_gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+        self.created.fetch_add(1, Ordering::SeqCst);
+        if std::env::var_os("DRASI_TEST_CRASH_DURING_CREATE").is_some() {
+            std::process::exit(72);
+        }
+        if context.configuration().get("fail") == Some(&json!(true)) {
+            return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                "deliberate constructor failure"
+            )));
+        }
+        Ok(ConstructedComponent::service(Box::new(Service {
+            descriptor: context.specification.descriptor.clone(),
+            config: serde_json::to_value(context.configuration()).expect("factory configuration"),
+        })))
+    }
+}
+
+fn registry(created: Arc<AtomicUsize>) -> FactoryRegistry {
+    let mut factories = FactoryRegistry::standard();
+    factories
+        .register(Arc::new(Factory::new(created)))
+        .expect("unique factory");
+    factories
+}
+
+fn desired(values: &[(&str, bool)]) -> DesiredInstance {
+    let mut definition = ComputationGraph::empty("application")
+        .expect("empty graph")
+        .snapshot()
+        .select(GraphSelection::All)
+        .expect("complete topology");
+    definition.components = values
+        .iter()
+        .map(|(id, fail)| {
+            let descriptor = ComponentDescriptor::try_new(
+                ComponentId::try_new(*id).expect("component ID"),
+                Vec::new(),
+            )
+            .expect("service descriptor");
+            DesiredComponent {
+                descriptor: descriptor.clone(),
+                role: ComponentRole::Service,
+                completion: None,
+                streams: BTreeMap::new(),
+                lifecycle: LifecyclePolicy::default(),
+                input_merge: InputMergePolicy::default(),
+                construction: ComponentConstruction::Factory(ComponentSpecification {
+                    descriptor,
+                    role: ComponentRole::Service,
+                    completion: None,
+                    implementation: ImplementationIdentity::try_new("test/managed-service", "1")
+                        .expect("implementation"),
+                    configuration_version: 1,
+                    configuration: [(Arc::from("fail"), ConfigurationValue::Literal(json!(fail)))]
+                        .into(),
+                    dependencies: BTreeMap::new(),
+                }),
+            }
+        })
+        .collect();
+    definition.into()
+}
+
+async fn open(
+    store: Arc<RedbConfigurationStore>,
+    name: &str,
+    count: Arc<AtomicUsize>,
+) -> Result<DrasiLib> {
+    Ok(DrasiLib::builder()
+        .with_id(name)
+        .with_component_factories(registry(count))
+        .with_configuration_store(store)
+        .build()
+        .await?)
+}
+
+#[tokio::test]
+async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired_changes_before_construction(
+) -> Result<()> {
+    for persistent in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let store = if persistent {
+            Some(Arc::new(RedbConfigurationStore::new_with_options(
+                directory.path().join("configuration.redb"),
+                [44; 32],
+                ConfigurationStoreOptions {
+                    receipt_batch_capacity: std::num::NonZeroUsize::new(2),
+                },
+            )?))
+        } else {
+            None
+        };
+        let mut builder = DrasiLib::builder()
+            .with_id("housekeeping")
+            .with_component_factories(registry(count.clone()));
+        if let Some(store) = &store {
+            builder = builder.with_configuration_store(store.clone());
+        }
+        let core = builder.build().await?;
+        let first = core.new_configuration_request_id().await?;
+        let first_receipt = core
+            .apply_desired_state(0, &first, desired(&[("a", false)]))
+            .await?;
+        core.snapshot_desired_configuration("first").await?;
+        let second = core.new_configuration_request_id().await?;
+        let second_receipt = core
+            .apply_desired_state(first_receipt.revision, &second, desired(&[("b", false)]))
+            .await?;
+        core.snapshot_desired_configuration("second").await?;
+        let page = core
+            .list_configuration_snapshots(None, std::num::NonZeroUsize::new(1).unwrap())
+            .await?;
+        assert_eq!(
+            page,
+            [ConfigurationSnapshotSummary {
+                name: "first".into(),
+                revision: first_receipt.revision
+            }]
+        );
+        let page = core
+            .list_configuration_snapshots(
+                Some("first".into()),
+                std::num::NonZeroUsize::new(1).unwrap(),
+            )
+            .await?;
+        assert_eq!(page[0].name, "second");
+        assert!(core
+            .delete_configuration_snapshot("first", first_receipt.revision + 1)
+            .await
+            .is_err());
+        assert!(
+            core.delete_configuration_snapshot("first", first_receipt.revision)
+                .await?
+        );
+        assert!(core.load_configuration_snapshot("first").await?.is_none());
+        let third = core.new_configuration_request_id().await?;
+        if persistent {
+            let before = count.load(Ordering::SeqCst);
+            assert!(core.configuration_receipt(&first).await.is_err());
+            assert!(core
+                .apply_desired_state(
+                    second_receipt.revision,
+                    &first,
+                    desired(&[("forbidden", false)])
+                )
+                .await
+                .is_err());
+            assert_eq!(count.load(Ordering::SeqCst), before);
+            assert_eq!(
+                core.desired_configuration()?.revision,
+                second_receipt.revision
+            );
+        } else {
+            assert_eq!(
+                core.configuration_receipt(&first).await?,
+                Some(first_receipt)
+            );
+        }
+        let third_receipt = core
+            .apply_desired_state(second_receipt.revision, &third, desired(&[("c", false)]))
+            .await?;
+        core.shutdown().await?;
+        assert!(core.new_configuration_request_id().await.is_err());
+        if let Some(store) = store {
+            let restored = open(store, "housekeeping", count).await?;
+            assert_eq!(
+                restored.desired_configuration()?.revision,
+                third_receipt.revision
+            );
+            assert_eq!(
+                restored.configuration_receipt(&third).await?,
+                Some(third_receipt)
+            );
+            assert!(restored.configuration_receipt(&first).await.is_err());
+            assert!(restored
+                .load_configuration_snapshot("first")
+                .await?
+                .is_none());
+            assert_eq!(
+                restored
+                    .load_configuration_snapshot("second")
+                    .await?
+                    .unwrap()
+                    .revision,
+                second_receipt.revision
+            );
+            restored.shutdown().await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistence_is_optional_and_object_injection_remains_lightweight() -> Result<()> {
+    let core = DrasiLib::builder().build().await?;
+    assert!(core.desired_configuration().is_err());
+    let descriptor = ComponentDescriptor::try_new(ComponentId::try_new("injected")?, vec![])?;
+    core.add_computation_component(ComponentAddition::new(ConstructedComponent::service(
+        Box::new(Service {
+            descriptor,
+            config: json!({}),
+        }),
+    )))
+    .await?
+    .wait_created()
+    .await?;
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_absent(
+) -> Result<()> {
+    let count = Arc::new(AtomicUsize::new(0));
+    let core = DrasiLib::builder()
+        .with_component_factories(registry(count.clone()))
+        .build()
+        .await?;
+    let first = core
+        .apply_desired_state(0, "first", desired(&[("a", false), ("b", false)]))
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    let handle = core.computation_control()?;
+    let before = handle.observed();
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let repeated = core
+        .apply_desired_state(0, "first", desired(&[("a", false), ("b", false)]))
+        .await?;
+    assert_eq!(first, repeated);
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let second = core
+        .apply_desired_state(
+            first.revision,
+            "second",
+            desired(&[("a", false), ("c", false)]),
+        )
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        handle.observed().components[&ComponentId::try_new("a")?].generation,
+        before.components[&ComponentId::try_new("a")?].generation
+    );
+    assert!(!handle
+        .observed()
+        .components
+        .contains_key(&ComponentId::try_new("b")?));
+    assert!(core
+        .apply_desired_state(0, "stale", DesiredInstance::default())
+        .await
+        .is_err());
+    assert!(core
+        .apply_desired_state(second.revision, "first", DesiredInstance::default())
+        .await
+        .is_err());
+    assert!(
+        handle
+            .set_lifecycle_policy(
+                handle.desired_snapshot().revision,
+                ComponentId::try_new("a")?,
+                LifecyclePolicy { auto_start: false }
+            )
+            .await
+            .is_err(),
+        "raw management bypass rejected"
+    );
+    core.start().await?;
+    core.stop().await?;
+    core.apply_desired_state(second.revision, "remove-all", DesiredInstance::default())
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    let remaining = core.computation_control()?.desired_snapshot();
+    assert!(!remaining
+        .nodes
+        .iter()
+        .any(|node| ["a", "b", "c"].contains(&node.descriptor.id().as_str())));
+    assert!(remaining
+        .nodes
+        .iter()
+        .any(|node| node.descriptor.id().as_str() == "__component_graph__"));
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_receipts(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("definitions.redb");
+    let count = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(RedbConfigurationStore::new(&path, [42; 32])?);
+    let a = open(store.clone(), "a", count.clone()).await?;
+    let b = open(store.clone(), "b", count.clone()).await?;
+    assert!(open(store.clone(), "a", count.clone()).await.is_err());
+    a.apply_desired_state(0, "request", desired(&[("good", false), ("bad", true)]))
+        .await?;
+    let report = a.reconcile_desired_state().await?;
+    assert!(!report.converged());
+    let observed = a.computation_control()?.observed();
+    assert_eq!(
+        observed.components[&ComponentId::try_new("bad")?].realization,
+        RealizationState::CreationFailed
+    );
+    assert!(observed.components[&ComponentId::try_new("bad")?]
+        .failure
+        .is_some());
+    assert_eq!(
+        a.desired_configuration()?.desired.topology.components.len(),
+        2
+    );
+    assert_eq!(
+        a.snapshot_desired_configuration("before").await?.revision,
+        1
+    );
+    b.apply_desired_state(0, "request", desired(&[("only-b", false)]))
+        .await?;
+    b.reconcile_desired_state().await?;
+    assert_eq!(
+        b.desired_configuration()?.desired.topology.components.len(),
+        1
+    );
+    a.shutdown().await?;
+    let restored = open(store.clone(), "a", count.clone()).await?;
+    assert_eq!(restored.desired_configuration()?.revision, 1);
+    assert_eq!(
+        restored
+            .configuration_receipt("request")
+            .await?
+            .unwrap()
+            .revision,
+        1
+    );
+    assert_eq!(
+        restored.computation_control()?.observed().components.len(),
+        3
+    );
+    restored
+        .apply_desired_state(1, "fix", desired(&[("good", false), ("bad", false)]))
+        .await?;
+    assert!(restored.reconcile_desired_state().await?.converged());
+    restored
+        .restore_configuration_snapshot("before", 2, "restore")
+        .await?;
+    assert!(!restored.reconcile_desired_state().await?.converged());
+    assert_eq!(restored.desired_configuration()?.revision, 3);
+    restored.shutdown().await?;
+    b.shutdown().await?;
+    drop((a, b, restored, store));
+    let reopened = Arc::new(RedbConfigurationStore::new(&path, [42; 32])?);
+    let a = open(reopened, "a", count).await?;
+    assert_eq!(a.desired_configuration()?.revision, 3);
+    a.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("config.redb"),
+        [7; 32],
+    )?);
+    let core = DrasiLib::builder()
+        .with_configuration_store(store.clone())
+        .build()
+        .await?;
+    core.apply_desired_state(0, "add", desired(&[("missing", false)]))
+        .await?;
+    assert!(!core.reconcile_desired_state().await?.converged());
+    assert!(core
+        .computation_control()?
+        .observed()
+        .components
+        .contains_key(&ComponentId::try_new("missing")?));
+    let waiting = core.computation_component("missing")?;
+    assert!(waiting
+        .observed()?
+        .waiting_for
+        .iter()
+        .any(|dependency| { matches!(dependency, DependencyWait::Factory { .. }) }));
+    let count = Arc::new(AtomicUsize::new(0));
+    core.register_component_factory(Arc::new(Factory::new(count.clone())))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), waiting.wait_created()).await??;
+    assert!(core.management_status().await?.converged());
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert!(core
+        .add_query(
+            drasi_lib::Query::cypher("opaque-query")
+                .query("RETURN 1")
+                .build()
+        )
+        .await
+        .is_err());
+    assert!(core
+        .add_components(ComponentBatch::builder().build()?)
+        .await
+        .is_err());
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restoration_preserves_intent_when_secret_provider_or_factory_versions_are_unavailable(
+) -> Result<()> {
+    struct Secrets {
+        available: bool,
+    }
+    #[async_trait]
+    impl ConfigurationResolver for Secrets {
+        fn validate_reference(&self, key: &str) -> Result<()> {
+            anyhow::ensure!(key == "token", "unknown secret reference");
+            Ok(())
+        }
+        async fn resolve(&self, _: &str) -> Result<Value> {
+            anyhow::ensure!(self.available, "secret is unavailable");
+            Ok(json!("test-only-secret"))
+        }
+    }
+    struct Resources {
+        provider: bool,
+        secret: bool,
+    }
+    #[async_trait]
+    impl ManagementResourceResolver for Resources {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            spec: &ResourceSpecification,
+            _: &Value,
+        ) -> Result<ResourceHandle> {
+            anyhow::ensure!(self.provider, "secret provider is unavailable");
+            Ok(ResourceHandle::new(
+                spec.role,
+                Arc::new(ConfigurationResolverResource(Arc::new(Secrets {
+                    available: self.secret,
+                }))),
+            ))
+        }
+    }
+    for unavailable in [
+        "provider",
+        "secret",
+        "implementation-version",
+        "configuration-version",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let store = Arc::new(RedbConfigurationStore::new(
+            directory.path().join("restore.redb"),
+            [45; 32],
+        )?);
+        let mut target = desired(&[("dependent", false)]);
+        let resource = ResourceId::try_new("secrets")?;
+        target.topology.resources.push(ResourceSpecification {
+            id: resource.clone(),
+            role: ResourceRole::SecretStore,
+            ownership: ResourceOwnership::Graph,
+            binding: "secrets".into(),
+        });
+        target
+            .topology
+            .resource_configurations
+            .insert(resource.clone(), json!({}));
+        let ComponentConstruction::Factory(spec) = &mut target.topology.components[0].construction
+        else {
+            unreachable!()
+        };
+        spec.configuration.insert(
+            "credential".into(),
+            ConfigurationValue::Reference {
+                resource,
+                key: "token".into(),
+                secret: true,
+            },
+        );
+        let target = target.normalized()?;
+        let session = store.open("restore").await?;
+        session.commit(0, "original", &target).await?;
+        session.snapshot("original").await?;
+        session.close().await?;
+        let created = Arc::new(AtomicUsize::new(0));
+        let mut factory = Factory::new(created.clone());
+        if unavailable == "implementation-version" {
+            factory.descriptor.implementation =
+                ImplementationIdentity::try_new("test/managed-service", "2")?;
+        }
+        if unavailable == "configuration-version" {
+            factory.descriptor.configuration_version = 2;
+        }
+        let mut factories = FactoryRegistry::standard();
+        factories.register(Arc::new(factory))?;
+        let core = DrasiLib::builder()
+            .with_id("restore")
+            .with_configuration_store(store.clone())
+            .with_component_factories(factories)
+            .with_management_resources(Arc::new(Resources {
+                provider: unavailable != "provider",
+                secret: unavailable != "secret",
+            }))
+            .build()
+            .await?;
+        assert!(
+            !core.management_status().await?.converged(),
+            "{unavailable}"
+        );
+        let observed = core.computation_control()?.observed();
+        let dependent = &observed.components[&ComponentId::try_new("dependent")?];
+        assert!(
+            dependent.realization != RealizationState::Created,
+            "{unavailable}: {dependent:?}"
+        );
+        assert_eq!(created.load(Ordering::Acquire), 0, "{unavailable}");
+        assert_eq!(core.desired_configuration()?.desired, target);
+        assert_eq!(
+            core.configuration_receipt("original")
+                .await?
+                .unwrap()
+                .revision,
+            1
+        );
+        core.shutdown().await?;
+        let recovered = DrasiLib::builder()
+            .with_id("restore")
+            .with_configuration_store(store.clone())
+            .with_component_factories(registry(created.clone()))
+            .with_management_resources(Arc::new(Resources {
+                provider: true,
+                secret: true,
+            }))
+            .build()
+            .await?;
+        assert!(
+            recovered.reconcile_desired_state().await?.converged(),
+            "{unavailable}"
+        );
+        assert_eq!(created.load(Ordering::Acquire), 1);
+        assert_eq!(recovered.desired_configuration()?.desired, target);
+        recovered.shutdown().await?;
+        let session = store.open("restore").await?;
+        assert_eq!(
+            session.load_snapshot("original").await?.unwrap().desired,
+            target
+        );
+        session.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_restore_retains_lease_until_reconciliation_and_cleanup_finish() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("interrupted.redb"),
+        [47; 32],
+    )?);
+    let target = desired(&[("restoring", false)]).normalized()?;
+    let seed = store.open("restore").await?;
+    seed.commit(0, "original", &target).await?;
+    seed.close().await?;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factory = Factory::new(created.clone());
+    factory.create_gate = Some((entered.clone(), release.clone()));
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(factory))?;
+    let restoring = tokio::spawn({
+        let store = store.clone();
+        async move {
+            DrasiLib::builder()
+                .with_id("restore")
+                .with_configuration_store(store)
+                .with_component_factories(factories)
+                .build()
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await?;
+    restoring.abort();
+    assert!(restoring.await.err().unwrap().is_cancelled());
+    assert!(matches!(
+        store.open("restore").await.err().unwrap().downcast_ref(),
+        Some(ManagementError::AlreadyOwned(_))
+    ));
+    release.notify_one();
+    let released = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match store.open("restore").await {
+                Ok(session) => return Ok::<_, anyhow::Error>(session),
+                Err(error)
+                    if matches!(error.downcast_ref(), Some(ManagementError::AlreadyOwned(_))) =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await??;
+    assert_eq!(released.load().await?.desired, target);
+    assert_eq!(released.receipt("original").await?.unwrap().revision, 1);
+    released.close().await?;
+    let reopened = open(store, "restore", created).await?;
+    assert!(reopened.reconcile_desired_state().await?.converged());
+    reopened.shutdown().await?;
+    Ok(())
+}
+
+async fn instance_stop_retains_pending_managed_construction(
+    reconcile_while_stopped: bool,
+) -> Result<()> {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factory = Factory::new(created.clone());
+    factory.create_gate = Some((entered.clone(), release.clone()));
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(factory))?;
+    let core = DrasiLib::builder()
+        .with_component_factories(factories)
+        .with_construction_timeout_secs(60)
+        .with_shutdown_timeout_secs(2)
+        .build()
+        .await?;
+    core.start().await?;
+    core.apply_desired_state(0, "held-definition", desired(&[("held", false)]))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await?;
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    tokio::time::timeout(Duration::from_secs(3), core.stop()).await??;
+    assert!(!core.is_running().await);
+    assert_eq!(
+        core.configuration_receipt("held-definition")
+            .await?
+            .expect("accepted receipt")
+            .revision,
+        1
+    );
+    release.notify_one();
+    if reconcile_while_stopped {
+        let status =
+            tokio::time::timeout(Duration::from_secs(3), core.reconcile_desired_state()).await??;
+        assert!(status.applied, "{status:?}");
+        assert!(status.error.is_none(), "{status:?}");
+    }
+    core.start().await?;
+    core.computation_component("held")?.wait_started().await?;
+    assert_eq!(created.load(Ordering::Acquire), 1);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn instance_stop_interrupts_managed_construction_current_thread() -> Result<()> {
+    for reconcile in [false, true] {
+        instance_stop_retains_pending_managed_construction(reconcile).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instance_stop_interrupts_managed_construction_multi_thread() -> Result<()> {
+    for reconcile in [false, true] {
+        instance_stop_retains_pending_managed_construction(reconcile).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_definitions_and_snapshots_are_encrypted_and_wrong_keys_fail() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("encrypted.redb");
+    let store = RedbConfigurationStore::new(&path, [9; 32])?;
+    let session = store.open("instance").await?;
+    let mut definition = desired(&[("credential-component", false)]);
+    let ComponentConstruction::Factory(spec) = &mut definition.topology.components[0].construction
+    else {
+        unreachable!()
+    };
+    let secret = "recognizable-password-that-must-not-occur-on-disk";
+    spec.configuration.insert(
+        Arc::from("credential"),
+        ConfigurationValue::Literal(json!(secret)),
+    );
+    session.commit(0, "request", &definition).await?;
+    session.snapshot("saved").await?;
+    session.close().await?;
+    drop((session, store));
+    let bytes = std::fs::read(&path)?;
+    assert!(!bytes
+        .windows(secret.len())
+        .any(|window| window == secret.as_bytes()));
+    assert!(RedbConfigurationStore::new(&path, [8; 32]).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_revision_writers_cannot_overwrite_each_other() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = RedbConfigurationStore::new(directory.path().join("config.redb"), [5; 32])?;
+    let session = store.open("instance").await?;
+    let one = desired(&[("one", false)]);
+    let two = desired(&[("two", false)]);
+    let (a, b) = tokio::join!(session.commit(0, "a", &one), session.commit(0, "b", &two));
+    assert_ne!(a.is_ok(), b.is_ok());
+    assert_eq!(session.load().await?.revision, 1);
+    session.close().await?;
+    assert!(session.commit(1, "closed", &one).await.is_err());
+    let again = store.open("instance").await?;
+    assert_eq!(again.load().await?.revision, 1);
+    again.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn factory_objects_in_persistent_builder_are_explicitly_rejected() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("config.redb"),
+        [1; 32],
+    )?);
+    let result = DrasiLib::builder()
+        .with_configuration_store(store)
+        .with_query(
+            drasi_lib::Query::cypher("not-a-recipe")
+                .query("RETURN 1")
+                .build(),
+        )
+        .build()
+        .await;
+    assert!(result.is_err());
+    Ok(())
+}
+
+mod close_cancellation {
+    use super::*;
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct CloseFailure;
+
+    impl std::fmt::Display for CloseFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("injected configuration close failure")
+        }
+    }
+
+    impl std::error::Error for CloseFailure {}
+
+    struct CloseGate {
+        entered: Notify,
+        release: Notify,
+        finished: Notify,
+        calls: AtomicUsize,
+        fail_first: bool,
+    }
+
+    struct Store {
+        inner: Arc<RedbConfigurationStore>,
+        gate: Arc<CloseGate>,
+    }
+
+    struct Session {
+        inner: Arc<dyn ConfigurationSession>,
+        gate: Arc<CloseGate>,
+    }
+
+    #[async_trait]
+    impl ConfigurationStore for Store {
+        async fn open(&self, id: &str) -> Result<Arc<dyn ConfigurationSession>> {
+            Ok(Arc::new(Session {
+                inner: self.inner.open(id).await?,
+                gate: self.gate.clone(),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl ConfigurationSession for Session {
+        async fn load(&self) -> Result<CommittedConfiguration> {
+            self.inner.load().await
+        }
+
+        async fn commit(
+            &self,
+            expected: u64,
+            request: &str,
+            desired: &DesiredInstance,
+        ) -> Result<AcceptanceReceipt> {
+            self.inner.commit(expected, request, desired).await
+        }
+
+        async fn receipt(&self, request: &str) -> Result<Option<AcceptanceReceipt>> {
+            self.inner.receipt(request).await
+        }
+
+        async fn snapshot(&self, name: &str) -> Result<CommittedConfiguration> {
+            self.inner.snapshot(name).await
+        }
+
+        async fn load_snapshot(&self, name: &str) -> Result<Option<CommittedConfiguration>> {
+            self.inner.load_snapshot(name).await
+        }
+
+        async fn close(&self) -> Result<()> {
+            let first = self.gate.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                self.gate.entered.notify_one();
+                self.gate.release.notified().await;
+                if self.gate.fail_first {
+                    self.gate.finished.notify_one();
+                    return Err(CloseFailure.into());
+                }
+            }
+            let result = self.inner.close().await;
+            self.gate.finished.notify_one();
+            result
+        }
+    }
+
+    async fn verify_cancelled_close() -> Result<()> {
+        for fail_first in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let inner = Arc::new(RedbConfigurationStore::new(
+                directory.path().join("close.redb"),
+                [43; 32],
+            )?);
+            let gate = Arc::new(CloseGate {
+                entered: Notify::new(),
+                release: Notify::new(),
+                finished: Notify::new(),
+                calls: AtomicUsize::new(0),
+                fail_first,
+            });
+            let core = Arc::new(
+                DrasiLib::builder()
+                    .with_id("closing")
+                    .with_configuration_store(Arc::new(Store {
+                        inner: inner.clone(),
+                        gate: gate.clone(),
+                    }))
+                    .build()
+                    .await?,
+            );
+            let expected = core.desired_configuration()?;
+            let shutdown = tokio::spawn({
+                let core = core.clone();
+                async move { core.shutdown().await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), gate.entered.notified()).await?;
+            assert!(matches!(
+                inner
+                    .open("closing")
+                    .await
+                    .err()
+                    .expect("held close must retain the lease")
+                    .downcast_ref(),
+                Some(ManagementError::AlreadyOwned(_))
+            ));
+
+            let created = Arc::new(AtomicUsize::new(0));
+            let sibling = open(inner.clone(), "sibling", created.clone()).await?;
+            sibling
+                .apply_desired_state(0, "add", desired(&[("unrelated", false)]))
+                .await?;
+            assert!(sibling.reconcile_desired_state().await?.converged());
+            assert_eq!(created.load(Ordering::SeqCst), 1);
+            sibling.shutdown().await?;
+
+            shutdown.abort();
+            assert!(shutdown
+                .await
+                .expect_err("the shutdown caller was cancelled")
+                .is_cancelled());
+            gate.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), gate.finished.notified()).await?;
+
+            let retry = core.shutdown().await;
+            assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+            if fail_first {
+                assert!(
+                    retry
+                        .expect_err("the first close failed")
+                        .downcast_ref::<CloseFailure>()
+                        .is_some(),
+                    "retry must report the original failed close"
+                );
+                assert!(matches!(
+                    inner
+                        .open("closing")
+                        .await
+                        .err()
+                        .expect("failed close must retain the lease")
+                        .downcast_ref(),
+                    Some(ManagementError::AlreadyOwned(_))
+                ));
+                core.shutdown().await?;
+                assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+            } else {
+                retry?;
+            }
+            core.shutdown().await?;
+            let reopened = inner.open("closing").await?;
+            assert_eq!(reopened.load().await?, expected);
+            reopened.close().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_management_close_retains_result_and_owner_current_thread() -> Result<()> {
+        verify_cancelled_close().await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_management_close_retains_result_and_owner_multi_thread() -> Result<()> {
+        verify_cancelled_close().await
+    }
+}
+
+mod restore_errors {
+    use super::*;
+    use drasi_lib::error::OperationFailures;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum StoreFailure {
+        Load,
+        Close,
+    }
+
+    impl std::fmt::Display for StoreFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(match self {
+                Self::Load => "injected configuration load failure",
+                Self::Close => "injected configuration close failure",
+            })
+        }
+    }
+
+    impl std::error::Error for StoreFailure {}
+
+    struct RestoreStore(Arc<RestoreSession>);
+
+    struct RestoreSession {
+        invalid_topology: bool,
+        close_fails: bool,
+        loads: AtomicUsize,
+        closes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ConfigurationStore for RestoreStore {
+        async fn open(&self, _: &str) -> Result<Arc<dyn ConfigurationSession>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[async_trait]
+    impl ConfigurationSession for RestoreSession {
+        async fn load(&self) -> Result<CommittedConfiguration> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            if !self.invalid_topology {
+                return Err(
+                    anyhow::Error::new(StoreFailure::Load).context("reading stored definition")
+                );
+            }
+            let mut configuration = CommittedConfiguration::default();
+            configuration.desired.topology.version = 0;
+            Ok(configuration)
+        }
+
+        async fn commit(&self, _: u64, _: &str, _: &DesiredInstance) -> Result<AcceptanceReceipt> {
+            panic!("failed restore must not commit configuration");
+        }
+
+        async fn receipt(&self, _: &str) -> Result<Option<AcceptanceReceipt>> {
+            panic!("failed restore must not read receipts");
+        }
+
+        async fn snapshot(&self, _: &str) -> Result<CommittedConfiguration> {
+            panic!("failed restore must not save snapshots");
+        }
+
+        async fn load_snapshot(&self, _: &str) -> Result<Option<CommittedConfiguration>> {
+            panic!("failed restore must not load named snapshots");
+        }
+
+        async fn close(&self) -> Result<()> {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            if self.close_fails {
+                Err(anyhow::Error::new(StoreFailure::Close).context("closing failed restore"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    async fn verify_restore_errors() {
+        for invalid_topology in [false, true] {
+            for close_fails in [false, true] {
+                let session = Arc::new(RestoreSession {
+                    invalid_topology,
+                    close_fails,
+                    loads: AtomicUsize::new(0),
+                    closes: AtomicUsize::new(0),
+                });
+                let error = DrasiLib::builder()
+                    .with_id("restore-failure")
+                    .with_configuration_store(Arc::new(RestoreStore(session.clone())))
+                    .build()
+                    .await
+                    .err()
+                    .expect("invalid stored configuration must fail construction");
+
+                assert_eq!(session.loads.load(Ordering::SeqCst), 1);
+                assert_eq!(session.closes.load(Ordering::SeqCst), 1);
+                if invalid_topology {
+                    assert!(
+                        matches!(error.downcast_ref::<GraphError>(),
+                            Some(GraphError::Topology { reason })
+                                if reason == "unsupported desired topology version"),
+                        "original validation cause was lost: {error:#}"
+                    );
+                    assert!(
+                        format!("{error:#}").contains("invalid persisted desired configuration")
+                    );
+                } else {
+                    assert_eq!(
+                        error.downcast_ref::<StoreFailure>(),
+                        Some(&StoreFailure::Load),
+                        "original load cause was lost: {error:#}"
+                    );
+                    assert!(format!("{error:#}").contains("reading stored definition"));
+                }
+                let cleanup = error.downcast_ref::<OperationFailures>();
+                if close_fails {
+                    let failures = cleanup
+                        .expect("cleanup failure must remain inspectable")
+                        .failures();
+                    assert_eq!(failures.len(), 1);
+                    assert_eq!(
+                        failures[0].downcast_ref::<StoreFailure>(),
+                        Some(&StoreFailure::Close)
+                    );
+                    assert!(format!("{error:#}").contains("injected configuration close failure"));
+                } else {
+                    assert!(
+                        cleanup.is_none(),
+                        "successful cleanup must not add a failure"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configuration_restore_retains_primary_and_cleanup_failures_current_thread() {
+        verify_restore_errors().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configuration_restore_retains_primary_and_cleanup_failures_multi_thread() {
+        verify_restore_errors().await;
+    }
+}
+
+struct FaultStore {
+    inner: Arc<RedbConfigurationStore>,
+    fault: Arc<AtomicUsize>,
+}
+struct FaultSession {
+    inner: Arc<dyn ConfigurationSession>,
+    fault: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl ConfigurationStore for FaultStore {
+    async fn open(&self, id: &str) -> Result<Arc<dyn ConfigurationSession>> {
+        Ok(Arc::new(FaultSession {
+            inner: self.inner.open(id).await?,
+            fault: self.fault.clone(),
+        }))
+    }
+}
+#[async_trait]
+impl ConfigurationSession for FaultSession {
+    async fn new_request_id(&self) -> Result<String> {
+        self.inner.new_request_id().await
+    }
+    async fn load(&self) -> Result<CommittedConfiguration> {
+        if self
+            .fault
+            .compare_exchange(6, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            anyhow::bail!("injected failure confirming committed configuration");
+        }
+        let mut committed = self.inner.load().await?;
+        for fault in 7..=9 {
+            if self
+                .fault
+                .compare_exchange(fault, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                match fault {
+                    7 => committed.revision = committed.revision.saturating_sub(1),
+                    8 => committed.desired = DesiredInstance::default(),
+                    9 => {
+                        committed.revision += 1;
+                        committed.desired.version = 0;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        Ok(committed)
+    }
+    async fn commit(
+        &self,
+        expected: u64,
+        id: &str,
+        definition: &DesiredInstance,
+    ) -> Result<AcceptanceReceipt> {
+        let fault = self.fault.swap(0, Ordering::SeqCst);
+        if fault == 1 {
+            anyhow::bail!("injected failure before commit");
+        }
+        if fault == 4 {
+            std::process::exit(70);
+        }
+        let mut receipt = self.inner.commit(expected, id, definition).await?;
+        if fault == 2 {
+            anyhow::bail!("injected lost response after commit");
+        }
+        if fault == 3 {
+            std::process::exit(71);
+        }
+        if fault == 5 {
+            self.fault.store(6, Ordering::SeqCst);
+            anyhow::bail!("injected response loss with unavailable confirmation");
+        }
+        match fault {
+            10 => receipt.request_id = "different-request".into(),
+            11 => receipt.revision += 1,
+            12 => receipt.durable = false,
+            _ => {}
+        }
+        Ok(receipt)
+    }
+    async fn receipt(&self, id: &str) -> Result<Option<AcceptanceReceipt>> {
+        self.inner.receipt(id).await
+    }
+    async fn snapshot(&self, id: &str) -> Result<CommittedConfiguration> {
+        self.inner.snapshot(id).await
+    }
+    async fn load_snapshot(&self, id: &str) -> Result<Option<CommittedConfiguration>> {
+        self.inner.load_snapshot(id).await
+    }
+    async fn list_snapshots(
+        &self,
+        after: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<ConfigurationSnapshotSummary>> {
+        self.inner.list_snapshots(after, limit).await
+    }
+    async fn delete_snapshot(&self, name: &str, expected: u64) -> Result<bool> {
+        self.inner.delete_snapshot(name, expected).await
+    }
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+}
+
+#[tokio::test]
+async fn inconsistent_store_receipts_do_not_report_acceptance_or_start_construction() -> Result<()>
+{
+    for fault_value in [10, 11, 12] {
+        let directory = tempfile::tempdir()?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let fault = Arc::new(AtomicUsize::new(0));
+        let core = DrasiLib::builder()
+            .with_component_factories(registry(count.clone()))
+            .with_configuration_store(Arc::new(FaultStore {
+                inner: Arc::new(RedbConfigurationStore::new(
+                    directory.path().join("receipts.redb"),
+                    [27; 32],
+                )?),
+                fault: fault.clone(),
+            }))
+            .build()
+            .await?;
+        fault.store(fault_value, Ordering::SeqCst);
+        let outcome = core
+            .apply_desired_state(0, "requested", desired(&[("saved", false)]))
+            .await;
+        assert!(
+            outcome.is_err(),
+            "invalid receipt {fault_value} was accepted: {outcome:?}"
+        );
+        assert!(core.desired_configuration().is_err());
+        assert!(!core.management_status().await?.converged());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        let receipt = core.configuration_receipt("requested").await?.unwrap();
+        assert_eq!(receipt.request_id, "requested");
+        assert_eq!(receipt.revision, 1);
+        assert!(receipt.durable);
+        assert!(core.reconcile_desired_state().await?.converged());
+        assert_eq!(core.desired_configuration()?.revision, 1);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        core.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn regressed_changed_and_invalid_store_reads_cannot_replace_confirmed_state() -> Result<()> {
+    for (fault_value, reason) in [
+        (7, "regressed"),
+        (8, "without advancing"),
+        (9, "invalid persisted desired configuration"),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let fault = Arc::new(AtomicUsize::new(0));
+        let core = DrasiLib::builder()
+            .with_component_factories(registry(count.clone()))
+            .with_configuration_store(Arc::new(FaultStore {
+                inner: Arc::new(RedbConfigurationStore::new(
+                    directory.path().join("reads.redb"),
+                    [29; 32],
+                )?),
+                fault: fault.clone(),
+            }))
+            .build()
+            .await?;
+        core.apply_desired_state(0, "initial", desired(&[("saved", false)]))
+            .await?;
+        assert!(core.reconcile_desired_state().await?.converged());
+        let confirmed = core.desired_configuration()?;
+        fault.store(fault_value, Ordering::SeqCst);
+        let error = core.reconcile_desired_state().await.unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+        assert!(core.desired_configuration().is_err());
+        assert!(!core.management_status().await?.converged());
+        assert_eq!(
+            core.snapshot_desired_configuration("authoritative").await?,
+            confirmed
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(core.reconcile_desired_state().await?.converged());
+        assert_eq!(core.desired_configuration()?, confirmed);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        core.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_failure_prevents_construction_and_lost_response_is_resolved_by_request_id(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("fault.redb"),
+        [4; 32],
+    )?);
+    let count = Arc::new(AtomicUsize::new(0));
+    let fault = Arc::new(AtomicUsize::new(1));
+    let core = DrasiLib::builder()
+        .with_id("fault")
+        .with_component_factories(registry(count.clone()))
+        .with_configuration_store(Arc::new(FaultStore {
+            inner: store.clone(),
+            fault: fault.clone(),
+        }))
+        .build()
+        .await?;
+    assert!(core
+        .apply_desired_state(0, "before", desired(&[("saved", false)]))
+        .await
+        .is_err());
+    assert_eq!(core.desired_configuration()?.revision, 0);
+    assert!(core.configuration_receipt("before").await?.is_none());
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    fault.store(2, Ordering::SeqCst);
+    assert!(core
+        .apply_desired_state(0, "after", desired(&[("saved", false)]))
+        .await
+        .is_err());
+    assert_eq!(
+        core.configuration_receipt("after").await?.unwrap().revision,
+        1
+    );
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    let live = core.management_status().await?;
+    assert_eq!(live.revision, 1);
+    assert!(live.converged(), "{live:?}");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    core.shutdown().await?;
+    let restored = open(store, "fault", count.clone()).await?;
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let receipt = restored
+        .apply_desired_state(0, "after", desired(&[("saved", false)]))
+        .await?;
+    assert_eq!(receipt.revision, 1);
+    assert!(receipt.durable);
+    assert!(restored.reconcile_desired_state().await?.converged());
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    restored.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_commit_confirmation_is_explicit_and_reconcile_reloads_authoritative_state(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("uncertain.redb"),
+        [12; 32],
+    )?);
+    let count = Arc::new(AtomicUsize::new(0));
+    let fault = Arc::new(AtomicUsize::new(0));
+    let core = DrasiLib::builder()
+        .with_id("uncertain")
+        .with_component_factories(registry(count.clone()))
+        .with_configuration_store(Arc::new(FaultStore {
+            inner: store,
+            fault: fault.clone(),
+        }))
+        .build()
+        .await?;
+    fault.store(5, Ordering::SeqCst);
+    let error = core
+        .apply_desired_state(0, "uncertain", desired(&[("saved", false)]))
+        .await
+        .expect_err("the response and its confirmation are unavailable");
+    assert!(
+        error.to_string().contains("could not be confirmed"),
+        "{error}"
+    );
+    assert!(
+        core.desired_configuration().is_err(),
+        "unconfirmed cached state must not appear authoritative"
+    );
+    assert!(
+        core.new_configuration_request_id().await.is_err(),
+        "do not expire receipts while configuration acceptance is unconfirmed"
+    );
+    let status = core.management_status().await?;
+    assert!(!status.converged());
+    assert!(status.error.is_some());
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        core.configuration_receipt("uncertain")
+            .await?
+            .unwrap()
+            .revision,
+        1
+    );
+    let recovered = core.reconcile_desired_state().await?;
+    assert_eq!(recovered.revision, 1);
+    assert!(recovered.converged(), "{recovered:?}");
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "subprocess crash worker invoked by the crash recovery test"]
+async fn management_crash_worker() -> Result<()> {
+    let path = std::env::var_os("DRASI_MANAGEMENT_CRASH_PATH").expect("worker path");
+    let phase: usize = std::env::var("DRASI_MANAGEMENT_CRASH_PHASE")?.parse()?;
+    let store = Arc::new(RedbConfigurationStore::new(path, [31; 32])?);
+    let core = DrasiLib::builder()
+        .with_id("crash")
+        .with_component_factories(registry(Arc::new(AtomicUsize::new(0))))
+        .with_configuration_store(Arc::new(FaultStore {
+            inner: store,
+            fault: Arc::new(AtomicUsize::new(phase)),
+        }))
+        .build()
+        .await?;
+    core.apply_desired_state(
+        0,
+        "crash-request",
+        desired(&[("retained", false), ("failed", true)]),
+    )
+    .await?;
+    core.reconcile_desired_state().await?;
+    anyhow::bail!("crash worker unexpectedly completed")
+}
+
+#[test]
+fn process_crashes_before_commit_after_commit_and_during_creation_recover_exact_intent(
+) -> Result<()> {
+    for (phase, code) in [(4, 70), (3, 71), (0, 72)] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("crash.redb");
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "management_crash_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("DRASI_MANAGEMENT_CRASH_PATH", &path)
+            .env("DRASI_MANAGEMENT_CRASH_PHASE", phase.to_string());
+        if phase == 0 {
+            command.env("DRASI_TEST_CRASH_DURING_CREATE", "1");
+        }
+        let result = command.output()?;
+        assert_eq!(
+            result.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let store = Arc::new(RedbConfigurationStore::new(&path, [31; 32])?);
+                let core = open(store, "crash", Arc::new(AtomicUsize::new(0))).await?;
+                assert_eq!(
+                    core.desired_configuration()?.revision,
+                    if phase == 4 { 0 } else { 1 }
+                );
+                if phase != 4 {
+                    assert_eq!(
+                        core.configuration_receipt("crash-request")
+                            .await?
+                            .unwrap()
+                            .revision,
+                        1
+                    );
+                    let graph = core.computation_control()?;
+                    assert_eq!(graph.observed().components.len(), 3);
+                    assert_eq!(
+                        graph.observed().components[&ComponentId::try_new("failed")?].realization,
+                        RealizationState::CreationFailed
+                    );
+                }
+                core.shutdown().await?;
+                anyhow::Ok(())
+            })?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocked_creation_does_not_delay_durable_acceptance_and_cancelled_waits_do_not_lose_work(
+) -> Result<()> {
+    struct BlockingFactory {
+        inner: Factory,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl ComponentFactory for BlockingFactory {
+        fn descriptor(&self) -> &FactoryDescriptor {
+            self.inner.descriptor()
+        }
+        fn validate(&self, spec: &ComponentSpecification) -> Result<()> {
+            self.inner.validate(spec)
+        }
+        async fn create(
+            &self,
+            context: ConstructionContext,
+        ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.create(context).await
+        }
+    }
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("pending.redb"),
+        [12; 32],
+    )?);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(BlockingFactory {
+        inner: Factory::new(Arc::new(AtomicUsize::new(0))),
+        entered: entered.clone(),
+        release: release.clone(),
+    }))?;
+    let core = DrasiLib::builder()
+        .with_component_factories(factories)
+        .with_configuration_store(store)
+        .build()
+        .await?;
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(2),
+        core.apply_desired_state(0, "pending", desired(&[("pending", false)])),
+    )
+    .await??;
+    assert!(receipt.durable);
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    assert!(!core.management_status().await?.converged());
+    assert_eq!(
+        core.computation_control()?.observed().components[&ComponentId::try_new("pending")?]
+            .realization,
+        RealizationState::Creating
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), core.reconcile_desired_state())
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_committed_target(
+) -> Result<()> {
+    use std::sync::atomic::AtomicBool;
+    struct Cleanup {
+        fail: Arc<AtomicBool>,
+        cleaned: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ResourceCleanup for Cleanup {
+        async fn shutdown(&self) -> Result<()> {
+            if self.fail.swap(false, Ordering::SeqCst) {
+                anyhow::bail!("injected provider cleanup failure");
+            }
+            self.cleaned.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    struct Resources {
+        fail: Arc<AtomicBool>,
+        created: Arc<AtomicUsize>,
+        cleaned: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl ManagementResourceResolver for Resources {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            spec: &ResourceSpecification,
+            value: &Value,
+        ) -> Result<ResourceHandle> {
+            self.created.fetch_add(1, Ordering::SeqCst);
+            Ok(ResourceHandle::new(
+                spec.role,
+                Arc::new(value["value"].as_u64().unwrap() as usize),
+            )
+            .with_cleanup(Arc::new(Cleanup {
+                fail: self.fail.clone(),
+                cleaned: self.cleaned.clone(),
+            })))
+        }
+    }
+    let fail = Arc::new(AtomicBool::new(false));
+    let created = Arc::new(AtomicUsize::new(0));
+    let cleaned = Arc::new(AtomicUsize::new(0));
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut factory = Factory::new(count.clone());
+    factory.descriptor.dependencies.insert(
+        Arc::from("provider"),
+        ResourceRequirement::exactly_one::<usize>(ResourceRole::StateStore),
+    );
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(factory))?;
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("resources.redb"),
+        [11; 32],
+    )?);
+    let core = DrasiLib::builder()
+        .with_component_factories(factories)
+        .with_configuration_store(store)
+        .with_management_resources(Arc::new(Resources {
+            fail: fail.clone(),
+            created: created.clone(),
+            cleaned: cleaned.clone(),
+        }))
+        .build()
+        .await?;
+    let mut first = desired(&[("component", false)]);
+    let resource = ResourceId::try_new("state")?;
+    first.topology.resources.push(ResourceSpecification {
+        id: resource.clone(),
+        role: ResourceRole::StateStore,
+        ownership: ResourceOwnership::Graph,
+        binding: Arc::from("provider"),
+    });
+    first
+        .topology
+        .resource_configurations
+        .insert(resource.clone(), json!({"value":1}));
+    let ComponentConstruction::Factory(spec) = &mut first.topology.components[0].construction
+    else {
+        unreachable!()
+    };
+    spec.dependencies
+        .insert(Arc::from("provider"), vec![resource.clone()]);
+    core.apply_desired_state(0, "one", first.clone()).await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(created.load(Ordering::SeqCst), 1);
+    core.apply_desired_state(1, "same", first.clone()).await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(created.load(Ordering::SeqCst), 1);
+    fail.store(true, Ordering::SeqCst);
+    first
+        .topology
+        .resource_configurations
+        .insert(resource, json!({"value":2}));
+    core.apply_desired_state(1, "two", first).await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(core.desired_configuration()?.revision, 2);
+    assert_eq!(created.load(Ordering::SeqCst), 2);
+    assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    core.shutdown().await?;
+    assert_eq!(cleaned.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn desired_changes_preserve_direct_components_and_reject_implicit_adoption() -> Result<()> {
+    let batch = ComponentBatch::builder()
+        .service(Box::new(Service {
+            descriptor: ComponentDescriptor::try_new(ComponentId::try_new("new")?, Vec::new())?,
+            config: json!({"direct":true}),
+        }))
+        .build()?;
+    let core = DrasiLib::builder()
+        .with_component_factories(registry(Arc::new(AtomicUsize::new(0))))
+        .with_components(batch)
+        .build()
+        .await?;
+    assert!(core
+        .apply_desired_state(0, "adopt", desired(&[("new", false)]))
+        .await
+        .is_err());
+    assert_eq!(core.desired_configuration()?.revision, 0);
+    core.computation_component("new")?.start().await?;
+    let generation = core.computation_component("new")?.generation();
+    core.apply_desired_state(0, "managed", desired(&[("managed", false)]))
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    core.apply_desired_state(1, "remove-managed", DesiredInstance::default())
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(core.computation_component("new")?.generation(), generation);
+    assert!(core.computation_component("managed").is_err());
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_managed_construction_allows_unrelated_admission_and_component_stop() -> Result<()>
+{
+    struct GatedFactory {
+        inner: Factory,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl ComponentFactory for GatedFactory {
+        fn descriptor(&self) -> &FactoryDescriptor {
+            self.inner.descriptor()
+        }
+        fn validate(&self, specification: &ComponentSpecification) -> Result<()> {
+            self.inner.validate(specification)
+        }
+        async fn create(
+            &self,
+            context: ConstructionContext,
+        ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.create(context).await
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(GatedFactory {
+        inner: Factory::new(created.clone()),
+        entered: entered.clone(),
+        release: Arc::new(tokio::sync::Notify::new()),
+    }))?;
+    let core = DrasiLib::builder()
+        .with_component_factories(factories)
+        .build()
+        .await?;
+    core.start().await?;
+    core.apply_desired_state(0, "pending", desired(&[("pending", false)]))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    let unrelated = tokio::time::timeout(
+        Duration::from_secs(2),
+        core.add_computation_component(ComponentAddition::new(ConstructedComponent::service(
+            Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(
+                    ComponentId::try_new("unrelated")?,
+                    Vec::new(),
+                )?,
+                config: json!({"unrelated":true}),
+            }),
+        ))),
+    )
+    .await??;
+    tokio::time::timeout(Duration::from_secs(2), unrelated.wait_started()).await??;
+    let pending = core.computation_component("pending")?;
+    tokio::time::timeout(Duration::from_secs(2), pending.stop()).await??;
+    assert_eq!(
+        created.load(Ordering::Acquire),
+        0,
+        "cancelled construction must not complete"
+    );
+    assert_eq!(unrelated.observed()?.lifecycle, ComponentLifecycle::Running);
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    assert!(core.computation_component("pending").is_ok());
+    tokio::time::timeout(Duration::from_secs(2), core.shutdown()).await??;
+    Ok(())
+}

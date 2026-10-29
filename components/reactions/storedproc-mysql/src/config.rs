@@ -225,32 +225,13 @@ impl MySqlStoredProcReactionConfig {
         query_id: &str,
         operation: common::OperationType,
     ) -> Option<String> {
-        // 1. Full query id route.
-        if let Some(template) = self
-            .routes
-            .get(query_id)
-            .and_then(|qc| spec_for_operation(qc, operation))
-        {
-            return Some(template);
-        }
-
-        // 2. Last dotted segment route (e.g. `routes.my_query` for `source.my_query`).
-        if let Some(segment) = query_id.rsplit('.').next() {
-            if segment != query_id {
-                if let Some(template) = self
-                    .routes
-                    .get(segment)
-                    .and_then(|qc| spec_for_operation(qc, operation))
-                {
-                    return Some(template);
-                }
-            }
-        }
-
-        // 3. Default template.
-        self.default_template
-            .as_ref()
-            .and_then(|qc| spec_for_operation(qc, operation))
+        drasi_mysql_common::storedproc::resolve_template(
+            &self.routes,
+            self.default_template.as_ref(),
+            query_id,
+            operation,
+        )
+        .map(|template| template.template.clone())
     }
 
     /// Validate the configuration.
@@ -291,32 +272,7 @@ impl MySqlStoredProcReactionConfig {
     /// Validate that every `routes` key corresponds to a subscribed query id
     /// (or to the last dotted segment of one).
     pub fn validate_routes(&self, query_ids: &[String]) -> anyhow::Result<()> {
-        for key in self.routes.keys() {
-            let matches = query_ids.iter().any(|id| {
-                id == key || id.rsplit('.').next().map(|seg| seg == key).unwrap_or(false)
-            });
-            if !matches {
-                anyhow::bail!(
-                    "route key '{key}' does not match any subscribed query id; \
-                     configured queries: {query_ids:?}"
-                );
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Return the (non-empty) template for an operation from a `QueryConfig`.
-fn spec_for_operation(qc: &QueryConfig, operation: common::OperationType) -> Option<String> {
-    let spec = match operation {
-        common::OperationType::Add => qc.added.as_ref(),
-        common::OperationType::Update => qc.updated.as_ref(),
-        common::OperationType::Delete => qc.deleted.as_ref(),
-    }?;
-    if spec.template.trim().is_empty() {
-        None
-    } else {
-        Some(spec.template.clone())
+        drasi_mysql_common::storedproc::validate_routes(&self.routes, query_ids)
     }
 }
 

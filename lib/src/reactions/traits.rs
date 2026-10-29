@@ -80,10 +80,21 @@ pub trait QueryProvider: Send + Sync {
 ///
 /// # Example Implementation
 ///
-/// ```ignore
+/// This compile-checked skeleton leaves connector-specific work to the implementer;
+/// it does not supply a processing worker or claim completed destination effects.
+///
+/// ```no_run
 /// use drasi_lib::Reaction;
 /// use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
 /// use drasi_lib::context::ReactionRuntimeContext;
+/// # use anyhow::Result;
+/// # use async_trait::async_trait;
+/// # use drasi_lib::channels::{ComponentStatus, QueryResult};
+/// # pub struct MyReactionConfig {
+/// #     id: String,
+/// #     queries: Vec<String>,
+/// #     queue_capacity: usize,
+/// # }
 ///
 /// pub struct MyReaction {
 ///     base: ReactionBase,
@@ -122,7 +133,7 @@ pub trait QueryProvider: Send + Sync {
 ///     async fn start(&self) -> Result<()> {
 ///         // Start processing loop — host handles query subscriptions
 ///         // after start() returns successfully
-///         Ok(())
+///         todo!("Start and retain the reaction's processing worker")
 ///     }
 ///
 ///     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
@@ -130,6 +141,11 @@ pub trait QueryProvider: Send + Sync {
 ///     }
 ///
 ///     // ... implement other methods
+/// #     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+/// #         todo!("Return every declared configuration property")
+/// #     }
+/// #     async fn stop(&self) -> Result<()> { todo!("Await connector cleanup") }
+/// #     async fn status(&self) -> ComponentStatus { self.base.get_status().await }
 /// }
 /// ```
 #[async_trait]

@@ -54,24 +54,24 @@ use axum::{
 
 // DrasiLib core types - using config structs instead of builders
 use drasi_lib::{
-    DrasiLib, QueryConfig, QueryLanguage,
-    // SourceSubscriptionConfig is in config module
-    config::SourceSubscriptionConfig,
+    // QueryInputConfig is in config module
+    config::QueryInputConfig,
+    DrasiLib,
+    QueryConfig,
+    QueryLanguage,
     // Import SourceTrait to access set_bootstrap_provider method
     SourceTrait,
 };
 
 // Component types and configs - using constructors instead of builders
-use drasi_source_http::{HttpSource, HttpSourceConfig};
-use drasi_bootstrap_scriptfile::{ScriptFileBootstrapProvider, ScriptFileBootstrapConfig};
+use drasi_bootstrap_scriptfile::{ScriptFileBootstrapConfig, ScriptFileBootstrapProvider};
 use drasi_reaction_log::{LogReaction, LogReactionConfig};
+use drasi_source_http::{HttpSource, HttpSourceConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging - set RUST_LOG=debug for more detail
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("========================================");
     println!("  DrasiLib Constructor Example");
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         DrasiLib::builder()
             .with_id("http-source-api-example")
             .build()
-            .await?
+            .await?,
     );
 
     println!("Created DrasiLib instance: http-source-api-example\n");
@@ -99,8 +99,7 @@ async fn main() -> Result<()> {
     // The ScriptFile bootstrap provider loads initial stock data from a JSONL
     // file. Here we use the config struct directly instead of a builder.
 
-    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("bootstrap_data.jsonl");
+    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bootstrap_data.jsonl");
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
 
@@ -138,7 +137,9 @@ async fn main() -> Result<()> {
 
     // Set the bootstrap provider on the source
     // Note: This must be done before adding the source to DrasiLib
-    http_source.set_bootstrap_provider(Box::new(bootstrap_provider)).await;
+    http_source
+        .set_bootstrap_provider(Box::new(bootstrap_provider))
+        .await;
 
     // =========================================================================
     // Step 4: Add Source to DrasiLib Dynamically
@@ -162,24 +163,24 @@ async fn main() -> Result<()> {
                    sp.price AS price,
                    sp.previous_close AS previous_close,
                    sp.volume AS volume
-        "#.to_string(),
+        "#
+        .to_string(),
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
-        sources: vec![
-            SourceSubscriptionConfig {
-                source_id: "stock-prices".to_string(),
-                pipeline: vec![],
-            }
-        ],
+        inputs: vec![QueryInputConfig {
+            component: "stock-prices".to_string(),
+            pipeline: vec![],
+            port: None,
+        }],
         auto_start: true,
         joins: None,
         enable_bootstrap: true,
-        bootstrap_buffer_size: 10000,
         priority_queue_capacity: None,
         dispatch_buffer_capacity: None,
         dispatch_mode: None,
         storage_backend: None,
         recovery_policy: None,
+        result: Default::default(),
     };
 
     // =========================================================================
@@ -207,11 +208,8 @@ async fn main() -> Result<()> {
     // - id: unique identifier
     // - queries: list of query IDs to subscribe to
     // - config: reaction-specific configuration
-    let log_reaction = LogReaction::new(
-        "console-logger",
-        vec!["all-prices".to_string()],
-        log_config,
-    );
+    let log_reaction =
+        LogReaction::new("console-logger", vec!["all-prices".to_string()], log_config);
 
     // =========================================================================
     // Step 8: Add Reaction to DrasiLib Dynamically

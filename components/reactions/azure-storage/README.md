@@ -107,4 +107,31 @@ make integration-test
 ## Limitations
 
 - Azure Files/Shares are not supported.
-- Uses Azure Rust SDK crates version `0.21.x` (latest stable at time of writing). Future versions may require migration to the unified `azure_sdk` v1 crate.
+- Uses the legacy Azure Rust Storage SDK `0.21.x` to retain account-key
+  authentication, custom Azurite endpoints and Table operations. The maintained
+  Blob/Queue 1.1 SDKs do not provide a drop-in replacement for this complete
+  capability set.
+
+### Legacy SDK credential logging mitigation
+
+`RUSTSEC-2026-0275` affects the SDK's request and successful-retry debug/trace
+output. Every client replaces the final request-logging transport with a
+redacting transport: the original SDK HTTP client receives the signed request,
+then the authorization value is replaced with `<redacted>` before retry
+logging. Cancellation performs the same cleanup, and each retry is re-signed
+by the SDK. Authentication, timeouts, retries and other diagnostics are retained;
+no global subscriber or logging filter is changed. This is a runtime
+mitigation, **not** a patched SDK or an audit exemption.
+
+Queue replies and storage errors also pass through a quick-xml 0.41 preflight
+before legacy XML deserialization. It rejects duplicate attributes and limits
+fixed-schema service metadata to 256 attributes per element, mitigating
+`RUSTSEC-2026-0194` without disabling duplicate checks. The legacy deserializer
+uses a plain reader, not the namespace resolver affected by
+`RUSTSEC-2026-0195`. Blob writes, queue messages, Table entities, templates and
+custom endpoints retain their existing behavior.
+
+Treat logs from older builds as potentially credential-bearing. Rotate keys
+used while SDK debug/trace logging was enabled. The mitigation does not sanitize
+configuration deliberately logged by application code or independent Azure
+clients outside this plugin.

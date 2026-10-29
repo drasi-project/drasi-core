@@ -22,10 +22,11 @@
 use std::sync::Arc;
 
 use drasi_core::interface::{
-    LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SessionGuard,
+    IndexBackendPlugin, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SessionGuard,
 };
 use drasi_index_garnet::{
-    GarnetLiveResultsWriter, GarnetOutboxWriter, GarnetSessionControl, GarnetSessionState,
+    GarnetIndexProvider, GarnetLiveResultsWriter, GarnetOutboxWriter, GarnetSessionControl,
+    GarnetSessionState,
 };
 use shared_tests::redis_helpers::{setup_redis, RedisGuard};
 use tokio::sync::OnceCell;
@@ -272,6 +273,292 @@ async fn test_garnet_outbox_isolation_between_queries() {
     writer1.clear(&qid1).await.unwrap();
     assert!(writer1.read_from(&qid1, 0).await.unwrap().is_empty());
     assert_eq!(writer2.read_from(&qid2, 0).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_garnet_output_scope_binding_preserves_primary_keys() {
+    let connection = get_connection().await;
+    let storage_scope = unique_query_id();
+    let query_id = "logical-query";
+    let auxiliary_id = "metadata:{logical-query}";
+    let outbox =
+        GarnetOutboxWriter::new(&storage_scope, connection.clone()).with_query_id(query_id);
+    let live =
+        GarnetLiveResultsWriter::new(&storage_scope, connection.clone()).with_query_id(query_id);
+    outbox.append(query_id, 7, b"primary").await.unwrap();
+    outbox.append(auxiliary_id, 1, b"metadata").await.unwrap();
+    live.apply_mutations(
+        query_id,
+        &[RowMutation {
+            row_signature: 7,
+            data: Some(b"primary"),
+        }],
+    )
+    .await
+    .unwrap();
+    live.apply_mutations(
+        auxiliary_id,
+        &[RowMutation {
+            row_signature: 1,
+            data: Some(b"metadata"),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outbox.read_from(query_id, 0).await.unwrap(),
+        [(7, b"primary".to_vec())]
+    );
+    assert_eq!(
+        outbox.read_from(auxiliary_id, 0).await.unwrap(),
+        [(1, b"metadata".to_vec())]
+    );
+    assert_eq!(
+        live.read_snapshot(query_id).await.unwrap(),
+        [(7, b"primary".to_vec())]
+    );
+    assert_eq!(
+        live.read_snapshot(auxiliary_id).await.unwrap(),
+        [(1, b"metadata".to_vec())]
+    );
+
+    let legacy_outbox = GarnetOutboxWriter::new(&storage_scope, connection.clone());
+    let legacy_live = GarnetLiveResultsWriter::new(&storage_scope, connection);
+    assert_eq!(
+        legacy_outbox.read_from(&storage_scope, 0).await.unwrap(),
+        [(7, b"primary".to_vec())]
+    );
+    assert_eq!(
+        legacy_live.read_snapshot(&storage_scope).await.unwrap(),
+        [(7, b"primary".to_vec())]
+    );
+    outbox.clear(auxiliary_id).await.unwrap();
+    live.clear(auxiliary_id).await.unwrap();
+    assert!(outbox.read_from(auxiliary_id, 0).await.unwrap().is_empty());
+    assert!(live.read_snapshot(auxiliary_id).await.unwrap().is_empty());
+    assert_eq!(
+        outbox.read_latest_sequence(query_id).await.unwrap(),
+        Some(7)
+    );
+    assert_eq!(live.row_count(query_id).await.unwrap(), 1);
+    outbox.clear(query_id).await.unwrap();
+    live.clear(query_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_garnet_outbox_sequence_order_is_exact_above_double_precision() {
+    let connection = get_connection().await;
+    let query_id = unique_query_id();
+    let outbox = GarnetOutboxWriter::new(&query_id, connection);
+    let sequences = [
+        (1 << 53) - 1,
+        1 << 53,
+        (1 << 53) + 1,
+        9_999_999_999_999_999,
+        10_000_000_000_000_000,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+    for sequence in sequences {
+        outbox.append(&query_id, sequence, b"entry").await.unwrap();
+        assert_eq!(
+            outbox.read_latest_sequence(&query_id).await.unwrap(),
+            Some(sequence)
+        );
+    }
+    for after in sequences {
+        assert_eq!(
+            outbox_sequences(&outbox.read_from(&query_id, after).await.unwrap()),
+            sequences
+                .into_iter()
+                .filter(|seq| *seq > after)
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        outbox.trim_to_capacity(&query_id, 2).await.unwrap(),
+        sequences.len() - 2
+    );
+    assert_eq!(
+        outbox_sequences(&outbox.read_from(&query_id, 0).await.unwrap()),
+        [u64::MAX - 1, u64::MAX]
+    );
+    outbox.clear(&query_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_garnet_scoped_provider_binds_output_and_commits_all_resources_together() {
+    let redis = shared_redis().await;
+    let storage_scope = unique_query_id();
+    let provider: Arc<dyn IndexBackendPlugin> =
+        Arc::new(GarnetIndexProvider::new(redis.url(), None, false));
+    assert!(provider.supports_atomic_query_output());
+    let query_id = "logical-query";
+    let metadata_id = "metadata:{logical-query}";
+    {
+        let resources = provider
+            .create_scoped_indexes(&storage_scope, query_id)
+            .await
+            .unwrap();
+        let checkpoint = resources.checkpoint_store.as_ref().unwrap();
+        let outbox = resources.outbox_writer.as_ref().unwrap();
+        let live = resources.live_results_writer.as_ref().unwrap();
+        {
+            let _session = SessionGuard::begin(resources.set.session_control.clone())
+                .await
+                .unwrap();
+            checkpoint
+                .stage_checkpoint("source", 1, None)
+                .await
+                .unwrap();
+            checkpoint.stage_result_sequence(query_id, 1).await.unwrap();
+            outbox
+                .append_and_trim(query_id, 1, b"discarded", 1)
+                .await
+                .unwrap();
+            outbox
+                .append(metadata_id, 1, b"discarded-metadata")
+                .await
+                .unwrap();
+            live.apply_mutations(
+                query_id,
+                &[RowMutation {
+                    row_signature: 1,
+                    data: Some(b"discarded"),
+                }],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                checkpoint.read_result_sequence(query_id).await.unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            checkpoint.read_result_sequence(query_id).await.unwrap(),
+            None
+        );
+        assert!(checkpoint
+            .read_checkpoint("source")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(outbox.read_from(query_id, 0).await.unwrap().is_empty());
+        assert!(outbox.read_from(metadata_id, 0).await.unwrap().is_empty());
+        assert!(live.read_snapshot(query_id).await.unwrap().is_empty());
+        let session = SessionGuard::begin(resources.set.session_control.clone())
+            .await
+            .unwrap();
+        checkpoint
+            .stage_checkpoint("source", 2, None)
+            .await
+            .unwrap();
+        checkpoint.stage_result_sequence(query_id, 2).await.unwrap();
+        outbox
+            .append_and_trim(query_id, 2, b"primary", 2)
+            .await
+            .unwrap();
+        outbox.append(metadata_id, 1, b"metadata").await.unwrap();
+        live.apply_mutations(
+            query_id,
+            &[RowMutation {
+                row_signature: 2,
+                data: Some(b"primary"),
+            }],
+        )
+        .await
+        .unwrap();
+        session.commit().await.unwrap();
+        checkpoint
+            .write_output_generation(query_id, 3)
+            .await
+            .unwrap();
+    }
+    let reopened = provider
+        .create_scoped_indexes(&storage_scope, query_id)
+        .await
+        .unwrap();
+    let checkpoint = reopened.checkpoint_store.as_ref().unwrap();
+    assert_eq!(
+        checkpoint.read_result_sequence(query_id).await.unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        checkpoint
+            .read_checkpoint("source")
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        2
+    );
+    assert_eq!(
+        checkpoint.read_output_generation(query_id).await.unwrap(),
+        Some(3)
+    );
+    assert_eq!(
+        reopened
+            .outbox_writer
+            .as_ref()
+            .unwrap()
+            .read_from(query_id, 0)
+            .await
+            .unwrap(),
+        [(2, b"primary".to_vec())]
+    );
+    assert_eq!(
+        reopened
+            .outbox_writer
+            .as_ref()
+            .unwrap()
+            .read_from(metadata_id, 0)
+            .await
+            .unwrap(),
+        [(1, b"metadata".to_vec())]
+    );
+    assert_eq!(
+        reopened
+            .live_results_writer
+            .as_ref()
+            .unwrap()
+            .read_snapshot(query_id)
+            .await
+            .unwrap(),
+        [(2, b"primary".to_vec())]
+    );
+    let legacy_reader = provider.create_indexes(&storage_scope).await.unwrap();
+    assert_eq!(
+        legacy_reader
+            .outbox_writer
+            .as_ref()
+            .unwrap()
+            .read_from(&storage_scope, 0)
+            .await
+            .unwrap(),
+        [(2, b"primary".to_vec())]
+    );
+    assert_eq!(
+        legacy_reader
+            .live_results_writer
+            .as_ref()
+            .unwrap()
+            .read_snapshot(&storage_scope)
+            .await
+            .unwrap(),
+        [(2, b"primary".to_vec())]
+    );
+    checkpoint.clear_checkpoints().await.unwrap();
+    assert_eq!(
+        checkpoint.read_result_sequence(query_id).await.unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        checkpoint.read_output_generation(query_id).await.unwrap(),
+        Some(3)
+    );
 }
 
 // ─── LiveResultsWriter Tests ─────────────────────────────────────────────────

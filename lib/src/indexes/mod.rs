@@ -41,7 +41,7 @@
 //! queries:
 //!   - id: my_query
 //!     query: "MATCH (n) RETURN n"
-//!     sources: [my_source]
+//!     inputs: [my_source]
 //!     storage_backend: rocks_persistent
 //! ```
 //!
@@ -51,7 +51,7 @@
 //! queries:
 //!   - id: my_query
 //!     query: "MATCH (n) RETURN n"
-//!     sources: [my_source]
+//!     inputs: [my_source]
 //!     storage_backend:
 //!       kind: memory
 //!       enableArchive: true
@@ -64,16 +64,17 @@
 //! [`crate::builder::DrasiLibBuilder::with_index_provider`]. A query selects a provider
 //! by referencing that same name through [`StorageBackendRef::Named`]:
 //!
-//! ```ignore
+//! ```no_run
 //! use drasi_index_rocksdb::RocksDbIndexProvider;
 //! use drasi_lib::{DrasiLib, Query, StorageBackendRef};
 //! use std::sync::Arc;
 //!
+//! # async fn example() -> anyhow::Result<()> {
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false)
 //!     .with_memory_budget_bytes(512 << 20)?;
 //! let query = Query::cypher("my_query")
 //!     .query("MATCH (n) RETURN n")
-//!     .from_source("my_source")
+//!     .from_input("my_source")
 //!     .with_storage_backend(StorageBackendRef::Named("rocksdb".to_string()))
 //!     .build();
 //! let core = DrasiLib::builder()
@@ -81,6 +82,9 @@
 //!     .with_query(query)
 //!     .build()
 //!     .await?;
+//! # core.shutdown().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Only in-memory backends can be instantiated purely from configuration in embedded
@@ -100,6 +104,26 @@ pub mod factory;
 
 pub use config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use factory::{IndexError, IndexFactory};
+
+pub(crate) fn operation_error(
+    query: &str,
+    operation: &str,
+    error: drasi_core::interface::IndexError,
+) -> drasi_core::interface::IndexError {
+    drasi_core::interface::IndexError::Other(
+        anyhow::Error::new(error)
+            .context(format!("Query '{query}' failed to {operation}"))
+            .into_boxed_dyn_error(),
+    )
+}
+
+pub(crate) fn check_clear(
+    query: &str,
+    operation: &str,
+    result: Result<(), drasi_core::interface::IndexError>,
+) -> Result<(), drasi_core::interface::IndexError> {
+    result.map_err(|error| operation_error(query, operation, error))
+}
 
 // Re-export IndexSet and IndexBackendPlugin from drasi_core for plugin developers
 pub use drasi_core::interface::CreatedIndexes;

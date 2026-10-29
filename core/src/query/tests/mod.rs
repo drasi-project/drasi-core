@@ -13,13 +13,19 @@
 // limitations under the License.
 
 mod aggregate_update_tests;
+#[cfg(feature = "computation")]
+mod mutation_integrity;
+mod optional_context_work;
 mod retained_multi_source_tests;
+mod rich_property_tests;
 mod row_signature_tests;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use drasi_query_ast::api::QueryParser;
 use drasi_query_cypher::CypherParser;
+use drasi_query_gql::GQLParser;
 
 use crate::{
     evaluation::{context::QueryPartEvaluationContext, functions::FunctionRegistry},
@@ -27,10 +33,86 @@ use crate::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
         in_memory_result_index::InMemoryResultIndex,
     },
-    interface::{FutureQueueConsumer, IndexError},
+    interface::{FutureQueueConsumer, IndexError, QueryBuilderError},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
+
+fn path_bound_parsers() -> [Arc<dyn QueryParser>; 2] {
+    let registry = Arc::new(FunctionRegistry::new());
+    [
+        Arc::new(CypherParser::new(registry.clone())),
+        Arc::new(GQLParser::new(registry)),
+    ]
+}
+
+fn assert_unsupported_path_bounds<T>(result: Result<T, QueryBuilderError>) {
+    let error = result
+        .err()
+        .expect("quantified relationships must not build");
+    assert_eq!(
+        error.to_string(),
+        "Unsupported query feature: variable-length relationship patterns"
+    );
+    assert!(matches!(
+        error,
+        QueryBuilderError::UnsupportedFeature {
+            feature: "variable-length relationship patterns"
+        }
+    ));
+}
+
+#[tokio::test]
+async fn unsupported_path_bounds_are_rejected_for_both_query_languages() {
+    for parser in path_bound_parsers() {
+        for text in [
+            "MATCH (a)-[r:LINK*]->(b) RETURN r",
+            "MATCH (a)-[r:LINK*1]->(b) RETURN r",
+            "MATCH (a)-[:LINK*2]->(b) RETURN b",
+            "MATCH (a)-[:LINK*1..3]->(b) RETURN b",
+            "MATCH (a)-[:LINK*..3]->(b) RETURN b",
+            "MATCH (a)-[:LINK*0..1]->(b) RETURN b",
+            "MATCH (a)<-[:LINK*1..3]-(b) RETURN b",
+            "MATCH (a)-[:LINK*1..3]-(b) RETURN b",
+            "MATCH (a) OPTIONAL MATCH (a)-[:LINK*1..3]->(b) RETURN b",
+        ] {
+            assert_unsupported_path_bounds(
+                QueryBuilder::new(text, parser.clone()).try_build().await,
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unsupported_path_bounds_in_later_cypher_parts_are_rejected_before_evaluator_creation() {
+    let parser = Arc::new(CypherParser::new(Arc::new(FunctionRegistry::new())));
+    assert_unsupported_path_bounds(
+        QueryBuilder::new(
+            "MATCH (a) WITH a MATCH (a)-[:LINK*1..3]->(b) RETURN b",
+            parser,
+        )
+        .try_build_evaluator()
+        .await,
+    );
+}
+
+#[tokio::test]
+async fn unquantified_relationship_paths_remain_supported() {
+    for parser in path_bound_parsers() {
+        for text in [
+            "MATCH (a)-[r:LINK]->(b) RETURN r",
+            "MATCH (a)<-[:LINK]-(b) RETURN b",
+            "MATCH (a)-[:LINK]-(b) RETURN b",
+            "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) RETURN c",
+            "MATCH (a) OPTIONAL MATCH (a)-[:LINK]->(b) RETURN b",
+        ] {
+            QueryBuilder::new(text, parser.clone())
+                .try_build()
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+        }
+    }
+}
 
 #[tokio::test]
 async fn dependency_leaks() {

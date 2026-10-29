@@ -32,6 +32,7 @@ workspace = true
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-http-common = { workspace = true, features = ["webhook", "adaptive"] }
 drasi-plugin-sdk = { workspace = true }
 drasi-source-mapping.workspace = true
 utoipa = { workspace = true }
@@ -56,7 +57,6 @@ prost-types = "0.12"
 ordered-float = "3.0"
 # Webhook feature dependencies
 handlebars = "6"
-quick-xml = { version = "0.37", features = ["serialize"] }
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"

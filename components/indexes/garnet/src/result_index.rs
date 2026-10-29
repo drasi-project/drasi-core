@@ -19,6 +19,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
@@ -26,7 +27,6 @@ use drasi_core::{
         ResultSequence, ResultSequenceCounter,
     },
 };
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use ordered_float::OrderedFloat;
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 
@@ -85,7 +85,9 @@ impl AccumulatorIndex for GarnetResultIndex {
                     let stored: StoredValueAccumulator =
                         redis::from_redis_value(&redis::Value::Data(bytes))
                             .map_err(IndexError::other)?;
-                    return Ok(Some(stored.into()));
+                    return ValueAccumulator::try_from(stored)
+                        .map(Some)
+                        .map_err(IndexError::other);
                 }
                 BufferReadResult::KeyDeleted => return Ok(None),
                 BufferReadResult::NotInBuffer => {} // fall through to Redis
@@ -103,7 +105,9 @@ impl AccumulatorIndex for GarnetResultIndex {
 
         match result {
             None => Ok(None),
-            Some(v) => Ok(Some(v.into())),
+            Some(v) => ValueAccumulator::try_from(v)
+                .map(Some)
+                .map_err(IndexError::other),
         }
     }
 
@@ -128,7 +132,7 @@ impl AccumulatorIndex for GarnetResultIndex {
                 buffer.del(ari_key);
             }
             Some(v) => {
-                let stored: StoredValueAccumulator = v.into();
+                let stored = StoredValueAccumulator::try_from(v).map_err(IndexError::other)?;
                 let bytes = redis::ToRedisArgs::to_redis_args(&stored);
                 let b = bytes.into_iter().next().ok_or_else(|| {
                     IndexError::other(std::io::Error::other(

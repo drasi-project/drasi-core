@@ -1,0 +1,789 @@
+// Copyright 2026 The Drasi Authors.
+// Licensed under the Apache License, Version 2.0.
+
+use std::{
+    collections::BTreeMap,
+    fs::OpenOptions,
+    io::Write,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use drasi_core::{
+    computation::ComputationIndexProvider,
+    evaluation::variable_value::VariableValue,
+    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
+};
+use drasi_index_rocksdb::RocksDbIndexProvider;
+use drasi_lib::computation::v1::*;
+use drasi_state_store_redb::RedbStateStoreProvider;
+
+#[path = "computation_transaction_query/reliability.rs"]
+mod reliability;
+
+fn provider(root: &Path) -> Arc<dyn ComputationIndexProvider> {
+    LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)))
+}
+
+async fn query(root: &Path) -> Result<ContinuousQueryTransformer> {
+    let mut query = ContinuousQueryTransformer::new_configured(
+        ContinuousQueryDefinition {
+            graph_id: "transaction-query".into(),
+            id: ComponentId::try_new("query")?,
+            query: "MATCH (n:Item) RETURN count(n) AS total".into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out")?,
+            outbox_capacity: NonZeroUsize::new(8).expect("outbox capacity"),
+        },
+        provider(root),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await?
+    .with_delivery_tracking();
+    query.start().await?;
+    Ok(query)
+}
+
+fn definition(key: &str, subscribers: &[&str]) -> QosChannelDefinition {
+    QosChannelDefinition {
+        stream: StreamId::try_new(format!("{key}/out")).expect("stream"),
+        capacity: NonZeroUsize::new(8).expect("channel capacity"),
+        durable: true,
+        retention: RetentionPolicy::Backpressure,
+        subscribers: subscribers
+            .iter()
+            .map(|name| (name.to_string(), SubscriptionStart::Earliest))
+            .collect(),
+    }
+}
+
+async fn channel(root: &Path, key: &str, subscribers: &[&str]) -> Result<Arc<QosChannel>> {
+    Ok(QosChannel::persistent(
+        definition(key, subscribers),
+        provider(root)
+            .create_indexes("transaction-query", &format!("pipe-{key}"))
+            .await?,
+        FactoryRegistry::standard()
+            .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
+        key,
+    )
+    .await?)
+}
+
+fn endpoint(
+    channel: &Arc<QosChannel>,
+    definition: &QosChannelDefinition,
+    subscriber: &str,
+) -> Result<ProvidedPipe> {
+    let id = ResourceId::try_new("journal")?;
+    Ok(definition
+        .pipe(id.clone(), subscriber)
+        .create_with_resources(&BTreeMap::from([(id, channel.resource())]))?)
+}
+
+fn input(sequence: u64) -> Result<ChangeEnvelope> {
+    Ok(GraphChangeCodec::encode_change(
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("source", &sequence.to_string()),
+                    labels: Arc::from([Arc::from("Item")]),
+                    effective_from: sequence,
+                },
+                properties: ElementPropertyMap::default(),
+            },
+        },
+        StreamId::try_new("input/out")?,
+        sequence,
+        None,
+    )?)
+}
+
+fn total(query: &ContinuousQueryTransformer) -> Result<i64> {
+    let snapshot = query.results().snapshot()?;
+    anyhow::ensure!(snapshot.rows.len() == 1, "expected one aggregate");
+    let row =
+        QueryChangeCodec::decode_row(snapshot.rows.values().next().context("aggregate row")?)?;
+    match &row.values["total"] {
+        VariableValue::Integer(value) => value.as_i64().context("aggregate integer"),
+        value => anyhow::bail!("unexpected aggregate {value:?}"),
+    }
+}
+
+struct Sink {
+    descriptor: ComponentDescriptor,
+    journal: PathBuf,
+}
+#[async_trait]
+impl ComputationComponent for Sink {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+#[async_trait]
+impl EnvelopeSink for Sink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal)?;
+        writeln!(
+            file,
+            "{}",
+            QueryChangeCodec::query_sequence(&input.envelope)?
+        )?;
+        file.sync_all()?;
+        Ok(())
+    }
+}
+
+async fn sink(
+    root: &Path,
+    name: &str,
+    store: Arc<RedbStateStoreProvider>,
+) -> Result<CheckpointedSink> {
+    let sink = Sink {
+        descriptor: ComponentDescriptor::try_new(
+            ComponentId::try_new(name)?,
+            vec![PortDescriptor::new(
+                PortId::try_new("in")?,
+                PortDirection::Input,
+                QueryChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )?,
+        journal: root.join(format!("{name}.effects")),
+    };
+    let mut sink = CheckpointedSink::new(
+        Box::new(sink),
+        Arc::new(StateStoreConsumerProgress::new(
+            "transaction-query",
+            name,
+            store,
+        )?),
+    )?;
+    sink.start().await?;
+    Ok(sink)
+}
+
+async fn consume(receiver: &mut dyn EnvelopeReceiver, sink: &mut CheckpointedSink) -> Result<()> {
+    let delivery = tokio::time::timeout(Duration::from_secs(3), receiver.receive())
+        .await??
+        .context("expected output delivery")?;
+    let (envelope, acknowledgement) = delivery.into_parts();
+    sink.handle(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope,
+    })
+    .await?;
+    acknowledgement
+        .context("QoS acknowledgement")?
+        .complete(HandlingOutcome::Handled)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "real process-crash worker invoked by the parent test"]
+async fn query_handoff_worker() -> Result<()> {
+    let root = PathBuf::from(std::env::var("DRASI_QUERY_HANDOFF_ROOT")?);
+    let phase = std::env::var("DRASI_QUERY_HANDOFF_PHASE")?;
+    let boundary = std::env::var("DRASI_QUERY_HANDOFF_BOUNDARY")?;
+    let incoming = channel(&root, "input", &["query"]).await?;
+    let outgoing = channel(&root, "query", &["fast", "slow"]).await?;
+    let mut input_endpoint = endpoint(&incoming, &definition("input", &["query"]), "query")?;
+    let mut input_receiver = input_endpoint.pipe.take_receiver()?;
+    let mut query = query(&root).await?;
+    if phase == "seed" {
+        incoming.publish(&input(1)?).await?;
+        let (envelope, _unacknowledged) = input_receiver.receive().await?.unwrap().into_parts();
+        let output = query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope,
+            })
+            .await?;
+        assert_eq!(total(&query)?, 1);
+        assert_eq!(output.len(), 1);
+        if boundary != "before-pipe" {
+            outgoing.publish(&output[0].envelope).await?;
+        }
+        if boundary == "confirmed" {
+            query.delivery_completed(&output).await?;
+        }
+        std::process::exit(86);
+    }
+    anyhow::ensure!(phase == "recover", "invalid worker phase");
+    assert_eq!(
+        total(&query)?,
+        1,
+        "the query state was committed before process death"
+    );
+    if boundary == "confirmed" {
+        assert!(!query.has_pending_emissions());
+    } else {
+        assert!(query.has_pending_emissions());
+        let replay = query.continue_transform().await?;
+        assert_eq!(replay.len(), 1);
+        assert_eq!(QueryChangeCodec::query_sequence(&replay[0].envelope)?, 1);
+        assert!(
+            replay[0].envelope.system().sequence() > 1,
+            "replay has a new delivery number"
+        );
+        outgoing.publish(&replay[0].envelope).await?;
+        query.delivery_completed(&replay).await?;
+    }
+    // The input acknowledgement was never committed, so the pipe redelivers.
+    // Its query checkpoint must suppress reevaluation of the already committed input.
+    let (envelope, acknowledgement) = input_receiver.receive().await?.unwrap().into_parts();
+    assert!(query
+        .transform(InputEnvelope {
+            port: PortId::try_new("in")?,
+            envelope
+        })
+        .await?
+        .is_empty());
+    acknowledgement
+        .unwrap()
+        .complete(HandlingOutcome::Handled)
+        .await?;
+    assert_eq!(total(&query)?, 1);
+    let store = Arc::new(RedbStateStoreProvider::new(root.join("consumers.redb"))?);
+    for name in ["fast", "slow"] {
+        let mut output_endpoint =
+            endpoint(&outgoing, &definition("query", &["fast", "slow"]), name)?;
+        let mut receiver = output_endpoint.pipe.take_receiver()?;
+        let mut sink = sink(&root, name, store.clone()).await?;
+        let count = outgoing.progress().await?.accepted;
+        for _ in 0..count {
+            consume(receiver.as_mut(), &mut sink).await?;
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join(format!("{name}.effects")))?,
+            "1\n"
+        );
+        sink.stop().await?;
+    }
+    assert_eq!(incoming.progress().await?.processed["query"], 1);
+    query.stop().await?;
+    incoming.shutdown().await?;
+    outgoing.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn process_crashes_preserve_atomic_query_state_and_every_durable_handoff() -> Result<()> {
+    for boundary in ["before-pipe", "accepted", "confirmed"] {
+        let directory = tempfile::tempdir()?;
+        for phase in ["seed", "recover"] {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "query_handoff_worker",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("DRASI_QUERY_HANDOFF_ROOT", directory.path())
+                .env("DRASI_QUERY_HANDOFF_PHASE", phase)
+                .env("DRASI_QUERY_HANDOFF_BOUNDARY", boundary)
+                .output()?;
+            assert_eq!(
+                output.status.code(),
+                Some(if phase == "seed" { 86 } else { 0 }),
+                "{boundary}/{phase}\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "scheduled query process worker invoked by the parent test"]
+async fn scheduled_query_worker() -> Result<()> {
+    let root = PathBuf::from(std::env::var("DRASI_QUERY_HANDOFF_ROOT")?);
+    let phase = std::env::var("DRASI_QUERY_HANDOFF_PHASE")?;
+    let boundary = std::env::var("DRASI_QUERY_HANDOFF_BOUNDARY")?;
+    let scheduling = Arc::new(QuerySchedulingResource::default());
+    let mut query = ContinuousQueryTransformer::new_configured(
+        ContinuousQueryDefinition {
+            graph_id: "scheduled-query".into(),
+            id: ComponentId::try_new("query")?,
+            query: "MATCH (n:Item) WHERE drasi.trueLater(true, 2000) RETURN n".into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out")?,
+            outbox_capacity: NonZeroUsize::new(8).unwrap(),
+        },
+        provider(&root),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await?
+    .with_delivery_tracking()
+    .with_scheduling(scheduling.clone())?;
+    let mut source = QueryScheduledSource::new(
+        ComponentId::try_new("clock")?,
+        StreamId::try_new("clock/out")?,
+        scheduling,
+    )?;
+    query.start().await?;
+    source.start().await?;
+    if phase == "seed" {
+        assert!(query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: input(1)?
+            })
+            .await?
+            .is_empty());
+        if boundary == "after-due-commit" {
+            let notification = tokio::time::timeout(Duration::from_secs(3), source.next())
+                .await??
+                .unwrap();
+            assert_eq!(
+                query
+                    .transform(InputEnvelope {
+                        port: PortId::try_new("in")?,
+                        envelope: notification.envelope
+                    })
+                    .await?
+                    .len(),
+                1
+            );
+        }
+        std::process::exit(87);
+    }
+    let output = if boundary == "after-due-commit" {
+        assert!(
+            query.has_pending_emissions(),
+            "committed timer output awaits durable delivery"
+        );
+        query.continue_transform().await?
+    } else {
+        assert!(!query.has_pending_emissions());
+        let notification = tokio::time::timeout(Duration::from_secs(3), source.next())
+            .await??
+            .unwrap();
+        query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: notification.envelope,
+            })
+            .await?
+    };
+    assert_eq!(output.len(), 1);
+    assert_eq!(QueryChangeCodec::query_sequence(&output[0].envelope)?, 1);
+    query.delivery_completed(&output).await?;
+    let repeated_hint = GraphChangeCodec::encode_futures_due(
+        StreamId::try_new("clock/out")?,
+        99,
+        chrono::DateTime::from_timestamp_millis(2000).unwrap(),
+    )?;
+    assert!(query
+        .transform(InputEnvelope {
+            port: PortId::try_new("in")?,
+            envelope: repeated_hint
+        })
+        .await?
+        .is_empty());
+    assert_eq!(query.results().snapshot()?.rows.len(), 1);
+    assert_eq!(query.results().snapshot()?.as_of_sequence, 1);
+    source.stop().await?;
+    query.stop().await?;
+    Ok(())
+}
+
+#[test]
+fn scheduled_work_and_its_committed_output_survive_process_crashes() -> Result<()> {
+    for boundary in ["before-due", "after-due-commit"] {
+        let directory = tempfile::tempdir()?;
+        for phase in ["seed", "recover"] {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "scheduled_query_worker",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("DRASI_QUERY_HANDOFF_ROOT", directory.path())
+                .env("DRASI_QUERY_HANDOFF_PHASE", phase)
+                .env("DRASI_QUERY_HANDOFF_BOUNDARY", boundary)
+                .output()?;
+            assert_eq!(
+                output.status.code(),
+                Some(if phase == "seed" { 87 } else { 0 }),
+                "{boundary}/{phase}\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn scheduled_input(
+    sequence: u64,
+    active: bool,
+    due: u64,
+    effective_from: u64,
+) -> Result<InputEnvelope> {
+    scheduled_named_input("one", sequence, active, due, effective_from, sequence == 1)
+}
+
+fn scheduled_named_input(
+    name: &str,
+    sequence: u64,
+    active: bool,
+    due: u64,
+    effective_from: u64,
+    insert: bool,
+) -> Result<InputEnvelope> {
+    let element = Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("source", name),
+            labels: Arc::from([Arc::from("Item")]),
+            effective_from,
+        },
+        properties: ElementPropertyMap::from(
+            serde_json::json!({"active":active,"due":due,"name":name}),
+        ),
+    };
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: GraphChangeCodec::encode_change(
+            if insert {
+                SourceChange::Insert { element }
+            } else {
+                SourceChange::update(element)
+            },
+            StreamId::try_new("input/out")?,
+            sequence,
+            None,
+        )?,
+    })
+}
+
+async fn scheduled_pair(
+    root: &Path,
+    progress: Arc<QuerySourceProgress>,
+) -> Result<(ContinuousQueryTransformer, QueryScheduledSource)> {
+    let scheduling = Arc::new(QuerySchedulingResource::default());
+    let mut query = ContinuousQueryTransformer::new_configured(
+        ContinuousQueryDefinition {
+            graph_id: "timer-pressure".into(),
+            id: ComponentId::try_new("query")?,
+            query: "MATCH (n:Item) WHERE drasi.trueLater(n.active, n.due) RETURN n.name AS name"
+                .into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out")?,
+            outbox_capacity: NonZeroUsize::new(4).expect("query retention"),
+        },
+        provider(root),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await?
+    .with_delivery_tracking()
+    .with_scheduling(scheduling.clone())?
+    .with_source_progress(progress)?;
+    let mut source = QueryScheduledSource::new(
+        ComponentId::try_new("clock")?,
+        StreamId::try_new("clock/out")?,
+        scheduling,
+    )?;
+    query.start().await?;
+    source.start().await?;
+    Ok((query, source))
+}
+
+async fn timer_burst_reconstruction() -> Result<()> {
+    const COUNT: usize = 256;
+    let directory = tempfile::tempdir()?;
+    let progress = Arc::new(QuerySourceProgress::new(
+        "timer-pressure",
+        ComponentId::try_new("query")?,
+    )?);
+    let mut sequence = 0;
+    {
+        let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+        for index in 0..COUNT {
+            sequence += 1;
+            assert!(query
+                .transform(scheduled_named_input(
+                    &format!("item-{index}"),
+                    sequence,
+                    true,
+                    2000,
+                    1000,
+                    true
+                )?)
+                .await?
+                .is_empty());
+        }
+        for index in (0..COUNT).step_by(4) {
+            sequence += 1;
+            assert!(query
+                .transform(scheduled_named_input(
+                    &format!("item-{index}"),
+                    sequence,
+                    false,
+                    2000,
+                    1500,
+                    false
+                )?)
+                .await?
+                .is_empty());
+        }
+        clock.stop().await?;
+        query.stop().await?;
+    }
+    let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+    let expected: std::collections::BTreeSet<_> = (0..COUNT)
+        .filter(|index| index % 4 != 0)
+        .map(|index| format!("item-{index}"))
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.len() < expected.len() {
+        let hint = tokio::time::timeout(Duration::from_secs(5), clock.next())
+            .await??
+            .context("recovered due work")?;
+        let mut pending = query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: hint.envelope,
+            })
+            .await?;
+        loop {
+            for output in &pending {
+                let results = QueryChangeCodec::to_legacy_result(&output.envelope)?;
+                for result in results.results {
+                    let drasi_lib::channels::ResultDiff::Add { data, .. } = result else {
+                        anyhow::bail!("unexpected scheduled result: {result:?}");
+                    };
+                    let name = data["name"].as_str().context("scheduled name")?.to_owned();
+                    assert!(expected.contains(&name), "cancelled or unknown timer fired");
+                    assert!(seen.insert(name), "duplicate timer result");
+                }
+            }
+            query.delivery_completed(&pending).await?;
+            pending = query.continue_transform().await?;
+            if pending.is_empty() {
+                break;
+            }
+        }
+    }
+    assert_eq!(seen, expected);
+    assert_eq!(
+        progress.snapshot().checkpoints
+            [&SourceProgressKey::Stream(StreamId::try_new("input/out")?)]
+            .sequence,
+        sequence
+    );
+    assert_eq!(query.results().snapshot()?.rows.len(), expected.len());
+    let stale = GraphChangeCodec::encode_futures_due(
+        StreamId::try_new("clock/out")?,
+        999,
+        chrono::DateTime::from_timestamp_millis(2000).context("due")?,
+    )?;
+    assert!(query
+        .transform(InputEnvelope {
+            port: PortId::try_new("in")?,
+            envelope: stale
+        })
+        .await?
+        .is_empty());
+    assert!(!query.has_pending_emissions());
+    clock.stop().await?;
+    query.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timer_burst_reconstruction_current_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(60), timer_burst_reconstruction()).await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timer_burst_reconstruction_multi_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(60), timer_burst_reconstruction()).await?
+}
+
+#[tokio::test]
+async fn cancelled_timer_and_backpressured_live_output_recover_without_recalculation_or_cursor_confusion(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let progress = Arc::new(QuerySourceProgress::new(
+        "timer-pressure",
+        ComponentId::try_new("query")?,
+    )?);
+    let mut output_definition = definition("query", &["receiver"]);
+    output_definition.capacity = NonZeroUsize::new(1).expect("one-slot output");
+    let outgoing = QosChannel::persistent(
+        output_definition.clone(),
+        provider(directory.path())
+            .create_indexes("timer-pressure", "output")
+            .await?,
+        FactoryRegistry::standard()
+            .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
+        "output",
+    )
+    .await?;
+    let mut connection = endpoint(&outgoing, &output_definition, "receiver")?;
+    let mut receiver = connection.pipe.take_receiver()?;
+    {
+        let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+        assert!(query
+            .transform(scheduled_input(1, true, 2000, 1000)?)
+            .await?
+            .is_empty());
+        let stale = tokio::time::timeout(Duration::from_secs(3), clock.next())
+            .await??
+            .context("scheduled hint")?;
+        assert!(query
+            .transform(scheduled_input(2, false, 2000, 1500)?)
+            .await?
+            .is_empty());
+        assert!(
+            query
+                .transform(InputEnvelope {
+                    port: PortId::try_new("in")?,
+                    envelope: stale.envelope
+                })
+                .await?
+                .is_empty(),
+            "a hint cannot revive cancelled work"
+        );
+        assert!(query.continue_transform().await?.is_empty());
+        assert!(!query.has_pending_emissions());
+        assert!(query
+            .transform(scheduled_input(3, true, 3000, 2500)?)
+            .await?
+            .is_empty());
+        let due = tokio::time::timeout(Duration::from_secs(3), clock.next())
+            .await??
+            .context("replacement hint")?;
+        let added = query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: due.envelope,
+            })
+            .await?;
+        assert_eq!(added.len(), 1);
+        let result = QueryChangeCodec::to_legacy_result(&added[0].envelope)?;
+        assert!(
+            matches!(result.results.as_slice(), [drasi_lib::channels::ResultDiff::Add { data, .. }] if data == &serde_json::json!({"name":"one"}))
+        );
+        outgoing.publish(&added[0].envelope).await?;
+        query.delivery_completed(&added).await?;
+        assert!(query.continue_transform().await?.is_empty());
+        assert!(!query.has_pending_emissions());
+        let deleted = query
+            .transform(scheduled_input(4, false, 3000, 3500)?)
+            .await?;
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(QueryChangeCodec::query_sequence(&deleted[0].envelope)?, 2);
+        {
+            let blocked = outgoing.publish(&deleted[0].envelope);
+            tokio::pin!(blocked);
+            assert!(
+                futures::poll!(blocked).is_pending(),
+                "the prior output has not been handled"
+            );
+        }
+        assert_eq!(outgoing.progress().await?.accepted, 1);
+        assert_eq!(outgoing.progress().await?.processed["receiver"], 0);
+        clock.stop().await?;
+        query.stop().await?;
+    }
+    {
+        let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+        assert_eq!(
+            progress.snapshot().checkpoints
+                [&SourceProgressKey::Stream(StreamId::try_new("input/out")?)]
+                .sequence,
+            4
+        );
+        assert!(query.has_pending_emissions());
+        assert!(
+            query
+                .transform(scheduled_input(5, true, 5000, 4500)?)
+                .await
+                .is_err(),
+            "recovered output must be drained before accepting new live input"
+        );
+        let replay = query.continue_transform().await?;
+        assert_eq!(replay.len(), 1);
+        assert_eq!(QueryChangeCodec::query_sequence(&replay[0].envelope)?, 2);
+        assert_eq!(replay[0].envelope.system().sequence(), 3);
+        let result = QueryChangeCodec::to_legacy_result(&replay[0].envelope)?;
+        assert!(
+            matches!(result.results.as_slice(), [drasi_lib::channels::ResultDiff::Delete { data, .. }] if data == &serde_json::json!({"name":"one"}))
+        );
+        let first = receiver.receive().await?.context("held timer output")?;
+        assert_eq!(QueryChangeCodec::query_sequence(first.envelope())?, 1);
+        first
+            .into_parts()
+            .1
+            .context("timer output ack")?
+            .complete(HandlingOutcome::Handled)
+            .await?;
+        outgoing.publish(&replay[0].envelope).await?;
+        query.delivery_completed(&replay).await?;
+        let second = receiver.receive().await?.context("replayed deletion")?;
+        assert_eq!(QueryChangeCodec::query_sequence(second.envelope())?, 2);
+        second
+            .into_parts()
+            .1
+            .context("deletion ack")?
+            .complete(HandlingOutcome::Handled)
+            .await?;
+        let repeated = GraphChangeCodec::encode_futures_due(
+            StreamId::try_new("clock/out")?,
+            99,
+            chrono::DateTime::from_timestamp_millis(3000).context("due time")?,
+        )?;
+        assert!(query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: repeated
+            })
+            .await?
+            .is_empty());
+        assert_eq!(
+            progress.snapshot().checkpoints
+                [&SourceProgressKey::Stream(StreamId::try_new("input/out")?)]
+                .sequence,
+            4
+        );
+        let snapshot = query.results().snapshot()?;
+        assert!(snapshot.rows.is_empty());
+        assert_eq!(snapshot.as_of_sequence, 2);
+        clock.stop().await?;
+        query.stop().await?;
+    }
+    let (mut query, mut clock) = scheduled_pair(directory.path(), progress).await?;
+    assert!(!query.has_pending_emissions());
+    assert_eq!(query.results().replay(0)?.len(), 2);
+    clock.stop().await?;
+    query.stop().await?;
+    outgoing.shutdown().await?;
+    Ok(())
+}

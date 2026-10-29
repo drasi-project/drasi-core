@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, ops::Deref, str::FromStr, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    ops::Deref,
+    str::FromStr,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use drasi_core::{
@@ -40,6 +45,21 @@ pub struct UnwindMapping {
     key: Option<JsonPathExpression>,
     relation: Option<String>,
     condition: Option<JsonPathExpression>,
+}
+
+impl UnwindMapping {
+    fn item_id(&self, index: usize, item: &Value) -> String {
+        match &self.key {
+            Some(key) => match key.execute_one(item) {
+                Some(id) => match id.as_str() {
+                    Some(id) => id.to_string(),
+                    None => index.to_string(),
+                },
+                None => index.to_string(),
+            },
+            None => index.to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -95,29 +115,53 @@ impl SourceMiddleware for Unwind {
         element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         let metadata = match &source_change {
-            SourceChange::Insert { element } => element.get_metadata(),
-            SourceChange::Update { element } => element.get_metadata(),
+            SourceChange::Insert { element } | SourceChange::Replace { element } => {
+                element.get_metadata()
+            }
+            SourceChange::Update { element, .. } => element.get_metadata(),
             SourceChange::Delete { metadata } => metadata,
             SourceChange::Future { .. } => return Ok(vec![source_change]),
         };
 
         let mut results = Vec::new();
 
-        for label in metadata.labels.iter() {
+        // The index holds the parent as last admitted, which is the view dropped
+        // children are resolved against. A changed label also visits the old
+        // label's mappings, whose children are all gone.
+        let old_parent = match &source_change {
+            SourceChange::Replace { .. } | SourceChange::Update { .. } => element_index
+                .get_element(&metadata.reference)
+                .await
+                .map_err(MiddlewareError::IndexError)?,
+            _ => None,
+        };
+        let mut labels: Vec<(Arc<str>, bool)> = metadata
+            .labels
+            .iter()
+            .map(|label| (label.clone(), true))
+            .collect();
+        if let Some(old) = &old_parent {
+            labels.extend(
+                old.get_metadata()
+                    .labels
+                    .iter()
+                    .filter(|label| !metadata.labels.contains(label))
+                    .map(|label| (label.clone(), false)),
+            );
+        }
+
+        for (label, in_new_labels) in labels {
             let mappings = match self.mappings.get(&label.to_string()) {
                 Some(mapping) => mapping,
                 None => continue,
             };
 
+            // An update is evaluated as the patch it carries: a property it omits
+            // or removes selects no children.
             let (new_element, old_element) = match &source_change {
                 SourceChange::Insert { element } => (Some(element), None),
-                SourceChange::Update { element } => {
-                    match element_index.get_element(&metadata.reference).await {
-                        Ok(old) => (Some(element), old),
-                        Err(e) => {
-                            return Err(MiddlewareError::IndexError(e));
-                        }
-                    }
+                SourceChange::Replace { element } | SourceChange::Update { element, .. } => {
+                    (in_new_labels.then_some(element), old_parent.clone())
                 }
                 SourceChange::Delete { metadata } => {
                     match element_index.get_element(&metadata.reference).await {
@@ -147,19 +191,22 @@ impl SourceMiddleware for Unwind {
 
                     let selected = mapping.selector.execute(new_obj);
 
+                    let old_items: HashMap<String, Value> = match (&source_change, &old_element_obj)
+                    {
+                        (SourceChange::Update { .. }, Some(old_obj)) => mapping
+                            .selector
+                            .execute(old_obj)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, obj)| (mapping.item_id(index, &obj), obj))
+                            .collect(),
+                        _ => HashMap::new(),
+                    };
+
                     for (index, obj) in selected.iter().enumerate() {
                         let mut new_metadata = metadata.clone();
 
-                        let item_id = match &mapping.key {
-                            Some(key) => match key.execute_one(obj) {
-                                Some(id) => match id.as_str() {
-                                    Some(id) => id.to_string(),
-                                    None => index.to_string(),
-                                },
-                                None => index.to_string(),
-                            },
-                            None => index.to_string(),
-                        };
+                        let item_id = mapping.item_id(index, obj);
 
                         let mut item_source_changes = Vec::new();
 
@@ -204,15 +251,38 @@ impl SourceMiddleware for Unwind {
                                     item_source_changes.push(SourceChange::Insert { element: rel });
                                 }
                             }
-                            SourceChange::Update { .. } => {
-                                item_source_changes.push(SourceChange::Update {
+                            SourceChange::Replace { .. } => {
+                                item_source_changes.push(SourceChange::Replace {
                                     element: Element::Node {
                                         metadata: new_metadata,
                                         properties,
                                     },
                                 });
                                 if let Some(rel) = relation {
-                                    item_source_changes.push(SourceChange::Update { element: rel });
+                                    item_source_changes
+                                        .push(SourceChange::Replace { element: rel });
+                                }
+                            }
+                            SourceChange::Update { .. } => {
+                                let removed_properties: BTreeSet<String> = old_items
+                                    .get(&item_id)
+                                    .and_then(Value::as_object)
+                                    .map(|old| {
+                                        old.keys()
+                                            .filter(|name| !properties.contains_key(name))
+                                            .cloned()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                item_source_changes.push(SourceChange::Update {
+                                    element: Element::Node {
+                                        metadata: new_metadata,
+                                        properties,
+                                    },
+                                    removed_properties,
+                                });
+                                if let Some(rel) = relation {
+                                    item_source_changes.push(SourceChange::update(rel));
                                 }
                             }
                             SourceChange::Delete { .. } => {
@@ -243,16 +313,7 @@ impl SourceMiddleware for Unwind {
                     let selected = mapping.selector.execute(old_obj);
 
                     for (index, obj) in selected.iter().enumerate() {
-                        let item_id = match &mapping.key {
-                            Some(key) => match key.execute_one(obj) {
-                                Some(id) => match id.as_str() {
-                                    Some(id) => id.to_string(),
-                                    None => index.to_string(),
-                                },
-                                None => index.to_string(),
-                            },
-                            None => index.to_string(),
-                        };
+                        let item_id = mapping.item_id(index, obj);
 
                         if change_map.contains_key(&item_id) {
                             continue;

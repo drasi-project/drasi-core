@@ -12,8 +12,8 @@ async fn main() -> Result<()> {
 
     let uri = std::env::var("NEO4J_URI").unwrap_or_else(|_| "bolt://localhost:7687".to_string());
     let user = std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".to_string());
-    let password = std::env::var("NEO4J_PASSWORD")
-        .expect("NEO4J_PASSWORD environment variable must be set");
+    let password =
+        std::env::var("NEO4J_PASSWORD").expect("NEO4J_PASSWORD environment variable must be set");
     let database = std::env::var("NEO4J_DATABASE").unwrap_or_else(|_| "neo4j".to_string());
 
     let bootstrap = Neo4jBootstrapProvider::new(Neo4jBootstrapConfig {
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
             RETURN p.name AS actor, m.title AS movie, r.role AS role
             "#,
         )
-        .from_source("neo4j-source")
+        .from_input("neo4j-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -52,9 +52,15 @@ async fn main() -> Result<()> {
     let reaction = LogReaction::builder("console")
         .from_query("actors")
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("[+] {{after.actor}} acted in {{after.movie}} as {{after.role}}")),
-            updated: Some(TemplateSpec::new("[~] {{after.actor}} acted in {{after.movie}} as {{after.role}}")),
-            deleted: Some(TemplateSpec::new("[-] {{before.actor}} / {{before.movie}} removed")),
+            added: Some(TemplateSpec::new(
+                "[+] {{after.actor}} acted in {{after.movie}} as {{after.role}}",
+            )),
+            updated: Some(TemplateSpec::new(
+                "[~] {{after.actor}} acted in {{after.movie}} as {{after.role}}",
+            )),
+            deleted: Some(TemplateSpec::new(
+                "[-] {{before.actor}} / {{before.movie}} removed",
+            )),
         })
         .build()?;
 

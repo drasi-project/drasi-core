@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
                    r.path_length AS path_length
             "#,
         )
-        .from_source("ris-live")
+        .from_input("ris-live")
         .auto_start(true)
         .build();
 

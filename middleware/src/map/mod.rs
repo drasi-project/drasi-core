@@ -19,12 +19,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "engine-adapter")]
 use async_trait::async_trait;
-use drasi_core::{
-    interface::{
-        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
-        SourceMiddlewareFactory,
-    },
+#[cfg(feature = "engine-adapter")]
+use drasi_core::interface::{ElementIndex, SourceMiddleware, SourceMiddlewareFactory};
+use drasi_core_types::{
+    interface::{MiddlewareError, MiddlewareSetupError},
     models::{Element, ElementPropertyMap, ElementReference, SourceChange, SourceMiddlewareConfig},
 };
 use jsonpath_rust::{path::config::JsonPathConfig, JsonPathInst};
@@ -51,6 +51,8 @@ pub struct SourceMappedOutput {
 #[derive(Debug, Clone, Deserialize)]
 pub enum MapOperation {
     Insert,
+    /// Replaces the whole element; omitted properties are dropped.
+    Replace,
     Update,
     Delete,
 }
@@ -122,16 +124,18 @@ pub struct Map {
     mappings: HashMap<String, SourceMappedOperations>,
 }
 
-#[async_trait]
-impl SourceMiddleware for Map {
-    async fn process(
+impl Map {
+    pub async fn apply(
         &self,
         source_change: SourceChange,
-        _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        source_change
+            .validate()
+            .map_err(|error| MiddlewareError::SourceChangeError(error.to_string()))?;
         let metadata = match &source_change {
-            SourceChange::Insert { element } => element.get_metadata(),
-            SourceChange::Update { element } => element.get_metadata(),
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => element.get_metadata(),
             SourceChange::Delete { metadata } => metadata,
             SourceChange::Future { .. } => return Ok(vec![source_change]),
         };
@@ -143,7 +147,8 @@ impl SourceMiddleware for Map {
                 //todo: use Arc<str> instead of String
                 Some(mappings) => match &source_change {
                     SourceChange::Insert { .. } => &mappings.insert,
-                    SourceChange::Update { .. } => &mappings.update,
+                    // A replacement targets an existing identity like an update.
+                    SourceChange::Replace { .. } | SourceChange::Update { .. } => &mappings.update,
                     SourceChange::Delete { .. } => &mappings.delete,
                     _ => continue,
                 },
@@ -157,8 +162,9 @@ impl SourceMiddleware for Map {
 
             #[allow(clippy::unwrap_used)]
             let element = match &source_change {
-                SourceChange::Insert { element } => element,
-                SourceChange::Update { element } => element,
+                SourceChange::Insert { element }
+                | SourceChange::Replace { element }
+                | SourceChange::Update { element, .. } => element,
                 SourceChange::Delete { metadata } => {
                     del_element_binding = Some(Element::Node {
                         metadata: metadata.clone(),
@@ -174,11 +180,23 @@ impl SourceMiddleware for Map {
                     Some(op) => op,
                     None => match &source_change {
                         SourceChange::Insert { .. } => &MapOperation::Insert,
+                        SourceChange::Replace { .. } => &MapOperation::Replace,
                         SourceChange::Update { .. } => &MapOperation::Update,
                         SourceChange::Delete { .. } => &MapOperation::Delete,
                         _ => continue,
                     },
                 };
+
+                if matches!(op, MapOperation::Update)
+                    && matches!(
+                        &source_change,
+                        SourceChange::Update { removed_properties, .. }
+                            if !removed_properties.is_empty()
+                    )
+                {
+                    log::debug!("Skipping map update rule: property removals require context not retained by this event mapper");
+                    continue;
+                }
 
                 let mut source_obj: Value = element.into();
 
@@ -283,9 +301,10 @@ impl SourceMiddleware for Map {
                         MapOperation::Insert => results.push(SourceChange::Insert {
                             element: new_element,
                         }),
-                        MapOperation::Update => results.push(SourceChange::Update {
+                        MapOperation::Replace => results.push(SourceChange::Replace {
                             element: new_element,
                         }),
+                        MapOperation::Update => results.push(SourceChange::update(new_element)),
                         MapOperation::Delete => results.push(SourceChange::Delete {
                             metadata: new_element.get_metadata().clone(),
                         }),
@@ -311,15 +330,11 @@ impl MapFactory {
     }
 }
 
-impl SourceMiddlewareFactory for MapFactory {
-    fn name(&self) -> String {
-        "map".to_string()
+impl MapFactory {
+    pub fn name(&self) -> String {
+        "map".to_owned()
     }
-
-    fn create(
-        &self,
-        config: &SourceMiddlewareConfig,
-    ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+    pub fn build(&self, config: &SourceMiddlewareConfig) -> Result<Map, MiddlewareSetupError> {
         let cfg = Value::Object(config.config.clone());
         let mappings = match serde_json::from_value(cfg) {
             Ok(mappings) => mappings,
@@ -336,6 +351,32 @@ impl SourceMiddlewareFactory for MapFactory {
             mappings
         );
 
-        Ok(Arc::new(Map { mappings }))
+        Ok(Map { mappings })
+    }
+}
+
+#[cfg(feature = "engine-adapter")]
+#[async_trait]
+impl SourceMiddleware for Map {
+    async fn process(
+        &self,
+        change: SourceChange,
+        _index: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        self.apply(change).await
+    }
+}
+
+#[cfg(feature = "engine-adapter")]
+impl SourceMiddlewareFactory for MapFactory {
+    fn name(&self) -> String {
+        MapFactory::name(self)
+    }
+    fn create(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|value| Arc::new(value) as Arc<dyn SourceMiddleware>)
     }
 }

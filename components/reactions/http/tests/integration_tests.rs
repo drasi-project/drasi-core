@@ -117,7 +117,7 @@ async fn end_to_end_through_drasilib_delivers_to_http_server() -> Result<()> {
             RETURN p.name AS name, p.age AS age
             "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let reaction = HttpReaction::builder("http-e2e")
@@ -1723,7 +1723,7 @@ async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
             RETURN p.name AS name, p.age AS age
             "#,
         )
-        .from_source("batch-source")
+        .from_input("batch-source")
         .auto_start(true)
         .build();
     let reaction = HttpReaction::builder("http-batch-e2e")

@@ -16,6 +16,218 @@ use super::*;
 use crate::mapping::{ChangeKind, RelationSnapshot};
 use drasi_core::models::SourceChange;
 
+mod lifecycle {
+    use super::*;
+    use drasi_lib::context::workers::WorkerCleanupError;
+    use drasi_lib::state_store::{MemoryStateStoreProvider, StateStoreResult};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct HeldStore {
+        inner: MemoryStateStoreProvider,
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl StateStoreProvider for HeldStore {
+        async fn get(&self, store: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+            self.inner.get(store, key).await
+        }
+        async fn set(&self, store: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.set(store, key, value).await
+        }
+        async fn delete(&self, store: &str, key: &str) -> StateStoreResult<bool> {
+            self.inner.delete(store, key).await
+        }
+        async fn contains_key(&self, store: &str, key: &str) -> StateStoreResult<bool> {
+            self.inner.contains_key(store, key).await
+        }
+        async fn get_many(
+            &self,
+            store: &str,
+            keys: &[&str],
+        ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
+            self.inner.get_many(store, keys).await
+        }
+        async fn set_many(&self, store: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+            self.inner.set_many(store, entries).await
+        }
+        async fn delete_many(&self, store: &str, keys: &[&str]) -> StateStoreResult<usize> {
+            self.inner.delete_many(store, keys).await
+        }
+        async fn clear_store(&self, store: &str) -> StateStoreResult<usize> {
+            self.inner.clear_store(store).await
+        }
+        async fn list_keys(&self, store: &str) -> StateStoreResult<Vec<String>> {
+            self.inner.list_keys(store).await
+        }
+        async fn store_exists(&self, store: &str) -> StateStoreResult<bool> {
+            self.inner.store_exists(store).await
+        }
+        async fn key_count(&self, store: &str) -> StateStoreResult<usize> {
+            self.inner.key_count(store).await
+        }
+    }
+
+    async fn server(requests: u64) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v7/flow"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[]})),
+            )
+            .expect(requests)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn source(url: &str) -> HereTrafficSourceBuilder {
+        HereTrafficSource::builder("lifecycle", "test-key", "52.5,13.3,52.6,13.5")
+            .with_base_url(url)
+            .with_endpoints(vec![Endpoint::Flow])
+            .with_polling_interval(Duration::from_secs(60))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn polling_restarts_reset_shutdown_and_clear_old_dispatchers() -> Result<()> {
+        let server = server(3).await;
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        let source = source(&server.uri())
+            .with_state_store(store.clone())
+            .build()?;
+        source.stop().await?;
+        for cycle in 0..3 {
+            let mut receiver = source.base.try_test_subscribe().await?;
+            source.start().await?;
+            source.start().await?;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while server
+                    .received_requests()
+                    .await
+                    .expect("recorded requests")
+                    .len()
+                    < cycle + 1
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            source.stop().await?;
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await?
+                    .unwrap_err()
+                    .to_string(),
+                "Channel closed"
+            );
+            assert!(source.task_handle.read().await.is_none());
+            assert_eq!(source.shutdown_tx.receiver_count(), 0);
+            assert!(store.get(source.id(), LAST_POLL_KEY).await?.is_some());
+        }
+        source.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn state_write_remains_owned_after_cancelled_and_timed_out_stop() -> Result<()> {
+        let server = server(1).await;
+        let store = Arc::new(HeldStore {
+            inner: MemoryStateStoreProvider::new(),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let source = source(&server.uri())
+            .with_state_store(store.clone())
+            .build()?;
+        let mut receiver = source.base.try_test_subscribe().await?;
+        source.start().await?;
+        tokio::time::timeout(Duration::from_secs(2), store.entered.notified()).await?;
+        {
+            let stop = source.stop();
+            tokio::pin!(stop);
+            tokio::select! {
+                result = &mut stop => panic!("write is still owned: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+        assert!(source
+            .start()
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkerAlreadyOwned>()
+            .is_some());
+        let error = source.stop().await.unwrap_err();
+        assert!(
+            matches!(error.downcast_ref(), Some(WorkerCleanupError::TimedOut { timeout }) if *timeout == Duration::from_secs(5))
+        );
+        assert!(!source
+            .task_handle
+            .read()
+            .await
+            .as_ref()
+            .expect("retained worker")
+            .is_finished());
+        assert!(store.inner.get(source.id(), LAST_POLL_KEY).await?.is_none());
+        store.release.notify_one();
+        source.stop().await?;
+        assert!(store.inner.get(source.id(), LAST_POLL_KEY).await?.is_some());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await?
+                .unwrap_err()
+                .to_string(),
+            "Channel closed"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn panic_and_cancelled_base_cleanup_block_restart_until_joined() -> Result<()> {
+        let source = source("http://127.0.0.1:1").build()?;
+        *source.cleanup_required.lock().await = true;
+        spawn_owned_worker(&source.task_handle, async {
+            panic!("injected HERE polling panic")
+        })
+        .await?;
+        let error = source.stop().await.unwrap_err();
+        assert!(
+            matches!(error.downcast_ref(), Some(WorkerCleanupError::Join(error)) if error.is_panic())
+        );
+        assert!(source.task_handle.read().await.is_none());
+        assert!(source
+            .start()
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkerAlreadyOwned>()
+            .is_some());
+        let base_cleanup = source.base.shutdown_tx.write().await;
+        {
+            let stop = source.stop();
+            tokio::pin!(stop);
+            tokio::select! {
+                result = &mut stop => panic!("base cleanup is still pending: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+        assert!(source
+            .start()
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkerAlreadyOwned>()
+            .is_some());
+        drop(base_cleanup);
+        source.stop().await?;
+        assert_eq!(source.status().await, ComponentStatus::Stopped);
+        Ok(())
+    }
+}
+
 fn sample_segment(jam_factor: f64, speed: f64) -> TrafficSegmentSnapshot {
     TrafficSegmentSnapshot {
         id: "segment_52.50000_13.40000".to_string(),

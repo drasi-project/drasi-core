@@ -1,0 +1,1276 @@
+// Copyright 2026 The Drasi Authors.
+// Licensed under the Apache License, Version 2.0.
+
+//! Requires the five separately built native network libraries:
+//! make build-native-network-plugins
+//! cargo test --offline -p drasi-host-sdk --test native_network_loopback
+
+use anyhow::{Context, Result};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+    Json, Router,
+};
+use drasi_computation_network_common::proto::{reaction, source};
+use drasi_core::{
+    computation::InMemoryComputationProvider,
+    evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
+    models::{Element, SourceChange},
+};
+use drasi_host_sdk::computation::{self, NativeComponentProxy, NativePlugin};
+use drasi_lib::computation::v1::*;
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::Duration,
+};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, Notify},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+const DEADLINE: Duration = Duration::from_secs(10);
+const HTTP_SOURCE: &str = "drasi.network/http-source";
+const GRPC_SOURCE: &str = "drasi.network/grpc-source";
+const HTTP_SINK: &str = "drasi.network/http-sink";
+const GRPC_SINK: &str = "drasi.network/grpc-sink";
+#[path = "native_network/durable.rs"]
+mod durable_tests;
+#[path = "native_network/grpc_family.rs"]
+mod grpc_family;
+#[path = "native_network/http_family.rs"]
+mod http_family;
+#[path = "fixtures/native_sink_inputs.rs"]
+mod sink_inputs;
+#[path = "native_network/sse.rs"]
+mod sse_tests;
+fn workspace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace")
+        .to_owned()
+}
+fn plugin(kind: &str) -> Result<Arc<NativePlugin>> {
+    let package = match kind {
+        HTTP_SOURCE => "drasi-computation-source-http",
+        GRPC_SOURCE => "drasi-computation-source-grpc",
+        HTTP_SINK => "drasi-computation-sink-http",
+        GRPC_SINK => "drasi-computation-sink-grpc",
+        drasi_computation_sink_sse::SSE_SINK => "drasi-computation-sink-sse",
+        _ => anyhow::bail!("unknown native component {kind}"),
+    };
+    static PLUGINS: OnceLock<Mutex<HashMap<String, Arc<NativePlugin>>>> = OnceLock::new();
+    let mut plugins = PLUGINS
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native plugin cache lock poisoned"))?;
+    if let Some(plugin) = plugins.get(package) {
+        return Ok(plugin.clone());
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace().join("target"));
+    let target = if target.is_absolute() {
+        target
+    } else {
+        workspace().join(target)
+    };
+    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| target.join("debug"));
+    let path = directory.join(format!(
+        "{}{}{}",
+        std::env::consts::DLL_PREFIX,
+        package.replace('-', "_"),
+        std::env::consts::DLL_SUFFIX,
+    ));
+    anyhow::ensure!(
+        path.is_file(),
+        "missing {}; first run make build-native-network-plugins",
+        path.display()
+    );
+    let plugin = computation::load(path)?;
+    anyhow::ensure!(
+        plugin.factories().len() == 1
+            && plugin.factories()[0]
+                .metadata()
+                .implementation
+                .name
+                .as_ref()
+                == kind
+            && plugin.metadata().plugin.id.as_ref() == package,
+        "{package} must expose only {kind} under its own plugin identity"
+    );
+    plugins.insert(package.to_owned(), plugin.clone());
+    Ok(plugin)
+}
+fn component(kind: &str, name: &str, config: Value) -> Result<NativeComponentProxy> {
+    let plugin = plugin(kind)?;
+    sink_inputs::create(
+        plugin
+            .factories()
+            .iter()
+            .find(|factory| factory.metadata().implementation.name.as_ref() == kind)
+            .context("native factory")?,
+        ComponentId::try_new(name)?,
+        config,
+    )
+}
+
+#[test]
+fn configuration_descriptions_match_the_loaded_network_components() -> Result<()> {
+    for kind in [
+        HTTP_SOURCE,
+        GRPC_SOURCE,
+        HTTP_SINK,
+        GRPC_SINK,
+        drasi_computation_sink_sse::SSE_SINK,
+    ] {
+        let plugin = plugin(kind)?;
+        let factory = &plugin.factories()[0];
+        let details = factory
+            .configuration_details()
+            .context("missing configuration descriptions")?;
+        assert_eq!(
+            details.fields.len(),
+            factory.metadata().configuration.fields.len(),
+            "{kind}"
+        );
+        let schema = factory.configuration_schema();
+        if kind == HTTP_SOURCE || kind == GRPC_SOURCE {
+            assert_eq!(schema["properties"]["timeoutMs"]["default"], 60000);
+            assert_eq!(schema["properties"]["port"]["maximum"], 65535);
+            let adaptive = factory.specification(
+                ComponentId::try_new("metadata")?,
+                json!({"stream":"metadata/out","adaptiveEnabled":true}),
+            );
+            if kind == GRPC_SOURCE {
+                assert_eq!(
+                    schema["properties"]["adaptiveEnabled"]["enum"],
+                    json!([false])
+                );
+                assert!(adaptive.is_err());
+            } else {
+                assert!(schema["properties"]["adaptiveEnabled"]
+                    .get("enum")
+                    .is_none());
+                assert!(adaptive.is_ok());
+            }
+        }
+        if kind == GRPC_SINK {
+            assert_eq!(schema["properties"]["batchSize"]["minimum"], 1);
+            assert_eq!(schema["properties"]["batchSize"]["maximum"], 65536);
+            assert_ne!(
+                schema["properties"]["batchFlushTimeoutMs"]["deprecated"],
+                true
+            );
+            assert_eq!(schema["properties"]["maxRetries"]["default"], 5);
+            assert!(factory
+                .specification(
+                    ComponentId::try_new("metadata")?,
+                    json!({"outputs":{"q":{"component":"q","port":"out"}},"batchSize":2})
+                )
+                .is_ok());
+        }
+        if kind == drasi_computation_sink_sse::SSE_SINK {
+            assert_eq!(
+                schema["properties"]["heartbeatIntervalMs"]["default"],
+                30000
+            );
+            assert_eq!(
+                schema["properties"]["broadcastCapacity"]["maximum"],
+                1048576
+            );
+        }
+    }
+    Ok(())
+}
+fn free_port() -> Result<u16> {
+    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port())
+}
+fn stream(name: &str) -> StreamId {
+    StreamId::try_new(name).expect("stream")
+}
+fn http_event(value: i64) -> Value {
+    json!({"operation":"insert","timestamp":1234567890000u64,"element":{
+        "type":"node","id":format!("row-{value}"),"labels":["Room"],"properties":{"value":value}
+    }})
+}
+fn proto_event(value: i64) -> source::SourceChange {
+    source::SourceChange {
+        r#type: source::ChangeType::Insert as i32,
+        source_id: "facilities-db".into(),
+        timestamp: None,
+        change: Some(source::source_change::Change::Element(source::Element {
+            element: Some(source::element::Element::Node(source::Node {
+                metadata: Some(source::ElementMetadata {
+                    reference: Some(source::ElementReference {
+                        source_id: "facilities-db".into(),
+                        element_id: format!("row-{value}"),
+                    }),
+                    labels: vec!["Room".into()],
+                    effective_from: 1234567890000,
+                }),
+                properties: Some(drasi_reaction_grpc::helpers::convert_json_to_proto_struct(
+                    &json!({"value":value}),
+                )),
+            })),
+        })),
+    }
+}
+fn source_value(envelope: &ChangeEnvelope) -> Result<i64> {
+    let changes = GraphChangeCodec::decode_changes(envelope)?;
+    let [SourceChange::Insert {
+        element: Element::Node {
+            metadata,
+            properties,
+        },
+    }] = changes.as_slice()
+    else {
+        anyhow::bail!("expected one inserted node per graph envelope");
+    };
+    assert_eq!(metadata.effective_from, 1234567);
+    match properties.get("value") {
+        Some(drasi_core::models::ElementValue::Integer(value)) => Ok(*value),
+        _ => anyhow::bail!("missing integer value"),
+    }
+}
+async fn next(source: &mut NativeComponentProxy) -> Result<ChangeEnvelope> {
+    let output = tokio::time::timeout(DEADLINE, source.next())
+        .await??
+        .context("unexpected EOF")?;
+    assert_eq!(output.port.as_str(), "out");
+    let progress = GraphProducerProgress::from_envelope(&output.envelope)?
+        .context("real producer identity")?;
+    assert!(!progress.identity().persistent());
+    assert_eq!(progress.sequence(), output.envelope.system().sequence());
+    Ok(output.envelope)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Result<()> {
+    let port = free_port()?;
+    let config = json!({"stream":"facilities-db/out","host":"127.0.0.1","port":port,
+        "ingressCapacity":1,"timeoutMs":500,"maxMessageBytes":4096,"maxBatchEvents":4});
+    let mut source = component(HTTP_SOURCE, "http-input", config)?;
+    let before = source.configuration()?;
+    assert!(
+        TcpListener::bind(("127.0.0.1", port)).await.is_ok(),
+        "factory must not bind"
+    );
+    source.start().await?;
+    assert_eq!(source.configuration()?, before);
+    let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+    let base = format!("http://127.0.0.1:{port}");
+    assert_eq!(
+        client.get(format!("{base}/health")).send().await?.status(),
+        StatusCode::OK
+    );
+    let mut occupied = component(HTTP_SOURCE, "occupied", before.clone())?;
+    assert!(
+        occupied.start().await.is_err(),
+        "bind conflict must reach the host"
+    );
+    occupied.stop().await?;
+    let url = format!("{base}/sources/facilities-db/events");
+    let bad = client
+        .post(format!("{base}/sources/wrong/events"))
+        .json(&http_event(0))
+        .send()
+        .await?;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(bad.json::<Value>().await?["success"], false);
+    assert!(!client
+        .post(&url)
+        .json(&json!({"operation":"bad"}))
+        .send()
+        .await?
+        .status()
+        .is_success());
+    assert_eq!(
+        client
+            .post(&url)
+            .body("x".repeat(5000))
+            .send()
+            .await?
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let send = client
+        .post(format!("{url}/batch"))
+        .json(&json!({"events":[http_event(1),http_event(2),http_event(3),http_event(4)]}))
+        .send();
+    let receive = async {
+        let mut values = Vec::new();
+        for sequence in 1..=4 {
+            let envelope = next(&mut source).await?;
+            assert_eq!(envelope.system().sequence(), sequence);
+            values.push(source_value(&envelope)?);
+        }
+        Result::<_>::Ok(values)
+    };
+    let (response, received) =
+        tokio::time::timeout(DEADLINE, async { tokio::join!(send, receive) }).await?;
+    assert_eq!(response?.json::<Value>().await?["events_processed"], 4);
+    assert_eq!(received?, [1, 2, 3, 4]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), source.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .json(&http_event(5))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?["success"],
+        true
+    );
+    let waiting = client.post(&url).json(&http_event(6)).send();
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut waiting)
+            .await
+            .is_err(),
+        "full ingress must backpressure"
+    );
+    assert_eq!(
+        client.get(format!("{base}/health")).send().await?.status(),
+        StatusCode::OK
+    );
+    assert_eq!(source_value(&next(&mut source).await?)?, 5);
+    assert_eq!(waiting.await?.json::<Value>().await?["success"], true);
+    assert_eq!(source_value(&next(&mut source).await?)?, 6);
+
+    let invalid_batch = client
+        .post(format!("{url}/batch"))
+        .json(&json!({
+            "events":[http_event(7), {"operation":"delete","id":""}]
+        }))
+        .send()
+        .await?;
+    assert_eq!(invalid_batch.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_batch.json::<Value>().await?["events_processed"], 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), source.next())
+            .await
+            .is_err(),
+        "prevalidation must reject the entire invalid batch"
+    );
+    let partial = client
+        .post(format!("{url}/batch"))
+        .json(&json!({"events":[http_event(7),http_event(8)]}))
+        .send()
+        .await?;
+    assert_eq!(partial.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let partial = partial.json::<Value>().await?;
+    assert_eq!(partial["success"], false);
+    assert_eq!(
+        partial["events_processed"], 1,
+        "partial admission must report the accepted prefix"
+    );
+    let admitted = next(&mut source).await?;
+    assert_eq!(source_value(&admitted)?, 7);
+    assert_eq!(admitted.system().sequence(), 7);
+    client
+        .post(&url)
+        .json(&http_event(8))
+        .send()
+        .await?
+        .error_for_status()?;
+    let rejected = client.post(&url).json(&http_event(9)).send().await?;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        rejected.json::<Value>().await?["events_processed"],
+        0,
+        "timeout cannot claim acceptance"
+    );
+    let blocked = client.post(&url).json(&http_event(10)).send();
+    tokio::pin!(blocked);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut blocked)
+            .await
+            .is_err()
+    );
+    let (stop, response) =
+        tokio::time::timeout(DEADLINE, async { tokio::join!(source.stop(), blocked) }).await?;
+    stop?;
+    assert_eq!(response?.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(source.next().await.is_err());
+    let rebound = TcpListener::bind(("127.0.0.1", port)).await?;
+    drop(rebound);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_streams() -> Result<()> {
+    let port = free_port()?;
+    let mut source = component(
+        GRPC_SOURCE,
+        "grpc-input",
+        json!({
+            "stream":"facilities-db/out","host":"127.0.0.1","port":port,"ingressCapacity":2,"timeoutMs":1000,"maxMessageBytes":1024
+        }),
+    )?;
+    source.start().await?;
+    let mut client = source::source_service_client::SourceServiceClient::connect(format!(
+        "http://127.0.0.1:{port}"
+    ))
+    .await?;
+    assert_eq!(
+        client.health_check(()).await?.into_inner().status,
+        source::health_check_response::Status::Healthy as i32
+    );
+    let error = client
+        .request_bootstrap(source::BootstrapRequest {
+            query_id: "q".into(),
+            node_labels: vec![],
+            relation_labels: vec![],
+        })
+        .await
+        .err()
+        .context("bootstrap must fail")?;
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+    let invalid = client
+        .submit_event(source::SubmitEventRequest { event: None })
+        .await?
+        .into_inner();
+    assert!(!invalid.success && !invalid.error.is_empty());
+    let mut wrong = proto_event(0);
+    wrong.source_id = "wrong".into();
+    assert!(
+        !client
+            .submit_event(source::SubmitEventRequest { event: Some(wrong) })
+            .await?
+            .into_inner()
+            .success
+    );
+    assert!(
+        client
+            .submit_event(source::SubmitEventRequest {
+                event: Some(proto_event(0))
+            })
+            .await?
+            .into_inner()
+            .success
+    );
+    assert_eq!(source_value(&next(&mut source).await?)?, 0);
+    let producer = async {
+        let mut response = client
+            .stream_events(tokio_stream::iter((1..=150).map(proto_event)))
+            .await?
+            .into_inner();
+        let mut total = 0;
+        while let Some(response) = response.message().await? {
+            assert!(response.success, "{}", response.error);
+            assert_eq!(response.events_processed, total + 1);
+            total = response.events_processed;
+        }
+        Result::<_>::Ok(total)
+    };
+    let consumer = async {
+        for value in 1..=150 {
+            let envelope = next(&mut source).await?;
+            assert_eq!(source_value(&envelope)?, value);
+            assert_eq!(envelope.system().sequence(), value as u64 + 1);
+        }
+        Result::<()>::Ok(())
+    };
+    let (count, drained) =
+        tokio::time::timeout(DEADLINE, async { tokio::join!(producer, consumer) }).await?;
+    assert_eq!(count?, 150);
+    drained?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), source.next())
+            .await
+            .is_err()
+    );
+    let mut invalid = proto_event(152);
+    invalid.source_id = "wrong".into();
+    let mut failed_stream = client
+        .stream_events(tokio_stream::iter([proto_event(151), invalid]))
+        .await?
+        .into_inner();
+    let first = failed_stream
+        .message()
+        .await?
+        .context("accepted stream event")?;
+    assert!(first.success);
+    assert_eq!(first.events_processed, 1);
+    let second = failed_stream
+        .message()
+        .await?
+        .context("failed stream event")?;
+    assert!(!second.success && !second.error.is_empty());
+    assert_eq!(second.events_processed, 1);
+    assert!(
+        failed_stream.message().await?.is_none(),
+        "failure must not be followed by final success"
+    );
+    assert_eq!(source_value(&next(&mut source).await?)?, 151);
+    for value in [152, 153] {
+        assert!(
+            client
+                .submit_event(source::SubmitEventRequest {
+                    event: Some(proto_event(value))
+                })
+                .await?
+                .into_inner()
+                .success
+        );
+    }
+    {
+        let mut health_client = client.clone();
+        let pending = client.submit_event(source::SubmitEventRequest {
+            event: Some(proto_event(154)),
+        });
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                .await
+                .is_err(),
+            "full gRPC ingress must backpressure unary admission"
+        );
+        assert_eq!(
+            health_client.health_check(()).await?.into_inner().status,
+            source::health_check_response::Status::Healthy as i32
+        );
+        assert_eq!(source_value(&next(&mut source).await?)?, 152);
+        assert!(pending.await?.into_inner().success);
+    }
+    assert_eq!(source_value(&next(&mut source).await?)?, 153);
+    assert_eq!(source_value(&next(&mut source).await?)?, 154);
+    let mut oversized = proto_event(151);
+    oversized.source_id = "x".repeat(2000);
+    assert_eq!(
+        client
+            .submit_event(source::SubmitEventRequest {
+                event: Some(oversized)
+            })
+            .await
+            .err()
+            .context("size rejection")?
+            .code(),
+        tonic::Code::OutOfRange
+    );
+    let (send, receive) = mpsc::channel(1);
+    let mut response = client
+        .stream_events(tokio_stream::wrappers::ReceiverStream::new(receive))
+        .await?
+        .into_inner();
+    let pending = response.message();
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut pending)
+            .await
+            .is_err()
+    );
+    let (stop, message) =
+        tokio::time::timeout(DEADLINE, async { tokio::join!(source.stop(), pending) }).await?;
+    stop?;
+    assert!(message.is_err(), "stopped stream must not report success");
+    drop(send);
+    drop(client);
+    assert!(source.next().await.is_err());
+    drop(TcpListener::bind(("127.0.0.1", port)).await?);
+    Ok(())
+}
+
+fn result_input(sequence: u64) -> Result<InputEnvelope> {
+    result_inputs(sequence, &[42])
+}
+
+fn result_inputs(sequence: u64, values: &[i64]) -> Result<InputEnvelope> {
+    let changes = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| QueryPartEvaluationContext::Adding {
+            after: [("value".into(), VariableValue::Integer((*value).into()))].into(),
+            row_signature: index as u64 + 11,
+        })
+        .collect::<Vec<_>>();
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: QueryChangeCodec::encode_evaluation(
+            None,
+            &ComponentId::try_new("q")?,
+            SystemMetadata::new(stream("q/out"), sequence),
+            &ResultNodeProjector::try_new("test/native-network-loopback/q/out", None)?,
+            &changes,
+            QueryOutputMetadata {
+                query_id: "q".into(),
+                source_id: Some("facilities-db".into()),
+                timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 123)
+                    .context("timestamp")?,
+                metadata: HashMap::from([("source".into(), json!("facilities-db"))]),
+                profiling: None,
+            },
+        )?
+        .context("output")?,
+    })
+}
+
+struct ReceiverState {
+    http: Mutex<Vec<(HeaderMap, Value)>>,
+    grpc: Mutex<
+        Vec<(
+            tonic::metadata::MetadataMap,
+            reaction::ProcessChangesRequest,
+        )>,
+    >,
+    failures: AtomicUsize,
+    delay: AtomicUsize,
+    entered: Notify,
+    cancel: CancellationToken,
+}
+impl ReceiverState {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            http: Mutex::new(Vec::new()),
+            grpc: Mutex::new(Vec::new()),
+            failures: AtomicUsize::new(0),
+            delay: AtomicUsize::new(0),
+            entered: Notify::new(),
+            cancel: CancellationToken::new(),
+        })
+    }
+    fn fail(&self) -> bool {
+        self.failures
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_sub(1)
+            })
+            .is_ok()
+    }
+    async fn wait(&self) {
+        self.entered.notify_one();
+        if self.delay.load(Ordering::Acquire) > 0 {
+            tokio::select! {
+                _ = self.cancel.cancelled() => {},
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {},
+            }
+        }
+    }
+}
+struct ReceiverServer {
+    address: SocketAddr,
+    state: Arc<ReceiverState>,
+    task: Option<JoinHandle<Result<()>>>,
+}
+impl Drop for ReceiverServer {
+    fn drop(&mut self) {
+        self.state.cancel.cancel();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+impl ReceiverServer {
+    async fn stop(&mut self) -> Result<()> {
+        self.state.cancel.cancel();
+        if let Some(task) = &mut self.task {
+            tokio::time::timeout(DEADLINE, task).await???;
+        }
+        self.task = None;
+        Ok(())
+    }
+}
+async fn receive_http(
+    State(state): State<Arc<ReceiverState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    state
+        .http
+        .lock()
+        .expect("HTTP capture")
+        .push((headers, value));
+    state.wait().await;
+    (
+        if state.fail() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        },
+        Json(json!({"ok":true})),
+    )
+}
+async fn http_receiver() -> Result<ReceiverServer> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let state = ReceiverState::new();
+    let router = Router::new()
+        .route("/reaction", post(receive_http))
+        .with_state(state.clone());
+    let cancel = state.cancel.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(cancel.cancelled_owned())
+            .await?;
+        Ok(())
+    });
+    Ok(ReceiverServer {
+        address,
+        state,
+        task: Some(task),
+    })
+}
+struct ReactionReceiver(Arc<ReceiverState>);
+#[tonic::async_trait]
+impl reaction::change_service_server::ChangeService for ReactionReceiver {
+    async fn process_changes(
+        &self,
+        request: tonic::Request<reaction::ProcessChangesRequest>,
+    ) -> std::result::Result<tonic::Response<reaction::ProcessResultsResponse>, tonic::Status> {
+        let items_processed = request
+            .get_ref()
+            .changes
+            .as_ref()
+            .map_or(0, |batch| batch.changes.len());
+        let headers = request.metadata().clone();
+        self.0
+            .grpc
+            .lock()
+            .expect("gRPC capture")
+            .push((headers, request.into_inner()));
+        self.0.wait().await;
+        let fail = self.0.fail();
+        Ok(tonic::Response::new(reaction::ProcessResultsResponse {
+            success: !fail,
+            message: String::new(),
+            error: if fail {
+                "deliberate receiver failure".into()
+            } else {
+                String::new()
+            },
+            items_processed: if fail {
+                0
+            } else {
+                items_processed
+                    .try_into()
+                    .map_err(|_| tonic::Status::out_of_range("too many result items"))?
+            },
+        }))
+    }
+}
+async fn grpc_receiver() -> Result<ReceiverServer> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let state = ReceiverState::new();
+    let cancel = state.cancel.clone();
+    let server =
+        reaction::change_service_server::ChangeServiceServer::new(ReactionReceiver(state.clone()));
+    let task = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(server)
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                cancel.cancelled_owned(),
+            )
+            .await?;
+        Ok(())
+    });
+    Ok(ReceiverServer {
+        address,
+        state,
+        task: Some(task),
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip() -> Result<()> {
+    let mut receiver = http_receiver().await?;
+    let base = json!({"outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction", receiver.address),"maxRetries":1,"timeoutMs":1000});
+    let mut sink = component(HTTP_SINK, "http-output", base.clone())?;
+    assert!(sink.handle(result_input(1)?).await.is_err());
+    sink.start().await?;
+    receiver.state.failures.store(1, Ordering::Release);
+    sink.handle(result_input(1)?).await?;
+    {
+        let delivered = receiver.state.http.lock().expect("capture");
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(
+            delivered[0].1, delivered[1].1,
+            "retry preserves logical delivery"
+        );
+        assert_eq!(delivered[0].0["x-drasi-component"], "q");
+        assert_eq!(delivered[0].0["x-drasi-port"], "out");
+        assert_eq!(delivered[0].0["content-type"], "application/json");
+        assert_eq!(
+            delivered[0].1,
+            json!({"operation":"ADD","output":{"alias":"q","component":"q","port":"out"},"sequence":1,
+            "timestamp":"2023-11-14T22:13:20.000000123+00:00","after":{"value":42},
+            "identity":{"namespace":"test/native-network-loopback/q/out","id":"000000000000000b"},
+            "element":{"kind":"node","labels":["Result"]},
+            "effectiveFrom":1_700_000_000_000u64})
+        );
+    }
+    receiver.state.failures.store(10, Ordering::Release);
+    assert!(
+        sink.handle(result_input(2)?).await.is_err(),
+        "strict retry exhaustion fails"
+    );
+    sink.stop().await?;
+    let mut config = base;
+    config["failurePolicy"] = json!("skip");
+    config["maxRetries"] = json!(0);
+    let mut skip = component(HTTP_SINK, "http-skip", config)?;
+    skip.start().await?;
+    skip.handle(result_input(3)?).await?;
+    skip.stop().await?;
+    receiver.state.failures.store(0, Ordering::Release);
+    receiver.state.delay.store(1, Ordering::Release);
+    sink.start().await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), sink.handle(result_input(4)?))
+            .await
+            .is_err(),
+        "pending delivery cannot be early Handled success"
+    );
+    sink.stop().await?;
+    assert!(sink.handle(result_input(5)?).await.is_err());
+    receiver.stop().await?;
+    Ok(())
+}
+
+/// Standard graph changes straight from a source: no query, projection or
+/// annotation exists anywhere on this envelope.
+fn source_graph_input(sequence: u64) -> Result<InputEnvelope> {
+    use drasi_core::models::{ElementMetadata, ElementPropertyMap, ElementReference, ElementValue};
+    let metadata = ElementMetadata {
+        reference: ElementReference::new("facilities-db", "room-1"),
+        labels: Arc::from([Arc::<str>::from("Room")]),
+        effective_from: 1_700_000_000_000,
+    };
+    let element = |name: &str| {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("name", ElementValue::String(name.into()));
+        Element::Node {
+            metadata: metadata.clone(),
+            properties,
+        }
+    };
+    let envelope = GraphChangeCodec::encode_changes(
+        &[
+            SourceChange::Insert {
+                element: element("one"),
+            },
+            SourceChange::Update {
+                element: element("two"),
+                removed_properties: ["colour".to_owned()].into(),
+            },
+            SourceChange::Delete { metadata },
+        ],
+        stream("facilities-db/out"),
+        sequence,
+        chrono::DateTime::from_timestamp(1_700_000_000, 0),
+    )?;
+    anyhow::ensure!(
+        !QueryChangeCodec::is_query_output(&envelope),
+        "a source envelope has no query annotation"
+    );
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope,
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata() -> Result<()> {
+    let mut http = http_receiver().await?;
+    let mut sink = component(
+        HTTP_SINK,
+        "http-source-output",
+        json!({"outputs":{"facilities-db":{"component":"facilities-db","port":"out"}},"url":format!("http://{}/reaction", http.address),
+            "maxRetries":0,"timeoutMs":1000}),
+    )?;
+    sink.start().await?;
+    sink.handle(source_graph_input(7)?).await?;
+    {
+        let delivered = http.state.http.lock().expect("capture");
+        assert_eq!(delivered.len(), 3, "one request per ordered change");
+        assert_eq!(delivered[0].0["x-drasi-component"], "facilities-db");
+        assert_eq!(delivered[0].0["x-drasi-port"], "out");
+        let operations: Vec<_> = delivered
+            .iter()
+            .map(|(_, body)| body["operation"].clone())
+            .collect();
+        assert_eq!(operations, [json!("ADD"), json!("PATCH"), json!("DELETE")]);
+        assert_eq!(delivered[0].1["after"], json!({"name":"one"}));
+        assert_eq!(
+            delivered[0].1["output"],
+            json!({"alias":"facilities-db","component":"facilities-db","port":"out"})
+        );
+        assert_eq!(delivered[0].1["sequence"], 7);
+        assert!(delivered
+            .iter()
+            .all(|(_, body)| body.get("queryId").is_none()
+                && body.get("producer").is_none()
+                && body.get("metadata").is_none()
+                && body.get("rowSignature").is_none()));
+        assert_eq!(delivered[1].1["after"], json!({"name":"two"}));
+        assert_eq!(delivered[1].1["removedProperties"], json!(["colour"]));
+        assert!(delivered[1].1.get("before").is_none());
+        // An identity-only delete carries neither image.
+        assert!(delivered[2].1.get("before").is_none() && delivered[2].1.get("after").is_none());
+        for (_, body) in delivered.iter() {
+            assert_eq!(
+                body["identity"],
+                json!({"namespace":"facilities-db","id":"room-1"})
+            );
+            assert_eq!(body["element"]["labels"], json!(["Room"]));
+        }
+    }
+    // A scheduling control is not data and fails instead of being dropped.
+    let due = InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: GraphChangeCodec::encode_futures_due(
+            stream("facilities-db/out"),
+            8,
+            chrono::Utc::now(),
+        )?,
+    };
+    assert!(sink.handle(due).await.is_err());
+    sink.stop().await?;
+    http.stop().await?;
+
+    let mut grpc = grpc_receiver().await?;
+    let mut sink = component(
+        GRPC_SINK,
+        "grpc-source-output",
+        json!({"outputs":{"facilities-db":{"component":"facilities-db","port":"out"}},"endpoint":format!("grpc://{}", grpc.address),
+            "maxRetries":0,"timeoutMs":1000,"connectionRetryAttempts":1,
+            "initialConnectionTimeoutMs":1000}),
+    )?;
+    sink.start().await?;
+    sink.handle(source_graph_input(7)?).await?;
+    {
+        let delivered = grpc.state.grpc.lock().expect("capture");
+        let items: Vec<_> = delivered
+            .iter()
+            .flat_map(|(_, request)| request.changes.as_ref().expect("changes").changes.clone())
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert!(delivered.iter().all(|(_, request)| {
+            let output = request.changes.as_ref().unwrap().output.as_ref().unwrap();
+            (
+                output.alias.as_str(),
+                output.component.as_str(),
+                output.port.as_str(),
+            ) == ("facilities-db", "facilities-db", "out")
+        }));
+        let operations: Vec<_> = items.iter().map(|item| item.operation).collect();
+        assert_eq!(
+            operations,
+            [
+                reaction::ChangeOperation::Add as i32,
+                reaction::ChangeOperation::Patch as i32,
+                reaction::ChangeOperation::Delete as i32
+            ]
+        );
+        for item in &items {
+            assert_eq!(item.sequence, 7);
+            let identity = item.identity.as_ref().unwrap();
+            assert_eq!(
+                (identity.namespace.as_str(), identity.id.as_str()),
+                ("facilities-db", "room-1")
+            );
+        }
+        // A patch states what it sets and what it removes; no before image is known.
+        assert!(items[1].before.is_none() && items[1].after.is_some());
+        assert_eq!(items[1].removed_properties, ["colour"]);
+        assert!(items[0].removed_properties.is_empty());
+        // An identity-only delete carries neither image.
+        assert!(items[2].before.is_none() && items[2].after.is_none());
+    }
+    sink.stop().await?;
+    grpc.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_success() -> Result<()> {
+    let mut receiver = grpc_receiver().await?;
+    let config = json!({"outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}", receiver.address),
+        "maxRetries":1,"timeoutMs":1000,"connectionRetryAttempts":1,"initialConnectionTimeoutMs":1000,
+        "metadata":{"x-custom":"custom"}});
+    let mut sink = component(GRPC_SINK, "grpc-output", config)?;
+    sink.start().await?;
+    receiver.state.failures.store(1, Ordering::Release);
+    sink.handle(result_input(1)?).await?;
+    {
+        let delivered = receiver.state.grpc.lock().expect("capture");
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0].1, delivered[1].1);
+        let (headers, request) = &delivered[0];
+        for (name, expected) in [("x-drasi-component", "q"), ("x-drasi-port", "out")] {
+            assert_eq!(
+                headers.get(name).context("identity header")?.to_str()?,
+                expected
+            );
+        }
+        assert_eq!(
+            headers.get("x-custom").context("custom header")?.to_str()?,
+            "custom"
+        );
+        assert_eq!(request.metadata["x-custom"], "custom");
+        let output = request.changes.as_ref().context("changes")?;
+        let identity = output.output.as_ref().context("output identity")?;
+        assert_eq!(
+            (
+                identity.alias.as_str(),
+                identity.component.as_str(),
+                identity.port.as_str()
+            ),
+            ("q", "q", "out")
+        );
+        assert_eq!(output.changes.len(), 1);
+        let item = &output.changes[0];
+        assert_eq!(item.operation, reaction::ChangeOperation::Add as i32);
+        assert_eq!(item.sequence, 1);
+        assert_eq!(item.timestamp, output.timestamp);
+        assert_eq!(item.identity.as_ref().unwrap().id, "000000000000000b");
+        assert!(item.payload.is_some() && item.after.is_some() && item.before.is_none());
+    }
+    receiver.state.failures.store(10, Ordering::Release);
+    assert!(sink.handle(result_input(2)?).await.is_err());
+    receiver.state.failures.store(0, Ordering::Release);
+    receiver.state.delay.store(1, Ordering::Release);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), sink.handle(result_input(3)?))
+            .await
+            .is_err()
+    );
+    sink.stop().await?;
+    assert!(sink.handle(result_input(4)?).await.is_err());
+    receiver.stop().await?;
+    let mut failed = component(
+        GRPC_SINK,
+        "no-receiver",
+        json!({
+            "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://127.0.0.1:{}", free_port()?),
+            "connectionRetryAttempts":1,"initialConnectionTimeoutMs":50,"timeoutMs":50
+        }),
+    )?;
+    assert!(
+        failed.start().await.is_err(),
+        "connection failure must not be lazy startup success"
+    );
+    failed.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<()> {
+    for grpc in [false, true] {
+        let mut receiver = if grpc {
+            grpc_receiver().await?
+        } else {
+            http_receiver().await?
+        };
+        let port = free_port()?;
+        let source_plugin = plugin(if grpc { GRPC_SOURCE } else { HTTP_SOURCE })?;
+        let sink_plugin = plugin(if grpc { GRPC_SINK } else { HTTP_SINK })?;
+        let source_factory = source_plugin
+            .factories()
+            .iter()
+            .find(|factory| {
+                factory.metadata().implementation.name.as_ref()
+                    == if grpc { GRPC_SOURCE } else { HTTP_SOURCE }
+            })
+            .context("source factory")?
+            .clone();
+        let sink_factory = sink_plugin
+            .factories()
+            .iter()
+            .find(|factory| {
+                factory.metadata().implementation.name.as_ref()
+                    == if grpc { GRPC_SINK } else { HTTP_SINK }
+            })
+            .context("sink factory")?
+            .clone();
+        let sink_config = if grpc {
+            json!({"outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}", receiver.address),"maxRetries":0})
+        } else {
+            json!({"outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction",receiver.address),"maxRetries":0})
+        };
+        let query = ContinuousQueryDefinition {
+            graph_id: "network-evaluator".into(),
+            id: ComponentId::try_new("q")?,
+            query: "MATCH (r:Room) RETURN r.value AS value".into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: stream("q/out"),
+            outbox_capacity: std::num::NonZeroUsize::new(32).unwrap(),
+        };
+        let indexes = ResourceId::try_new("memory-indexes")?;
+        let spec = ComponentSpecification {
+            descriptor: query.descriptor(),
+            role: ComponentRole::Query,
+            completion: None,
+            implementation: ImplementationIdentity::try_new("drasi/continuous-query", "1")?,
+            configuration_version: 1,
+            configuration: [
+                (
+                    "query".into(),
+                    ConfigurationValue::Literal(query.query.clone().into()),
+                ),
+                ("stream".into(), ConfigurationValue::Literal("q/out".into())),
+            ]
+            .into(),
+            dependencies: [("indexes".into(), vec![indexes.clone()])].into(),
+        };
+        let endpoint = |id: &str, port: &str| -> Result<Endpoint> {
+            Ok(Endpoint::new(
+                ComponentId::try_new(id)?,
+                PortId::try_new(port)?,
+            ))
+        };
+        let mut graph = ComputationGraph::builder("network-evaluator")
+            .declare_resource(ResourceSpecification {
+                id: indexes.clone(),
+                role: ResourceRole::IndexBackend,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "memory".into(),
+            })?
+            .provide_resource(
+                indexes,
+                ResourceHandle::new(
+                    ResourceRole::IndexBackend,
+                    Arc::new(QueryIndexProviderResource(Arc::new(
+                        InMemoryComputationProvider,
+                    ))),
+                ),
+            )?
+            .component(
+                source_factory.specification(
+                    ComponentId::try_new("facilities-db")?,
+                    json!({
+                        "stream":"facilities-db","host":"127.0.0.1","port":port,"timeoutMs":1000
+                    }),
+                )?,
+                source_factory,
+            )
+            .component(spec, Arc::new(ContinuousQueryFactory::default()))
+            .component(
+                sink_factory.specification(ComponentId::try_new("sink")?, sink_config)?,
+                sink_factory,
+            )
+            .connect(
+                EdgeDefinition::new(endpoint("facilities-db", "out")?, endpoint("q", "in")?),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .connect(
+                EdgeDefinition::new(endpoint("q", "out")?, endpoint("sink", "in")?),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .bind_stream(endpoint("facilities-db", "out")?, stream("facilities-db"))
+            .bind_stream(endpoint("q", "out")?, stream("q/out"))
+            .build()?;
+        let run = graph.start()?;
+        let control = run.control();
+        let drive = async {
+            let result = async {
+                assert_eq!(
+                    control.startup_report().await?.summary,
+                    OperationSummary::Completed
+                );
+                let http = reqwest::Client::new();
+                let mut grpc_client = if grpc {
+                    Some(
+                        source::source_service_client::SourceServiceClient::connect(format!(
+                            "http://127.0.0.1:{port}"
+                        ))
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                for value in 1..=10 {
+                    if let Some(client) = &mut grpc_client {
+                        assert!(
+                            client
+                                .submit_event(source::SubmitEventRequest {
+                                    event: Some(proto_event(value))
+                                })
+                                .await?
+                                .into_inner()
+                                .success
+                        );
+                    } else {
+                        http.post(format!(
+                            "http://127.0.0.1:{port}/sources/facilities-db/events"
+                        ))
+                        .json(&http_event(value))
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    }
+                }
+                loop {
+                    let arrived = receiver.state.entered.notified();
+                    let count = if grpc {
+                        receiver.state.grpc.lock().unwrap().len()
+                    } else {
+                        receiver.state.http.lock().unwrap().len()
+                    };
+                    if count == 10 {
+                        break;
+                    }
+                    arrived.await;
+                }
+                Result::<()>::Ok(())
+            }
+            .await;
+            control.cancel();
+            result
+        };
+        let (run, driven) =
+            tokio::time::timeout(DEADLINE, async { tokio::join!(run, drive) }).await?;
+        driven?;
+        assert!(matches!(run, Err(GraphError::Cancelled)));
+        if grpc {
+            let values = receiver.state.grpc.lock().unwrap();
+            assert_eq!(values.len(), 10);
+            for (index, (_, request)) in values.iter().enumerate() {
+                let item = &request.changes.as_ref().context("changes")?.changes[0];
+                assert_eq!(item.sequence, index as u64 + 1);
+                // Query output carries no query annotations: the change states its
+                // operation and the result node's canonical identity.
+                assert_eq!(item.operation, reaction::ChangeOperation::Add as i32);
+                assert_eq!(item.element.as_ref().unwrap().labels, ["Result"]);
+                assert_eq!(
+                    item.after,
+                    Some(drasi_reaction_grpc::helpers::convert_json_to_proto_struct(
+                        &json!({"value":index+1})
+                    ))
+                );
+            }
+        } else {
+            let values = receiver.state.http.lock().unwrap();
+            assert_eq!(values.len(), 10);
+            for (index, (_, item)) in values.iter().enumerate() {
+                assert_eq!(item["sequence"], index as u64 + 1);
+                assert_eq!(item["after"], json!({"value":index+1}));
+                assert_eq!(item["operation"], "ADD");
+                assert_eq!(item["element"]["kind"], "node");
+                assert_eq!(item["element"]["labels"], json!(["Result"]));
+                assert!(item.get("queryId").is_none() && item.get("metadata").is_none());
+            }
+        }
+        receiver.stop().await?;
+    }
+    Ok(())
+}

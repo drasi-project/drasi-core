@@ -1,0 +1,42 @@
+[package]
+name = "drasi-instance-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Normal native DrasiLib hosting and owned local instance supervision"
+publish = false
+
+[features]
+dynamic-plugin = []
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+drasi-core = { workspace = true }
+drasi-host-sdk = { path = "../host-sdk" }
+drasi-computation-bridge-common = { workspace = true }
+drasi-computation-source-bridge = { workspace = true }
+drasi-computation-sink-bridge = { workspace = true }
+drasi-lib = { workspace = true }
+drasi-index-rocksdb = { workspace = true, features = ["computation"] }
+drasi-state-store-redb = { workspace = true, features = ["configuration"] }
+drasi-middleware = { workspace = true, features = ["engine-adapter", "map", "relabel"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+drasi-computation-plugin-sdk = { workspace = true }
+
+[[example]]
+name = "instance_host_fixture"
+path = "tests/fixtures/native.rs"
+crate-type = ["cdylib"]
+test = false
+required-features = ["dynamic-plugin"]
+
+[lints]
+workspace = true

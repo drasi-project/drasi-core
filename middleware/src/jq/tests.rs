@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod process {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use drasi_core::{
@@ -26,6 +27,73 @@ mod process {
     use serde_json::json;
 
     use crate::jq::JQFactory;
+
+    #[tokio::test]
+    async fn unmappable_removal_patch_skips_only_the_update_rule() {
+        let config = json!({
+            "Telemetry": {
+                "update": [
+                    {"query": "error(\"this update rule must not run\")", "haltOnError": true},
+                    {"op": "Delete", "id": ".id", "label": "\"Vehicle\"",
+                     "query": "{\"id\": .vehicleId}"}
+                ]
+            }
+        });
+        let subject = JQFactory::new()
+            .create(&SourceMiddlewareConfig {
+                name: "events".into(),
+                kind: "jq".into(),
+                config: config.as_object().unwrap().clone(),
+            })
+            .unwrap();
+        let change = SourceChange::update_with_removals(
+            Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "t1"),
+                    labels: vec!["Telemetry".into()].into(),
+                    effective_from: 10,
+                },
+                properties: ElementPropertyMap::from(json!({"vehicleId":"v1"})),
+            },
+            BTreeSet::from(["speed".to_string()]),
+        )
+        .unwrap();
+        let result = subject
+            .process(change, &InMemoryElementIndex::new())
+            .await
+            .unwrap();
+        let [SourceChange::Delete { metadata }] = result.as_slice() else {
+            panic!("the meaningful deletion mapping must still run");
+        };
+        assert_eq!(metadata.reference.element_id.as_ref(), "v1");
+        assert_eq!(metadata.labels.as_ref(), [Arc::from("Vehicle")]);
+    }
+
+    #[tokio::test]
+    async fn malformed_patch_is_not_treated_as_an_ignored_event() {
+        let subject = JQFactory::new()
+            .create(&SourceMiddlewareConfig {
+                name: "events".into(),
+                kind: "jq".into(),
+                config: Default::default(),
+            })
+            .unwrap();
+        let change = SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "t1"),
+                    labels: vec!["Telemetry".into()].into(),
+                    effective_from: 10,
+                },
+                properties: ElementPropertyMap::from(json!({"speed":3})),
+            },
+            removed_properties: BTreeSet::from(["speed".to_string()]),
+        };
+        assert!(subject
+            .process(change, &InMemoryElementIndex::new())
+            .await
+            .is_err());
+    }
 
     #[tokio::test]
     pub async fn map_insert_to_update() {
@@ -94,6 +162,7 @@ mod process {
         assert_eq!(
             result[0],
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("test", "v1"),
@@ -185,6 +254,7 @@ mod process {
         let result = result.unwrap();
         assert_eq!(result.len(), 2);
         assert!(result.contains(&SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "v1"),
@@ -198,6 +268,7 @@ mod process {
             }
         }));
         assert!(result.contains(&SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "f1"),
@@ -294,6 +365,7 @@ mod process {
         assert_eq!(
             result[0],
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new("test", "v1"),

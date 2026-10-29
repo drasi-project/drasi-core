@@ -1,0 +1,1604 @@
+// Copyright 2026 The Drasi Authors.
+// Licensed under the Apache License, Version 2.0.
+
+use anyhow::Context;
+use drasi_computation_plugin_abi as abi;
+use drasi_computation_plugin_sdk::{
+    metadata::{PluginMetadata, TARGET},
+    transport::{borrowed_bytes, checked_table, take_status},
+    wire,
+};
+use drasi_lib::computation::v1::{
+    FactoryRegistry, RecordId, RecordImage, RecordValidationError, RecordValidator, Schema,
+    SchemaDescriptor, TransactionalTransformerFactory,
+};
+use libloading::Library;
+use std::{path::Path, sync::Arc};
+
+use super::{NativeBootstrapFactory, NativeFactory};
+
+pub struct NativePlugin {
+    metadata: PluginMetadata,
+    factories: Vec<Arc<NativeFactory>>,
+    bootstrap_factories: Vec<Arc<NativeBootstrapFactory>>,
+}
+impl NativePlugin {
+    /// Link an in-process SDK plugin through the same validated catalogue and
+    /// operation tables used for a separately loaded native library.
+    pub fn from_definition(
+        definition: drasi_computation_plugin_sdk::PluginDefinition,
+    ) -> anyhow::Result<Arc<Self>> {
+        let exported = drasi_computation_plugin_sdk::ExportedPlugin::new(definition)?;
+        // Exported handles retain the definition; metadata is copied before the
+        // temporary export backing is released. Statically linked code cannot unload.
+        unsafe {
+            Self::from_exports_with_output_reads(
+                || exported.metadata(),
+                |out| exported.entry(out),
+                || Some(exported.services()),
+                || Some(exported.recovery()),
+                || Some(exported.bootstrap()),
+                || Some(exported.consumer()),
+                || Some(exported.configuration()),
+                || Some(exported.batching()),
+                || Some(exported.output_snapshots()),
+                || Some(exported.consumer_progress()),
+                || Some(exported.source_schema()),
+                || Some(exported.bootstrap_coordination()),
+                || Some(exported.activation_credentials()),
+                || Some(exported.output_reads()),
+                || Some(exported.output_follow()),
+            )
+        }
+    }
+
+    pub fn metadata(&self) -> &PluginMetadata {
+        &self.metadata
+    }
+    pub fn factories(&self) -> &[Arc<NativeFactory>] {
+        &self.factories
+    }
+    pub fn bootstrap_factories(&self) -> &[Arc<NativeBootstrapFactory>] {
+        &self.bootstrap_factories
+    }
+
+    /// Atomic with respect to duplicate registration: failures leave registry as-is.
+    pub fn register_factories(&self, registry: &mut FactoryRegistry) -> anyhow::Result<()> {
+        let mut next = registry.clone();
+        for factory in &self.factories {
+            next.register(factory.clone())?;
+        }
+        *registry = next;
+        Ok(())
+    }
+    pub fn transactional_factories(&self) -> Vec<Arc<dyn TransactionalTransformerFactory>> {
+        self.factories
+            .iter()
+            .filter(|factory| factory.metadata().capabilities.transactional)
+            .map(|factory| factory.clone() as Arc<dyn TransactionalTransformerFactory>)
+            .collect()
+    }
+
+    /// Host an explicitly supplied native ABI implementation (also useful to test
+    /// foreign producers). Production discovery should use load/try_load.
+    ///
+    /// # Safety
+    /// Both functions and every returned pointer must obey ABI 1.0. Their code and
+    /// metadata must be pinned for process lifetime. This is not a plugin sandbox.
+    pub unsafe fn from_entry_points(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe { Self::from_entry_points_with_services(metadata, entry, None) }
+    }
+
+    /// Host an optional source data-schema reader without changing the base ABI.
+    ///
+    /// # Safety
+    /// All entry points must belong to the same process-pinned binary and obey
+    /// their versioned ownership and callback contracts.
+    pub unsafe fn from_entry_points_with_source_schema(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        source_schema: Option<abi::source_schema::SourceSchemaFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports(
+                || metadata(),
+                |out| take_status(entry(out)),
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || source_schema.map(|entry| entry()),
+                || None,
+                || None,
+            )
+        }
+    }
+
+    /// Host an optional versioned service extension without changing ABI 1.0.
+    ///
+    /// # Safety
+    /// The base and optional entry points must belong to the same pinned binary,
+    /// and all returned handles must obey their respective callback contracts.
+    pub unsafe fn from_entry_points_with_activation_credentials(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        activation_credentials: Option<abi::activation_credentials::Entry>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports(
+                || metadata(),
+                |out| take_status(entry(out)),
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || activation_credentials.map(|entry| entry()),
+            )
+        }
+    }
+
+    /// Host an optional versioned service extension without changing ABI 1.0.
+    ///
+    /// # Safety
+    /// The base and optional entry points must belong to the same pinned binary,
+    /// and all returned handles must obey their respective callback contracts.
+    pub unsafe fn from_entry_points_with_services(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe { Self::from_entry_points_with_recovery(metadata, entry, services, None) }
+    }
+
+    /// Host independently negotiated admission and read-only recovery services.
+    ///
+    /// # Safety
+    /// Every entry point must belong to the same process-pinned binary and obey
+    /// its versioned ownership and callback contract.
+    pub unsafe fn from_entry_points_with_recovery(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+        recovery: Option<abi::recovery::RecoveryFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe { Self::from_entry_points_with_bootstrap(metadata, entry, services, recovery, None) }
+    }
+
+    /// Host an independently negotiated, required consumer-progress read service.
+    ///
+    /// # Safety
+    /// All entry points must belong to the same process-pinned binary and obey
+    /// their versioned ownership and callback contracts.
+    pub unsafe fn from_entry_points_with_consumer_progress(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+        recovery: Option<abi::recovery::RecoveryFn>,
+        consumer_progress: Option<abi::consumer_progress::ConsumerProgressFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports(
+                || metadata(),
+                |out| take_status(entry(out)),
+                || services.map(|entry| entry()),
+                || recovery.map(|entry| entry()),
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || consumer_progress.map(|entry| entry()),
+                || None,
+                || None,
+                || None,
+            )
+        }
+    }
+
+    /// Host independently negotiated query-owned bootstrap providers.
+    ///
+    /// # Safety
+    /// All entry points must belong to the same process-pinned binary and obey
+    /// their versioned ownership/callback contracts.
+    pub unsafe fn from_entry_points_with_bootstrap(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+        recovery: Option<abi::recovery::RecoveryFn>,
+        bootstrap: Option<abi::bootstrap::BootstrapFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_entry_points_with_consumer(
+                metadata, entry, services, recovery, bootstrap, None,
+            )
+        }
+    }
+
+    /// Host native consumer completion while retaining progress/commit ownership.
+    ///
+    /// # Safety
+    /// All entry points must belong to the same process-pinned binary and obey
+    /// their versioned ownership and callback contracts.
+    pub unsafe fn from_entry_points_with_consumer(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+        recovery: Option<abi::recovery::RecoveryFn>,
+        bootstrap: Option<abi::bootstrap::BootstrapFn>,
+        consumer: Option<abi::consumer::ConsumerFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_entry_points_with_configuration(
+                metadata, entry, services, recovery, bootstrap, consumer, None,
+            )
+        }
+    }
+
+    /// Host optional configuration descriptions without changing the base ABI.
+    ///
+    /// # Safety
+    /// All entry points must belong to the same pinned binary and their metadata
+    /// must remain immutable and valid for the lifetime of that binary.
+    pub unsafe fn from_entry_points_with_configuration(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+        recovery: Option<abi::recovery::RecoveryFn>,
+        bootstrap: Option<abi::bootstrap::BootstrapFn>,
+        consumer: Option<abi::consumer::ConsumerFn>,
+        configuration: Option<abi::configuration::ConfigurationFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports(
+                || metadata(),
+                |out| take_status(entry(out)),
+                || services.map(|entry| entry()),
+                || recovery.map(|entry| entry()),
+                || bootstrap.map(|entry| entry()),
+                || consumer.map(|entry| entry()),
+                || configuration.map(|entry| entry()),
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+            )
+        }
+    }
+
+    /// Host the independently negotiated, internal source/bootstrap pairing.
+    ///
+    /// # Safety
+    /// Every entry point and returned handle must obey its ABI contract and
+    /// originate from the same process-pinned library.
+    pub unsafe fn from_entry_points_with_bootstrap_coordination(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        recovery: Option<abi::recovery::RecoveryFn>,
+        consumer_progress: Option<abi::consumer_progress::ConsumerProgressFn>,
+        bootstrap: Option<abi::bootstrap::BootstrapFn>,
+        coordination: Option<abi::bootstrap_coordination::BootstrapCoordinationFn>,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports(
+                || metadata(),
+                |out| take_status(entry(out)),
+                || None,
+                || recovery.map(|entry| entry()),
+                || bootstrap.map(|entry| entry()),
+                || None,
+                || None,
+                || None,
+                || None,
+                || consumer_progress.map(|entry| entry()),
+                || None,
+                || coordination.map(|entry| entry()),
+                || None,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn from_exports(
+        metadata: impl FnOnce() -> *const abi::Metadata,
+        entry: impl FnOnce(
+            *mut abi::PluginHandle,
+        ) -> Result<(), drasi_computation_plugin_sdk::transport::Failure>,
+        services: impl FnOnce() -> Option<*const abi::services::PluginServicesV1>,
+        recovery: impl FnOnce() -> Option<*const abi::recovery::PluginRecoveryV1>,
+        bootstrap: impl FnOnce() -> Option<*const abi::bootstrap::PluginBootstrapV1>,
+        consumer: impl FnOnce() -> Option<*const abi::consumer::PluginConsumerV1>,
+        configuration: impl FnOnce() -> Option<*const abi::configuration::ConfigurationMetadataV1>,
+        batching: impl FnOnce() -> Option<*const abi::batching::PluginBatchingV1>,
+        output_snapshots: impl FnOnce() -> Option<*const abi::output_snapshots::PluginOutputSnapshotsV1>,
+        consumer_progress: impl FnOnce() -> Option<
+            *const abi::consumer_progress::PluginConsumerProgressV1,
+        >,
+        source_schema: impl FnOnce() -> Option<*const abi::source_schema::PluginSourceSchemaV1>,
+        coordination: impl FnOnce() -> Option<
+            *const abi::bootstrap_coordination::PluginBootstrapCoordinationV1,
+        >,
+        activation_credentials: impl FnOnce() -> Option<
+            *const abi::activation_credentials::PluginActivationCredentialsV1,
+        >,
+    ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_exports_with_output_reads(
+                metadata,
+                entry,
+                services,
+                recovery,
+                bootstrap,
+                consumer,
+                configuration,
+                batching,
+                output_snapshots,
+                consumer_progress,
+                source_schema,
+                coordination,
+                activation_credentials,
+                || None,
+                || None,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn from_exports_with_output_reads(
+        metadata: impl FnOnce() -> *const abi::Metadata,
+        entry: impl FnOnce(
+            *mut abi::PluginHandle,
+        ) -> Result<(), drasi_computation_plugin_sdk::transport::Failure>,
+        services: impl FnOnce() -> Option<*const abi::services::PluginServicesV1>,
+        recovery: impl FnOnce() -> Option<*const abi::recovery::PluginRecoveryV1>,
+        bootstrap: impl FnOnce() -> Option<*const abi::bootstrap::PluginBootstrapV1>,
+        consumer: impl FnOnce() -> Option<*const abi::consumer::PluginConsumerV1>,
+        configuration: impl FnOnce() -> Option<*const abi::configuration::ConfigurationMetadataV1>,
+        batching: impl FnOnce() -> Option<*const abi::batching::PluginBatchingV1>,
+        output_snapshots: impl FnOnce() -> Option<*const abi::output_snapshots::PluginOutputSnapshotsV1>,
+        consumer_progress: impl FnOnce() -> Option<
+            *const abi::consumer_progress::PluginConsumerProgressV1,
+        >,
+        source_schema: impl FnOnce() -> Option<*const abi::source_schema::PluginSourceSchemaV1>,
+        coordination: impl FnOnce() -> Option<
+            *const abi::bootstrap_coordination::PluginBootstrapCoordinationV1,
+        >,
+        activation_credentials: impl FnOnce() -> Option<
+            *const abi::activation_credentials::PluginActivationCredentialsV1,
+        >,
+        output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV1>,
+        output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV1>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let manifest = unsafe { read_metadata(metadata())? };
+        let output_reads = unsafe { read_output_reads(output_reads(), &manifest)? };
+        let output_follow = unsafe { read_output_follow(output_follow(), &manifest)? };
+        let mut configurations = unsafe { read_configuration(configuration(), &manifest)? };
+        let batching = unsafe { read_batching(batching())? };
+        let output_snapshots = unsafe { read_output_snapshots(output_snapshots())? };
+        let consumer_progress = unsafe { read_consumer_progress(consumer_progress())? };
+        let source_schema = unsafe { read_source_schema(source_schema())? };
+        let coordination = unsafe { read_bootstrap_coordination(coordination())? };
+        let activation_credentials =
+            unsafe { read_activation_credentials(activation_credentials())? };
+        let consumer = unsafe { read_consumer(consumer())? };
+        let bootstrap = unsafe { read_bootstrap(bootstrap())? };
+        let recovery = unsafe { read_recovery(recovery())? };
+        let services = unsafe { read_services(services())? };
+        let mut handle = abi::PluginHandle::null();
+        entry(&mut handle)?;
+        let plugin = Arc::new(unsafe { PluginOwner::new(handle)? });
+        let schemas: Vec<_> = manifest
+            .schemas
+            .iter()
+            .map(|descriptor| {
+                Arc::new(Schema::new(
+                    descriptor.clone(),
+                    Arc::new(RemoteValidator {
+                        plugin: plugin.clone(),
+                    }),
+                ))
+            })
+            .collect();
+        let codec = Arc::new(wire::codec(&schemas)?);
+        let mut factories = Vec::new();
+        for (index, metadata) in manifest.factories.iter().enumerate() {
+            let mut handle = abi::FactoryHandle::null();
+            let index = u32::try_from(index).context("too many native factories")?;
+            let source_coordination = if let Some(extension) = coordination {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .source_factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                wire::decode::<bool>(&response)?.then_some(extension)
+            } else {
+                None
+            };
+            let sink_batching = if let Some(extension) = batching {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                wire::decode::<bool>(&response)?.then_some(extension)
+            } else {
+                None
+            };
+            let snapshot_reads = if let Some(extension) = output_snapshots {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                wire::decode::<bool>(&response)?.then_some(extension)
+            } else {
+                None
+            };
+            let consumer_binding = if let Some(extension) = consumer {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                let declared: drasi_computation_plugin_sdk::consumer::FactoryConsumer =
+                    wire::decode(&response)?;
+                anyhow::ensure!(
+                    declared.version == abi::consumer::VERSION,
+                    "unsupported native consumer version"
+                );
+                declared.mode.map(|mode| (mode, extension))
+            } else {
+                None
+            };
+            let source_progress = if let Some(recovery) = recovery {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(recovery
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                let capability: drasi_computation_plugin_sdk::progress::FactoryRecovery =
+                    drasi_computation_plugin_sdk::progress::decode(&response)?;
+                anyhow::ensure!(
+                    capability.version == abi::recovery::VERSION,
+                    "unsupported native factory recovery version"
+                );
+                if capability.source_progress {
+                    anyhow::ensure!(
+                        metadata.role == drasi_lib::computation::v1::ComponentRole::Source,
+                        "native source progress requires a source"
+                    );
+                    Some(recovery)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let admission = if let Some(services) = services {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(services
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                let capabilities: drasi_computation_plugin_sdk::admission::FactoryServices =
+                    wire::decode(&response)?;
+                anyhow::ensure!(
+                    capabilities.version == abi::services::VERSION,
+                    "unsupported native factory service version"
+                );
+                if capabilities.source_admission {
+                    anyhow::ensure!(
+                        metadata.role == drasi_lib::computation::v1::ComponentRole::Source
+                            && metadata.ports.len() == 1,
+                        "native admission requires a single-output source"
+                    );
+                    Some(services)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let consumer_progress = if let Some(extension) = consumer_progress {
+                let response = unsafe {
+                    drasi_computation_plugin_sdk::transport::take_reply(extension
+                        .factory
+                        .expect("validated")(
+                        plugin.raw.state, index
+                    ))?
+                };
+                let declared: drasi_computation_plugin_sdk::consumer_progress::FactoryProgress =
+                    drasi_computation_plugin_sdk::consumer_progress::decode(&response)?;
+                anyhow::ensure!(
+                    declared.version == abi::consumer_progress::VERSION,
+                    "unsupported native factory consumer progress version"
+                );
+                declared.consumer_progress.then_some(extension)
+            } else {
+                None
+            };
+            unsafe {
+                take_status(plugin.table().factory.expect("validated")(
+                    plugin.raw.state,
+                    index,
+                    &mut handle,
+                ))?
+            };
+            factories.push(Arc::new(unsafe {
+                NativeFactory::new(
+                    metadata.clone(),
+                    handle,
+                    plugin.clone(),
+                    codec.clone(),
+                    schemas.clone(),
+                    admission,
+                    source_progress,
+                )?
+                .with_activation_credentials(activation_credentials)?
+                .with_consumer(consumer_binding)?
+                .with_consumer_progress(consumer_progress)?
+                .with_bootstrap_coordination(source_coordination)?
+                .with_batching(sink_batching)?
+                .with_output_snapshots(snapshot_reads)?
+                .with_source_schema(source_schema)
+                .with_output_reads(output_reads)
+                .with_output_follow(output_follow)
+                .with_configuration_details(configurations.remove(&metadata.implementation))
+            }));
+        }
+        let mut bootstrap_factories = Vec::new();
+        if let Some(extension) = bootstrap {
+            use drasi_computation_plugin_sdk::bootstrap;
+            let bytes = unsafe {
+                drasi_computation_plugin_sdk::transport::take_reply(extension
+                    .factories
+                    .expect("validated")(
+                    plugin.raw.state
+                ))?
+            };
+            let metadata: Vec<bootstrap::BootstrapFactoryMetadata> = bootstrap::decode(&bytes)?;
+            let mut identities = std::collections::BTreeSet::new();
+            for (index, metadata) in metadata.into_iter().enumerate() {
+                metadata.validate(&manifest.plugin)?;
+                anyhow::ensure!(
+                    identities.insert((
+                        metadata.implementation.name.clone(),
+                        metadata.implementation.version.clone()
+                    )),
+                    "duplicate native bootstrap factory"
+                );
+                let index = u32::try_from(index)?;
+                let pairing = if let Some(extension) = coordination {
+                    let response = unsafe {
+                        drasi_computation_plugin_sdk::transport::take_reply(extension
+                            .bootstrap_factory
+                            .expect("validated")(
+                            plugin.raw.state,
+                            index,
+                        ))?
+                    };
+                    wire::decode::<bool>(&response)?.then_some(extension)
+                } else {
+                    None
+                };
+                bootstrap_factories.push(Arc::new(
+                    NativeBootstrapFactory::new(
+                        metadata,
+                        index,
+                        extension,
+                        plugin.clone(),
+                        codec.clone(),
+                    )
+                    .with_coordination(pairing)?,
+                ));
+            }
+        }
+        anyhow::ensure!(
+            !factories.is_empty() || !bootstrap_factories.is_empty(),
+            "native plugin has no component or bootstrap factories"
+        );
+        Ok(Arc::new(Self {
+            metadata: manifest,
+            factories,
+            bootstrap_factories,
+        }))
+    }
+}
+
+/// Load a native library. Accepted and rejected native candidates are pinned once
+/// identified; user code/OS loader initializers are trusted in-process code.
+pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Arc<NativePlugin>> {
+    try_load(path)?.ok_or_else(|| {
+        anyhow::anyhow!("library does not export the native computation plugin family")
+    })
+}
+
+/// None means neither native symbol exists. A partial/malformed native family
+/// returns Err and must never be interpreted as a legacy plugin registration.
+pub fn try_load(path: impl AsRef<Path>) -> anyhow::Result<Option<Arc<NativePlugin>>> {
+    let library =
+        Arc::new(unsafe { Library::new(path.as_ref()) }.with_context(|| {
+            format!("load native plugin candidate {}", path.as_ref().display())
+        })?);
+    try_load_library(library)
+}
+
+pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<Arc<NativePlugin>>> {
+    let activation_credentials = unsafe {
+        library.get::<abi::activation_credentials::Entry>(abi::activation_credentials::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let metadata = unsafe { library.get::<abi::MetadataFn>(abi::METADATA_SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let entry = unsafe { library.get::<abi::EntryFn>(abi::ENTRY_SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let services = unsafe { library.get::<abi::services::ServicesFn>(abi::services::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let recovery = unsafe { library.get::<abi::recovery::RecoveryFn>(abi::recovery::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let bootstrap = unsafe { library.get::<abi::bootstrap::BootstrapFn>(abi::bootstrap::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let consumer = unsafe { library.get::<abi::consumer::ConsumerFn>(abi::consumer::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let configuration =
+        unsafe { library.get::<abi::configuration::ConfigurationFn>(abi::configuration::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let batching = unsafe { library.get::<abi::batching::BatchingFn>(abi::batching::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let output_snapshots = unsafe {
+        library.get::<abi::output_snapshots::OutputSnapshotsFn>(abi::output_snapshots::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let consumer_progress = unsafe {
+        library.get::<abi::consumer_progress::ConsumerProgressFn>(abi::consumer_progress::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let source_schema =
+        unsafe { library.get::<abi::source_schema::SourceSchemaFn>(abi::source_schema::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let coordination = unsafe {
+        library.get::<abi::bootstrap_coordination::BootstrapCoordinationFn>(
+            abi::bootstrap_coordination::SYMBOL,
+        )
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let output_reads =
+        unsafe { library.get::<abi::output_reads::OutputReadsFn>(abi::output_reads::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let output_follow =
+        unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    if metadata.is_none()
+        && entry.is_none()
+        && services.is_none()
+        && recovery.is_none()
+        && bootstrap.is_none()
+        && consumer.is_none()
+        && configuration.is_none()
+        && batching.is_none()
+        && output_snapshots.is_none()
+        && consumer_progress.is_none()
+        && source_schema.is_none()
+        && coordination.is_none()
+        && activation_credentials.is_none()
+        && output_reads.is_none()
+        && output_follow.is_none()
+    {
+        return Ok(None);
+    }
+
+    // Retaining only successful handles is insufficient: metadata/entry code can
+    // have retained callbacks or initialized I/O before reporting an error.
+    std::mem::forget(library);
+    let metadata =
+        metadata.ok_or_else(|| anyhow::anyhow!("native computation metadata symbol is missing"))?;
+    let entry =
+        entry.ok_or_else(|| anyhow::anyhow!("native computation entry symbol is missing"))?;
+    Ok(Some(unsafe {
+        NativePlugin::from_exports_with_output_reads(
+            || metadata(),
+            |out| take_status(entry(out)),
+            || services.map(|entry| entry()),
+            || recovery.map(|entry| entry()),
+            || bootstrap.map(|entry| entry()),
+            || consumer.map(|entry| entry()),
+            || configuration.map(|entry| entry()),
+            || batching.map(|entry| entry()),
+            || output_snapshots.map(|entry| entry()),
+            || consumer_progress.map(|entry| entry()),
+            || source_schema.map(|entry| entry()),
+            || coordination.map(|entry| entry()),
+            || activation_credentials.map(|entry| entry()),
+            || output_reads.map(|entry| entry()),
+            || output_follow.map(|entry| entry()),
+        )?
+    }))
+}
+
+unsafe fn read_metadata(metadata: *const abi::Metadata) -> anyhow::Result<PluginMetadata> {
+    let metadata = unsafe { checked_table(metadata)? };
+    let target = std::str::from_utf8(unsafe { borrowed_bytes(metadata.target, 4096)? })?;
+    anyhow::ensure!(
+        target == TARGET,
+        "native plugin target mismatch: expected {TARGET}, got {target}"
+    );
+    let manifest: PluginMetadata = serde_json::from_slice(unsafe {
+        borrowed_bytes(metadata.manifest, abi::MAX_METADATA_BYTES)?
+    })
+    .context("invalid native computation plugin metadata")?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+unsafe fn read_configuration(
+    entry: Option<*const abi::configuration::ConfigurationMetadataV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<
+    std::collections::BTreeMap<
+        drasi_lib::computation::v1::ImplementationIdentity,
+        drasi_computation_plugin_sdk::ConfigDetails,
+    >,
+> {
+    let Some(entry) = entry else {
+        return Ok(Default::default());
+    };
+    let metadata = unsafe { checked_table(entry)? };
+    anyhow::ensure!(
+        metadata.version == abi::configuration::VERSION && metadata.reserved == 0,
+        "incompatible native configuration-description extension"
+    );
+    let details: drasi_computation_plugin_sdk::configuration::ConfigurationMetadata =
+        serde_json::from_slice(unsafe {
+            borrowed_bytes(metadata.manifest, abi::MAX_METADATA_BYTES)?
+        })
+        .context("invalid native configuration descriptions")?;
+    details.validate(manifest)?;
+    Ok(details
+        .factories
+        .into_iter()
+        .map(|factory| (factory.implementation, factory.details))
+        .collect())
+}
+
+unsafe fn read_bootstrap(
+    entry: Option<*const abi::bootstrap::PluginBootstrapV1>,
+) -> anyhow::Result<Option<abi::bootstrap::PluginBootstrapV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::bootstrap::VERSION
+                    && table.reserved == 0
+                    && table.factories.is_some()
+                    && table.create.is_some(),
+                "incompatible or incomplete native bootstrap extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_batching(
+    entry: Option<*const abi::batching::PluginBatchingV1>,
+) -> anyhow::Result<Option<abi::batching::PluginBatchingV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::batching::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.policy.is_some(),
+                "incompatible or incomplete native batching extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_output_snapshots(
+    entry: Option<*const abi::output_snapshots::PluginOutputSnapshotsV1>,
+) -> anyhow::Result<Option<abi::output_snapshots::PluginOutputSnapshotsV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::output_snapshots::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.create.is_some(),
+                "incompatible or incomplete native output-snapshot extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_consumer_progress(
+    entry: Option<*const abi::consumer_progress::PluginConsumerProgressV1>,
+) -> anyhow::Result<Option<abi::consumer_progress::PluginConsumerProgressV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::consumer_progress::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.create.is_some()
+                    && table.inspect.is_some()
+                    && table.position_policy.is_some(),
+                "incompatible or incomplete native consumer progress extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_source_schema(
+    entry: Option<*const abi::source_schema::PluginSourceSchemaV1>,
+) -> anyhow::Result<Option<abi::source_schema::PluginSourceSchemaV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::source_schema::VERSION
+                    && table.reserved == 0
+                    && table.supported.is_some()
+                    && table.begin.is_some(),
+                "incompatible or incomplete native source-schema extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+/// The extension is required exactly when some factory declares output reads.
+unsafe fn read_output_reads(
+    entry: Option<*const abi::output_reads::PluginOutputReadsV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<Option<abi::output_reads::PluginOutputReadsV1>> {
+    let table = entry
+        .map(|entry| -> anyhow::Result<_> {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::output_reads::VERSION
+                    && table.reserved == 0
+                    && table.open.is_some(),
+                "incompatible or incomplete native output-reads extension"
+            );
+            Ok(table)
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        table.is_some()
+            || !manifest
+                .factories
+                .iter()
+                .any(|factory| factory.capabilities.declares_output_reads()),
+        "native factory declares output reads without the negotiated extension"
+    );
+    Ok(table)
+}
+
+/// The extension is required exactly when some factory declares output follows.
+unsafe fn read_output_follow(
+    entry: Option<*const abi::output_follow::PluginOutputFollowV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<Option<abi::output_follow::PluginOutputFollowV1>> {
+    let table = entry
+        .map(|entry| -> anyhow::Result<_> {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::output_follow::VERSION
+                    && table.reserved == 0
+                    && table.open.is_some(),
+                "incompatible or incomplete native output-follow extension"
+            );
+            Ok(table)
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        table.is_some()
+            || !manifest
+                .factories
+                .iter()
+                .any(|factory| factory.capabilities.declares_output_follows()),
+        "native factory declares output follows without the negotiated extension"
+    );
+    Ok(table)
+}
+
+unsafe fn read_activation_credentials(
+    entry: Option<*const abi::activation_credentials::PluginActivationCredentialsV1>,
+) -> anyhow::Result<Option<abi::activation_credentials::PluginActivationCredentialsV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::activation_credentials::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.context.is_some(),
+                "incompatible or incomplete native activation-credentials extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_bootstrap_coordination(
+    entry: Option<*const abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
+) -> anyhow::Result<Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::bootstrap_coordination::VERSION
+                    && table.reserved == 0
+                    && table.source_factory.is_some()
+                    && table.bootstrap_factory.is_some()
+                    && table.create.is_some()
+                    && table.create_source.is_some()
+                    && table.create_bootstrap.is_some(),
+                "incompatible or incomplete native bootstrap coordination extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_services(
+    entry: Option<*const abi::services::PluginServicesV1>,
+) -> anyhow::Result<Option<abi::services::PluginServicesV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::services::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.create.is_some(),
+                "incompatible or incomplete native service extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_recovery(
+    entry: Option<*const abi::recovery::PluginRecoveryV1>,
+) -> anyhow::Result<Option<abi::recovery::PluginRecoveryV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::recovery::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.create.is_some()
+                    && table.inspect.is_some(),
+                "incompatible or incomplete native recovery extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_consumer(
+    entry: Option<*const abi::consumer::PluginConsumerV1>,
+) -> anyhow::Result<Option<abi::consumer::PluginConsumerV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::consumer::VERSION
+                    && table.reserved == 0
+                    && table.factory.is_some()
+                    && table.create.is_some()
+                    && table.inspect.is_some()
+                    && table.begin.is_some()
+                    && table.end_batch.is_some(),
+                "incompatible or incomplete native consumer extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+/// Inspect without calling the plugin entry or creating factory handles.
+/// Extension factory catalogues are validated when the plugin is loaded.
+pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<PluginMetadata>> {
+    let activation_credentials = unsafe {
+        library.get::<abi::activation_credentials::Entry>(abi::activation_credentials::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let metadata = unsafe { library.get::<abi::MetadataFn>(abi::METADATA_SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let has_entry = unsafe { library.get::<abi::EntryFn>(abi::ENTRY_SYMBOL) }.is_ok();
+    let services = unsafe { library.get::<abi::services::ServicesFn>(abi::services::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let recovery = unsafe { library.get::<abi::recovery::RecoveryFn>(abi::recovery::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let bootstrap = unsafe { library.get::<abi::bootstrap::BootstrapFn>(abi::bootstrap::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let consumer = unsafe { library.get::<abi::consumer::ConsumerFn>(abi::consumer::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let configuration =
+        unsafe { library.get::<abi::configuration::ConfigurationFn>(abi::configuration::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let batching = unsafe { library.get::<abi::batching::BatchingFn>(abi::batching::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let output_snapshots = unsafe {
+        library.get::<abi::output_snapshots::OutputSnapshotsFn>(abi::output_snapshots::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let consumer_progress = unsafe {
+        library.get::<abi::consumer_progress::ConsumerProgressFn>(abi::consumer_progress::SYMBOL)
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let source_schema =
+        unsafe { library.get::<abi::source_schema::SourceSchemaFn>(abi::source_schema::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let coordination = unsafe {
+        library.get::<abi::bootstrap_coordination::BootstrapCoordinationFn>(
+            abi::bootstrap_coordination::SYMBOL,
+        )
+    }
+    .ok()
+    .map(|symbol| *symbol);
+    let output_reads =
+        unsafe { library.get::<abi::output_reads::OutputReadsFn>(abi::output_reads::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    let output_follow =
+        unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
+    if metadata.is_none()
+        && !has_entry
+        && activation_credentials.is_none()
+        && services.is_none()
+        && recovery.is_none()
+        && bootstrap.is_none()
+        && consumer.is_none()
+        && configuration.is_none()
+        && batching.is_none()
+        && output_snapshots.is_none()
+        && consumer_progress.is_none()
+        && source_schema.is_none()
+        && coordination.is_none()
+        && output_reads.is_none()
+        && output_follow.is_none()
+    {
+        return Ok(None);
+    }
+    std::mem::forget(library);
+    anyhow::ensure!(has_entry, "native computation entry symbol is missing");
+    let metadata =
+        metadata.ok_or_else(|| anyhow::anyhow!("native computation metadata symbol is missing"))?;
+    let manifest = unsafe { read_metadata(metadata())? };
+    unsafe { read_services(services.map(|entry| entry()))? };
+    unsafe { read_activation_credentials(activation_credentials.map(|entry| entry()))? };
+    unsafe { read_recovery(recovery.map(|entry| entry()))? };
+    unsafe { read_consumer(consumer.map(|entry| entry()))? };
+    unsafe { read_configuration(configuration.map(|entry| entry()), &manifest)? };
+    unsafe { read_batching(batching.map(|entry| entry()))? };
+    unsafe { read_output_snapshots(output_snapshots.map(|entry| entry()))? };
+    unsafe { read_consumer_progress(consumer_progress.map(|entry| entry()))? };
+    unsafe { read_source_schema(source_schema.map(|entry| entry()))? };
+    unsafe { read_bootstrap_coordination(coordination.map(|entry| entry()))? };
+    unsafe { read_output_reads(output_reads.map(|entry| entry()), &manifest)? };
+    unsafe { read_output_follow(output_follow.map(|entry| entry()), &manifest)? };
+    let bootstrap = unsafe { read_bootstrap(bootstrap.map(|entry| entry()))? };
+    anyhow::ensure!(
+        !manifest.factories.is_empty() || bootstrap.is_some(),
+        "native plugin has no component factories or bootstrap extension"
+    );
+    Ok(Some(manifest))
+}
+
+pub(super) struct PluginOwner {
+    raw: abi::PluginHandle,
+}
+// ABI factories/validators are thread-safe; handle release runs only after the
+// last local owner. The producer alone dereferences its opaque state.
+unsafe impl Send for PluginOwner {}
+unsafe impl Sync for PluginOwner {}
+impl PluginOwner {
+    pub(super) fn state(&self) -> *mut std::ffi::c_void {
+        self.raw.state
+    }
+    unsafe fn new(raw: abi::PluginHandle) -> anyhow::Result<Self> {
+        let table = unsafe { checked_table(raw.vtable)? };
+        anyhow::ensure!(
+            !raw.state.is_null()
+                && table.release.is_some()
+                && table.factory.is_some()
+                && table.validate_record.is_some(),
+            "incomplete native plugin table"
+        );
+        Ok(Self { raw })
+    }
+    fn table(&self) -> &abi::PluginVTable {
+        unsafe { &*self.raw.vtable }
+    }
+}
+impl Drop for PluginOwner {
+    fn drop(&mut self) {
+        unsafe { self.table().release.expect("validated")(self.raw.state) };
+    }
+}
+
+struct RemoteValidator {
+    plugin: Arc<PluginOwner>,
+}
+impl RemoteValidator {
+    fn validate(&self, request: wire::RecordValidation<'_>) -> Result<(), RecordValidationError> {
+        let execute = || -> anyhow::Result<()> {
+            let bytes = wire::encode(&request)?;
+            unsafe {
+                take_status(self.plugin.table().validate_record.expect("validated")(
+                    self.plugin.raw.state,
+                    abi::BorrowedBytes::new(&bytes),
+                ))?
+            };
+            Ok(())
+        };
+        execute().map_err(|error| RecordValidationError::new("native-schema", error.to_string()))
+    }
+}
+impl RecordValidator for RemoteValidator {
+    fn validate_identity(
+        &self,
+        schema: &SchemaDescriptor,
+        identity: &RecordId,
+    ) -> Result<(), RecordValidationError> {
+        self.validate(wire::RecordValidation {
+            schema: schema.clone(),
+            namespace: std::borrow::Cow::Borrowed(identity.namespace()),
+            identity: std::borrow::Cow::Borrowed(identity.value()),
+            image: None,
+            payload: std::borrow::Cow::Borrowed(&[]),
+        })
+    }
+
+    fn validate(
+        &self,
+        schema: &SchemaDescriptor,
+        identity: &RecordId,
+        image: RecordImage,
+        payload: &[u8],
+    ) -> Result<(), RecordValidationError> {
+        self.validate(wire::RecordValidation {
+            schema: schema.clone(),
+            namespace: std::borrow::Cow::Borrowed(identity.namespace()),
+            identity: std::borrow::Cow::Borrowed(identity.value()),
+            image: Some(match image {
+                RecordImage::Full => 0,
+                RecordImage::Patch => 1,
+                RecordImage::Partial => 2,
+            }),
+            payload: std::borrow::Cow::Borrowed(payload),
+        })
+    }
+}
+
+#[cfg(test)]
+mod activation_credentials_tests {
+    use super::super::activation_credentials_tests::fixture;
+    use super::*;
+    use drasi_computation_plugin_sdk as sdk;
+
+    #[test]
+    fn activation_credentials_extension_rejects_malformed_tables_before_entry() -> anyhow::Result<()>
+    {
+        let export = sdk::ExportedPlugin::new(fixture::definition()?)?;
+        let table = unsafe { *export.activation_credentials() };
+        assert!(unsafe { read_activation_credentials(None)? }.is_none());
+        assert!(unsafe { read_activation_credentials(Some(std::ptr::null())) }.is_err());
+        let prefix = abi::Header::new::<abi::Header>();
+        assert!(unsafe {
+            read_activation_credentials(Some((&prefix as *const abi::Header).cast()))
+        }
+        .is_err());
+        assert!(unsafe {
+            read_activation_credentials(Some(
+                (&table as *const abi::activation_credentials::PluginActivationCredentialsV1)
+                    .cast::<u8>()
+                    .wrapping_add(1)
+                    .cast(),
+            ))
+        }
+        .is_err());
+        for variant in 0..5 {
+            let mut invalid = table;
+            match variant {
+                0 => invalid.version += 1,
+                1 => invalid.reserved = 1,
+                2 => invalid.factory = None,
+                3 => invalid.context = None,
+                _ => invalid.header.size -= 1,
+            }
+            let entered = std::cell::Cell::new(false);
+            let result = unsafe {
+                NativePlugin::from_exports(
+                    || export.metadata(),
+                    |out| {
+                        entered.set(true);
+                        export.entry(out)
+                    },
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || Some(&invalid),
+                )
+            };
+            assert!(result.is_err());
+            assert!(!entered.get(), "malformed extension entered native code");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn activation_credentials_missing_or_false_extension_does_not_authorize_binding(
+    ) -> anyhow::Result<()> {
+        unsafe extern "C" fn unsupported(_: *mut std::ffi::c_void) -> abi::Reply {
+            sdk::transport::reply_boundary(|| sdk::wire::encode(&false).map_err(Into::into))
+        }
+        unsafe extern "C" fn malformed(_: *mut std::ffi::c_void) -> abi::Reply {
+            sdk::transport::reply_boundary(|| sdk::wire::encode(&"not-a-bool").map_err(Into::into))
+        }
+        let export = sdk::ExportedPlugin::new(fixture::definition()?)?;
+        for mode in 0..3 {
+            let mut table = unsafe { *export.activation_credentials() };
+            table.factory = Some(if mode == 2 { malformed } else { unsupported });
+            let plugin = unsafe {
+                NativePlugin::from_exports(
+                    || export.metadata(),
+                    |out| export.entry(out),
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || (mode != 0).then_some(&table),
+                )
+            };
+            if mode == 2 {
+                assert!(plugin.is_err());
+                continue;
+            }
+            let plugin = plugin?;
+            let factory = &plugin.factories()[0];
+            assert!(!factory.supports_activation_credentials());
+            assert!(
+                !drasi_lib::computation::v1::ComponentFactory::descriptor(factory.as_ref())
+                    .dependencies
+                    .contains_key("identity")
+            );
+            let identity = Arc::new(super::super::NativeIdentityResource::new(Arc::new(
+                drasi_lib::identity::PasswordIdentityProvider::new("user", "password"),
+            )));
+            assert!(factory
+                .create_component_with_identity(
+                    drasi_lib::computation::v1::ComponentId::try_new("test")?,
+                    fixture::configuration(),
+                    identity,
+                )
+                .is_err());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_coordination_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> anyhow::Result<Arc<Library>> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| workspace.join("target"));
+        let target = if target.is_absolute() {
+            target
+        } else {
+            workspace.join(target)
+        };
+        let path = target.join("debug/examples").join(format!(
+            "{}{name}{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX,
+        ));
+        anyhow::ensure!(
+            path.is_file(),
+            "build drasi-host-sdk --example {name} first"
+        );
+        Ok(Arc::new(unsafe { Library::new(path)? }))
+    }
+
+    #[test]
+    fn bootstrap_coordination_real_discovery_rejects_malformed_without_entry() -> anyhow::Result<()>
+    {
+        let library = fixture("native_bootstrap_coordination_metadata")?;
+        let entered =
+            unsafe { library.get::<unsafe extern "C" fn() -> u8>(b"drasi_fixture_entered\0")? };
+        assert_eq!(unsafe { entered() }, 0);
+        let error = try_read_metadata(library.clone()).expect_err("reject malformed metadata");
+        assert!(error
+            .to_string()
+            .contains("bootstrap coordination extension"));
+        assert!(try_load_library(library.clone())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("bootstrap coordination extension"));
+        assert_eq!(unsafe { entered() }, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_coordination_partial_family_never_falls_back() -> anyhow::Result<()> {
+        let library = fixture("native_bootstrap_coordination_partial")?;
+        assert!(try_read_metadata(library.clone()).is_err());
+        assert!(try_load_library(library).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_coordination_foreign_tables_validate_before_entry() -> anyhow::Result<()> {
+        let export = drasi_computation_plugin_sdk::ExportedPlugin::new(
+            drasi_computation_plugin_sdk::PluginDefinition::new(
+                "fixture/coordination-shape",
+                "1",
+                super::super::tests::consumer_progress_fixture::factories(),
+                vec![drasi_lib::computation::v1::GraphChangeCodec::schema()],
+            )?,
+        )?;
+        let table = unsafe { *export.bootstrap_coordination() };
+        assert!(unsafe { read_bootstrap_coordination(None)? }.is_none());
+        assert!(unsafe { read_bootstrap_coordination(Some(std::ptr::null())) }.is_err());
+        assert!(unsafe {
+            read_bootstrap_coordination(Some(
+                (&table as *const abi::bootstrap_coordination::PluginBootstrapCoordinationV1)
+                    .cast::<u8>()
+                    .wrapping_add(1)
+                    .cast(),
+            ))
+        }
+        .is_err());
+        let prefix = abi::Header::new::<abi::Header>();
+        assert!(unsafe {
+            read_bootstrap_coordination(Some((&prefix as *const abi::Header).cast()))
+        }
+        .is_err());
+        assert!(unsafe { read_bootstrap_coordination(Some(&table))? }.is_some());
+        for field in 0..11 {
+            let mut invalid = table;
+            match field {
+                0 => invalid.header.magic ^= 1,
+                1 => invalid.header.major += 1,
+                2 => invalid.header.minor += 1,
+                3 => invalid.header.size += 1,
+                4 => invalid.version += 1,
+                5 => invalid.reserved = 1,
+                6 => invalid.source_factory = None,
+                7 => invalid.bootstrap_factory = None,
+                8 => invalid.create = None,
+                9 => invalid.create_source = None,
+                _ => invalid.create_bootstrap = None,
+            }
+            // Metadata-only and actual load deliberately share this validator.
+            assert!(unsafe { read_bootstrap_coordination(Some(&invalid)) }.is_err());
+            let entered = std::cell::Cell::new(false);
+            let result = unsafe {
+                NativePlugin::from_exports(
+                    || export.metadata(),
+                    |out| {
+                        entered.set(true);
+                        export.entry(out)
+                    },
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || None,
+                    || Some(&invalid),
+                    || None,
+                )
+            };
+            assert!(result.is_err());
+            assert!(
+                !entered.get(),
+                "invalid coordination extension entered the plugin"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_coordination_rejects_nonboolean_factory_capabilities() -> anyhow::Result<()> {
+        unsafe extern "C" fn invalid(_: *mut std::ffi::c_void, _: u32) -> abi::Reply {
+            drasi_computation_plugin_sdk::transport::reply_boundary(|| {
+                wire::encode(&"not a capability").map_err(Into::into)
+            })
+        }
+        let export = drasi_computation_plugin_sdk::ExportedPlugin::new(
+            drasi_computation_plugin_sdk::PluginDefinition::new(
+                "fixture/coordination-capabilities",
+                "1",
+                super::super::tests::consumer_progress_fixture::factories(),
+                vec![drasi_lib::computation::v1::GraphChangeCodec::schema()],
+            )?,
+        )?;
+        let mut table = unsafe { *export.bootstrap_coordination() };
+        table.source_factory = Some(invalid);
+        let result = unsafe {
+            NativePlugin::from_exports(
+                || export.metadata(),
+                |out| export.entry(out),
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || None,
+                || Some(&table),
+                || None,
+            )
+        };
+        assert!(
+            result.is_err(),
+            "a malformed capability cannot silently opt out"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod consumer_progress_tests {
+    use super::super::tests::consumer_progress_fixture;
+    use super::*;
+
+    #[test]
+    fn consumer_progress_extension_shape_validates_every_required_field() -> anyhow::Result<()> {
+        let export = drasi_computation_plugin_sdk::ExportedPlugin::new(
+            drasi_computation_plugin_sdk::PluginDefinition::new(
+                "fixture/consumer-progress-shape",
+                "1",
+                consumer_progress_fixture::factories(),
+                vec![drasi_lib::computation::v1::GraphChangeCodec::schema()],
+            )?,
+        )?;
+        let table = unsafe { *export.consumer_progress() };
+        assert!(unsafe { read_consumer_progress(None)? }.is_none());
+        assert!(unsafe { read_consumer_progress(Some(std::ptr::null())) }.is_err());
+        assert!(unsafe { read_consumer_progress(Some(&table))? }.is_some());
+        for field in 0..7 {
+            let mut invalid = table;
+            match field {
+                0 => invalid.header.size += 1,
+                1 => invalid.version += 1,
+                2 => invalid.reserved = 1,
+                3 => invalid.factory = None,
+                4 => invalid.create = None,
+                5 => invalid.inspect = None,
+                _ => invalid.position_policy = None,
+            }
+            assert!(unsafe { read_consumer_progress(Some(&invalid)) }.is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consumer_progress_metadata_only_rejects_a_real_malformed_library_without_entry(
+    ) -> anyhow::Result<()> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| workspace.join("target"));
+        let target = if target.is_absolute() {
+            target
+        } else {
+            workspace.join(target)
+        };
+        let path = target.join("debug/examples").join(format!(
+            "{}native_consumer_progress_metadata{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX,
+        ));
+        anyhow::ensure!(
+            path.is_file(),
+            "build drasi-host-sdk --example native_consumer_progress_metadata first"
+        );
+        let library = Arc::new(unsafe { Library::new(path)? });
+        let entered =
+            unsafe { library.get::<unsafe extern "C" fn() -> u8>(b"drasi_fixture_entered\0")? };
+        assert_eq!(unsafe { entered() }, 0);
+        let error = try_read_metadata(library.clone()).expect_err("metadata-only scan must reject");
+        assert!(error.to_string().contains("consumer progress extension"));
+        assert_eq!(unsafe { entered() }, 0);
+        assert!(try_load_library(library.clone()).is_err());
+        assert_eq!(unsafe { entered() }, 0);
+        Ok(())
+    }
+}

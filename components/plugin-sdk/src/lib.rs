@@ -220,6 +220,8 @@
 //! tracks config versions and can reject incompatible plugins. See the [`descriptor`]
 //! module docs for versioning rules.
 
+#[cfg(feature = "computation")]
+pub mod computation;
 pub mod config_value;
 pub mod descriptor;
 pub mod ffi;
@@ -239,7 +241,7 @@ pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
 
-/// Marker string embedded in every plugin binary to show that the Rustls `ring`
+/// Marker string embedded in plugins built with this SDK to show that the Rustls `ring`
 /// provider is linked in. `xtask build-plugins` searches the built cdylib for
 /// this exact NUL-terminated string and rejects the plugin if it is missing.
 /// `#[used]` keeps it in the binary; it is not a public FFI symbol.

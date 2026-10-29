@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
             RETURN c.name AS coin, c.max_leverage AS max_leverage, m.price AS price
             "#,
         )
-        .from_source("hl-source")
+        .from_input("hl-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
                    t.price AS price, t.size AS size
             "#,
         )
-        .from_source("hl-source")
+        .from_input("hl-source")
         .auto_start(true)
         .build();
 

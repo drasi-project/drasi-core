@@ -16,6 +16,7 @@
 pub(crate) mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::test_helpers::managers::ReactionManager;
     use crate::test_helpers::wait_for_component_status;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -141,43 +142,19 @@ pub(crate) mod manager_tests {
 
     async fn create_test_manager() -> (
         Arc<ReactionManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
-        // Use the global shared log registry for test isolation with tracing
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        // Spawn a mini graph update loop for tests
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let manager = Arc::new(ReactionManager::new(
-            "test-instance",
-            log_registry,
-            graph.clone(),
-            update_tx,
-        ));
-        // Inject mock QueryProvider so add_reaction() can construct ReactionRuntimeContext
-        manager
-            .inject_query_provider(Arc::new(MockQueryProvider))
-            .await;
-        (manager, graph)
+        let core = crate::test_helpers::managers::empty_core().await;
+        (
+            Arc::new(ReactionManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
     async fn create_test_manager_with_graph() -> (
         Arc<ReactionManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraphView,
     ) {
         create_test_manager().await
     }
@@ -186,38 +163,20 @@ pub(crate) mod manager_tests {
     /// Registers placeholder query nodes for any referenced queries not already in the graph.
     async fn add_reaction(
         manager: &ReactionManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         reaction: impl crate::reactions::Reaction + 'static,
     ) -> anyhow::Result<()> {
-        let reaction_id = reaction.id().to_string();
-        let reaction_type = reaction.type_name().to_string();
-        let query_ids = reaction.query_ids();
-        {
-            let mut g = graph.write().await;
-            // Ensure referenced queries exist as placeholder nodes
-            for qid in &query_ids {
-                if !g.contains(qid) {
-                    g.register_query(qid, HashMap::new(), &[])?;
-                }
-            }
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), reaction_type);
-            g.register_reaction(&reaction_id, metadata, &query_ids)?;
-        }
-        manager.provision_reaction(reaction).await
+        manager.add(reaction).await
     }
 
     /// Helper: teardown a reaction in the manager, then deregister from the graph.
     async fn delete_reaction(
         manager: &ReactionManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraphView,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
-        manager.teardown_reaction(id.to_string(), cleanup).await?;
-        let mut g = graph.write().await;
-        g.deregister(id)?;
-        Ok(())
+        manager.delete(id, cleanup).await
     }
 
     #[tokio::test]
@@ -231,7 +190,7 @@ pub(crate) mod manager_tests {
         assert!(result.is_ok());
 
         // Verify reaction was added
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
         assert_eq!(reactions[0].0, "test-reaction");
     }
@@ -249,7 +208,27 @@ pub(crate) mod manager_tests {
         // Try to add same reaction again
         let result = add_reaction(&manager, &graph, reaction2).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists"));
+        let error = result.unwrap_err();
+        {
+            use crate::computation::v1::GraphError;
+
+            let GraphError::AdditionRejected { cause, addition } = error
+                .downcast_ref::<GraphError>()
+                .expect("native graph error")
+            else {
+                panic!("expected a rejected addition: {error:?}");
+            };
+            assert!(
+                matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component test-reaction"),
+                "unexpected rejection cause: {cause:?}"
+            );
+            let rejected = addition.take().await.expect("retained rejected reaction");
+            assert_eq!(
+                rejected.definition.descriptor.id().as_str(),
+                "test-reaction"
+            );
+        }
     }
 
     #[tokio::test]
@@ -264,7 +243,7 @@ pub(crate) mod manager_tests {
         assert!(result.is_ok());
 
         // Verify reaction was removed
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 0);
     }
 
@@ -305,7 +284,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction1).await.unwrap();
         add_reaction(&manager, &graph, reaction2).await.unwrap();
 
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 2);
 
         // Both should be in Added state initially
@@ -373,7 +352,7 @@ pub(crate) mod manager_tests {
         assert_eq!(failure_count, 9, "All other add_reaction calls should fail");
 
         // Verify only one reaction exists
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
         assert_eq!(reactions[0].0, "same-reaction");
     }
@@ -404,7 +383,7 @@ pub(crate) mod manager_tests {
         }
 
         // Verify all 10 reactions exist
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 10);
     }
 
@@ -428,7 +407,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction2).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status changes
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Start all reactions
         manager.start_all().await.unwrap();
@@ -477,7 +456,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status changes
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Start all should start this reaction
         manager.start_all().await.unwrap();
@@ -527,7 +506,7 @@ pub(crate) mod manager_tests {
         );
 
         // Subscribe BEFORE the operation that triggers status change
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Manually start the reaction
         manager
@@ -567,16 +546,10 @@ pub(crate) mod manager_tests {
         let reaction = create_test_mock_reaction("cleanup-events-reaction".to_string(), vec![]);
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
-        // Record an event manually to simulate lifecycle
         manager
-            .record_event(ComponentEvent {
-                component_id: "cleanup-events-reaction".to_string(),
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some("Test event".to_string()),
-            })
-            .await;
+            .start_reaction("cleanup-events-reaction".into())
+            .await
+            .unwrap();
 
         // Verify events exist
         let events = manager.get_reaction_events("cleanup-events-reaction").await;
@@ -603,7 +576,7 @@ pub(crate) mod manager_tests {
 
         // Subscribe to create the channel
         let result = manager.subscribe_logs("cleanup-logs-reaction").await;
-        assert!(result.is_some(), "Expected to subscribe to reaction logs");
+        assert!(result.is_ok(), "Expected to subscribe to reaction logs");
 
         // Delete the reaction
         delete_reaction(&manager, &graph, "cleanup-logs-reaction", false)
@@ -612,7 +585,10 @@ pub(crate) mod manager_tests {
 
         // Verify logs are cleaned up (subscribe should fail for non-existent reaction)
         let result = manager.subscribe_logs("cleanup-logs-reaction").await;
-        assert!(result.is_none(), "Expected None for deleted reaction logs");
+        assert!(
+            result.is_err(),
+            "Expected an error for deleted reaction logs"
+        );
     }
 
     // ========================================================================
@@ -772,7 +748,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status change
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         manager
             .start_reaction("reconfig-running-reaction".to_string())
@@ -818,7 +794,7 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager_with_graph().await;
 
         // Subscribe to graph events BEFORE adding reaction
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
         add_reaction(&manager, &graph, reaction).await.unwrap();
@@ -993,7 +969,7 @@ pub(crate) mod manager_tests {
             .with_query(
                 crate::Query::cypher("e2e-query")
                     .query("MATCH (n:Person) RETURN n.name, n.age")
-                    .from_source("e2e-src")
+                    .from_input("e2e-src")
                     .build(),
             )
             .with_reaction(reaction)

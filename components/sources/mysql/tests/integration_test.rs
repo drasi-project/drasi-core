@@ -123,7 +123,7 @@ async fn test_mysql_source_change_detection() {
 
     let query = Query::cypher("users-query")
         .query("MATCH (u:users) RETURN u.id AS id, u.name AS name, u.email AS email")
-        .from_source("mysql-source")
+        .from_input("mysql-source")
         .enable_bootstrap(true)
         .auto_start(true)
         .build();
@@ -384,7 +384,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
                 t.json_col AS json_col,
                 t.marker AS marker",
         )
-        .from_source("mysql-type-test")
+        .from_input("mysql-type-test")
         .enable_bootstrap(true)
         .auto_start(true)
         .build();
@@ -638,7 +638,9 @@ async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
                         {
                             match change {
                                 SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
-                                SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                                SourceChange::Update { .. } | SourceChange::Replace { .. } => {
+                                    *updates.entry(id).or_default() += 1
+                                }
                                 SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
                                 SourceChange::Future { .. } => {}
                             }
@@ -984,7 +986,7 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
 
         let query = Query::cypher("cp-query")
             .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
-            .from_source("mysql-cp-src")
+            .from_input("mysql-cp-src")
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1127,7 +1129,7 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
 
         let query = Query::cypher("bs-query")
             .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
-            .from_source("mysql-bs-src")
+            .from_input("mysql-bs-src")
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -1255,7 +1257,7 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
 
         let query = Query::cypher("fr-query")
             .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
-            .from_source("mysql-fr-src")
+            .from_input("mysql-fr-src")
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))

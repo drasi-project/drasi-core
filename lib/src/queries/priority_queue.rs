@@ -12,72 +12,123 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Query-local source ranking on top of the generic priority queue.
+//! Priority queue for source events - now uses generic priority queue implementation
+//!
+//! This module provides a type alias to the generic priority queue for source events.
+//! The generic implementation is located in channels::priority_queue.
 
 use crate::channels::events::SourceEventWrapper;
-use crate::channels::priority_queue::QueueOrder;
-use std::sync::Arc;
+use crate::channels::{SourceControl, SourceEvent, Timestamped};
+use std::{collections::HashMap, sync::Arc};
 
-/// A source event with the rank assigned by its query's forwarder.
-///
-/// Rank is the source's position in the query's declared sources list.
-/// Buffered events are ordered by `(timestamp, source_rank, sequence)`.
-/// At a timestamp tie, this groups events by source before comparing sequence:
-/// buffered arrivals `A, B, A, B` dequeue as `A, A, B, B` when A is declared first.
-/// This processing order can affect intermediate join results. It applies only
-/// to entries already buffered: the queue does not wait for other sources or
-/// reorder events that have already been processed.
-/// Construction requires a rank; unranked source events cannot enter the query queue.
-#[derive(Debug, Clone)]
-pub struct RankedSourceEvent {
-    inner: Arc<SourceEventWrapper>,
-    source_rank: u32,
-}
-
-impl RankedSourceEvent {
-    pub fn new(event: Arc<SourceEventWrapper>, source_rank: u32) -> Self {
-        Self {
-            inner: event,
-            source_rank,
-        }
-    }
-
-    pub fn into_event(self) -> Arc<SourceEventWrapper> {
-        self.inner
-    }
-}
-
-impl std::ops::Deref for RankedSourceEvent {
-    type Target = SourceEventWrapper;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl QueueOrder for RankedSourceEvent {
-    type Key = (chrono::DateTime<chrono::Utc>, u32, u64);
-
-    fn order_key(&self) -> Self::Key {
-        (self.inner.timestamp, self.source_rank, self.inner.sequence)
-    }
-}
-
-/// Priority queue accepting only explicitly ranked source events.
-///
-/// ```compile_fail
-/// use drasi_lib::channels::events::SourceEventWrapper;
-/// use drasi_lib::queries::priority_queue::PriorityQueue;
-/// use std::sync::Arc;
-///
-/// async fn enqueue_without_rank(queue: &PriorityQueue, event: Arc<SourceEventWrapper>) {
-///     queue.enqueue(event).await;
-/// }
-/// ```
-pub type PriorityQueue = crate::channels::priority_queue::PriorityQueue<RankedSourceEvent>;
+/// Priority queue specialized for SourceEvents
+/// This is now a type alias to the generic priority queue implementation
+pub type PriorityQueue = crate::channels::priority_queue::PriorityQueue<SourceEventWrapper>;
 
 /// Re-export metrics type for compatibility
 pub use crate::channels::priority_queue::PriorityQueueMetrics;
+
+#[derive(Debug, Clone)]
+struct RankedSourceEvent {
+    event: Arc<SourceEventWrapper>,
+    rank: usize,
+    sequence: u64,
+}
+
+impl Timestamped for RankedSourceEvent {
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+        self.event.timestamp
+    }
+
+    fn ordering_tie_breaker(&self) -> Option<(usize, u64)> {
+        Some((self.rank, self.sequence))
+    }
+}
+
+/// One bounded query inbox. Source ranks belong to this query, never to a shared source.
+#[derive(Clone)]
+pub(crate) struct QueryEventQueue {
+    queue: crate::channels::priority_queue::PriorityQueue<RankedSourceEvent>,
+    ranks: Arc<HashMap<String, usize>>,
+    scheduled_rank: usize,
+}
+
+impl QueryEventQueue {
+    pub(crate) fn new<'a>(
+        capacity: usize,
+        sources: impl IntoIterator<Item = &'a str>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(capacity > 0, "query input capacity must be nonzero");
+        let mut ranks = HashMap::new();
+        for (rank, source) in sources.into_iter().enumerate() {
+            anyhow::ensure!(
+                ranks.insert(source.to_owned(), rank).is_none(),
+                "duplicate source subscription '{source}'"
+            );
+        }
+        let scheduled_rank = ranks.len();
+        Ok(Self {
+            queue: crate::channels::priority_queue::PriorityQueue::new(capacity),
+            ranks: Arc::new(ranks),
+            scheduled_rank,
+        })
+    }
+
+    fn ranked(
+        &self,
+        event: Arc<SourceEventWrapper>,
+    ) -> anyhow::Result<Option<Arc<RankedSourceEvent>>> {
+        if matches!(
+            event.event,
+            SourceEvent::Control(SourceControl::Subscription { .. })
+        ) {
+            return Ok(None);
+        }
+        // Scheduled work has its own rank regardless of the diagnostic source
+        // name. A real source named "__future_queue__" remains an ordinary input.
+        let rank = if matches!(event.event, SourceEvent::Control(SourceControl::FuturesDue)) {
+            self.scheduled_rank
+        } else {
+            *self
+                .ranks
+                .get(&event.source_id)
+                .ok_or_else(|| anyhow::anyhow!("undeclared query source '{}'", event.source_id))?
+        };
+        let sequence = event.sequence;
+        Ok(Some(Arc::new(RankedSourceEvent {
+            event,
+            rank,
+            sequence,
+        })))
+    }
+
+    pub(crate) async fn enqueue(&self, event: Arc<SourceEventWrapper>) -> anyhow::Result<bool> {
+        match self.ranked(event)? {
+            Some(event) => Ok(self.queue.enqueue(event).await),
+            None => Ok(true),
+        }
+    }
+
+    pub(crate) async fn enqueue_wait(&self, event: Arc<SourceEventWrapper>) -> anyhow::Result<()> {
+        if let Some(event) = self.ranked(event)? {
+            self.queue.enqueue_wait(event).await;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn dequeue(&self) -> Arc<SourceEventWrapper> {
+        self.queue.dequeue().await.event.clone()
+    }
+
+    pub(crate) async fn drain(&self) -> Vec<Arc<SourceEventWrapper>> {
+        self.queue
+            .drain()
+            .await
+            .into_iter()
+            .map(|event| event.event.clone())
+            .collect()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -90,14 +141,6 @@ mod tests {
     fn create_test_event(
         source_id: &str,
         timestamp: chrono::DateTime<Utc>,
-    ) -> Arc<SourceEventWrapper> {
-        create_test_event_seq(source_id, timestamp, 1)
-    }
-
-    fn create_test_event_seq(
-        source_id: &str,
-        timestamp: chrono::DateTime<Utc>,
-        sequence: u64,
     ) -> Arc<SourceEventWrapper> {
         let change = SourceChange::Insert {
             element: Element::Node {
@@ -114,127 +157,8 @@ mod tests {
             source_id.to_string(),
             SourceEvent::Change(change),
             timestamp,
-            sequence,
+            1,
         ))
-    }
-
-    // Issue #814 Scenario 1/2: same-timestamp events from a single source must
-    // dequeue in ascending `sequence` order regardless of enqueue order, so the
-    // query evaluates them in emission order (and the sequence dedup high-water
-    // never moves backward).
-    #[tokio::test]
-    async fn test_same_timestamp_dequeues_in_sequence_order() {
-        let pq = PriorityQueue::new(100);
-        let now = Utc::now();
-
-        // Enqueue out of order; identical timestamp and source rank.
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("s1", now, 3),
-            0,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("s1", now, 1),
-            0,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("s1", now, 2),
-            0,
-        )))
-        .await;
-
-        assert_eq!(pq.try_dequeue().await.unwrap().sequence, 1);
-        assert_eq!(pq.try_dequeue().await.unwrap().sequence, 2);
-        assert_eq!(pq.try_dequeue().await.unwrap().sequence, 3);
-    }
-
-    // Issue #814 Scenario 3/4: two sources emit same-timestamp events. The lower
-    // source rank dequeues first; within a source, sequence orders the events.
-    #[tokio::test]
-    async fn test_same_timestamp_multi_source_ordered_by_rank_then_sequence() {
-        let pq = PriorityQueue::new(100);
-        let now = Utc::now();
-
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("later", now + chrono::Duration::seconds(1), 1),
-            0,
-        )))
-        .await;
-        // Interleave enqueue order across the two sources.
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("sourceB", now, 11),
-            1,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("sourceA", now, 21),
-            0,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("sourceB", now, 10),
-            1,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event_seq("sourceA", now, 20),
-            0,
-        )))
-        .await;
-
-        // rank 0 (sourceA) first, in sequence order, then rank 1 (sourceB).
-        let d1 = pq.try_dequeue().await.unwrap();
-        assert_eq!((d1.source_id.as_str(), d1.sequence), ("sourceA", 20));
-        let d2 = pq.try_dequeue().await.unwrap();
-        assert_eq!((d2.source_id.as_str(), d2.sequence), ("sourceA", 21));
-        let d3 = pq.try_dequeue().await.unwrap();
-        assert_eq!((d3.source_id.as_str(), d3.sequence), ("sourceB", 10));
-        let d4 = pq.try_dequeue().await.unwrap();
-        assert_eq!((d4.source_id.as_str(), d4.sequence), ("sourceB", 11));
-        assert_eq!(pq.try_dequeue().await.unwrap().source_id, "later");
-    }
-
-    #[tokio::test]
-    async fn test_futures_due_sorts_after_real_source_at_same_timestamp() {
-        use crate::channels::SourceControl;
-        use crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
-
-        let queue = PriorityQueue::new(3);
-        let timestamp = Utc::now();
-        let real_event = create_test_event_seq("source", timestamp, 99);
-        for sequence in [2, 1] {
-            let signal = Arc::new(SourceEventWrapper::new(
-                FUTURE_QUEUE_SOURCE_ID.to_string(),
-                SourceEvent::Control(SourceControl::FuturesDue),
-                timestamp,
-                sequence,
-            ));
-            queue
-                .enqueue_wait(Arc::new(RankedSourceEvent::new(signal, u32::MAX)))
-                .await;
-        }
-        queue
-            .enqueue_wait(Arc::new(RankedSourceEvent::new(real_event.clone(), 0)))
-            .await;
-
-        let first = queue.try_dequeue().await.unwrap();
-        assert!(Arc::ptr_eq(
-            &Arc::try_unwrap(first)
-                .unwrap_or_else(|entry| (*entry).clone())
-                .into_event(),
-            &real_event
-        ));
-        for sequence in [1, 2] {
-            let signal = queue.try_dequeue().await.unwrap();
-            assert_eq!(signal.source_id, FUTURE_QUEUE_SOURCE_ID);
-            assert_eq!(
-                signal.event,
-                SourceEvent::Control(SourceControl::FuturesDue)
-            );
-            assert_eq!(signal.sequence, sequence);
-        }
-        assert!(queue.try_dequeue().await.is_none());
     }
 
     #[tokio::test]
@@ -248,12 +172,9 @@ mod tests {
         let event3 = create_test_event("source3", now + chrono::Duration::seconds(5));
 
         // Enqueue in random order
-        pq.enqueue(Arc::new(RankedSourceEvent::new(event1, 0)))
-            .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(event3, 0)))
-            .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(event2, 0)))
-            .await;
+        pq.enqueue(event1).await;
+        pq.enqueue(event3).await;
+        pq.enqueue(event2).await;
 
         // Dequeue should return oldest first
         let dequeued1 = pq.try_dequeue().await.unwrap();
@@ -276,20 +197,11 @@ mod tests {
         let event3 = create_test_event("source3", now);
 
         // Enqueue up to capacity
-        assert!(
-            pq.enqueue(Arc::new(RankedSourceEvent::new(event1, 0)))
-                .await
-        );
-        assert!(
-            pq.enqueue(Arc::new(RankedSourceEvent::new(event2, 0)))
-                .await
-        );
+        assert!(pq.enqueue(event1).await);
+        assert!(pq.enqueue(event2).await);
 
         // Should reject when at capacity
-        assert!(
-            !pq.enqueue(Arc::new(RankedSourceEvent::new(event3, 0)))
-                .await
-        );
+        assert!(!pq.enqueue(event3).await);
 
         // Metrics should reflect the drop
         let metrics = pq.metrics().await;
@@ -302,16 +214,8 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event("source1", now),
-            0,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event("source2", now),
-            0,
-        )))
-        .await;
+        pq.enqueue(create_test_event("source1", now)).await;
+        pq.enqueue(create_test_event("source2", now)).await;
 
         let metrics = pq.metrics().await;
         assert_eq!(metrics.total_enqueued, 2);
@@ -334,9 +238,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             let event = create_test_event("source1", Utc::now());
-            pq_clone
-                .enqueue(Arc::new(RankedSourceEvent::new(event, 0)))
-                .await;
+            pq_clone.enqueue(event).await;
         });
 
         // This should block until the event arrives
@@ -349,24 +251,62 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event("source1", now),
-            0,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event("source2", now),
-            0,
-        )))
-        .await;
-        pq.enqueue(Arc::new(RankedSourceEvent::new(
-            create_test_event("source3", now),
-            0,
-        )))
-        .await;
+        pq.enqueue(create_test_event("source1", now)).await;
+        pq.enqueue(create_test_event("source2", now)).await;
+        pq.enqueue(create_test_event("source3", now)).await;
 
         let drained = pq.drain().await;
         assert_eq!(drained.len(), 3);
         assert!(pq.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn ranked_query_queue_uses_declaration_order_then_source_sequence() {
+        let timestamp = chrono::DateTime::from_timestamp_millis(2_000).unwrap();
+        let frames: Vec<_> = [
+            ("a-source", 2, timestamp),
+            ("z-source", 2, timestamp),
+            ("a-source", 1, timestamp),
+            ("z-source", 1, timestamp),
+            ("earlier", 1, timestamp - chrono::Duration::milliseconds(1)),
+        ]
+        .into_iter()
+        .map(|(source, sequence, time)| {
+            let mut event = create_test_event(source, time);
+            Arc::make_mut(&mut event).sequence = sequence;
+            event
+        })
+        .collect();
+        for (sources, expected) in [
+            (["z-source", "a-source", "earlier"], [4, 3, 1, 2, 0]),
+            (["a-source", "z-source", "earlier"], [4, 2, 0, 3, 1]),
+        ] {
+            let queue = QueryEventQueue::new(frames.len(), sources).unwrap();
+            for event in &frames {
+                queue.enqueue_wait(event.clone()).await.unwrap();
+            }
+            for index in expected {
+                assert!(Arc::ptr_eq(&queue.dequeue().await, &frames[index]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ranked_query_inputs_require_unique_declared_sources() {
+        let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
+        assert!(QueryEventQueue::new(0, ["source"]).is_err());
+        assert!(QueryEventQueue::new(1, ["source", "source"]).is_err());
+        assert!(QueryEventQueue::new(1, [future]).is_ok());
+        let queue = QueryEventQueue::new(1, ["source"]).unwrap();
+        assert!(queue
+            .enqueue(create_test_event("source", Utc::now()))
+            .await
+            .unwrap());
+        assert_eq!(queue.dequeue().await.sequence, 1);
+        let error = queue
+            .enqueue(create_test_event("unknown", Utc::now()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("undeclared query source"));
     }
 }

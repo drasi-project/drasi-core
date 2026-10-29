@@ -2,6 +2,12 @@
 
 A Drasi reaction plugin that invokes MS SQL Server stored procedures when continuous query results change.
 
+The independent [native stored-procedure sink](../../computation-plugins/sinks/storedproc-mssql/README.md)
+reuses this reaction's extracted renderer/routing/binding logic, but awaits
+execution and propagates failures rather than enqueueing legacy work. Its
+README documents unsafe-retry removal, timeout limits and the still-blocked
+real SQL Server qualification gate.
+
 ## Overview
 
 The MS SQL Server Stored Procedure reaction enables you to:
@@ -10,6 +16,11 @@ The MS SQL Server Stored Procedure reaction enables you to:
 - Handle multiple queries with a single reaction
 - Automatically retry failed procedure calls with exponential backoff
 - Configure connection parameters and timeouts
+
+SQL rendering, route selection and Tiberius parameter binding are shared through
+`drasi-mssql-common`'s `sql` feature. The legacy reaction retains its existing
+credential resolution, retry and delivery behavior; sharing these helpers does
+not change its completion guarantees.
 
 ## Installation
 
@@ -30,6 +41,13 @@ backend. This crate exposes two mutually exclusive Cargo features, with
 |--------------|-------------------------------------------|---------|
 | `native-tls` | platform TLS (OpenSSL / Secure Transport) | ✅       |
 | `rustls`     | rustls                                    |         |
+
+The SQL Server components use Tiberius 0.13 with **TDS 7.3 explicitly selected**;
+the upgrade does not opt into Tiberius's new TDS 8.0 default. Existing native TLS,
+Windows authentication, date/time and decimal support remain selected. The
+rustls profile resolves rustls 0.23.46 and webpki 0.103.16 or newer. Dependency
+and shared-helper tests do not substitute for the separately deferred live SQL
+Server qualification.
 
 The default works out of the box on Linux. Use rustls instead when the platform
 TLS stack rejects the server handshake — notably **macOS**, whose Secure

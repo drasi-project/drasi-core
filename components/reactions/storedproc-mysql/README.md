@@ -2,6 +2,22 @@
 
 A Drasi reaction plugin that invokes MySQL stored procedures when continuous query results change.
 
+For independent native ComputationGraph hosting, use
+[`drasi-computation-sink-storedproc-mysql`](../../computation-plugins/sinks/storedproc-mysql/README.md).
+It reuses this family's renderer, route precedence, result contexts and typed
+parameters from `drasi-mysql-common`. The native sink awaits directly owned
+prepared commands and session cleanup instead of the legacy pool/queue, accepts
+only parameter-bound dynamic SQL values, and propagates failures. It does not
+inherit the legacy log-and-skip or submitted-command retry policy described
+below, and it does not claim atomic destination checkpoints or exactly-once
+effects.
+
+The native sink also preserves per-start identity-provider refresh through the
+Host's optional typed `identity` resource, including configured secret references
+and injected-provider precedence. Authentication is activation-local, not a
+mutation of saved configuration. Native SQL transport supports MySQL 5.7.9+;
+its owned cleanup requires positive account-scoped connection-attribute proof.
+
 ## Overview
 
 The MySQL Stored Procedure reaction enables you to:

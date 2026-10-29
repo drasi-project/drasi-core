@@ -40,7 +40,7 @@ use crate::{
     path_solver::{match_path::MatchPath, MatchPathSolver},
 };
 
-use super::ContinuousQuery;
+use super::{ContinuousQuery, QueryEvaluator};
 
 pub struct QueryBuilder {
     function_registry: Option<Arc<FunctionRegistry>>,
@@ -154,12 +154,37 @@ impl QueryBuilder {
     }
 
     pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {
+        let session_control = self
+            .session_control
+            .take()
+            .unwrap_or_else(|| Arc::new(NoOpSessionControl));
+        Ok(ContinuousQuery::from_evaluator(
+            self.try_build_evaluator().await?,
+            session_control,
+        ))
+    }
+
+    /// Bind the existing algorithms to caller-owned indexes without creating a
+    /// transaction-owning runtime or a background future consumer.
+    pub async fn try_build_evaluator(mut self) -> Result<QueryEvaluator, QueryBuilderError> {
         let function_registry = match self.function_registry.take() {
             Some(registry) => registry,
             None => Arc::new(FunctionRegistry::new()),
         };
 
         let query = self.query_parser.parse(self.query_source.as_str())?;
+
+        if query
+            .parts
+            .iter()
+            .flat_map(|part| &part.match_clauses)
+            .flat_map(|clause| &clause.path)
+            .any(|(relationship, _)| relationship.variable_length.is_some())
+        {
+            return Err(QueryBuilderError::UnsupportedFeature {
+                feature: "variable-length relationship patterns",
+            });
+        }
 
         let match_path = Arc::new(MatchPath::from_query(&query.parts[0])?);
 
@@ -229,14 +254,9 @@ impl QueryBuilder {
             }
         }?;
 
-        let session_control = match self.session_control.take() {
-            Some(sc) => sc,
-            None => Arc::new(NoOpSessionControl),
-        };
-
         element_index.set_joins(&match_path, &self.joins).await;
 
-        Ok(ContinuousQuery::new(
+        Ok(QueryEvaluator::new(
             Arc::new(query),
             match_path,
             expr_evaluator,
@@ -245,7 +265,6 @@ impl QueryBuilder {
             part_evaluator,
             future_queue,
             source_pipelines,
-            session_control,
         ))
     }
 }

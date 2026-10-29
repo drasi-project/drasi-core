@@ -272,7 +272,7 @@ async fn get_query_snapshot(
     }
 
     let snapshot = state.snapshot_store.get_snapshot(&query_id).await;
-    if !snapshot.rows.is_empty() || snapshot.aggregation.is_some() {
+    if !snapshot.rows.is_empty() {
         return Ok(Json(snapshot));
     }
 
@@ -290,7 +290,7 @@ async fn get_query_snapshot(
                     .collect();
                 return Ok(Json(QuerySnapshot {
                     rows,
-                    aggregation: None,
+                    ..Default::default()
                 }));
             }
         }

@@ -102,6 +102,7 @@ pub async fn get_versions_by_timerange(config: &(impl QueryTestConfig + Send)) {
 
         _ = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: v1.clone(),
             })
             .await
@@ -109,6 +110,7 @@ pub async fn get_versions_by_timerange(config: &(impl QueryTestConfig + Send)) {
 
         _ = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: v2.clone(),
             })
             .await
@@ -116,6 +118,7 @@ pub async fn get_versions_by_timerange(config: &(impl QueryTestConfig + Send)) {
     }
 
     let change = SourceChange::Update {
+        removed_properties: Default::default(),
         element: v3.clone(),
     };
 
@@ -216,6 +219,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
 
         _ = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: v1.clone(),
             })
             .await
@@ -223,6 +227,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
 
         _ = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: v2.clone(),
             })
             .await
@@ -230,6 +235,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
     }
 
     let change = SourceChange::Update {
+        removed_properties: Default::default(),
         element: v3.clone(),
     };
 
@@ -272,6 +278,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
 
         _ = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: v1.clone(),
             })
             .await
@@ -279,6 +286,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
 
         _ = query
             .process_source_change(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: v2.clone(),
             })
             .await
@@ -286,6 +294,7 @@ pub async fn get_versions_by_timerange_with_initial_value_flag(
     }
 
     let change = SourceChange::Update {
+        removed_properties: Default::default(),
         element: v3.clone(),
     };
 

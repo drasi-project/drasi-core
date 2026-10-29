@@ -14,14 +14,16 @@
 
 //! Bootstrap provider architecture for Drasi
 //!
-//! This module provides a pluggable bootstrap system that separates bootstrap
-//! concerns from source streaming logic. Bootstrap providers can be reused
-//! across different source types while maintaining access to their parent
-//! source configuration.
+//! Public ordinary bootstrap contracts, separate from source streaming logic.
+//! Providers own their typed configuration and receive the documented
+//! [`crate::bootstrap::BootstrapContext`] during execution; that context is not the source's
+//! configuration object. These are the existing Source/Reaction-family
+//! interfaces. Native dynamic bootstrap providers use `NativeBootstrapProvider`
+//! from `drasi-computation-plugin-sdk`.
 //!
 //! # Included Providers
 //!
-//! - [`ComponentGraphBootstrapProvider`]: Bootstraps from the [`ComponentGraph`] snapshot
+//! - [`ComponentGraphBootstrapProvider`]: Bootstraps from a [`ComponentGraphView`](crate::ComponentGraphView) snapshot
 //!   for the built-in component graph source.
 
 pub mod component_graph;
@@ -113,6 +115,11 @@ impl BootstrapContext {
         self.properties.get(key).cloned()
     }
 
+    /// Runtime properties passed to the provider, including across plugin boundaries.
+    pub fn properties(&self) -> &HashMap<String, serde_json::Value> {
+        &self.properties
+    }
+
     /// Get a typed property from the context
     pub fn get_typed_property<T>(&self, key: &str) -> Result<Option<T>>
     where
@@ -142,7 +149,7 @@ use crate::channels::BootstrapEventSender;
 ///   checkpoint so crash-recovery after bootstrap can resume without
 ///   re-bootstrapping.
 ///
-///   Must be at most [`SourceBase::MAX_SOURCE_POSITION_BYTES`] (64 KB).
+///   Must be at most [`crate::SourceBase::MAX_SOURCE_POSITION_BYTES`] (64 KB).
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapResult {
     pub event_count: usize,
@@ -206,24 +213,6 @@ impl BootstrapProvider for Box<dyn BootstrapProvider> {
 pub struct PostgresBootstrapConfig {
     // No additional config needed - uses parent source config
     // Include this struct for consistency and future extensibility
-}
-
-/// Application bootstrap provider configuration
-///
-/// This provider bootstraps data from in-memory storage maintained by
-/// application sources. It replays stored insert events to provide initial
-/// data. No additional configuration is required as it uses shared state
-/// from the application source.
-///
-/// # Example
-/// ```yaml
-/// bootstrap_provider:
-///   type: application
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct ApplicationBootstrapConfig {
-    // No config needed - uses shared state
-    // Include for consistency and future extensibility
 }
 
 /// Script file bootstrap provider configuration
@@ -291,8 +280,6 @@ impl Default for PlatformBootstrapConfig {
 pub enum BootstrapProviderConfig {
     /// PostgreSQL bootstrap provider
     Postgres(PostgresBootstrapConfig),
-    /// Application-based bootstrap provider
-    Application(ApplicationBootstrapConfig),
     /// Script file bootstrap provider
     ScriptFile(ScriptFileBootstrapConfig),
     /// Platform bootstrap provider for remote Drasi sources
@@ -318,19 +305,12 @@ impl BootstrapProviderFactory {
     /// - PostgreSQL: Use `drasi_bootstrap_postgres::PostgresBootstrapProvider::builder().with_host(...).build()`
     /// - Platform: Use `drasi_bootstrap_platform::PlatformBootstrapProvider::builder().with_query_api_url(...).build()`
     /// - ScriptFile: Use `drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider::builder().with_file(...).build()`
-    /// - Application: Use `drasi_bootstrap_application::ApplicationBootstrapProvider::builder().build()`
     pub fn create_provider(config: &BootstrapProviderConfig) -> Result<Box<dyn BootstrapProvider>> {
         match config {
             BootstrapProviderConfig::Postgres(_) => {
                 Err(anyhow::anyhow!(
                     "PostgreSQL bootstrap provider is available in the drasi-bootstrap-postgres crate. \
                      Use PostgresBootstrapProvider::builder().with_host(...).build() to create it."
-                ))
-            }
-            BootstrapProviderConfig::Application(_) => {
-                Err(anyhow::anyhow!(
-                    "Application bootstrap provider is available in the drasi-bootstrap-application crate. \
-                     Use ApplicationBootstrapProvider::builder().build() to create it."
                 ))
             }
             BootstrapProviderConfig::ScriptFile(config) => {
@@ -377,13 +357,6 @@ mod tests {
         let config = PostgresBootstrapConfig::default();
         // Should be empty struct for now
         assert_eq!(config, PostgresBootstrapConfig {});
-    }
-
-    #[test]
-    fn test_application_bootstrap_config_defaults() {
-        let config = ApplicationBootstrapConfig::default();
-        // Should be empty struct for now
-        assert_eq!(config, ApplicationBootstrapConfig {});
     }
 
     #[test]
@@ -452,20 +425,6 @@ mod tests {
 
         let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
         assert!(matches!(deserialized, BootstrapProviderConfig::Postgres(_)));
-    }
-
-    #[test]
-    fn test_application_bootstrap_config_serialization() {
-        let config = BootstrapProviderConfig::Application(ApplicationBootstrapConfig::default());
-
-        let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("\"type\":\"application\""));
-
-        let deserialized: BootstrapProviderConfig = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            deserialized,
-            BootstrapProviderConfig::Application(_)
-        ));
     }
 
     #[test]

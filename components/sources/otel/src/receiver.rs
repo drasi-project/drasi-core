@@ -17,6 +17,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{future::Future, pin::Pin};
 
 use anyhow::Context;
 use axum::body::Bytes;
@@ -397,9 +398,9 @@ pub async fn serve(
         info!("[{}] OTLP/gRPC listening on {addr}", runtime.source_id);
         let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        grpc_task = Some((
-            stop_tx,
-            tokio::spawn(async move {
+        grpc_task = Some(Listener {
+            shutdown: Some(stop_tx),
+            operation: Box::pin(async move {
                 builder
                     .add_service(
                         MetricsServiceServer::new(svc.clone())
@@ -422,7 +423,7 @@ pub async fn serve(
                     .await
                     .map_err(|e| anyhow::anyhow!("OTLP/gRPC server error: {e}"))
             }),
-        ));
+        });
     }
 
     let mut http_task = None;
@@ -435,9 +436,9 @@ pub async fn serve(
             .with_state(runtime.clone());
         info!("[{}] OTLP/HTTP listening on {addr}", runtime.source_id);
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        http_task = Some((
-            stop_tx,
-            tokio::spawn(async move {
+        http_task = Some(Listener {
+            shutdown: Some(stop_tx),
+            operation: Box::pin(async move {
                 axum::serve(listener, app)
                     .with_graceful_shutdown(async move {
                         let _ = stop_rx.await;
@@ -445,7 +446,7 @@ pub async fn serve(
                     .await
                     .map_err(|e| anyhow::anyhow!("OTLP/HTTP server error: {e}"))
             }),
-        ));
+        });
     }
 
     let sweeper_runtime = runtime.clone();
@@ -453,10 +454,10 @@ pub async fn serve(
     let unexpected = loop {
         tokio::select! {
             _ = &mut shutdown => break None,
-            result = wait_server_task(&mut grpc_task) => {
+            result = finish_listener(&mut grpc_task), if grpc_task.is_some() => {
                 break Some(result.context("OTLP/gRPC server exited unexpectedly"));
             }
-            result = wait_server_task(&mut http_task) => {
+            result = finish_listener(&mut http_task), if http_task.is_some() => {
                 break Some(result.context("OTLP/HTTP server exited unexpectedly"));
             }
             _ = interval.tick() => {
@@ -467,39 +468,48 @@ pub async fn serve(
         }
     };
 
-    if let Some((tx, handle)) = grpc_task.take() {
-        let _ = tx.send(());
-        let _ = handle.await;
+    for listener in [&mut grpc_task, &mut http_task].into_iter().flatten() {
+        if let Some(tx) = listener.shutdown.take() {
+            let _ = tx.send(());
+        }
     }
-    if let Some((tx, handle)) = http_task.take() {
-        let _ = tx.send(());
-        let _ = handle.await;
-    }
-    match unexpected {
+    let (grpc_result, http_result) = tokio::join!(
+        finish_listener(&mut grpc_task),
+        finish_listener(&mut http_task),
+    );
+    let mut outcome = match unexpected {
         Some(Err(e)) => Err(e),
         Some(Ok(())) => Err(anyhow::anyhow!(
             "OTLP listener exited while the source was still running"
         )),
         None => Ok(()),
+    };
+    for result in [
+        grpc_result.context("OTLP/gRPC shutdown"),
+        http_result.context("OTLP/HTTP shutdown"),
+    ] {
+        if let Err(error) = result {
+            outcome = Err(match outcome {
+                Ok(()) => error,
+                Err(primary) => primary.context(format!("listener cleanup also failed: {error:#}")),
+            });
+        }
     }
+    outcome
 }
 
-async fn wait_server_task(
-    task: &mut Option<(
-        tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
-    )>,
-) -> anyhow::Result<()> {
-    let Some((_, handle)) = task.as_mut() else {
-        std::future::pending::<()>().await;
+struct Listener {
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    operation: Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
+}
+
+async fn finish_listener(listener: &mut Option<Listener>) -> anyhow::Result<()> {
+    let Some(current) = listener.as_mut() else {
         return Ok(());
     };
-    // Await in place so the shutdown sender is not dropped (that would stop the server).
-    match handle.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(anyhow::anyhow!("OTLP server task panicked: {e}")),
-    }
+    let result = current.operation.as_mut().await;
+    *listener = None;
+    result
 }
 
 async fn http_metrics(
@@ -634,6 +644,43 @@ mod tests {
     };
     use crate::otlp::proto::resource::v1::Resource;
     use drasi_lib::sources::base::SourceBaseParams;
+
+    #[tokio::test]
+    async fn cancelled_receiver_releases_both_listener_futures() {
+        let grpc = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let grpc_address = grpc.local_addr().unwrap();
+        let http_address = http.local_addr().unwrap();
+        let (_shutdown, receiver) = tokio::sync::oneshot::channel();
+        let mut serving = tokio_test::task::spawn(serve(
+            runtime(OtelSourceConfig::default()),
+            BoundEndpoints {
+                grpc: Some(grpc),
+                http: Some(http),
+            },
+            receiver,
+        ));
+        assert!(serving.poll().is_pending());
+        drop(serving);
+        tokio::net::TcpListener::bind(grpc_address)
+            .await
+            .expect("gRPC listener released");
+        tokio::net::TcpListener::bind(http_address)
+            .await
+            .expect("HTTP listener released");
+    }
+
+    #[tokio::test]
+    async fn failed_listener_is_not_polled_again_during_cleanup() {
+        let mut listener = Some(Listener {
+            shutdown: None,
+            operation: Box::pin(async { anyhow::bail!("injected listener failure") }),
+        });
+        let error = finish_listener(&mut listener).await.unwrap_err();
+        assert_eq!(error.to_string(), "injected listener failure");
+        assert!(listener.is_none());
+        finish_listener(&mut listener).await.unwrap();
+    }
 
     fn runtime(config: OtelSourceConfig) -> OtelRuntime {
         let base = SourceBase::new(SourceBaseParams::new("otel")).unwrap();

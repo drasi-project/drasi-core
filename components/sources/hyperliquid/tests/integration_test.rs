@@ -37,7 +37,7 @@ async fn test_hyperliquid_source_live() -> Result<()> {
             RETURN c.name AS coin, c.max_leverage AS max_leverage, m.price AS price
             "#,
         )
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -50,7 +50,7 @@ async fn test_hyperliquid_source_live() -> Result<()> {
             RETURN t.tid AS tid, t.price AS price
             "#,
         )
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(false)
         .build();

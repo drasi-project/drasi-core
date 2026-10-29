@@ -61,7 +61,7 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (c:ConfigMap) RETURN c.name AS name, c.data.color AS color")
-        .from_source("k8s-source")
+        .from_input("k8s-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -176,7 +176,7 @@ async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()>
 
     let query = Query::cypher("q1")
         .query("MATCH (c:ConfigMap) RETURN c.name AS name")
-        .from_source("k8s-source")
+        .from_input("k8s-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

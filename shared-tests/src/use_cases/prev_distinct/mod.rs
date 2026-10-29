@@ -78,6 +78,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     //update contract 1 with active status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c1"),
@@ -115,6 +116,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     //update contract 1 tags
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c1"),
@@ -181,6 +183,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     //update contract 1 tags
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c1"),
@@ -223,6 +226,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     //update contract 2 with active status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c2"),
@@ -248,6 +252,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     //update contract 2 with pending status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c2"),
@@ -273,6 +278,7 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
     //update contract 2 with active status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c2"),
@@ -344,6 +350,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
     //update contract 1 with active status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c1"),
@@ -381,6 +388,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
     //update contract 1 tags
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c1"),
@@ -447,6 +455,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
     //update contract 1 tags
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c1"),
@@ -489,6 +498,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
     //update contract 2 with active status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c2"),
@@ -514,6 +524,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
     //update contract 2 with pending status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c2"),
@@ -539,6 +550,7 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
     //update contract 2 with active status
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "c2"),

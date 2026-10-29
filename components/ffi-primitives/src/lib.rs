@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![allow(unexpected_cfgs)]
+#![deny(unused)]
 
 //! `drasi-ffi-primitives` — Core FFI-safe types and vtable generation macros.
 //!

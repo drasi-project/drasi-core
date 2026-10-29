@@ -21,12 +21,12 @@ use std::{
 use crate::IndexDb;
 use async_trait::async_trait;
 use bit_set::BitSet;
+use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
     interface::{ElementIndex, ElementStream, IndexError},
     models::{Element, ElementReference, QueryJoin, QueryJoinKey},
     path_solver::match_path::MatchPath,
 };
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::{bytes::BytesMut, Message};
 use rocksdb::{Cache, Options, SliceTransform, Transaction};
 use tokio::task;
@@ -86,6 +86,34 @@ impl RocksDbElementIndex {
 
 #[async_trait]
 impl ElementIndex for RocksDbElementIndex {
+    async fn get_slot_elements(&self, slot: usize) -> Result<ElementStream, IndexError> {
+        let context = self.context.clone();
+        let rows = task::spawn_blocking(move || {
+            let slots = context.db.cf_handle(SLOT_CF).expect("Slot CF not found");
+            context.session_state.with_txn(|txn| {
+                let mut rows: Vec<Arc<Element>> = Vec::new();
+                for entry in txn.iterator_cf(&slots, rocksdb::IteratorMode::Start) {
+                    let (key, affinity) = entry.map_err(IndexError::other)?;
+                    if BitSet::from_bytes(&affinity).contains(slot) {
+                        let key: ReferenceHash = key
+                            .as_ref()
+                            .try_into()
+                            .map_err(|_| IndexError::CorruptedData)?;
+                        if let Some(element) = get_element_internal(context.clone(), &key, txn)? {
+                            rows.push(Arc::new(
+                                Element::try_from(element).map_err(IndexError::other)?,
+                            ));
+                        }
+                    }
+                }
+                Ok(rows)
+            })
+        })
+        .await
+        .map_err(IndexError::other)??;
+        Ok(Box::pin(futures::stream::iter(rows.into_iter().map(Ok))))
+    }
+
     #[tracing::instrument(skip_all, err)]
     async fn get_element(
         &self,
@@ -98,7 +126,7 @@ impl ElementIndex for RocksDbElementIndex {
                 let stored = get_element_internal(context.clone(), &element_key, txn)?;
                 match stored {
                     Some(stored) => {
-                        let element: Element = stored.into();
+                        let element = Element::try_from(stored).map_err(IndexError::other)?;
                         Ok(Some(Arc::new(element)))
                     }
                     None => Ok(None),
@@ -118,7 +146,7 @@ impl ElementIndex for RocksDbElementIndex {
         element: &Element,
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
-        let stored: StoredElement = element.into();
+        let stored = StoredElement::try_from(element).map_err(IndexError::other)?;
         let slot_affinity = slot_affinity.clone();
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
@@ -173,7 +201,7 @@ impl ElementIndex for RocksDbElementIndex {
 
                 match get_element_internal(context.clone(), &element_key, txn) {
                     Ok(Some(stored)) => {
-                        let element: Element = stored.into();
+                        let element = Element::try_from(stored).map_err(IndexError::other)?;
                         Ok(Some(Arc::new(element)))
                     }
                     Ok(None) => Ok(None),
@@ -215,8 +243,11 @@ impl ElementIndex for RocksDbElementIndex {
                             let relation_key = decode_inout_key_relation(&key);
                             match get_element_internal(context.clone(), &relation_key, txn) {
                                 Ok(Some(stored)) => {
-                                    let element: Element = stored.into();
-                                    results.push(Ok(Arc::new(element)));
+                                    results.push(
+                                        Element::try_from(stored)
+                                            .map(Arc::new)
+                                            .map_err(IndexError::other),
+                                    );
                                 }
                                 Ok(None) => {
                                     log::debug!(
@@ -270,8 +301,11 @@ impl ElementIndex for RocksDbElementIndex {
                             let relation_key = decode_inout_key_relation(&key);
                             match get_element_internal(context.clone(), &relation_key, txn) {
                                 Ok(Some(stored)) => {
-                                    let element: Element = stored.into();
-                                    results.push(Ok(Arc::new(element)));
+                                    results.push(
+                                        Element::try_from(stored)
+                                            .map(Arc::new)
+                                            .map_err(IndexError::other),
+                                    );
                                 }
                                 Ok(None) => {
                                     log::debug!(
@@ -300,66 +334,12 @@ impl ElementIndex for RocksDbElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let context = self.context.clone();
-
+        let require_session = context.session_state.has_active_session()?;
         let task = task::spawn_blocking(move || {
-            let options = &context.options;
-            let block_cache = options.memory_budget().block_cache();
-            if let Err(err) = context.db.drop_cf(ELEMENTS_CF) {
-                return Err(IndexError::other(err));
-            }
-            if let Err(err) = context.db.drop_cf(SLOT_CF) {
-                return Err(IndexError::other(err));
-            }
-            if let Err(err) = context.db.drop_cf(INBOUND_CF) {
-                return Err(IndexError::other(err));
-            }
-            if let Err(err) = context.db.drop_cf(OUTBOUND_CF) {
-                return Err(IndexError::other(err));
-            }
-            if let Err(err) = context.db.drop_cf(PARTIAL_CF) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = context.db.create_cf(
-                ELEMENTS_CF,
-                &crate::sizing::sized(ELEMENTS_CF, get_elements_cf_options(block_cache), options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = context.db.create_cf(
-                SLOT_CF,
-                &crate::sizing::sized(SLOT_CF, get_elements_cf_options(block_cache), options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = context.db.create_cf(
-                INBOUND_CF,
-                &crate::sizing::sized(INBOUND_CF, get_inout_index_cf_options(block_cache), options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = context.db.create_cf(
-                OUTBOUND_CF,
-                &crate::sizing::sized(
-                    OUTBOUND_CF,
-                    get_inout_index_cf_options(block_cache),
-                    options,
-                ),
-            ) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = context.db.create_cf(
-                PARTIAL_CF,
-                &crate::sizing::sized(PARTIAL_CF, get_partial_cf_options(block_cache), options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-
-            Ok(())
+            context.session_state.clear_column_families(
+                &[ELEMENTS_CF, SLOT_CF, INBOUND_CF, OUTBOUND_CF, PARTIAL_CF],
+                require_session,
+            )
         });
 
         match task.await {
@@ -436,12 +416,10 @@ fn get_element_internal(
         Err(e) => return Err(IndexError::other(e)),
     };
 
-    let element = match StoredElementContainer::decode(element.as_slice()) {
-        Ok(container) => container.element,
-        Err(e) => return Err(IndexError::other(e)),
-    };
-
-    Ok(element)
+    match StoredElementContainer::decode(element.as_slice()) {
+        Ok(container) => container.element.map(Some).ok_or(IndexError::CorruptedData),
+        Err(e) => Err(IndexError::other(e)),
+    }
 }
 
 fn delete_element_internal(
@@ -703,7 +681,10 @@ fn update_source_joins(
                                 {
                                     Ok(Some(data)) => {
                                         match StoredElementContainer::decode(data.as_slice()) {
-                                            Ok(container) => container.element,
+                                            Ok(container) => match container.element {
+                                                Some(element) => Some(element),
+                                                None => return Err(IndexError::CorruptedData),
+                                            },
                                             Err(e) => return Err(IndexError::other(e)),
                                         }
                                     }
@@ -790,6 +771,7 @@ fn update_source_joins(
                                             let in_out = StoredElement::Relation(StoredRelation {
                                                 metadata: StoredElementMetadata {
                                                     reference: get_join_virtual_ref(
+                                                        qj,
                                                         &element_reference,
                                                         &other,
                                                     ),
@@ -804,6 +786,7 @@ fn update_source_joins(
                                             let out_in = StoredElement::Relation(StoredRelation {
                                                 metadata: StoredElementMetadata {
                                                     reference: get_join_virtual_ref(
+                                                        qj,
                                                         &other,
                                                         &element_reference,
                                                     ),
@@ -937,8 +920,8 @@ fn delete_source_join(
                     Err(e) => return Err(IndexError::other(e)),
                 };
 
-                let in_out = get_join_virtual_ref(old_element, &other);
-                let out_in = get_join_virtual_ref(&other, old_element);
+                let in_out = get_join_virtual_ref(query_join, old_element, &other);
+                let out_in = get_join_virtual_ref(query_join, &other, old_element);
 
                 delete_element_internal(context.clone(), txn, &hash_stored_element_ref(&in_out))?;
                 delete_element_internal(context.clone(), txn, &hash_stored_element_ref(&out_in))?;
@@ -1093,10 +1076,16 @@ fn decode_partial_join_key(key: &[u8]) -> Result<StoredElementReference, IndexEr
 }
 
 fn get_join_virtual_ref(
+    join: &QueryJoin,
     ref1: &StoredElementReference,
     ref2: &StoredElementReference,
 ) -> StoredElementReference {
-    let new_id = format!("{}:{}", ref1.element_id, ref2.element_id);
+    let new_id = join.relationship_id(
+        &ref1.source_id,
+        &ref1.element_id,
+        &ref2.source_id,
+        &ref2.element_id,
+    );
     StoredElementReference {
         source_id: "$join".to_string(),
         element_id: new_id,

@@ -29,7 +29,7 @@
 //! 3. Optionally provides a bootstrap provider via `set_bootstrap_provider()`
 //! 4. Implements the Source trait delegating to SourceBase methods
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -38,9 +38,9 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
+use crate::channels::ComponentStatusHandle;
 use crate::channels::*;
-use crate::component_graph::ComponentStatusHandle;
-use crate::context::SourceRuntimeContext;
+use crate::context::{ComponentResource, SourceRuntimeContext};
 use crate::identity::IdentityProvider;
 use crate::profiling;
 use crate::sources::PositionComparator;
@@ -55,15 +55,19 @@ use drasi_core::models::SourceChange;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+/// use drasi_lib::{BootstrapProvider, channels::DispatchMode};
 ///
+/// fn build_base(my_provider: impl BootstrapProvider + 'static) -> anyhow::Result<SourceBase> {
 /// let params = SourceBaseParams::new("my-source")
 ///     .with_dispatch_mode(DispatchMode::Channel)
 ///     .with_dispatch_buffer_capacity(2000)
 ///     .with_bootstrap_provider(my_provider);
 ///
 /// let base = SourceBase::new(params)?;
+/// Ok(base)
+/// }
 /// ```
 pub struct SourceBaseParams {
     /// Unique identifier for the source
@@ -187,6 +191,8 @@ pub struct SourceBase {
         Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
+    /// Serializes inventory snapshots so concurrent setters cannot publish stale state.
+    resource_report_lock: Arc<Mutex<()>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Handle to the source's main task
@@ -208,13 +214,15 @@ pub struct SourceBase {
     /// ("no position confirmed yet"). Only populated when
     /// `request_position_handle == true`.
     position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
+    wal_subscriptions_complete: Arc<AtomicBool>,
+    wal_pruning_stop: tokio::sync::watch::Sender<bool>,
     /// Monotonically increasing counter for assigning event sequences.
     /// Used when a source does not supply its own sequence number.
     next_sequence: Arc<AtomicU64>,
     /// Serializes timestamp normalization and enqueue per source. Convenience
     /// dispatch methods also allocate their sequence under this lock (#640).
     /// Explicit-wrapper producers must serialize allocation and dispatch
-    /// themselves so `SequenceDedup` does not discard reordered live events.
+    /// themselves so query checkpoints do not discard reordered live events.
     ///
     /// The guarded value is the last timestamp stamped on a dispatched event.
     /// Each event's timestamp is clamped to at least the previous timestamp to
@@ -352,12 +360,15 @@ impl SourceBase {
             status_handle: ComponentStatusHandle::new(&params.id),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
+            resource_report_lock: Arc::new(Mutex::new(())),
             state_store: Arc::new(RwLock::new(params.state_store)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
             identity_provider: Arc::new(RwLock::new(None)),
             position_handles: Arc::new(RwLock::new(HashMap::new())),
+            wal_subscriptions_complete: Arc::new(AtomicBool::new(false)),
+            wal_pruning_stop: tokio::sync::watch::channel(false).0,
             next_sequence: Arc::new(AtomicU64::new(1)),
             dispatch_order: Arc::new(Mutex::new(chrono::DateTime::<chrono::Utc>::MIN_UTC)),
             raw_config: None,
@@ -428,6 +439,7 @@ impl SourceBase {
     /// - `source_id`: The source's unique identifier
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
     /// - `state_store`: Optional persistent state storage
+    /// - `resource_observer`: Optional reporting of the actual selected providers
     pub async fn initialize(&self, context: SourceRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -449,6 +461,41 @@ impl SourceBase {
             if guard.is_none() {
                 *guard = Some(ip.clone());
             }
+        }
+
+        self.report_resources().await;
+    }
+
+    async fn report_resources(&self) {
+        let _report_guard = self.resource_report_lock.lock().await;
+        let Some(context) = self.context().await else {
+            return;
+        };
+        let Some(observer) = context.resource_observer else {
+            return;
+        };
+
+        let mut resources = Vec::new();
+        if let Some(provider) = self.bootstrap_provider.read().await.clone() {
+            resources.push(ComponentResource::Bootstrap(provider));
+        }
+        if let Some(provider) = self.identity_provider().await {
+            resources.push(ComponentResource::Identity(provider));
+        }
+        if let Some(provider) = self.state_store().await {
+            resources.push(ComponentResource::StateStore(provider));
+        }
+        if let Some(provider) = context.wal_provider {
+            resources.push(ComponentResource::Wal(provider));
+        }
+
+        if let Err(error) = observer.observe(resources).await {
+            let message = format!(
+                "Source '{}' failed to report component resources: {error:#}",
+                self.id
+            );
+            error!("{message}");
+            self.set_status(ComponentStatus::Error, Some(message)).await;
         }
     }
 
@@ -480,8 +527,10 @@ impl SourceBase {
     /// This is typically called during source construction when the provider
     /// is available from configuration (e.g., `with_identity_provider()` builder).
     /// Providers set this way take precedence over context-injected providers.
+    /// An initialized computation context is notified of the updated inventory.
     pub async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
         *self.identity_provider.write().await = Some(provider);
+        self.report_resources().await;
     }
 
     /// Create and register a position handle for `query_id`, initialized to `u64::MAX`.
@@ -534,6 +583,57 @@ impl SourceBase {
             min = Some(min.map_or(v, |m| m.min(v)));
         }
         min
+    }
+
+    /// Protect retained input while the initial subscribers restore their cursors.
+    /// A new empty log has no pre-start history to protect.
+    pub fn begin_wal_subscriptions(&self, committed_head: u64) {
+        self.wal_pruning_stop.send_replace(false);
+        self.wal_subscriptions_complete
+            .store(committed_head == 0, Ordering::Release);
+    }
+
+    /// Release the startup fence only after the hosting lifecycle has established
+    /// all required subscriptions. Time passing is not evidence of completion.
+    pub fn complete_wal_subscriptions(&self) {
+        self.wal_subscriptions_complete
+            .store(true, Ordering::Release);
+    }
+
+    /// Request that the pruning worker stop after its current operation.
+    pub fn stop_wal_pruning(&self) {
+        self.wal_pruning_stop.send_replace(true);
+    }
+
+    pub fn subscribe_wal_pruning_stop(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.wal_pruning_stop.subscribe()
+    }
+
+    /// Prune only an established group's minimum confirmed position.
+    pub async fn prune_confirmed_wal(
+        &self,
+        wal: &dyn crate::wal::WalProvider,
+    ) -> std::result::Result<u64, crate::wal::WalError> {
+        if !self.wal_subscriptions_complete.load(Ordering::Acquire) {
+            debug!(
+                "WAL pruning for '{}' is waiting for initial subscriptions",
+                self.id
+            );
+            return Ok(0);
+        }
+        self.cleanup_stale_handles().await;
+        // Registration takes the write side of this lock. Keep it excluded
+        // until the actual prune finishes, not just until its watermark is read.
+        let handles = self.position_handles.read().await;
+        let confirmed = handles
+            .values()
+            .map(|handle| handle.load(Ordering::Acquire))
+            .filter(|sequence| *sequence != u64::MAX)
+            .min();
+        match confirmed {
+            Some(sequence) if sequence > 0 => wal.prune_up_to(&self.id, sequence).await,
+            _ => Ok(0),
+        }
     }
 
     /// Drop entries whose `Arc::strong_count == 1` (only `SourceBase` holds a
@@ -630,7 +730,7 @@ impl SourceBase {
     /// recovering from a WAL-head/checkpoint restore. The next dispatched event
     /// will receive at least `sequence + 1`.
     ///
-    /// Funnels through [`raise_next_sequence`](Self::raise_next_sequence), so it
+    /// Uses the shared internal sequence-floor update, so it
     /// **never lowers** the counter and composes safely with the resume-floor
     /// applied on subscribe regardless of ordering.
     pub fn set_next_sequence(&self, sequence: u64) {
@@ -708,12 +808,15 @@ impl SourceBase {
             status_handle: self.status_handle.clone(),
             dispatchers: self.dispatchers.clone(),
             context: self.context.clone(),
+            resource_report_lock: self.resource_report_lock.clone(),
             state_store: self.state_store.clone(),
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             bootstrap_provider: self.bootstrap_provider.clone(),
             identity_provider: self.identity_provider.clone(),
             position_handles: self.position_handles.clone(),
+            wal_subscriptions_complete: self.wal_subscriptions_complete.clone(),
+            wal_pruning_stop: self.wal_pruning_stop.clone(),
             next_sequence: self.next_sequence.clone(),
             dispatch_order: self.dispatch_order.clone(),
             raw_config: self.raw_config.clone(),
@@ -731,15 +834,19 @@ impl SourceBase {
     ///
     /// Call this after creating the SourceBase if the source plugin supports bootstrapping.
     /// The bootstrap provider is created by the plugin using its own configuration.
+    /// An initialized computation context is notified of the updated inventory.
     ///
     /// # Example
-    /// ```ignore
-    /// let provider = MyBootstrapProvider::new(config);
+    /// ```no_run
+    /// use drasi_lib::{BootstrapProvider, sources::SourceBase};
+    /// async fn attach(source_base: &SourceBase, provider: impl BootstrapProvider + 'static) {
     /// source_base.set_bootstrap_provider(provider).await;  // Ownership transferred
+    /// }
     /// ```
     pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static) {
         *self.bootstrap_provider.write().await = Some(Arc::new(provider));
         self.has_bootstrap_provider.store(true, Ordering::Release);
+        self.report_resources().await;
     }
 
     /// Set the position comparator for per-subscriber replay filtering.
@@ -1004,6 +1111,50 @@ impl SourceBase {
             .map(|(bootstrap_receiver, _)| bootstrap_receiver))
     }
 
+    /// Select WAL replay without losing sequence-only recovery before the first
+    /// native cursor is checkpointed. An explicitly configured bootstrap provider
+    /// still handles fresh snapshots.
+    pub async fn subscribe_with_wal(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        wal: &dyn crate::wal::WalProvider,
+        source_type: &str,
+    ) -> Result<SubscriptionResponse> {
+        let resume = match &settings.resume_from {
+            Some(position) => {
+                let bytes: [u8; 8] = position
+                    .get(..8)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Invalid resume_from position: expected at least 8 bytes, got {}",
+                            position.len()
+                        )
+                    })?
+                    .try_into()?;
+                Some(u64::from_be_bytes(bytes))
+            }
+            None => settings.resume_sequence,
+        }
+        .or_else(|| (settings.enable_bootstrap && !self.has_bootstrap_provider()).then_some(0));
+        let Some(resume) = resume else {
+            return self.subscribe_with_bootstrap(settings, source_type).await;
+        };
+        self.subscribe_with_replay(settings, wal, resume, source_type)
+            .await
+            .map_err(|error| match error.downcast_ref::<crate::wal::WalError>() {
+                Some(crate::wal::WalError::PositionUnavailable {
+                    oldest_available, ..
+                }) => crate::sources::SourceError::PositionUnavailable {
+                    source_id: self.id.clone(),
+                    requested: bytes::Bytes::copy_from_slice(&resume.to_be_bytes()),
+                    earliest_available: oldest_available
+                        .map(|position| bytes::Bytes::copy_from_slice(&position.to_be_bytes())),
+                }
+                .into(),
+                _ => error,
+            })
+    }
+
     /// Subscribe with WAL replay support.
     ///
     /// Creates a streaming channel, captures the WAL head under the dispatchers
@@ -1041,10 +1192,18 @@ impl SourceBase {
         // This ensures no live events reach the new subscriber before replay.
         let mut dispatchers = self.dispatchers.write().await;
 
-        // Capture WAL head while batcher is blocked (fast in-memory read)
+        // Capture committed history while live dispatch is blocked.
         let head = wal.head_sequence(&self.id).await.map_err(|e| {
             anyhow::anyhow!("Failed to read WAL head for source '{}': {e}", self.id)
         })?;
+        if resume_seq > head {
+            return Err(crate::wal::WalError::PositionUnavailable {
+                source_id: self.id.clone(),
+                requested: resume_seq,
+                oldest_available: wal.oldest_sequence(&self.id).await?,
+            }
+            .into());
+        }
 
         // Create dedicated channel for this subscriber
         let dispatcher = crate::channels::dispatcher::ChannelChangeDispatcher::<
@@ -1054,6 +1213,19 @@ impl SourceBase {
 
         // Add dispatcher to live list — after lock release, live events flow to it
         dispatchers.push(Box::new(dispatcher));
+        // Protect the requested history before reading it. A concurrent pruner
+        // must not discard replay input while this subscription is being built.
+        let position_handle = if settings.request_position_handle {
+            let mut handles = self.position_handles.write().await;
+            let handle = handles
+                .entry(settings.query_id.clone())
+                .or_insert_with(|| Arc::new(AtomicU64::new(resume_seq)))
+                .clone();
+            handle.store(resume_seq, Ordering::Release);
+            Some(handle)
+        } else {
+            None
+        };
         drop(dispatchers);
 
         self.subscriber_notify.notify_one();
@@ -1075,6 +1247,20 @@ impl SourceBase {
         } else {
             Vec::new()
         };
+        if resume_seq < head
+            && (replay_events.first().map(|(sequence, _)| *sequence) != Some(resume_seq + 1)
+                || replay_events.last().map(|(sequence, _)| *sequence) != Some(head)
+                || replay_events
+                    .windows(2)
+                    .any(|pair| pair[0].0.checked_add(1) != Some(pair[1].0)))
+        {
+            return Err(crate::wal::WalError::PositionUnavailable {
+                source_id: self.id.clone(),
+                requested: resume_seq + 1,
+                oldest_available: replay_events.first().map(|(sequence, _)| *sequence),
+            }
+            .into());
+        }
 
         // Build replay events (already stamped with their WAL sequence)
         let replay_wrappers: std::collections::VecDeque<
@@ -1106,18 +1292,6 @@ impl SourceBase {
         let composite: Box<
             dyn crate::channels::ChangeReceiver<crate::channels::events::SourceEventWrapper>,
         > = Box::new(ReplayThenLiveReceiver::new(replay_wrappers, live_receiver));
-
-        // Position handle — initialize to the resume sequence so a resuming
-        // subscriber is included in the min-watermark from the start (without
-        // this, a handle left at u64::MAX would be invisible to the watermark,
-        // letting upstream advance past the subscriber's checkpoint).
-        let position_handle = if settings.request_position_handle {
-            let handle = self.create_position_handle(&settings.query_id).await;
-            handle.store(resume_seq, Ordering::Release);
-            Some(handle)
-        } else {
-            None
-        };
 
         Ok(SubscriptionResponse {
             query_id: settings.query_id.clone(),
@@ -1296,7 +1470,8 @@ impl SourceBase {
     /// Maximum allowed size for source position bytes (64KB).
     /// Positions exceeding this limit are skipped at checkpoint time
     /// to prevent memory issues, preserving the last good position.
-    pub const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
+    pub const MAX_SOURCE_POSITION_BYTES: usize =
+        drasi_computation_contracts::MAX_SOURCE_POSITION_BYTES;
 
     /// Return `candidate` clamped to at least `*last`, updating `*last`.
     ///
@@ -1573,27 +1748,21 @@ impl SourceBase {
             .expect("Failed to create test subscription receiver")
     }
 
-    /// Abort and join the source task, releasing the handle lock before waiting.
+    /// Abort and join the source task without releasing its ownership slot.
     ///
     /// Expected cancellation is successful; unexpected task failures are returned
     /// with their `JoinError` preserved. Callers must finish resource cleanup before
     /// propagating an error. This does not change status or clear subscriptions.
     ///
-    /// Joining is intentionally not timed out: dropping an unfinished handle would
-    /// let the task outlive cleanup and overlap a restart. Source tasks must use
-    /// cooperative async I/O rather than blocking the executor.
+    /// Cancellation or a five-second timeout retains an unfinished handle for
+    /// subsequent cleanup. Source tasks must use cooperative async I/O.
     pub async fn abort_and_join_task(&self) -> Result<()> {
-        let task = self.task_handle.write().await.take();
-        if let Some(task) = task {
-            task.abort();
-            if let Err(error) = task.await {
-                // abort() normally produces cancellation; a panic is not cancellation.
-                if !error.is_cancelled() {
-                    return Err(anyhow::Error::new(error)
-                        .context(format!("Source '{}' task failed during shutdown", self.id)));
-                }
-            }
-        }
+        crate::context::workers::cancel_owned_worker(
+            &mut *self.task_handle.write().await,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Source '{}' task failed during shutdown", self.id))?;
         Ok(())
     }
 
@@ -1606,22 +1775,23 @@ impl SourceBase {
             let _ = tx.send(());
         }
 
-        // Wait for task to complete
-        if let Some(mut handle) = self.task_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
-                Ok(Ok(())) => {
+        {
+            let mut task = self.task_handle.write().await;
+            match crate::context::workers::join_owned_worker(
+                &mut task,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(error).context(format!("Source '{}' worker cleanup", self.id))
+            })? {
+                crate::context::workers::WorkerCompletion::Completed(()) => {
                     info!("Source '{}' task completed successfully", self.id);
                 }
-                Ok(Err(e)) => {
-                    error!("Source '{}' task panicked: {}", self.id, e);
+                crate::context::workers::WorkerCompletion::Cancelled => {
+                    warn!("Source '{}' cancelled task has been joined", self.id);
                 }
-                Err(_) => {
-                    warn!(
-                        "Source '{}' task did not complete within timeout, aborting",
-                        self.id
-                    );
-                    handle.abort();
-                }
+                crate::context::workers::WorkerCompletion::Absent => {}
             }
         }
 
@@ -1633,10 +1803,7 @@ impl SourceBase {
         //
         // Broadcast mode keeps a single persistent dispatcher that hands
         // out receivers; channel mode creates one dispatcher per subscriber.
-        if self.dispatch_mode == DispatchMode::Channel {
-            let mut dispatchers = self.dispatchers.write().await;
-            dispatchers.clear();
-        }
+        self.clear_dispatchers().await;
 
         self.set_status(
             ComponentStatus::Stopped,
@@ -1728,7 +1895,7 @@ mod tests {
     use crate::sources::ByteLexPositionComparator;
 
     #[tokio::test]
-    async fn abort_and_join_task_releases_lock_before_joining() {
+    async fn abort_and_join_task_retains_ownership_until_joined() {
         struct DropProbe {
             base: SourceBase,
             dropped: Arc<AtomicBool>,
@@ -1737,8 +1904,8 @@ mod tests {
         impl Drop for DropProbe {
             fn drop(&mut self) {
                 assert!(
-                    self.base.task_handle.try_write().is_ok(),
-                    "joining must not hold the task-handle lock"
+                    self.base.task_handle.try_write().is_err(),
+                    "joining must retain exclusive ownership of the task slot"
                 );
                 self.dropped.store(true, Ordering::SeqCst);
             }
@@ -1768,6 +1935,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_abort_and_join_retains_unfinished_task() {
+        let base = SourceBase::new(SourceBaseParams::new("cancelled-join")).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        crate::context::workers::spawn_owned_blocking_worker(&base.task_handle, move || {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+        })
+        .await
+        .unwrap();
+        ready.await.unwrap();
+        {
+            let stop = base.abort_and_join_task();
+            tokio::pin!(stop);
+            assert!(futures::poll!(&mut stop).is_pending());
+        }
+        assert!(base.task_handle.read().await.is_some());
+        assert!(
+            crate::context::workers::spawn_owned_worker(&base.task_handle, async {})
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        base.abort_and_join_task().await.unwrap();
+        assert!(base.task_handle.read().await.is_none());
+    }
+
+    #[tokio::test]
     async fn abort_and_join_task_preserves_panic() {
         let base = SourceBase::new(SourceBaseParams::new("panic-test")).unwrap();
         let task = tokio::spawn(async { panic!("task panic") });
@@ -1776,10 +1971,10 @@ mod tests {
         }
         base.set_task_handle(task).await;
         let error = base.abort_and_join_task().await.unwrap_err();
-        assert!(error
-            .downcast_ref::<tokio::task::JoinError>()
-            .unwrap()
-            .is_panic());
+        assert!(matches!(
+            error.downcast_ref(),
+            Some(crate::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+        ));
         assert!(base.task_handle.read().await.is_none());
     }
 
@@ -2445,13 +2640,16 @@ mod tests {
                 events.push(event);
             }
 
-            let queue = crate::queries::PriorityQueue::new(events.len());
+            let queue = crate::queries::priority_queue::QueryEventQueue::new(
+                events.len(),
+                ["timestamp-ties"],
+            )
+            .unwrap();
             for event in events.into_iter().rev() {
-                let entry = crate::queries::priority_queue::RankedSourceEvent::new(event, 0);
-                assert!(queue.enqueue(Arc::new(entry)).await);
+                assert!(queue.enqueue(event).await.unwrap());
             }
             for (index, expected_timestamp) in expected_timestamps.into_iter().enumerate() {
-                let event = queue.try_dequeue().await.unwrap();
+                let event = queue.dequeue().await;
                 assert_eq!(event.timestamp, expected_timestamp);
                 assert_eq!(event.sequence, index as u64 + 1);
             }
@@ -2459,12 +2657,12 @@ mod tests {
     }
 
     /// Regression test for issue #640: dispatching changes concurrently on a
-    /// single source must not silently drop any via `SequenceDedup`.
+    /// single source must preserve order relative to a saved checkpoint.
     ///
     /// Before the per-source dispatch serialization, two concurrent
     /// `dispatch_source_change` calls could assign sequences in one order but
-    /// reach the subscriber in the opposite order. The query processor's
-    /// `SequenceDedup` then treats the later-delivered, lower-numbered event as
+    /// reach the subscriber in the opposite order. A checkpoint comparison
+    /// then treats the later-delivered, lower-numbered event as
     /// an already-processed replay and drops it. With serialized dispatch,
     /// delivery order matches sequence order, so nothing is dropped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2504,27 +2702,18 @@ mod tests {
                 handle.await.unwrap();
             }
 
-            // Drain the subscriber in delivery order and run the events through a
-            // fresh `SequenceDedup`, mirroring the query processor loop.
-            let mut dedup = crate::queries::SequenceDedup::default();
             let mut delivered_sequences = Vec::new();
             let mut delivered_timestamps = Vec::new();
-            let mut dropped = 0usize;
             for _ in 0..EVENTS_PER_TRIAL {
                 let event = receiver.recv().await.unwrap();
-                let seq = event.sequence;
-                if dedup.should_skip("concurrent-src", seq) {
-                    dropped += 1;
-                    continue;
-                }
-                dedup.advance("concurrent-src", seq);
-                delivered_sequences.push(seq);
+                delivered_sequences.push(event.sequence);
                 delivered_timestamps.push(event.timestamp);
             }
 
             assert_eq!(
-                dropped, 0,
-                "trial {trial}: SequenceDedup dropped {dropped} concurrently dispatched event(s)"
+                delivered_sequences,
+                (1..=EVENTS_PER_TRIAL).collect::<Vec<_>>(),
+                "trial {trial}: dispatch must deliver every allocated sequence in order"
             );
             assert_eq!(
                 delivered_sequences.len() as u64,
@@ -2554,7 +2743,7 @@ mod tests {
     /// received the same serialization fix as `dispatch_event`. Dispatching
     /// batches concurrently on one source must likewise deliver every event in
     /// strictly increasing sequence order with nothing dropped by
-    /// `SequenceDedup`.
+    /// the checkpoint comparison model used by this source-level test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_batch_dispatch_preserves_sequence_order() {
         const BATCHES_PER_TRIAL: u64 = 20;
@@ -2609,23 +2798,16 @@ mod tests {
             }
 
             let total = BATCHES_PER_TRIAL * EVENTS_PER_BATCH;
-            let mut dedup = crate::queries::SequenceDedup::default();
             let mut delivered = Vec::new();
-            let mut dropped = 0usize;
             for _ in 0..total {
                 let event = receiver.recv().await.unwrap();
-                let seq = event.sequence;
-                if dedup.should_skip("concurrent-batch-src", seq) {
-                    dropped += 1;
-                    continue;
-                }
-                dedup.advance("concurrent-batch-src", seq);
-                delivered.push(seq);
+                delivered.push(event.sequence);
             }
 
             assert_eq!(
-                dropped, 0,
-                "trial {trial}: SequenceDedup dropped {dropped} batched event(s)"
+                delivered,
+                (1..=total).collect::<Vec<_>>(),
+                "trial {trial}: batch dispatch must deliver every allocated sequence in order"
             );
             assert_eq!(
                 delivered.len() as u64,
@@ -3329,8 +3511,8 @@ mod tests {
             "high-water mark should be set after first dispatch"
         );
 
-        // Stop: clear dispatchers — the stale [0x30] mark for index 0 must go.
-        base.clear_dispatchers().await;
+        // Stop: the stale [0x30] mark for index 0 must go with its dispatcher.
+        base.stop_common().await.unwrap();
         assert!(
             base.subscriber_resume_positions.read().await.is_empty(),
             "clear_dispatchers must reset per-subscriber position filter state"
@@ -3558,7 +3740,7 @@ mod tests {
                 Ok(0)
             }
             async fn head_sequence(&self, _source_id: &str) -> Result<u64, crate::wal::WalError> {
-                Ok(0)
+                Ok(700)
             }
             async fn oldest_sequence(
                 &self,
@@ -3600,10 +3782,10 @@ mod tests {
         );
     }
 
-    /// End-to-end regression proof for #827: after a restart resume, the sequences
+    /// Source-level regression for #827: after a restart resume, the sequences
     /// SourceBase *fills in* for a source that omits them must land strictly above
-    /// the query's checkpoint, so the real `SequenceDedup` filter does not drop
-    /// them as stale replays. This exercises the actual bug, not just the plumbing.
+    /// the supplied query checkpoint. Full query recovery is checked by the
+    /// runtime suites; this test independently checks the assigned sequence.
     #[tokio::test]
     async fn test_filled_sequences_survive_dedup_after_restart() {
         let source_id = "dedup-restart";
@@ -3624,13 +3806,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Seed the dedup filter exactly as the query manager does on resume.
-        let dedup = crate::queries::SequenceDedup::new(
-            std::iter::once((source_id.to_string(), checkpoint)).collect(),
-        );
-
         // The source omits its own sequence; SourceBase fills one in on dispatch.
-        for _ in 0..3 {
+        for offset in 1..=3 {
             base.dispatch_event(make_event(&base, Some(&[0x01])))
                 .await
                 .unwrap();
@@ -3640,10 +3817,7 @@ mod tests {
                 seq > checkpoint,
                 "filled-in sequence {seq} must exceed checkpoint {checkpoint}"
             );
-            assert!(
-                !dedup.should_skip(source_id, ev.sequence),
-                "post-restart event (seq {seq}) must NOT be dropped by dedup (checkpoint {checkpoint})"
-            );
+            assert_eq!(seq, checkpoint + offset);
         }
     }
 }

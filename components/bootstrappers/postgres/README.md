@@ -2,6 +2,14 @@
 
 A bootstrap provider for Drasi that reads initial data snapshots from PostgreSQL databases. This component enables continuous queries to start with a complete view of existing data before processing incremental changes.
 
+For native ComputationGraph hosting, use the separate
+[PostgreSQL bootstrap library](../../computation-plugins/bootstrappers/postgres).
+Its standalone `drasi.postgres/snapshot` factory uses ordinary SELECT privileges
+without a replication source or invented WAL watermark. Separate coordinated
+transaction/row factories bind actual query-owned progress and a committed
+snapshot/WAL boundary. All support static registration and independent cdylib loading; the callback API
+documented below remains the legacy standalone bootstrap contract.
+
 ## Overview
 
 The PostgreSQL Bootstrap Provider creates consistent point-in-time snapshots of PostgreSQL tables and streams the data to Drasi queries. It provides the foundation for continuous queries by establishing the initial state before change tracking begins.
@@ -311,7 +319,7 @@ let bootstrap = PostgresBootstrapProvider::builder()
 // Create query that will be bootstrapped
 let query = Query::cypher("user-monitor")
     .query("MATCH (u:User) WHERE u.active = true RETURN u")
-    .from_source("postgres-source")
+    .from_input("postgres-source")
     .build();
 
 // Bootstrap provider will populate initial state when query starts

@@ -1,5 +1,97 @@
 # Application Source
 
+## Native graph input
+
+`NativeApplicationSource::channel` provides bounded, volatile input directly to
+ComputationGraph. It reuses `ApplicationSourceHandle` and its graph-value builders,
+but the graph polls input itself: there is no `SourceBase`, dispatcher, forwarding
+task or second graph.
+
+```rust
+use std::num::NonZeroUsize;
+use drasi_lib::computation::v1::StreamId;
+use drasi_source_application::NativeApplicationSource;
+
+let (source, handle) = NativeApplicationSource::channel(
+    "my-instance",
+    "my-graph",
+    "input",
+    StreamId::try_new("input/out")?,
+    NonZeroUsize::new(64).unwrap(),
+)?;
+let output = source.output();
+// Add `source` to the graph and bind `output` to the same "input/out" stream.
+```
+
+Handles can be cloned, accept input before startup and while stopped, and apply
+backpressure at the actual configured capacity. Stop/start preserves the queued
+input and emission sequence. Cancelled reads do not consume the next event;
+encoding failures retain the admitted event for inspection/recovery.
+Custom immutable properties can be supplied with `with_properties`.
+Supply the actual owning instance/construction scope and graph ID. Each
+constructed source has a fresh volatile producer incarnation, retained across
+soft restarts but never presented as a restart-stable durable identity.
+
+This constructor is explicitly **volatile**. It does not claim WAL durability or
+process-restart replay. Use the separate durable constructor below when input
+acceptance must survive the configured failure scope.
+
+## Native durable input
+
+`NativeApplicationSource::durable` binds an existing `SourceAdmission` service.
+The graph owns acceptance, producer sessions, retry receipts, replay and retention
+through the existing persistent QoS channel. The application source adds no second
+WAL, publication task or pruning worker.
+
+Given an admission-enabled persistent `QosChannel`, bind its service to the source:
+
+```rust,ignore
+use drasi_lib::computation::v1::{ComponentId, PortId, SourceAdmission};
+use drasi_source_application::NativeApplicationSource;
+
+let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+let source = NativeApplicationSource::durable("input", admission.clone())?;
+let output = source.output();
+```
+
+The configured admission identity must name this source, its actual construction
+scope/graph and its `out` port/stream. Every outgoing edge must use this same
+channel, not another journal with equivalent settings or a memory-only bypass.
+See [graph-owned source binding](../../../lib/docs/computation-graph-qos.md#graph-owned-source-binding)
+for channel configuration and lifecycle requirements.
+
+After the graph activates the source, producers submit native graph-change
+envelopes through the retained service:
+
+```rust,ignore
+let session = admission.register_producer(ComponentId::try_new("client")?).await?;
+let receipt = admission.admit(&session, 1, &envelope).await?;
+```
+
+**Durable calls reject before activation and while stopped.** This deliberately
+differs from the volatile handle's stopped-buffering behavior. Soft restart
+preserves sessions and receipts; persistent reopen preserves accepted input and
+its producer identity. Retrying a retained sequence with identical content returns
+the same receipt without appending again. Changed content is a conflict. Resolve
+unknown acceptance with the same session and sequence before advancing; only a
+definite rejection such as `Busy` permits a new submission attempt.
+
+Receipts prove input acceptance for the channel's configured failure scope, not
+query completion or an application's external side effect. Durable callers use
+the admission service; `get_handle()` returns `None` in this mode.
+
+Live graph removal does not bypass queued-work drain. An attempted removal with
+unhandled input retains the nodes, journal and subscriber obligations; drain the
+input before retrying. Removing stopped, drained components does not shut down a
+borrowed journal or erase its producer receipts. A new admission binding can reuse
+that journal, while the old component/admission handles remain inactive.
+Producer retirement is separate: it rejects pending subscriber obligations and
+invalidates the old session even if the producer name is registered again.
+
+The native source, bootstrap and reaction implementations are available, but
+their host/API cutover is still in progress. Existing `ApplicationSource` callers
+below have not yet been retired.
+
 ## Overview
 
 The Application Source is a programmatic data injection plugin for Drasi that enables direct, in-process delivery of graph data changes from Rust applications. Unlike network-based sources (HTTP, gRPC) or database-connected sources (PostgreSQL), the Application Source provides a native Rust API through a cloneable handle pattern, allowing any part of your application to send graph events directly into Drasi's continuous query processing pipeline.
@@ -40,6 +132,7 @@ use std::collections::HashMap;
 // Create minimal configuration
 let config = ApplicationSourceConfig {
     properties: HashMap::new(),
+    durability: None,
 };
 
 // Create source and handle
@@ -55,6 +148,8 @@ source.set_bootstrap_provider(Box::new(my_bootstrap_provider)).await;
 pub struct ApplicationSourceConfig {
     /// Application-specific properties (flexible key-value map)
     pub properties: HashMap<String, serde_json::Value>,
+    /// Optional WAL-before-acknowledgement persistence for injected events.
+    pub durability: Option<drasi_lib::DurabilityConfig>,
 }
 ```
 
@@ -68,6 +163,19 @@ pub struct ApplicationSourceConfig {
 **Note**: The Application Source has minimal configuration requirements since it operates entirely in-process. The `properties` field is primarily for metadata and custom application logic.
 
 **Auto-Start Behavior**: When `auto_start=true` (default), the source starts immediately if added to a running DrasiLib instance. If added before `drasi.start()` is called, it starts when the DrasiLib starts. When `auto_start=false`, the source must be started manually via `drasi.start_source("source-id")`.
+
+### Stop, restart and durable readiness
+
+Stopping the source joins its processing and WAL-pruning tasks without destroying
+the input receiver. Existing handles remain usable, queued input survives a
+same-instance restart, and an interrupted dispatch retains its original event
+and sequence. The bounded input queue still applies backpressure while stopped.
+
+When WAL durability is enabled, `send()` rejects input until a successful source
+start has initialized the WAL. A failed WAL-head read fails startup rather than
+pretending the log is empty. Once initialized, input submitted while stopped is
+still persisted before `send()` acknowledges it; source restart resumes that
+same log. Without durability, queued input survives stop/start, not process death.
 
 ## Input Schema
 
@@ -128,10 +236,14 @@ The Application Source processes three types of graph changes:
    SourceChange::Insert { element: Element }
    ```
 
-2. **Update**: Modify an existing node or relationship (full replacement)
+2. **Update**: Patch an existing node or relationship: the element's properties are
+   set (null is stored as a value) and every other property stays unchanged
    ```rust
-   SourceChange::Update { element: Element }
+   SourceChange::update(element)
    ```
+   Use `SourceChange::update_with_removals(element, removed_property_names)` to
+   delete properties, or `SourceChange::replace(element)` for a full replacement
+   that drops every omitted property.
 
 3. **Delete**: Remove a node or relationship
    ```rust
@@ -334,7 +446,7 @@ drasi.add_source(Arc::new(source)).await?;
 // Define a query that uses the source
 let query = drasi.create_query("high-temp-sensors")
     .cypher("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s")
-    .from_source("events")
+    .from_input("events")
     .build()
     .await?;
 

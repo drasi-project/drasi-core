@@ -154,7 +154,7 @@ impl LifecycleState {
                 if is_insert {
                     changes.push(SourceChange::Insert { element });
                 } else {
-                    changes.push(SourceChange::Update { element });
+                    changes.push(SourceChange::update(element));
                 }
             }
         }

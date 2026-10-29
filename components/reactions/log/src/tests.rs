@@ -17,9 +17,120 @@ mod tests {
     use crate::config::{QueryConfig, TemplateSpec};
     use crate::{LogReaction, LogReactionConfig};
     use drasi_lib::channels::ComponentStatus;
+    use drasi_lib::context::workers::{spawn_owned_worker, WorkerAlreadyOwned, WorkerCleanupError};
     use drasi_lib::recovery::ReactionRecoveryPolicy;
     use drasi_lib::Reaction;
     use std::collections::HashMap;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_restarts_join_the_previous_processor() -> anyhow::Result<()> {
+        let reaction = LogReaction::builder("log-restart")
+            .with_query("q1")
+            .build()?;
+        reaction.stop().await?;
+        for sequence in 1..=3 {
+            reaction.start().await?;
+            assert!(reaction
+                .start()
+                .await
+                .unwrap_err()
+                .is::<WorkerAlreadyOwned>());
+            reaction
+                .enqueue_query_result(drasi_lib::channels::QueryResult::new(
+                    "q1".into(),
+                    sequence,
+                    chrono::Utc::now(),
+                    vec![drasi_lib::channels::ResultDiff::Add {
+                        data: serde_json::json!({"id":sequence}),
+                        row_signature: sequence,
+                    }],
+                    HashMap::new(),
+                ))
+                .await?;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !reaction.base.priority_queue.is_empty().await {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            tokio::time::timeout(Duration::from_secs(1), reaction.stop()).await??;
+            assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+            assert!(reaction.base.processing_task.read().await.is_none());
+        }
+        reaction.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_log_start_and_worker_cleanup_block_replacement() -> anyhow::Result<()> {
+        let reaction = LogReaction::builder("log-cleanup").build()?;
+        let shutdown = reaction.base.shutdown_tx.write().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reaction.start())
+                .await
+                .is_err()
+        );
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .is::<WorkerAlreadyOwned>());
+        drop(shutdown);
+        reaction.stop().await?;
+
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        spawn_owned_worker(&reaction.base.processing_task, async move {
+            wait.await.expect("release log worker");
+        })
+        .await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reaction.stop())
+                .await
+                .is_err()
+        );
+        let error = reaction.stop().await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WorkerCleanupError>(),
+            Some(WorkerCleanupError::TimedOut { .. })
+        ));
+        tokio::task::yield_now().await;
+        assert!(!reaction
+            .base
+            .processing_task
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .is::<WorkerAlreadyOwned>());
+        release.send(()).expect("live worker");
+        reaction.stop().await?;
+
+        spawn_owned_worker(&reaction.base.processing_task, async {
+            panic!("log worker failed")
+        })
+        .await?;
+        let error = reaction.stop().await.unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<WorkerCleanupError>(), Some(WorkerCleanupError::Join(cause)) if cause.is_panic())
+        );
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .is::<WorkerAlreadyOwned>());
+        reaction.stop().await?;
+        reaction.start().await?;
+        reaction.stop().await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_log_reaction_creation() {

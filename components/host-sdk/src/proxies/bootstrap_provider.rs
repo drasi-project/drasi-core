@@ -59,8 +59,10 @@ impl BootstrapProvider for BootstrapProviderProxy {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
-        _settings: Option<&SourceSubscriptionSettings>,
+        settings: Option<&SourceSubscriptionSettings>,
     ) -> anyhow::Result<BootstrapResult> {
+        let settings_json = serde_json::to_string(&settings)?;
+        let properties_json = serde_json::to_string(context.properties())?;
         // Start the provider and take ownership of the stream handles inside a
         // block so no raw pointer is held across an await point. The guard
         // keeps the result callback context alive until the result is read.
@@ -87,6 +89,8 @@ impl BootstrapProvider for BootstrapProviderProxy {
                 FfiStr::from_str(&request.request_id),
                 FfiStr::from_str(&context.server_id),
                 FfiStr::from_str(&context.source_id),
+                FfiStr::from_str(&settings_json),
+                FfiStr::from_str(&properties_json),
             );
 
             if stream_ptr.is_null() {

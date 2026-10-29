@@ -32,13 +32,13 @@
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
+use crate::channels::ComponentStatusHandle;
 use crate::channels::{ComponentStatus, QueryResult};
-use crate::component_graph::ComponentStatusHandle;
-use crate::context::ReactionRuntimeContext;
+use crate::context::{ComponentResource, ReactionRuntimeContext};
 use crate::identity::IdentityProvider;
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::reactions::common::checkpoint_state::{CheckpointState, FailureAction};
@@ -52,7 +52,7 @@ use crate::state_store::StateStoreProvider;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 ///
 /// let params = ReactionBaseParams::new("my-reaction", vec!["query1".to_string()])
@@ -120,6 +120,8 @@ pub struct ReactionBase {
     status_handle: ComponentStatusHandle,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
+    /// Serializes inventory snapshots so concurrent setters cannot publish stale state.
+    resource_report_lock: Arc<Mutex<()>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
@@ -153,6 +155,7 @@ impl ReactionBase {
             recovery_policy: params.recovery_policy,
             status_handle: ComponentStatusHandle::new(&params.id),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
+            resource_report_lock: Arc::new(Mutex::new(())),
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
@@ -171,6 +174,7 @@ impl ReactionBase {
     /// - `reaction_id`: The reaction's unique identifier
     /// - `state_store`: Optional persistent state storage
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
+    /// - `resource_observer`: Optional reporting of the actual selected providers
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -188,6 +192,35 @@ impl ReactionBase {
             if guard.is_none() {
                 *guard = Some(ip.clone());
             }
+        }
+
+        self.report_resources().await;
+    }
+
+    async fn report_resources(&self) {
+        let _report_guard = self.resource_report_lock.lock().await;
+        let Some(context) = self.context().await else {
+            return;
+        };
+        let Some(observer) = context.resource_observer else {
+            return;
+        };
+
+        let mut resources = Vec::new();
+        if let Some(provider) = self.identity_provider().await {
+            resources.push(ComponentResource::Identity(provider));
+        }
+        if let Some(provider) = self.state_store().await {
+            resources.push(ComponentResource::StateStore(provider));
+        }
+
+        if let Err(error) = observer.observe(resources).await {
+            let message = format!(
+                "Reaction '{}' failed to report component resources: {error:#}",
+                self.id
+            );
+            error!("{message}");
+            self.set_status(ComponentStatus::Error, Some(message)).await;
         }
     }
 
@@ -219,8 +252,10 @@ impl ReactionBase {
     /// This is typically called during reaction construction when the provider
     /// is available from configuration (e.g., `with_identity_provider()` builder).
     /// Providers set this way take precedence over context-injected providers.
+    /// An initialized computation context is notified of the updated inventory.
     pub async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
         *self.identity_provider.write().await = Some(provider);
+        self.report_resources().await;
     }
 
     /// Get whether this reaction should auto-start
@@ -280,6 +315,7 @@ impl ReactionBase {
             recovery_policy: self.recovery_policy,
             status_handle: self.status_handle.clone(),
             context: self.context.clone(),
+            resource_report_lock: self.resource_report_lock.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
@@ -406,10 +442,27 @@ impl ReactionBase {
     ///
     /// This method handles:
     /// 1. Sending shutdown signal to processing task (for graceful termination)
-    /// 2. Aborting all subscription forwarder tasks
-    /// 3. Waiting for or aborting the processing task
+    /// 2. Aborting and joining all subscription forwarder tasks
+    /// 3. Joining the processing task, retaining ownership on cancellation/timeout
     /// 4. Draining the priority queue
     pub async fn stop_common(&self) -> Result<()> {
+        self.stop_common_with_policy(false).await
+    }
+
+    /// Stops without aborting a processor that must finish in-flight effects.
+    ///
+    /// Timeout and cancellation retain ownership. Callers must prevent restart
+    /// until this method and any additional component cleanup have succeeded.
+    pub async fn stop_common_gracefully(&self) -> Result<()> {
+        self.set_status(
+            ComponentStatus::Stopping,
+            Some(format!("Stopping reaction '{}'", self.id)),
+        )
+        .await;
+        self.stop_common_with_policy(true).await
+    }
+
+    async fn stop_common_with_policy(&self, graceful: bool) -> Result<()> {
         info!("Stopping reaction: {}", self.id);
 
         // Send shutdown signal to processing task (if it's using tokio::select!)
@@ -417,36 +470,41 @@ impl ReactionBase {
             let _ = tx.send(());
         }
 
-        // Abort all subscription forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for task in subscription_tasks.drain(..) {
-            task.abort();
+        {
+            let mut subscription_tasks = self.subscription_tasks.write().await;
+            crate::context::workers::cancel_owned_workers(
+                &mut subscription_tasks,
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(error).context(format!(
+                    "Reaction '{}' subscription worker cleanup",
+                    self.id
+                ))
+            })?;
         }
-        drop(subscription_tasks);
-
-        // Wait for the processing task to complete (with timeout), or abort it
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(mut task) = processing_task.take() {
-            // Give the task a short time to respond to the shutdown signal
-            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
-                Ok(Ok(())) => {
+        {
+            let mut task = self.processing_task.write().await;
+            let timeout = std::time::Duration::from_secs(2);
+            let completion = if graceful {
+                crate::context::workers::join_owned_worker_gracefully(&mut task, timeout).await
+            } else {
+                crate::context::workers::join_owned_worker(&mut task, timeout).await
+            };
+            match completion.map_err(|error| {
+                anyhow::Error::new(error)
+                    .context(format!("Reaction '{}' processing worker cleanup", self.id))
+            })? {
+                crate::context::workers::WorkerCompletion::Completed(()) => {
                     debug!("[{}] Processing task completed gracefully", self.id);
                 }
-                Ok(Err(e)) => {
-                    // Task was aborted or panicked
-                    debug!("[{}] Processing task ended: {}", self.id, e);
+                crate::context::workers::WorkerCompletion::Cancelled => {
+                    warn!("[{}] Cancelled processing task has been joined", self.id);
                 }
-                Err(_) => {
-                    // Timeout - task didn't respond to shutdown signal
-                    warn!(
-                        "[{}] Processing task did not respond to shutdown signal within timeout, aborting",
-                        self.id
-                    );
-                    task.abort();
-                }
+                crate::context::workers::WorkerCompletion::Absent => {}
             }
         }
-        drop(processing_task);
 
         // Drain the priority queue
         let drained_events = self.priority_queue.drain().await;
@@ -521,7 +579,7 @@ impl ReactionBase {
     /// 7. Breaks when `shutdown_rx` fires.
     ///
     /// # Arguments
-    /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
+    /// * `shutdown_rx` — receiver created via [`Self::create_shutdown_channel`].
     /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
     ///   orchestration). The loop uses these for dedup and preserves each
     ///   query's `config_hash` when advancing the sequence.
@@ -730,9 +788,7 @@ mod tests {
     async fn test_status_transitions() {
         use crate::context::ReactionRuntimeContext;
 
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(RwLock::new(graph));
+        let (update_tx, mut updates) = tokio::sync::mpsc::channel(32);
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
@@ -748,13 +804,24 @@ mod tests {
 
         assert_eq!(base.get_status().await, ComponentStatus::Starting);
 
-        // Check event was sent via graph broadcast
-        let mut event_rx = graph.read().await.subscribe();
-        // The status was already set; emit another event to verify the graph path works
+        assert!(matches!(
+            updates.recv().await,
+            Some(crate::channels::ComponentUpdate::Status {
+                status: ComponentStatus::Starting,
+                ..
+            })
+        ));
         base.set_status(ComponentStatus::Running, Some("Running test".to_string()))
             .await;
 
         assert_eq!(base.get_status().await, ComponentStatus::Running);
+        assert!(matches!(
+            updates.recv().await,
+            Some(crate::channels::ComponentUpdate::Status {
+                status: ComponentStatus::Running,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -884,6 +951,59 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn graceful_stop_retains_a_submitted_blocking_operation() -> Result<()> {
+        use crate::context::workers::{spawn_owned_worker, WorkerCleanupError};
+
+        let base = ReactionBase::new(ReactionBaseParams::new("blocking-effect", vec![]));
+        base.set_status(ComponentStatus::Running, None).await;
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        spawn_owned_worker(&base.processing_task, {
+            let completed = completed.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    started.send(()).expect("blocking operation started");
+                    let _ = blocked.recv();
+                    completed.store(true, Ordering::SeqCst);
+                })
+                .await
+                .expect("submitted operation joined");
+            }
+        })
+        .await?;
+        ready.await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), base.stop_common_gracefully(),)
+                .await
+                .is_err()
+        );
+        let error = base.stop_common_gracefully().await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WorkerCleanupError>(),
+            Some(WorkerCleanupError::TimedOut { .. })
+        ));
+        tokio::task::yield_now().await;
+        assert!(!base
+            .processing_task
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        assert!(!completed.load(Ordering::SeqCst));
+        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
+
+        release.send(())?;
+        base.stop_common_gracefully().await?;
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(base.processing_task.read().await.is_none());
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+        base.stop_common_gracefully().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_graceful_shutdown_timing() {
         let params = ReactionBaseParams::new("test-reaction", vec![]);
@@ -992,8 +1112,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_some_after_initialize() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
         let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
 
         let params = ReactionBaseParams::new("r1", vec![]);
@@ -1014,8 +1133,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_store_none_after_initialize_without_store() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
         let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
 
         let params = ReactionBaseParams::new("r1", vec![]);
@@ -1093,8 +1211,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_read_write_round_trip() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params =
             ReactionBaseParams::new("ckpt-reaction", vec!["q1".to_string(), "q2".to_string()]);
@@ -1167,8 +1284,7 @@ mod tests {
     async fn test_run_standard_loop_dedup_and_checkpoint() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-reaction", vec!["q1".to_string()]);
         let base = ReactionBase::new(params);
@@ -1263,8 +1379,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_handler_error_does_not_advance_checkpoint() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-fail", vec!["q1".to_string()])
             .with_recovery_policy(ReactionRecoveryPolicy::Strict);
@@ -1339,8 +1454,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_autoskip_advances_past_failed_side_effect() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-skip", vec!["q1".to_string()])
             .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap);
@@ -1417,8 +1531,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_autoreset_retries_then_advances_checkpoint() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-reset", vec!["q1".to_string()])
             .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
@@ -1495,8 +1608,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_uses_passed_policy_not_strict_default() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         // No per-instance override on ReactionBaseParams.
         let params = ReactionBaseParams::new("loop-trait-default", vec!["q1".to_string()]);

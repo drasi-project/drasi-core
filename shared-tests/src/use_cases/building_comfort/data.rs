@@ -133,6 +133,7 @@ pub fn insert_tutorial_node(
 
 pub fn update_tutorial_node(id: &str, label: &str, properties: serde_json::Value) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: tutorial_node(id, label, properties, 2000),
     }
 }

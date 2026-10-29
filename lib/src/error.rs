@@ -32,6 +32,10 @@
 //! `DrasiError::Internal(#[from] anyhow::Error)` auto-converts internal `anyhow` errors
 //! at the public API boundary via the `?` operator. For errors with known semantics, use
 //! the structured variants directly (e.g., `DrasiError::invalid_state()`).
+//! When translating an existing failure, attach it with [`DrasiError::with_cause`]
+//! rather than discarding it after formatting. Such errors use the existing
+//! `Internal` carrier; match [`DrasiError::classification`] for the public category
+//! and use [`DrasiError::downcast_ref`] for the retained typed cause.
 //!
 //! ## Rules
 //!
@@ -43,26 +47,61 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rust
 //! use drasi_lib::error::{DrasiError, Result};
 //!
-//! fn example() -> Result<()> {
-//!     // Pattern match on specific error variants
+//! fn example(some_operation: impl FnOnce() -> Result<()>) -> Result<()> {
 //!     match some_operation() {
-//!         Err(DrasiError::ComponentNotFound { component_type, component_id }) => {
-//!             println!("{} '{}' not found", component_type, component_id);
-//!         }
-//!         Err(DrasiError::InvalidState { message }) => {
-//!             println!("Invalid state: {}", message);
-//!         }
-//!         Err(e) => return Err(e),
+//!         Err(error) => match error.classification() {
+//!             DrasiError::ComponentNotFound { component_type, component_id } => {
+//!                 println!("{} '{}' not found", component_type, component_id);
+//!             }
+//!             DrasiError::InvalidState { message } => {
+//!                 println!("Invalid state: {}", message);
+//!             }
+//!             _ => return Err(error),
+//!         },
 //!         Ok(v) => { /* ... */ }
 //!     }
 //!     Ok(())
 //! }
+//! # example(|| Err(DrasiError::component_not_found("source", "example")))?;
+//! # Ok::<(), DrasiError>(())
 //! ```
 
 use thiserror::Error;
+
+/// Startup accepted work, but not every requested component became available.
+/// The instance remains running so callers can inspect failures and call `stop`
+/// or `shutdown`; retry `start` only after stopping it.
+#[derive(Debug, Error)]
+#[error(
+    "instance startup was partial; inspect component failures and stop before restarting: {cause}"
+)]
+#[non_exhaustive]
+pub struct PartialStartError {
+    #[source]
+    pub cause: anyhow::Error,
+}
+
+/// Typed lookup failure carried through internal `anyhow` errors.
+///
+/// Public API boundaries can downcast to this cause without parsing messages.
+#[derive(Debug, Error)]
+#[error("{component_type} not found: {component_id}")]
+pub struct ComponentNotFoundError {
+    pub component_type: &'static str,
+    pub component_id: String,
+}
+
+impl ComponentNotFoundError {
+    pub fn new(component_type: &'static str, component_id: impl Into<String>) -> Self {
+        Self {
+            component_type,
+            component_id: component_id.into(),
+        }
+    }
+}
 
 /// Main error type for drasi-lib operations.
 ///
@@ -133,11 +172,60 @@ pub enum DrasiError {
 // ============================================================================
 
 impl DrasiError {
+    /// Attach an underlying failure without changing this error's public category.
+    ///
+    /// The returned variant is `Internal`, since the other existing variants have
+    /// no source field. Use [`Self::classification`] rather than matching the outer
+    /// variant when handling errors returned by library operations.
+    pub fn with_cause(self, cause: impl Into<anyhow::Error>) -> Self {
+        Self::Internal(cause.into().context(self))
+    }
+
+    /// Return the outermost structured public category, including through contexts.
+    /// An unclassified internal error returns itself.
+    pub fn classification(&self) -> &Self {
+        match self {
+            Self::Internal(error) => error
+                .downcast_ref::<Self>()
+                .map_or(self, Self::classification),
+            _ => self,
+        }
+    }
+
+    /// Find a retained typed cause, including `anyhow` contexts and nested sources.
+    ///
+    /// Errors can contain several failures (for example `GraphError::Cleanup`).
+    /// Downcast to that aggregate to inspect all failures; the standard source
+    /// chain alone represents only its primary failure.
+    pub fn downcast_ref<E: std::error::Error + Send + Sync + 'static>(&self) -> Option<&E> {
+        match self {
+            Self::Internal(error) => error
+                .downcast_ref::<E>()
+                .or_else(|| {
+                    error
+                        .downcast_ref::<Self>()
+                        .and_then(Self::downcast_ref::<E>)
+                })
+                .or_else(|| {
+                    error.chain().find_map(|cause| {
+                        cause.downcast_ref::<E>().or_else(|| {
+                            cause
+                                .downcast_ref::<Self>()
+                                .and_then(Self::downcast_ref::<E>)
+                        })
+                    })
+                }),
+            _ => None,
+        }
+    }
+
     /// Create a component not found error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::component_not_found("source", "my-source-id")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::component_not_found("source", "my-source-id");
+    /// assert!(matches!(error, DrasiError::ComponentNotFound { .. }));
     /// ```
     pub fn component_not_found(
         component_type: impl Into<String>,
@@ -152,8 +240,10 @@ impl DrasiError {
     /// Create an already exists error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::already_exists("query", "my-query-id")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::already_exists("query", "my-query-id");
+    /// assert!(matches!(error, DrasiError::AlreadyExists { .. }));
     /// ```
     pub fn already_exists(
         component_type: impl Into<String>,
@@ -168,8 +258,10 @@ impl DrasiError {
     /// Create an invalid configuration error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::invalid_config("Missing required field 'query'")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::invalid_config("Missing required field 'query'");
+    /// assert!(matches!(error, DrasiError::InvalidConfig { .. }));
     /// ```
     pub fn invalid_config(message: impl Into<String>) -> Self {
         DrasiError::InvalidConfig {
@@ -180,8 +272,10 @@ impl DrasiError {
     /// Create an invalid state error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::invalid_state("Server must be initialized before starting")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::invalid_state("Server must be initialized before starting");
+    /// assert!(matches!(error, DrasiError::InvalidState { .. }));
     /// ```
     pub fn invalid_state(message: impl Into<String>) -> Self {
         DrasiError::InvalidState {
@@ -192,8 +286,10 @@ impl DrasiError {
     /// Create a validation error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::validation("Query string cannot be empty")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::validation("Query string cannot be empty");
+    /// assert!(matches!(error, DrasiError::Validation { .. }));
     /// ```
     pub fn validation(message: impl Into<String>) -> Self {
         DrasiError::Validation {
@@ -204,8 +300,10 @@ impl DrasiError {
     /// Create an operation failed error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::operation_failed("source", "my-source", "start", "Connection refused")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::operation_failed("source", "my-source", "start", "Connection refused");
+    /// assert!(matches!(error, DrasiError::OperationFailed { .. }));
     /// ```
     pub fn operation_failed(
         component_type: impl Into<String>,
@@ -220,10 +318,6 @@ impl DrasiError {
             reason: reason.into(),
         }
     }
-
-    // ========================================================================
-    // Backward compatibility helpers (deprecated, use structured variants)
-    // ========================================================================
 }
 
 /// Result type for drasi-lib operations.
@@ -231,6 +325,29 @@ impl DrasiError {
 /// This is the standard result type for all public API methods in drasi-lib.
 /// It uses `DrasiError` which supports pattern matching on specific error variants.
 pub type Result<T> = std::result::Result<T, DrasiError>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedError(std::sync::Arc<anyhow::Error>);
+
+impl From<anyhow::Error> for RetainedError {
+    fn from(error: anyhow::Error) -> Self {
+        Self(std::sync::Arc::new(error))
+    }
+}
+
+impl std::fmt::Display for RetainedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for RetainedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref().as_ref())
+    }
+}
+
+pub use drasi_computation_contracts::OperationFailures;
 
 // ============================================================================
 // Tests
@@ -286,6 +403,92 @@ mod tests {
         let drasi_err: DrasiError = anyhow_err.into();
         assert!(matches!(drasi_err, DrasiError::Internal(_)));
         assert!(drasi_err.to_string().contains("Something went wrong"));
+    }
+
+    #[test]
+    fn public_classification_and_typed_cause_survive_contexts() {
+        let cause = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "checkpoint denied",
+        ))
+        .context("saving checkpoint");
+        let error = DrasiError::operation_failed("source", "input", "stop", cause.to_string())
+            .with_cause(cause);
+        let error = DrasiError::from(anyhow::Error::new(error).context("outer operation"));
+        assert!(matches!(
+            error.classification(),
+            DrasiError::OperationFailed { component_type, component_id, operation, reason }
+                if component_type == "source" && component_id == "input"
+                    && operation == "stop" && reason == "saving checkpoint"
+        ));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn outer_public_classification_wins_over_inner_classification() {
+        let inner = DrasiError::invalid_state("not ready");
+        let error = DrasiError::operation_failed("query", "q", "start", inner.to_string())
+            .with_cause(inner);
+        assert!(matches!(
+            error.classification(),
+            DrasiError::OperationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn unclassified_internal_error_stays_internal() {
+        let error = DrasiError::from(anyhow::anyhow!("unclassified"));
+        assert!(std::ptr::eq(error.classification(), &error));
+        assert!(error.downcast_ref::<std::io::Error>().is_none());
+    }
+
+    #[test]
+    fn nested_internal_carriers_retain_the_root_error_not_only_its_source() {
+        use crate::computation::v1::{ComponentId, GraphError};
+
+        let graph_error = GraphError::Component {
+            component: ComponentId::try_new("input").unwrap(),
+            operation: "stop",
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
+        };
+        let inner = DrasiError::from(anyhow::Error::new(graph_error));
+        let error = DrasiError::from(anyhow::Error::new(inner).context("outer operation"));
+        assert!(matches!(
+            error.downcast_ref::<GraphError>(),
+            Some(GraphError::Component { .. })
+        ));
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+    }
+
+    #[test]
+    fn aggregate_retains_all_causes_and_primary_downcasting() {
+        use crate::context::workers::WorkerCleanupError;
+
+        let failures = OperationFailures::new(
+            "shutdown failed",
+            vec![
+                WorkerCleanupError::TimedOut {
+                    timeout: std::time::Duration::from_secs(2),
+                }
+                .into(),
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
+            ],
+        );
+        let error = DrasiError::operation_failed("source", "input", "stop", failures.to_string())
+            .with_cause(failures);
+        assert!(error.downcast_ref::<WorkerCleanupError>().is_some());
+        let failures = error
+            .downcast_ref::<OperationFailures>()
+            .unwrap()
+            .failures();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(
+            failures[1].downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

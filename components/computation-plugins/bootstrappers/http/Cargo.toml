@@ -1,0 +1,41 @@
+[package]
+name = "drasi-computation-bootstrap-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Native ComputationGraph HTTP bootstrap provider"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "1.0.0"
+kind = "bootstrap-http"
+
+[dependencies]
+drasi-computation-plugin-sdk = { workspace = true }
+drasi-computation-contracts = { workspace = true }
+drasi-core-types = { workspace = true }
+drasi-http-common = { workspace = true, features = ["bootstrap"] }
+anyhow = "1"
+async-trait = "0.1"
+chrono = "0.4"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+axum = "0.7"
+
+[lints]
+workspace = true

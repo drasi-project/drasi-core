@@ -109,7 +109,7 @@ fn item_change(
         })),
     };
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }
@@ -424,7 +424,7 @@ fn position_change(
         })),
     };
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }
@@ -699,6 +699,7 @@ async fn grouping_numeric_representation_update_keeps_one_identity() {
 
         let update = subject
             .process(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: grouped_position("p", after_group.clone(), 20, 2),
             })
             .await;
@@ -851,12 +852,14 @@ async fn grouping_numeric_compound_contributors_share_accumulators_and_drain() {
 
                 let unchanged = subject
                     .process(SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: grouped_position("p", second_group.clone(), 10, 3),
                     })
                     .await;
                 assert!(unchanged.is_empty(), "{unchanged:?}");
                 let changed = subject
                     .process(SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: grouped_position("p", second_group.clone(), 20, 4),
                     })
                     .await;
@@ -906,6 +909,7 @@ async fn grouping_numeric_precision_boundary_migrates_through_scalar_projection(
         let old_signature = first[0].row_signature();
         let migrated = subject
             .process(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: grouped_position("p", second_group, 10, 2),
             })
             .await;
@@ -978,6 +982,7 @@ async fn grouping_numeric_signed_and_large_positive_boundaries_are_distinct() {
     ] {
         let changes = subject
             .process(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: grouped_position(id, group, number, time),
             })
             .await;
@@ -1052,6 +1057,7 @@ async fn chained_aggregate_groups_replace_each_identity_domain() {
 
     let changed = subject
         .process(SourceChange::Update {
+            removed_properties: Default::default(),
             element: grouped_position("p", json!(["a", "x"]), 15, 4),
         })
         .await;
@@ -1064,6 +1070,7 @@ async fn chained_aggregate_groups_replace_each_identity_domain() {
 
     let migrated = subject
         .process(SourceChange::Update {
+            removed_properties: Default::default(),
             element: grouped_position("p", json!(["b", "z"]), 15, 5),
         })
         .await;
@@ -1207,6 +1214,7 @@ async fn grouping_lazy_extrema_use_typed_keys_and_stable_element_references() {
     let signature = first[0].row_signature();
     let changed = subject
         .process(SourceChange::Update {
+            removed_properties: Default::default(),
             element: grouped_position("p", json!(1), 20, 2),
         })
         .await;

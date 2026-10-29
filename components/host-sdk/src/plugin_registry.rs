@@ -48,6 +48,41 @@ impl<T: ?Sized> std::fmt::Debug for RegisteredDescriptor<T> {
     }
 }
 
+// Preserve the public RegisteredDescriptor shape while binding versions to
+// individual registrations, not a mutable plugin-ID-wide lookup.
+struct DescriptorRegistration<T: ?Sized> {
+    registration: RegisteredDescriptor<T>,
+    package_version: Option<String>,
+}
+
+impl<T: ?Sized> DescriptorRegistration<T> {
+    fn new(descriptor: Arc<T>, plugin_id: &str, package_version: Option<&str>) -> Self {
+        if package_version.is_some_and(str::is_empty) {
+            log::warn!(
+                "Plugin '{plugin_id}' supplied an empty package version; leaving it unknown"
+            );
+        }
+        Self {
+            registration: RegisteredDescriptor {
+                descriptor,
+                plugin_id: plugin_id.to_owned(),
+                registered_at: Utc::now(),
+            },
+            package_version: package_version
+                .filter(|version| !version.is_empty())
+                .map(str::to_owned),
+        }
+    }
+}
+
+impl<T: ?Sized> std::ops::Deref for DescriptorRegistration<T> {
+    type Target = RegisteredDescriptor<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.registration
+    }
+}
+
 /// Information about a registered plugin kind.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,11 +106,13 @@ pub struct PluginKindInfo {
 /// at runtime. The registry should be wrapped in `Arc<RwLock<PluginRegistry>>` for
 /// thread-safe access.
 pub struct PluginRegistry {
-    sources: HashMap<String, RegisteredDescriptor<dyn SourcePluginDescriptor>>,
-    reactions: HashMap<String, RegisteredDescriptor<dyn ReactionPluginDescriptor>>,
-    bootstrappers: HashMap<String, RegisteredDescriptor<dyn BootstrapPluginDescriptor>>,
-    identity_providers: HashMap<String, RegisteredDescriptor<dyn IdentityProviderPluginDescriptor>>,
-    secret_stores: HashMap<String, RegisteredDescriptor<dyn SecretStorePluginDescriptor>>,
+    sources: HashMap<String, DescriptorRegistration<dyn SourcePluginDescriptor>>,
+    reactions: HashMap<String, DescriptorRegistration<dyn ReactionPluginDescriptor>>,
+    bootstrappers: HashMap<String, DescriptorRegistration<dyn BootstrapPluginDescriptor>>,
+    identity_providers:
+        HashMap<String, DescriptorRegistration<dyn IdentityProviderPluginDescriptor>>,
+    secret_stores: HashMap<String, DescriptorRegistration<dyn SecretStorePluginDescriptor>>,
+    computation_plugins: std::collections::BTreeMap<String, Arc<crate::computation::NativePlugin>>,
     /// Monotonically increasing counter incremented on every mutation.
     /// Used by OpenAPI cache invalidation and other version-sensitive consumers.
     version: u64,
@@ -90,6 +127,7 @@ impl PluginRegistry {
             bootstrappers: HashMap::new(),
             identity_providers: HashMap::new(),
             secret_stores: HashMap::new(),
+            computation_plugins: std::collections::BTreeMap::new(),
             version: 0,
         }
     }
@@ -99,20 +137,161 @@ impl PluginRegistry {
         self.version
     }
 
+    pub fn register_computation_plugin(
+        &mut self,
+        plugin: Arc<crate::computation::NativePlugin>,
+    ) -> anyhow::Result<Vec<crate::plugin_types::PluginKindEntry>> {
+        let id = computation_plugin_id(plugin.metadata());
+        anyhow::ensure!(
+            !self.computation_plugins.contains_key(&id),
+            "native plugin {id} is already registered"
+        );
+        let mut factories = self.computation_factory_registry()?;
+        plugin.register_factories(&mut factories)?;
+        let existing = self.computation_bootstrap_factories()?;
+        for factory in plugin.bootstrap_factories() {
+            anyhow::ensure!(
+                !existing.contains_key(&factory.metadata().implementation),
+                "native bootstrap factory is already registered"
+            );
+        }
+        let kinds = plugin
+            .factories()
+            .iter()
+            .map(|factory| crate::plugin_types::PluginKindEntry {
+                category: crate::plugin_types::PluginCategory::Computation,
+                kind: factory.metadata().implementation.name.to_string(),
+                config_version: factory.metadata().configuration_version.to_string(),
+                config_schema_name: factory.metadata().implementation.name.to_string(),
+            })
+            .collect();
+        self.computation_plugins.insert(id, plugin);
+        self.version += 1;
+        Ok(kinds)
+    }
+
+    pub fn computation_plugin_metadata(&self) -> Vec<crate::computation::PluginMetadata> {
+        self.computation_plugins
+            .values()
+            .map(|plugin| plugin.metadata().clone())
+            .collect()
+    }
+
+    /// Registered native plugins, including their negotiated configuration details.
+    pub fn computation_plugins(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::computation::NativePlugin>> {
+        self.computation_plugins.values()
+    }
+
+    pub fn computation_factory_registry(
+        &self,
+    ) -> anyhow::Result<drasi_lib::computation::v1::FactoryRegistry> {
+        let mut registry = drasi_lib::computation::v1::FactoryRegistry::standard();
+        for plugin in self.computation_plugins.values() {
+            plugin.register_factories(&mut registry)?;
+        }
+        Ok(registry)
+    }
+
+    pub fn computation_bootstrap_metadata(
+        &self,
+    ) -> Vec<crate::computation::BootstrapFactoryMetadata> {
+        self.computation_plugins
+            .values()
+            .flat_map(|plugin| {
+                plugin
+                    .bootstrap_factories()
+                    .iter()
+                    .map(|factory| factory.metadata().clone())
+            })
+            .collect()
+    }
+
+    pub fn computation_consumer_metadata(
+        &self,
+    ) -> Vec<crate::computation::NativeConsumerFactoryMetadata> {
+        self.computation_plugins
+            .values()
+            .flat_map(|plugin| {
+                plugin.factories().iter().filter_map(|factory| {
+                    factory.consumer_mode().map(|mode| {
+                        crate::computation::NativeConsumerFactoryMetadata {
+                            implementation: factory.metadata().implementation.clone(),
+                            mode,
+                        }
+                    })
+                })
+            })
+            .collect()
+    }
+
+    pub fn computation_bootstrap_factories(
+        &self,
+    ) -> anyhow::Result<crate::computation::NativeBootstrapFactories> {
+        let mut factories = crate::computation::NativeBootstrapFactories::new();
+        for plugin in self.computation_plugins.values() {
+            for factory in plugin.bootstrap_factories() {
+                anyhow::ensure!(
+                    factories
+                        .insert(factory.metadata().implementation.clone(), factory.clone())
+                        .is_none(),
+                    "duplicate native bootstrap factory"
+                );
+            }
+        }
+        Ok(factories)
+    }
+
+    /// Already loaded descriptors only; no provider construction or credentials.
+    pub fn computation_identity_providers(&self) -> crate::computation::NativeIdentityProviders {
+        self.identity_providers
+            .iter()
+            .map(|(kind, registration)| (kind.clone(), registration.descriptor.clone()))
+            .collect()
+    }
+
+    /// Snapshot the loaded source coordinator factories without caching live resources.
+    pub fn computation_source_bootstrap_factories(
+        &self,
+    ) -> anyhow::Result<crate::computation::NativeSourceBootstrapFactories> {
+        let mut factories = crate::computation::NativeSourceBootstrapFactories::new();
+        for plugin in self.computation_plugins.values() {
+            for factory in plugin
+                .factories()
+                .iter()
+                .filter(|factory| factory.supports_source_bootstrap())
+            {
+                anyhow::ensure!(
+                    factories
+                        .insert(factory.metadata().implementation.clone(), factory.clone())
+                        .is_none(),
+                    "native source bootstrap factory is already registered"
+                );
+            }
+        }
+        Ok(factories)
+    }
+
+    pub fn transactional_transformer_registry(
+        &self,
+        middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
+    ) -> anyhow::Result<Arc<drasi_lib::computation::v1::TransactionalTransformerRegistry>> {
+        let mut registry =
+            drasi_lib::computation::v1::TransactionalTransformerRegistry::standard(middleware);
+        for plugin in self.computation_plugins.values() {
+            for factory in plugin.transactional_factories() {
+                registry.register(factory)?;
+            }
+        }
+        Ok(Arc::new(registry))
+    }
+
     /// Register a source plugin descriptor.
     ///
     /// If a source with the same kind is already registered, it is replaced.
     pub fn register_source(&mut self, descriptor: Arc<dyn SourcePluginDescriptor>) {
-        let kind = descriptor.kind().to_string();
-        self.sources.insert(
-            kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: String::new(),
-                registered_at: Utc::now(),
-            },
-        );
-        self.version += 1;
+        self.register_source_with_package_version(descriptor, "", None);
     }
 
     /// Register a source plugin descriptor with plugin identity metadata.
@@ -121,30 +300,27 @@ impl PluginRegistry {
         descriptor: Arc<dyn SourcePluginDescriptor>,
         plugin_id: &str,
     ) {
+        self.register_source_with_package_version(descriptor, plugin_id, None);
+    }
+
+    /// Register a source with its actual loaded package version, when known.
+    pub fn register_source_with_package_version(
+        &mut self,
+        descriptor: Arc<dyn SourcePluginDescriptor>,
+        plugin_id: &str,
+        package_version: Option<&str>,
+    ) {
         let kind = descriptor.kind().to_string();
         self.sources.insert(
             kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-            },
+            DescriptorRegistration::new(descriptor, plugin_id, package_version),
         );
         self.version += 1;
     }
 
     /// Register a reaction plugin descriptor.
     pub fn register_reaction(&mut self, descriptor: Arc<dyn ReactionPluginDescriptor>) {
-        let kind = descriptor.kind().to_string();
-        self.reactions.insert(
-            kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: String::new(),
-                registered_at: Utc::now(),
-            },
-        );
-        self.version += 1;
+        self.register_reaction_with_package_version(descriptor, "", None);
     }
 
     /// Register a reaction plugin descriptor with plugin identity metadata.
@@ -153,30 +329,27 @@ impl PluginRegistry {
         descriptor: Arc<dyn ReactionPluginDescriptor>,
         plugin_id: &str,
     ) {
+        self.register_reaction_with_package_version(descriptor, plugin_id, None);
+    }
+
+    /// Register a reaction with its actual loaded package version, when known.
+    pub fn register_reaction_with_package_version(
+        &mut self,
+        descriptor: Arc<dyn ReactionPluginDescriptor>,
+        plugin_id: &str,
+        package_version: Option<&str>,
+    ) {
         let kind = descriptor.kind().to_string();
         self.reactions.insert(
             kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-            },
+            DescriptorRegistration::new(descriptor, plugin_id, package_version),
         );
         self.version += 1;
     }
 
     /// Register a bootstrap plugin descriptor.
     pub fn register_bootstrapper(&mut self, descriptor: Arc<dyn BootstrapPluginDescriptor>) {
-        let kind = descriptor.kind().to_string();
-        self.bootstrappers.insert(
-            kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: String::new(),
-                registered_at: Utc::now(),
-            },
-        );
-        self.version += 1;
+        self.register_bootstrapper_with_package_version(descriptor, "", None);
     }
 
     /// Register a bootstrap plugin descriptor with plugin identity metadata.
@@ -185,14 +358,20 @@ impl PluginRegistry {
         descriptor: Arc<dyn BootstrapPluginDescriptor>,
         plugin_id: &str,
     ) {
+        self.register_bootstrapper_with_package_version(descriptor, plugin_id, None);
+    }
+
+    /// Register a bootstrapper with its actual loaded package version, when known.
+    pub fn register_bootstrapper_with_package_version(
+        &mut self,
+        descriptor: Arc<dyn BootstrapPluginDescriptor>,
+        plugin_id: &str,
+        package_version: Option<&str>,
+    ) {
         let kind = descriptor.kind().to_string();
         self.bootstrappers.insert(
             kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-            },
+            DescriptorRegistration::new(descriptor, plugin_id, package_version),
         );
         self.version += 1;
     }
@@ -202,30 +381,12 @@ impl PluginRegistry {
         &mut self,
         descriptor: Arc<dyn IdentityProviderPluginDescriptor>,
     ) {
-        let kind = descriptor.kind().to_string();
-        self.identity_providers.insert(
-            kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: String::new(),
-                registered_at: Utc::now(),
-            },
-        );
-        self.version += 1;
+        self.register_identity_provider_with_package_version(descriptor, "", None);
     }
 
     /// Register a secret store plugin descriptor.
     pub fn register_secret_store(&mut self, descriptor: Arc<dyn SecretStorePluginDescriptor>) {
-        let kind = descriptor.kind().to_string();
-        self.secret_stores.insert(
-            kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: String::new(),
-                registered_at: Utc::now(),
-            },
-        );
-        self.version += 1;
+        self.register_secret_store_with_package_version(descriptor, "", None);
     }
 
     /// Register an identity-provider plugin descriptor with plugin identity metadata.
@@ -234,14 +395,20 @@ impl PluginRegistry {
         descriptor: Arc<dyn IdentityProviderPluginDescriptor>,
         plugin_id: &str,
     ) {
+        self.register_identity_provider_with_package_version(descriptor, plugin_id, None);
+    }
+
+    /// Register an identity provider with its actual loaded package version, when known.
+    pub fn register_identity_provider_with_package_version(
+        &mut self,
+        descriptor: Arc<dyn IdentityProviderPluginDescriptor>,
+        plugin_id: &str,
+        package_version: Option<&str>,
+    ) {
         let kind = descriptor.kind().to_string();
         self.identity_providers.insert(
             kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-            },
+            DescriptorRegistration::new(descriptor, plugin_id, package_version),
         );
         self.version += 1;
     }
@@ -252,14 +419,20 @@ impl PluginRegistry {
         descriptor: Arc<dyn SecretStorePluginDescriptor>,
         plugin_id: &str,
     ) {
+        self.register_secret_store_with_package_version(descriptor, plugin_id, None);
+    }
+
+    /// Register a secret store with its actual loaded package version, when known.
+    pub fn register_secret_store_with_package_version(
+        &mut self,
+        descriptor: Arc<dyn SecretStorePluginDescriptor>,
+        plugin_id: &str,
+        package_version: Option<&str>,
+    ) {
         let kind = descriptor.kind().to_string();
         self.secret_stores.insert(
             kind,
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-            },
+            DescriptorRegistration::new(descriptor, plugin_id, package_version),
         );
         self.version += 1;
     }
@@ -297,7 +470,7 @@ impl PluginRegistry {
         &self,
         kind: &str,
     ) -> Option<&RegisteredDescriptor<dyn SourcePluginDescriptor>> {
-        self.sources.get(kind)
+        self.sources.get(kind).map(|entry| &entry.registration)
     }
 
     /// Look up a reaction registration (descriptor + metadata) by kind.
@@ -305,7 +478,7 @@ impl PluginRegistry {
         &self,
         kind: &str,
     ) -> Option<&RegisteredDescriptor<dyn ReactionPluginDescriptor>> {
-        self.reactions.get(kind)
+        self.reactions.get(kind).map(|entry| &entry.registration)
     }
 
     /// Look up a bootstrap registration (descriptor + metadata) by kind.
@@ -313,7 +486,9 @@ impl PluginRegistry {
         &self,
         kind: &str,
     ) -> Option<&RegisteredDescriptor<dyn BootstrapPluginDescriptor>> {
-        self.bootstrappers.get(kind)
+        self.bootstrappers
+            .get(kind)
+            .map(|entry| &entry.registration)
     }
 
     /// Look up an identity-provider registration (descriptor + metadata) by kind.
@@ -321,7 +496,9 @@ impl PluginRegistry {
         &self,
         kind: &str,
     ) -> Option<&RegisteredDescriptor<dyn IdentityProviderPluginDescriptor>> {
-        self.identity_providers.get(kind)
+        self.identity_providers
+            .get(kind)
+            .map(|entry| &entry.registration)
     }
 
     /// Look up a secret store registration (descriptor + metadata) by kind.
@@ -329,7 +506,34 @@ impl PluginRegistry {
         &self,
         kind: &str,
     ) -> Option<&RegisteredDescriptor<dyn SecretStorePluginDescriptor>> {
-        self.secret_stores.get(kind)
+        self.secret_stores
+            .get(kind)
+            .map(|entry| &entry.registration)
+    }
+
+    /// Package version attached to this source registration, never a config version.
+    pub fn source_package_version(&self, kind: &str) -> Option<&str> {
+        self.sources.get(kind)?.package_version.as_deref()
+    }
+
+    /// Package version attached to this reaction registration, never a config version.
+    pub fn reaction_package_version(&self, kind: &str) -> Option<&str> {
+        self.reactions.get(kind)?.package_version.as_deref()
+    }
+
+    pub fn bootstrapper_package_version(&self, kind: &str) -> Option<&str> {
+        self.bootstrappers.get(kind)?.package_version.as_deref()
+    }
+
+    pub fn identity_provider_package_version(&self, kind: &str) -> Option<&str> {
+        self.identity_providers
+            .get(kind)?
+            .package_version
+            .as_deref()
+    }
+
+    pub fn secret_store_package_version(&self, kind: &str) -> Option<&str> {
+        self.secret_stores.get(kind)?.package_version.as_deref()
     }
 
     /// List all registered source kinds.
@@ -459,6 +663,7 @@ impl PluginRegistry {
             && self.bootstrappers.is_empty()
             && self.identity_providers.is_empty()
             && self.secret_stores.is_empty()
+            && self.computation_plugins.is_empty()
     }
 
     /// Returns the total number of registered descriptors.
@@ -468,7 +673,21 @@ impl PluginRegistry {
             + self.bootstrappers.len()
             + self.identity_providers.len()
             + self.secret_stores.len()
+            + self
+                .computation_plugins
+                .values()
+                .map(|plugin| plugin.factories().len())
+                .sum::<usize>()
     }
+}
+
+/// Native registration identity includes the ABI family and package version.
+/// Graph specifications keep the plugin's original implementation identity.
+pub fn computation_plugin_id(metadata: &crate::computation::PluginMetadata) -> String {
+    format!(
+        "computation:{}@{}",
+        metadata.plugin.id, metadata.plugin.version
+    )
 }
 
 impl Default for PluginRegistry {
@@ -485,6 +704,10 @@ impl std::fmt::Debug for PluginRegistry {
             .field("bootstrappers", &self.bootstrapper_kinds())
             .field("identity_providers", &self.identity_provider_kinds())
             .field("secret_stores", &self.secret_store_kinds())
+            .field(
+                "computation_plugins",
+                &self.computation_plugins.keys().collect::<Vec<_>>(),
+            )
             .field("version", &self.version)
             .finish()
     }
@@ -611,6 +834,92 @@ mod tests {
         let infos = registry.source_plugin_infos();
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].plugin_id, "drasi-source-mock");
+    }
+
+    #[test]
+    fn package_versions_are_separate_from_configuration_versions() {
+        let mut registry = PluginRegistry::new();
+        registry.register_source_with_package_version(
+            Arc::new(MockSourceDescriptor { kind: "source" }),
+            "source/package",
+            Some("2.4.1"),
+        );
+        registry.register_reaction_with_package_version(
+            Arc::new(MockReactionDescriptor { kind: "reaction" }),
+            "reaction/package",
+            Some("3.7.0"),
+        );
+        assert_eq!(registry.source_package_version("source"), Some("2.4.1"));
+        assert_eq!(registry.reaction_package_version("reaction"), Some("3.7.0"));
+        assert_eq!(registry.source_plugin_infos()[0].config_version, "1.0.0");
+        assert_eq!(registry.reaction_plugin_infos()[0].config_version, "1.0.0");
+        assert_eq!(registry.version(), 2);
+    }
+
+    #[test]
+    fn package_versions_belong_to_each_descriptor_registration() {
+        let mut registry = PluginRegistry::new();
+        registry.register_source_with_package_version(
+            Arc::new(MockSourceDescriptor { kind: "first" }),
+            "multi-kind",
+            Some("1.2.0"),
+        );
+        registry.register_source_with_package_version(
+            Arc::new(MockSourceDescriptor { kind: "second" }),
+            "multi-kind",
+            Some("1.3.0"),
+        );
+        assert_eq!(registry.source_package_version("first"), Some("1.2.0"));
+        assert_eq!(registry.source_package_version("second"), Some("1.3.0"));
+        registry.register_source_with_metadata(
+            Arc::new(MockSourceDescriptor { kind: "first" }),
+            "replacement",
+        );
+        assert_eq!(registry.source_package_version("first"), None);
+        assert_eq!(registry.source_package_version("second"), Some("1.3.0"));
+        assert_eq!(
+            registry.get_source_registration("first").unwrap().plugin_id,
+            "replacement"
+        );
+    }
+
+    #[test]
+    fn unversioned_or_empty_metadata_does_not_invent_a_package_version() {
+        let mut registry = PluginRegistry::new();
+        registry.register_source_with_metadata(
+            Arc::new(MockSourceDescriptor { kind: "source" }),
+            "legacy",
+        );
+        registry.register_reaction_with_package_version(
+            Arc::new(MockReactionDescriptor { kind: "reaction" }),
+            "legacy",
+            Some(""),
+        );
+        assert_eq!(registry.source_package_version("source"), None);
+        assert_eq!(registry.reaction_package_version("reaction"), None);
+    }
+
+    #[test]
+    fn replacing_a_versioned_registration_with_a_core_descriptor_clears_its_origin() {
+        let mut registry = PluginRegistry::new();
+        registry.register_identity_provider_with_package_version(
+            Arc::new(MockIdentityProviderDescriptor { kind: "identity" }),
+            "identity/package",
+            Some("7.2.0"),
+        );
+        assert_eq!(
+            registry.identity_provider_package_version("identity"),
+            Some("7.2.0")
+        );
+        registry.register_identity_provider(Arc::new(MockIdentityProviderDescriptor {
+            kind: "identity",
+        }));
+        assert_eq!(registry.identity_provider_package_version("identity"), None);
+        assert!(registry
+            .get_identity_provider_registration("identity")
+            .unwrap()
+            .plugin_id
+            .is_empty());
     }
 
     #[test]

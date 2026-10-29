@@ -42,6 +42,7 @@ jobs:
     name: Core Coverage
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
     services:
@@ -56,7 +57,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
+          sudo apt-get install -y jq libjq-dev libonig-dev
+
+      - name: Install pinned Protobuf compiler
+        uses: ./.github/actions/setup-protoc
 
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -67,7 +71,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@37461a1de4134bec919a737ee9ba018e72011b7c # v2.52.7
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Cache Cargo registry
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -95,14 +99,20 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-llvm-cov-core-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-core-${{ hashFiles('ci/install_protoc.py') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-llvm-cov-core-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-core-${{ hashFiles('ci/install_protoc.py') }}-
 
       - name: Generate core coverage
         env:
           REDIS_URL: redis://localhost:6379
         run: |
+          set -euo pipefail
+          make build-test-plugins
+          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug"
+          export DRASI_INSTANCE_HOST_FIXTURE="$PWD/target/debug/examples/libinstance_host_fixture.so"
+          test -s "$DRASI_INSTANCE_HOST_FIXTURE"
+          cargo llvm-cov clean --profraw-only
           cargo llvm-cov --workspace \
             --exclude drasi-host-sdk \
             --exclude drasi-source-postgres --exclude drasi-source-http --exclude drasi-source-grpc \
@@ -125,7 +135,17 @@ jobs:
             --exclude drasi-ffi-primitives --exclude drasi-plugin-sdk \
             --exclude drasi-mssql-common \
             --exclude xtask --exclude query-perf --exclude query-example \
-            --lcov --output-path core-lcov.info
+            --features drasi-lib/computation-rocksdb-tests,lib-integration-tests/computation-middleware-tests,lib-integration-tests/garnet-tests \
+            --no-report -- --test-threads=1
+          cargo llvm-cov --no-report -p drasi-index-rocksdb \
+            --features computation --test computation_result_transactions --test outbox_live_results_tests
+          cargo llvm-cov --no-report -p drasi-index-garnet \
+            --features computation --test computation_resources --test outbox_live_results_tests \
+            -- --include-ignored --test-threads=1
+          cargo llvm-cov report --lcov --output-path core-lcov.info
+          test -s core-lcov.info
+          grep -Eq '^SF:.*lib/src/computation/' core-lcov.info
+          grep -Eq '^SF:.*core/src/computation/' core-lcov.info
 
       - name: Upload core coverage to Coveralls
         uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
@@ -139,6 +159,7 @@ jobs:
     name: Plugin Coverage
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
     services:
@@ -153,7 +174,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
+          sudo apt-get install -y jq libjq-dev libonig-dev
+
+      - name: Install pinned Protobuf compiler
+        uses: ./.github/actions/setup-protoc
 
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -164,7 +188,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@37461a1de4134bec919a737ee9ba018e72011b7c # v2.52.7
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Cache Cargo registry
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -192,14 +216,30 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-llvm-cov-plugins-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-plugins-${{ hashFiles('ci/install_protoc.py') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-llvm-cov-plugins-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-plugins-${{ hashFiles('ci/install_protoc.py') }}-
 
       - name: Generate plugin coverage (tier 1)
         env:
           REDIS_URL: redis://localhost:6379
         run: |
+          set -euo pipefail
+          native_packages="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '
+            [.packages[] | select(.metadata["drasi-plugin"]["abi-family"] == "computation") | .name]
+            | if length == 0 then error("no native plugins selected for coverage") else .[] end')"
+          native_package_args=()
+          while IFS= read -r package; do
+            native_package_args+=(-p "$package")
+          done <<< "$native_packages"
+          make build-test-plugins
+          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug"
+          export DRASI_NATIVE_RECOVERY_PLUGIN="$PWD/target/debug/examples/libnative_recovery.so"
+          test -s "$DRASI_NATIVE_RECOVERY_PLUGIN"
+          while IFS= read -r package; do
+            test -s "$DRASI_NATIVE_PLUGIN_DIR/lib${package//-/_}.so"
+          done <<< "$native_packages"
+          cargo llvm-cov clean --profraw-only
           cargo llvm-cov \
             -p drasi-source-postgres \
             -p drasi-source-http \
@@ -214,7 +254,14 @@ jobs:
             -p drasi-bootstrap-postgres \
             -p drasi-bootstrap-application \
             -p drasi-plugin-sdk \
-            --lcov --output-path plugins-lcov.info
+            "${native_package_args[@]}" \
+            --no-report
+          cargo llvm-cov --no-report \
+            -p drasi-host-sdk --lib --test native_network_loopback --test native_network_wire
+          cargo llvm-cov report --lcov --output-path plugins-lcov.info
+          test -s plugins-lcov.info
+          grep -Eq '^SF:.*components/computation-plugins/' plugins-lcov.info
+          grep -Eq '^SF:.*components/host-sdk/src/computation/' plugins-lcov.info
 
       - name: Upload plugin coverage to Coveralls
         uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6

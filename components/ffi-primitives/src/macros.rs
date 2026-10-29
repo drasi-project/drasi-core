@@ -16,10 +16,10 @@
 //!
 //! These macros reduce boilerplate for the most common FFI patterns:
 //!
-//! - [`ffi_vtable!`] — Generate `#[repr(C)]` vtable structs
-//! - [`vtable_fn_getter!`] — Generate synchronous getter `extern "C"` functions
-//! - [`vtable_fn_async!`] — Generate async method `extern "C"` functions
-//! - [`impl_vtable_proxy!`] — Generate proxy structs wrapping vtables
+//! - [`crate::ffi_vtable!`] — Generate `#[repr(C)]` vtable structs
+//! - [`crate::vtable_fn_getter!`] — Generate synchronous getter `extern "C"` functions
+//! - [`crate::vtable_fn_async!`] — Generate async method `extern "C"` functions
+//! - [`crate::impl_vtable_proxy!`] — Generate proxy structs wrapping vtables
 
 /// Generate a `#[repr(C)]` vtable struct with `state`, `executor`, function
 /// pointers for each declared method, and a `drop_fn`.

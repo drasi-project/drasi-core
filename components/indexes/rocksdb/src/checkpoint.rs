@@ -21,10 +21,12 @@
 //! - `source_sequence:{source_id}` → 8-byte big-endian `u64` sequence
 //! - `source_position:{source_id}` → raw opaque bytes
 //! - `config_hash` → 8-byte big-endian `u64`
+//! - `result_sequence:{query_id}` → last committed result sequence as big-endian `u64`
+//! - `output_generation:{query_id}` → durable output generation as big-endian `u64`
 //!
-//! `stage_checkpoint` writes into the active session transaction so it commits
-//! atomically with index updates. All other methods (reads, config hash,
-//! clear) operate directly on the DB without requiring an active session.
+//! Source and result-sequence staging share the active index transaction.
+//! Result-head reads only expose committed data. Clearing bootstrap checkpoints
+//! preserves the independently managed result head and output generation.
 
 use std::collections::HashMap;
 use std::sync::Arc;

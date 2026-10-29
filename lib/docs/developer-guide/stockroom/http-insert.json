@@ -1,0 +1,14 @@
+{
+  "operation": "insert",
+  "element": {
+    "type": "node",
+    "id": "bolts",
+    "labels": ["Product"],
+    "properties": {
+      "sku": "bolts",
+      "quantity": 3,
+      "minimum": 5,
+      "warehouse": "west"
+    }
+  }
+}

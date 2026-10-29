@@ -1,0 +1,38 @@
+[package]
+name = "drasi-sqlite-common"
+description = "Shared SQLite schema and native graph identity mapping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+native-runtime = [
+    "dep:drasi-computation-contracts", "dep:async-trait", "dep:bincode", "dep:bytes", "dep:chrono",
+    "dep:log", "dep:tokio", "dep:uuid", "rusqlite/column_decltype",
+    "rusqlite/preupdate_hook", "rusqlite/limits",
+]
+rest = ["dep:async-trait", "dep:axum", "dep:tokio", "tokio/net"]
+
+[dependencies]
+drasi-core-types.workspace = true
+drasi-computation-contracts = { workspace = true, optional = true }
+anyhow = "1"
+base64 = "0.22"
+async-trait = { version = "0.1", optional = true }
+axum = { version = "0.7", optional = true }
+bincode = { version = "1.3", optional = true }
+bytes = { version = "1", optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
+log = { version = "0.4", optional = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"], optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
+
+[lints]
+workspace = true

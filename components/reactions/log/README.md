@@ -28,6 +28,19 @@ The Log Reaction provides console logging of continuous query results, making it
 
 **Not recommended for**: High-throughput production deployments. Use HTTP, gRPC, or SSE reactions for production monitoring.
 
+## Stop and Restart
+
+Lifecycle calls are serialized and the processor is registered before it runs.
+Cancelled startup, an unjoined worker or incomplete cleanup blocks replacement.
+Stop waits up to two seconds for the processor without requesting abort; timeout
+or cancellation requires a later stop. Completed cleanup drains queued results.
+Worker panics remain typed failures rather than successful cleanup.
+
+Output remains acceptance-only, synchronous console output: it is not durable
+delivery, and a blocked stdout write can stall the runtime thread rather than
+yield to an asynchronous timeout. The lifecycle tests cover repeated processing,
+cancelled startup/cleanup, retained timeout ownership and worker panic.
+
 ## Configuration
 
 ### Builder Pattern (Recommended)

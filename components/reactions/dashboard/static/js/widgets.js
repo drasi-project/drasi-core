@@ -313,7 +313,7 @@ export function getDefaultConfig(widgetType) {
 }
 
 export function createWidgetRuntime() {
-  return { rows: [], aggregation: null, latest: null };
+  return { rows: [], latest: null };
 }
 
 export function createDefaultWidget(widgetType, index = 0) {
@@ -439,7 +439,7 @@ export function applyResultDiff(runtime, diff) {
     runtime.latest = row;
     return;
   }
-  if (diff.op === "update") {
+  if (diff.op === "update" || diff.op === "aggregation") {
     const after = normalizeDiffData(diff);
     if (!after) return;
     // row_signature is stable across an update; match by it first, then fall
@@ -459,10 +459,6 @@ export function applyResultDiff(runtime, diff) {
     if (idx >= 0) runtime.rows.splice(idx, 1);
     runtime.latest = runtime.rows.length > 0 ? runtime.rows[runtime.rows.length - 1] : null;
     return;
-  }
-  if (diff.op === "aggregation") {
-    runtime.aggregation = normalizeDiffData(diff);
-    runtime.latest = runtime.aggregation;
   }
 }
 
@@ -488,7 +484,7 @@ function escapeHtml(value) {
 }
 
 function getLatestValue(rt, field) {
-  const src = rt?.aggregation ?? rt?.latest;
+  const src = rt?.latest;
   return src && typeof src === "object" ? asNumber(src[field]) : 0;
 }
 
@@ -497,11 +493,6 @@ const AGGREGATION_MODES = ["last", "first", "sum", "avg", "count", "min", "max",
 export { AGGREGATION_MODES };
 
 function getAggregatedValue(rt, field, mode = "last", filterField = "", filterValue = "") {
-  // If query returned an aggregation result, use it directly
-  if (rt?.aggregation && typeof rt.aggregation === "object") {
-    return asNumber(rt.aggregation[field]);
-  }
-
   const rows = asRows(rt);
   if (rows.length === 0) return 0;
 
@@ -509,7 +500,7 @@ function getAggregatedValue(rt, field, mode = "last", filterField = "", filterVa
     case "first":
       return asNumber(rows[0]?.[field]);
     case "last":
-      return asNumber(rows[rows.length - 1]?.[field]);
+      return getLatestValue(rt, field);
     case "sum":
       return rows.reduce((acc, r) => acc + asNumber(r?.[field]), 0);
     case "avg": {
@@ -1450,7 +1441,6 @@ function renderText(widget, runtime, container) {
     rows,
     count: rows.length,
     latest: runtime?.latest ?? null,
-    aggregation: runtime?.aggregation ?? null,
   };
 
   // Preserve scroll position across re-renders

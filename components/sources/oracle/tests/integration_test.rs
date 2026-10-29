@@ -165,7 +165,7 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .build();
@@ -291,7 +291,7 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .build();
@@ -405,7 +405,7 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                     RETURN p.id AS id, p.name AS name, p.price AS price
                 "#,
                 )
-                .from_source(SOURCE_ID)
+                .from_input(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(true)
                 .build();
@@ -475,7 +475,7 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                     RETURN p.id AS id, p.name AS name, p.price AS price
                 "#,
                 )
-                .from_source(SOURCE_ID)
+                .from_input(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(true)
                 .build();
@@ -593,7 +593,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -751,7 +751,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
             )
-            .from_source(SOURCE_ID)
+            .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
@@ -982,7 +982,9 @@ async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> R
                         {
                             match change {
                                 SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
-                                SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                                SourceChange::Update { .. } | SourceChange::Replace { .. } => {
+                                    *updates.entry(id).or_default() += 1
+                                }
                                 SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
                                 SourceChange::Future { .. } => {}
                             }

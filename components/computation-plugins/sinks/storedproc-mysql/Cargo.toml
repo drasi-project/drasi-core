@@ -1,0 +1,38 @@
+[package]
+name = "drasi-computation-sink-storedproc-mysql"
+description = "Native MySQL stored-procedure delivery"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "1.0.0"
+kind = "sink-storedproc-mysql"
+
+[dependencies]
+drasi-computation-contracts.workspace = true
+drasi-computation-plugin-sdk.workspace = true
+drasi-core-types.workspace = true
+drasi-mysql-common = { workspace = true, features = ["native", "storedproc"] }
+drasi-reaction-common.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+
+[lints]
+workspace = true

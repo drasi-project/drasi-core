@@ -35,6 +35,7 @@ crate-type = ["lib", "cdylib"]
 # intentionally uncompliant for now so the in-repo reaction can build against
 # local drasi-core/drasi-lib changes while it lives in this workspace.
 drasi-lib.workspace = true
+drasi-http-common = { workspace = true, features = ["reaction"] }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -50,6 +51,7 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
 [dev-dependencies]
+bincode = "1.3"
 # TODO(#574): Revisit this test-only workspace dependency when the HTTP
 # reaction is made buildable outside the drasi-core workspace.
 drasi-core.workspace = true
@@ -60,3 +62,5 @@ env_logger = "0.11"
 [features]
 # default = []
 dynamic-plugin = []
+# Compatibility alias for older test commands; all tests use ComputationGraph.
+computation-tests = []

@@ -15,9 +15,8 @@
 use std::sync::Arc;
 
 use crate::relabel::RelabelMiddlewareFactory;
-use drasi_core::{
-    in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{FutureElementRef, MiddlewareSetupError, SourceMiddlewareFactory},
+use drasi_core_types::{
+    interface::{FutureElementRef, MiddlewareSetupError},
     models::{
         Element, ElementMetadata, ElementReference, ElementTimestamp, ElementValue, SourceChange,
         SourceMiddlewareConfig,
@@ -55,6 +54,7 @@ fn create_node_insert_change(labels: Vec<&str>, props: Value) -> SourceChange {
 fn create_node_update_change(labels: Vec<&str>, props: Value) -> SourceChange {
     let labels: Vec<Arc<str>> = labels.into_iter().map(Arc::from).collect();
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test_source", "node1"),
@@ -117,16 +117,12 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change =
             create_node_insert_change(vec!["Person", "Employee"], json!({"name": "John Doe"}));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -150,16 +146,12 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change =
             create_node_insert_change(vec!["OldLabel", "UnchangedLabel"], json!({"data": "test"}));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -183,18 +175,14 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_node_insert_change(
             vec!["ExistingLabel", "AnotherLabel"],
             json!({"data": "test"}),
         );
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -219,18 +207,14 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_node_insert_change(
             vec!["Person", "Company", "Employee", "Manager"],
             json!({"data": "test"}),
         );
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -260,19 +244,15 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_node_update_change(vec!["TempLabel"], json!({"updated": true}));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
-            SourceChange::Update { element } => {
+            SourceChange::Update { element, .. } => {
                 let metadata = element.get_metadata();
                 assert_eq!(metadata.labels.len(), 1);
                 assert!(metadata.labels.contains(&Arc::from("FinalLabel")));
@@ -292,18 +272,14 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_relation_insert_change(
             vec!["KNOWS", "SOCIAL_LINK"],
             json!({"since": "2020-01-01"}),
         );
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -327,15 +303,11 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_delete_change(vec!["OldLabel", "KeepLabel"]);
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -358,15 +330,11 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_future_change();
 
-        let result = subject
-            .process(source_change.clone(), element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], source_change);
@@ -381,8 +349,7 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let properties = json!({
             "name": "Test Node",
@@ -392,10 +359,7 @@ mod process {
 
         let source_change = create_node_insert_change(vec!["TestLabel"], properties.clone());
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -426,7 +390,7 @@ mod factory {
             }
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
     }
 
@@ -437,7 +401,7 @@ mod factory {
             "labelMappings": {}
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
@@ -454,7 +418,7 @@ mod factory {
             // Missing label_mappings field
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
@@ -471,7 +435,7 @@ mod factory {
             "labelMappings": "invalid_format" // Should be an object, not string
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
@@ -496,7 +460,7 @@ mod factory {
             }
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
     }
 
@@ -509,7 +473,7 @@ mod factory {
             }
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
     }
 
@@ -524,7 +488,66 @@ mod factory {
             "labelMappings": mappings
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
+    }
+}
+
+mod canonical_mutation {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn subject() -> crate::relabel::RelabelMiddleware {
+        RelabelMiddlewareFactory::new()
+            .build(&create_mw_config(
+                json!({"labelMappings": {"Person": "User"}}),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn update_keeps_its_removals_and_null_values() {
+        let SourceChange::Update { element, .. } =
+            create_node_update_change(vec!["Person"], json!({"kept": null}))
+        else {
+            panic!("expected update");
+        };
+        let change =
+            SourceChange::update_with_removals(element, BTreeSet::from(["gone".to_string()]))
+                .unwrap();
+        let result = subject().apply(change).await.unwrap();
+        let [SourceChange::Update {
+            element,
+            removed_properties,
+        }] = result.as_slice()
+        else {
+            panic!("an update stays one update");
+        };
+        assert_eq!(
+            removed_properties.iter().collect::<Vec<_>>(),
+            [&"gone".to_string()]
+        );
+        assert!(element.get_metadata().labels.contains(&Arc::from("User")));
+        assert_eq!(
+            element.get_properties().get("kept"),
+            Some(&ElementValue::Null)
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_stays_a_replacement() {
+        let SourceChange::Insert { element } =
+            create_node_insert_change(vec!["Person"], json!({"name": "a"}))
+        else {
+            panic!("expected insert");
+        };
+        let result = subject()
+            .apply(SourceChange::replace(element))
+            .await
+            .unwrap();
+        let [SourceChange::Replace { element }] = result.as_slice() else {
+            panic!("a replacement must not become an insert");
+        };
+        assert!(element.get_metadata().labels.contains(&Arc::from("User")));
     }
 }

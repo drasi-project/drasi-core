@@ -31,7 +31,7 @@ pub struct StorageBackendConfig {
 /// provider instances through `DrasiLibBuilder::with_index_provider(name, provider)`.
 /// Backend-specific settings belong to the provider constructor, not this
 /// specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum StorageBackendSpec {
     /// In-memory storage backend (volatile, fast, no persistence)
@@ -67,7 +67,7 @@ pub enum StorageBackendSpec {
 }
 
 /// Reference to a storage backend, either by name or inline specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StorageBackendRef {
     /// Reference to a named storage backend defined in storage_backends

@@ -1,0 +1,903 @@
+# ComputationGraph implementation reference
+
+[Design](computation-graph-design.md) |
+[Usage](computation-graph-usage.md) |
+[Configuration](computation-graph-configuration.md)
+
+Use this page when implementing a component, connection provider or management
+tool. It contains the exact API names and rules that the shorter guides leave
+out. The APIs are under `drasi_lib::computation::v1` and are available without a
+feature opt-in.
+
+For an architectural explanation rather than an API reference, use the
+[maintainer's guide](computation-graph-maintainers-guide.md).
+
+## Main types and ownership
+
+| Type | Responsibility |
+|---|---|
+| `ComputationGraph` | Owns component instances, connections, resources and the controller |
+| `GraphRun` | Future that drives a standalone graph; its caller must keep polling it and await cleanup |
+| `GraphControl` | Sends commands to the controller; does not mutate component objects directly |
+| `GraphSnapshot` | Component/resource declarations, connection policies and reported inventory information |
+| `ObservedGraph` | Current creation, execution, health and failure information |
+| `ComputationInspector` | Consistent snapshots and the most recent 256 controller publications |
+| `ResourceHandle` | An actual supplied object and, where applicable, its cleanup owner |
+| `InstanceGraph` (internal) | Owns the DrasiLib instance's ComputationGraph task and cleanup |
+| `NativeQuery` (internal) | Generation-fenced API adapter for a query already owned by the instance graph; no evaluator or driver |
+| `ComponentBatch` | Component declarations and supplied bindings added to the instance graph |
+| `ComputationInventory` | Coherent view of the instance graph, including queries, their helpers and shared provider relationships |
+| `QueryApi` | Optional read capability for a graph-owned query's configuration, output and metrics |
+
+An instance's source/reaction objects and native query declarations are owned by
+its graph. Compatibility inspection responses are derived from its publications, not used to recover
+membership or decide removals. Ordinary component operations and any retained
+manager-style accessors are graph-backed APIs, not a second execution engine.
+
+`DrasiLib::get_graph().await` returns the compatibility snapshot directly.
+`component_graph()` provides a weak, read-only asynchronous view with no
+node/relationship mutation methods or runtime-instance storage.
+
+DrasiLib owns its ComputationGraph task; processing operations, including
+ordinary queries and their helpers, have independently scheduled, graph-owned
+tasks. Mutable calls to each component remain serialized.
+Task joins and cleanup ownership survive cancelled waiters. Independent native
+nodes can use different Tokio workers; transactional inner steps are not
+independent execution units.
+The in-process graph APIs support both single-thread and multi-thread Tokio
+runtimes. A particular plugin or its foreign-function bridge can have additional
+requirements; those are not an alternative graph engine.
+
+The separate `drasi-instance-host`, `drasi-computation-source-bridge` and
+`drasi-computation-sink-bridge` packages provide normal child instances and
+native source/sink links. They do not add a child
+execution mode to DrasiLib. Current Unix hosting and tested link contracts do
+not imply complete platform, distributed-transaction or production-scale
+qualification; see the work inventory for remaining runtime/callback boundaries.
+
+## Identifying the right object
+
+| Identity | What it distinguishes |
+|---|---|
+| `ComponentId` | A component name within one graph |
+| `GraphRevision` | A version of the graph's declarations and reported inventory |
+| `ComponentGeneration` | One constructed instance of a component |
+| `OperationEpoch` | One operation on that instance |
+| Binding generation | One particular connection/resource binding |
+| `ComputationScope` | A registered graph plus the owner path to a nested graph |
+
+Replacing a component does not make an old handle refer to the replacement.
+Commands, observations and control messages check the appropriate identity.
+Internal runtime lookups use weak references; an expired reference is an error,
+not a reason to find another object with the same name.
+
+Component IDs, resource IDs and plugin IDs have separate meanings. When combining
+several graphs, retain their scope information rather than using local names as
+globally unique keys. Inventory across different DrasiLib instances also needs the
+instance ID.
+
+## Component and connection declarations
+
+| Execution role | Ports | Processing method |
+|---|---|---|
+| Source | Outputs only, at least one | `EnvelopeSource::next()` |
+| Transformer | At least one input and output | `Transformer::transform()` |
+| Query | Transformer-shaped | Query transformer with evaluation and recovery |
+| Sink | Inputs only, at least one | `EnvelopeSink::handle()` |
+| Service | No data ports | `ComputationService::run()` |
+
+All implement `ComputationComponent` start/stop hooks. A factory can construct an
+instance from a `ComponentSpecification`; alternatively, the caller supplies an
+already-constructed object.
+
+The existing Source/Query/Reaction interfaces are hosted by Service nodes in the
+instance graph. Their displayed kinds remain Source, Query and Reaction. Query
+data ports and storage live in the query's nested graph. A host-subscription
+relationship describes existing delivery; it does not add another queue.
+
+A descriptor defines the component ID and ports. Each port has a direction,
+schema and connection requirements. A factory specification adds implementation
+identity, configuration version, configuration fields and named dependencies.
+Secret fields require unresolved references, not resolved credentials.
+
+`MiddlewareTransformer` is a graph-change-to-graph-change component that reuses
+the existing query middleware runner and registry. It has one input/output port,
+supports multiple incoming connections and keeps previous emitted elements for
+state-dependent middleware. Choose memory-only state with `new` or atomic
+persistent state and saved output with `new_durable`. See the
+[middleware guide](computation-graph-middleware.md) for configuration, batching
+and recovery limits.
+
+`SourceTimeMergeTransformer` buffers multiple declared source streams and emits
+one source-change-time-ordered stream, including reordering within a source.
+Source timestamps are mandatory. Count/byte limits, a reorder allowance,
+maximum residence wait, optional idle timeout and explicit late-event policies
+bound the behavior. Memory-only and atomic persistent constructors are available;
+durable outputs require lossless persistent handoff. See the
+[source-time merge guide](computation-graph-time-merge.md) for native assembly,
+monitoring, held-event resolution and recovery limits.
+
+`TransactionTransformer` owns either a configured linear sequence whose
+implementations also implement `TransactionalTransformer`, or a query body using
+the shared core evaluator. It owns the processing transaction and saved output;
+linear steps receive a borrowed `TransactionContext` with isolated state. It
+does not create a nested graph or schedule child nodes. See the
+[transaction guide](computation-graph-transactions.md) for participation,
+configuration and recovery requirements.
+
+`QosChannel` implements one producer journal with independently checkpointed
+subscribers. `QosPipeConfig` selects a subscriber endpoint; graph fan-out performs
+one append for endpoints sharing that channel. Memory backpressure, explicit
+lossy retention and persistent replay are available. See
+[pipe QoS](computation-graph-qos.md) for ownership, retirement and provider recipes.
+
+A data connection names `(component, port)` at both ends, its provider and its
+`RelationshipPolicy`. A resource declaration names its role, ownership and
+binding; `provide_resource` supplies the actual object separately.
+
+Strict graph builds reject cycles, duplicate identities, unconnected mandatory
+ports, missing output streams and schema/capability mismatches. Incremental adds
+can retain incomplete nodes, but eventual connections must satisfy these rules.
+One producer output cannot feed several input ports on the same consumer:
+separate queues would not preserve ordering for that stream.
+
+`GraphSnapshot` also records unresolved relationships, host subscriptions,
+control-only connections, readiness requirements and reported component resources
+and plugins. An absent producer or provider is an unresolved reference, not a
+fictional component.
+
+## States and readiness
+
+Creation, execution and health are separate. These are API enum names, not
+interchangeable descriptions of a single status.
+
+### Graph controller: `GraphState`
+
+```mermaid
+stateDiagram-v2
+    [*] --> Ready: graph built
+    Ready --> Starting: start or run
+    Completed --> Starting: start another run
+    Starting --> Running: controller available
+    Starting --> Stopping: failure or cancellation
+    Running --> Stopping: completion, cancellation or fatal failure
+    Stopping --> Completed: normal completion and cleanup
+    Stopping --> Cancelled: cancellation and cleanup
+    Stopping --> Failed: fatal failure and cleanup
+    Stopping --> CleanupRequired: cleanup incomplete
+    Starting --> CleanupRequired: run future dropped
+    Running --> CleanupRequired: run future dropped
+    CleanupRequired --> Cancelled: awaited cleanup succeeds
+```
+
+`Running` means the controller is active, not that every component is healthy or
+running. `graph.run()` keeps a controller available without automatically
+starting all components. `graph.start()` also requests automatic activation.
+Only Ready and Completed permit a new direct graph run.
+
+### Component creation: `RealizationState`
+
+| Value | Meaning |
+|---|---|
+| `Pending` | Declaration accepted; creation has not completed |
+| `Creating` | Validation/construction is in progress |
+| `Created` | Instance exists and required creation/wiring conditions are met |
+| `Blocked` | Required construction dependency or wiring is unavailable |
+| `CreationFailed` | Validation, construction or initialization failed |
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: add declaration
+    Pending --> Creating: attempt creation
+    Pending --> Created: accept supplied instance during deployment
+    Pending --> Blocked: dependency unavailable
+    Pending --> CreationFailed: validation fails
+    Creating --> Created: success
+    Creating --> Blocked: incomplete wiring
+    Creating --> CreationFailed: failure or cancelled creation
+    Blocked --> Created: complete required wiring
+    Blocked --> Pending: prepare reconstruction
+    CreationFailed --> Pending: permitted retry or replacement
+    Created --> Pending: replace with a new instance
+```
+
+An explicit retry is allowed only for a retryable failure. Terminal failures need
+a changed specification or removal. An absent source for a DrasiLib query may
+cause CreationFailed; an unconnected custom component may be Blocked. They are
+not promises that every missing dependency follows the same code path.
+
+### Component execution: `ComponentLifecycle`
+
+```mermaid
+stateDiagram-v2
+    [*] --> Stopped
+    Stopped --> Starting: requested start
+    Starting --> Running: start hook or readiness confirmation
+    Starting --> Failed: startup fails
+    Running --> Quiescing: request pause
+    Quiescing --> Quiesced: reach a processing boundary
+    Quiesced --> Running: resume without start hook
+    Starting --> Stopping: stop or cancellation
+    Running --> Stopping: stop, replacement or removal
+    Quiescing --> Stopping: stop supersedes pause
+    Quiesced --> Stopping: stop requested
+    Failed --> Stopping: cleanup
+    Running --> Failed: processing fails
+    Quiescing --> Failed: processing fails
+    Stopping --> Stopped: stop hook succeeds
+    Stopping --> Failed: stop fails
+```
+
+`Quiescing` means pausing; `Quiesced` means paused at a supported boundary.
+Component work normally becomes ready when its start hook succeeds. Components
+needing later confirmation call `control.ready()`. Plugin wrappers wait for the
+plugin's Running observation; query wrappers check the inner query.
+
+`ComputationService::quiesce()` runs after its `run()` future has been dropped for
+a pause. A service with separately owned work must wait for that work to pause.
+The default needs no extra action for work living entirely in `run()`.
+Query wrappers propagate this pause to their nested graph and resume only the
+appropriate paused component instances.
+
+Normal source exhaustion sets `exhausted` and closes its output. It is not itself
+a call to the stop hook and can briefly coexist with a Running lifecycle.
+`started` records readiness for the latest requested activation, even if a
+short-lived component subsequently finishes. It is not a continuing-health test.
+
+Health values are `Unknown`, `Healthy`, `Degraded` and `Unavailable`. Failures
+retain phase, disposition, original cause and time. Phases include Validation,
+Creation, Binding, Activation, Processing, Stop, Removal and Control. A control
+handler failure can degrade health without terminating data processing.
+
+### Existing status API: `ComponentStatus`
+
+The older API still reports Added, Starting, Running, Stopping, Stopped, Removed,
+Reconfiguring and Error. Its view cannot express every graph state:
+
+| Graph observation | Existing status |
+|---|---|
+| Recorded failure or Failed execution | Error |
+| Starting / Stopping | Starting / Stopping |
+| No lifecycle request yet, or creation is incomplete | Initial status, usually Added; normally Stopped for a replacement |
+| Exhausted or stopped after lifecycle activity | Stopped |
+| Other created execution states | Running |
+
+In particular, Added does not prove successful creation, and the older status
+view does not expose pause states. Removed is not a lingering graph component:
+after removal, its graph lookup fails.
+
+### Resources and connections
+
+`ResourceRealization` is Pending, Created, CleanupRequired or Released.
+Created means an object is bound, not that credentials or a database connection
+are healthy. Providers generally have no independent start/stop lifecycle.
+Their operational failures are usually reported by the consuming component.
+
+`BindingState` is Declared, Binding, Bound, Draining or Failed. Unbinding can
+return a retained connection declaration to Declared. Its data availability is
+separate: Unknown, Idle, Available, Unavailable or Exhausted.
+
+Hosted source/query/reaction subscriptions expose their endpoint observations,
+not invented capabilities or binding states from a different transport.
+Plugin/version reference nodes likewise have no Running/Error lifecycle.
+
+## Data and delivery rules
+
+`ChangeEnvelope` holds a shared immutable `ChangeEvent` and an append-only
+annotation history. `append_annotation` changes only that branch's history;
+`derive` creates a new event while preserving information about its input.
+Fanout shares the event payload rather than copying it for each branch.
+
+Records are schema-validated bytes. Adds, updates and deletes preserve operation
+order; update semantics distinguish patch from replacement. Every output port
+has a producer stream whose successful new emissions have increasing sequences.
+This sequence is separate from a source plugin's raw sequence and a query's
+result sequence.
+
+| Connection type | Guarantees and limits |
+|---|---|
+| `BoundedPipeConfig` | Per-stream FIFO and backpressure |
+| `BroadcastPipeConfig` | Bounded history with an explicit lag policy; no backpressure guarantee |
+| `RetainedPipeConfig` + `MemoryEnvelopeStore` | Retained history inside the process |
+| `RetainedPipeConfig` + `IndexedEnvelopeStore` | Durable acceptance/replay using a complete persistent index bundle |
+| `RankedInputPipeConfig` | Branches of a shared query queue ordered by event time, source rank and source sequence; not producer FIFO |
+
+`EnvelopeCodec` requires registered schema validators on decode and preserves
+event metadata and annotations. Internal canonical identity bytes are not a
+reversible event serialization format.
+
+Acceptance means enqueueing succeeded. `SinkCompletion::Handled` promises a
+different boundary from `Accepted`. The graph rejects acknowledgement-required
+delivery to an acceptance-only sink. A retained delivery's saved position advances
+only after successful handling and required output forwarding; dropping it is
+not acknowledgement.
+
+`send_batch` reports accepted entries and the failed/unattempted remainder.
+For a durable commit error, `SendFailure::acceptance() == Unknown` means the write
+may have succeeded; it is not proof that retry is safe.
+
+Fanout is not atomic. A later branch can fail after earlier branches accepted
+the event, and a slow branch can backpressure its producer. Cancellation can
+discard queued/in-flight data and cannot undo an external effect.
+
+For query-specific ordering, including scheduled work and source sequence
+requirements, see [configuration](computation-graph-configuration.md#ordering-and-buffers).
+
+## Control messages and startup
+
+`ComponentControl` can send only to current connected upstream/downstream
+neighbours. Data connections, host subscriptions and explicit control-only links
+establish those neighbours. Rewiring invalidates old senders and queued messages.
+
+Control mailboxes are separate from data queues. Current limits are 64 queued
+messages per component, a 16 KiB payload budget and JSON depth 64. Sending does
+not wait for capacity; fanout reserves capacity for all recipients or fails.
+These are not durable messages.
+
+Graph-generated readiness/availability notices have separate coalescing slots:
+the latest state per connected peer, direction and category survives a full
+command queue. Rebind invalidates old slots. Public custom commands and explicit
+`ComponentControl` fan-out retain all-recipient reservation semantics.
+
+Register a `ControlHandler` on a component or through its handle. Handlers can
+progress separately from mutable data calls, but blocking an executor thread
+still delays other work. Availability messages do not imply a universal automatic
+restart policy.
+
+A returned handler error records degraded health without closing its inbox.
+Returned data/start errors, including invalid plugin output, retain the failed
+node and leave the controller and unrelated branches available. Inspect observed
+failures or operation reports; a failed node is not completion of `GraphRun`.
+Unknown errors default to terminal; an explicit `ComponentOperationError`
+preserves a classified cause. Retryability does not bypass cleanup or fenced
+storage. Management performs at most one reconstruction attempt per explicit
+reconciliation request, not a background retry loop. Delivery retries keep their
+separate configured limit and delay. Panic containment is not implied.
+
+`require_downstream_ready` optionally gates producer startup. Configure it before
+startup. It is separate from a connection policy requiring an already-running
+upstream component; opposing requirements can deadlock an application.
+
+For the standard DrasiLib pipeline, startup requests sources and queries, then
+releases the sources' `on_subscriptions_complete` notification before starting
+reactions. Waiting for query bootstrap to finish before that notification could
+deadlock. This is why a standard start method's return is not always a readiness
+confirmation.
+
+## Changing a running graph
+
+Call `GraphControl::preview(revision, mutations)`, then
+`reconcile(preview, bindings)` to apply that plan. The controller rechecks the
+revision and affected instances before changing them.
+
+Supported changes include add/replace/update/remove, connect/disconnect, resource
+replacement, subscription changes, restart and retry. In-place reconfiguration
+requires factory support and cannot silently change an interface or implementation.
+Otherwise replacement constructs a new component instance.
+
+Preflight, pipe creation, reconfiguration and retired resource/object destruction
+run in graph-owned tasks with retained joins and typed panic boundaries.
+Reconciliation continues servicing disjoint lifecycle commands while those
+tasks are pending. Conflicting mutations reject rather than entering an
+unbounded deferred queue. Resource/plugin notifications keep only the latest
+value per kind and generation until reconciliation finishes, then publish
+against the current topology.
+
+| Removal policy | Behaviour |
+|---|---|
+| Reject | Refuse a change that breaks required dependencies |
+| Cascade | Include dependent components |
+| Orphan | Keep an explicitly allowed unresolved relationship |
+| Drain | Wait for a supported completed-handling boundary |
+
+A sink-only replacement can retain its unconsumed input queue without restarting
+upstream components. Changed connections drain in dependency order. A provider
+must prove it is idle through `PipeControl::is_idle`; queue metrics are not that
+proof. Acceptance by an external reaction queue is not proof that effects finished.
+
+Cleanup failure can leave old declarations with stopped components or unusable
+bindings. Construction/start failure after a new declaration is committed leaves
+the new declaration and its error visible. Cancellation does not roll back those
+effects.
+
+Desired-topology commit preflights counters, slot leases and peer attachments
+before mutation and publishes one coherent desired/observed revision. Failure
+before this boundary cannot partially replace the topology; it does not undo
+stop/cleanup work already performed. Postcommit errors are carried in a
+`ReconciliationReport` whose `committed` flag remains true.
+
+Graceful stop drains admitted input, continuations and required acknowledgement
+before stop hooks. It also finishes in-flight graph-owned source admission
+writes. A drain timeout reports failure and retains active work, rather than
+aborting it. Explicit `GraphControl::cancel()` or dropping the run forces
+cancellation and can require storage reconstruction.
+
+Instance-wide `start()` is coordinated by an owned lifecycle task. Its caller
+waits for the result rather than owning the only future capable of releasing
+the startup gate. `stop()` and `shutdown()` advance the instance's stop epoch,
+interrupt the startup wait and join that task before completing cleanup.
+Superseded starts return `PartialStartError` with `StartupSupersededError`;
+they cannot later restore the running flag. Component work already admitted to
+the graph remains graph-owned. Queued starts whose waiters have disappeared
+are not started later.
+
+| Budget | Graph builder | DrasiLib builder | Default |
+|---|---|---|---|
+| Whole startup | `startup_timeout` | `with_startup_timeout_secs` | 600 s |
+| Whole stop/shutdown | `shutdown_timeout` | `with_shutdown_timeout_secs` | 60 s |
+| Configuration plus construction/reconfiguration | `construction_timeout` | `with_construction_timeout_secs` | 5 s |
+| Resource construction | `resource_construction_timeout` | `with_resource_construction_timeout_secs` | 30 s |
+| Input binding, start and output binding | `activation_timeout` | `with_activation_timeout_secs` | 300 s |
+| Individual cleanup | `cleanup_timeout` | `with_cleanup_timeout_secs` | 5 s |
+
+Graph builders take `Duration`; DrasiLib setters take positive seconds. Server
+exposes the corresponding camel-case instance settings and accepts numeric
+overrides on instance creation. One absolute overall deadline covers admission
+and subsequent phases. `LifecycleTimeoutError` records the owner, operation,
+phase, budget and request acceptance; it is not a completed-stop receipt.
+Explicit `wait_created()` / `wait_started()` are observation waits and remain
+caller-bounded.
+
+Managed realization retains its pending graph request after an interrupted wait,
+so the actor can consume the actual result before another configuration change.
+Construction is submitted with activation deferred, outside the instance
+lifecycle gate; activation then checks the current instance intent. A committed
+component whose startup has not completed can be stopped during realization.
+Previously running reserved owners remain protected during their cutover.
+Configuration acceptance/retirement and non-yielding native calls are not made
+arbitrarily interruptible.
+
+`force_cancel_components(revision, selection)` is explicit scoped escalation,
+not a graceful stop. Selection must cover the complete registered actual
+resource domain, including aliases, dependent users and required propagation
+boundaries. Pending resource metadata or unfinished resource construction,
+cleanup or retirement refuses an unprovable selection before effects.
+`ForceCancellationReport.interrupted` retains damaged generations separately
+from `cleanup`; completed cleanup never proves rollback or downstream effects.
+Same-generation restart remains prohibited. Reconstruct through an explicit
+changed specification after the required cleanup/recovery checks. Opaque,
+unreported sharing and non-yielding code are not a fine-grained safety guarantee.
+
+Rejected additions retain supplied objects through `GraphError::AdditionRejected`.
+The error's owner can return them through `take().await`, or graph disposal can
+clean up newly transferred owned resources. Do not discard the ownership-bearing
+error by converting it only to a string. Borrowed/already-managed objects are not
+shut down merely because an addition was rejected.
+Once disposal starts, `take()` cannot reclaim that addition. Cancelling the
+disposal waiter retains the actual resource jobs and final destruction for
+an awaited retry. Managed unsubmitted component batches use the same ownership
+mechanism.
+
+`graph.shutdown().await` finishes component cleanup.
+`graph.dispose().await` also releases owned resource bindings.
+DrasiLib's graph shutdown joins its owned task and performs disposal.
+Failed or cancelled cleanup retains ownership for retry. Dropping a run or graph
+cannot await asynchronous hooks or repair a plugin's unmanaged worker tasks.
+
+## Storage and recovery implementation
+
+Shared query input admission compares source-scoped element identities using
+`effective_from`, not receipt time. Strictly older mutations warn and are skipped;
+native input progress still advances. Equal-time differences follow admitted
+order. Duplicate inserts upsert rather than double-count, updates merge sparse
+properties, and live node/relationship collisions fail explicitly. Transactional
+deletion frontiers prevent stale resurrection after restart; they have no
+automatic time-based expiry.
+
+Native query configuration identities include these semantics (versions 5/6).
+An older persisted identity is rejected as `ConfigurationChanged`; explicit
+reset/rebootstrap or a separately designed migration is required, subject to
+pending-output protection. This is not a backward-compatible stored-state change.
+
+An atomic query transaction covers indexes, source checkpoints, result sequence,
+retained output and its eviction, and current result rows. Standard index
+providers opt in with `supports_atomic_query_output()`. Their writers must share
+the index session's transaction; merely returning persistent writers is not enough.
+
+Ordinary and native pipeline queries default to direct in-memory indexes with a
+no-op session controller. They do not acquire plugin-I/O task wrappers or claim
+persistent transactional state. An explicitly selected provider, archive-enabled
+memory backend, or `query_provider` override keeps its declared storage and
+cleanup contract.
+
+Non-atomic publication uses a pending-output marker to detect interrupted
+publication. Recovery checks the committed sequence, retained history and
+snapshot before accepting new input. A reset-in-progress configuration marker
+prevents resuming partially cleared storage after failed cleanup.
+
+Malformed saved outputs, rows or recovery annotations are reported as inconsistent
+query state: Strict refuses startup; AutoReset can rebuild from a configured
+bootstrap. Output decoding failures retain their original cause. Output-store
+read outages are not reclassified as corruption or permission to clear state.
+
+A bootstrap setting alone does not clear a healthy query on an in-process
+restart. The source must actually supply a snapshot or its completion stream
+before a volatile snapshot refresh is requested. A real refresh still rebuilds
+query state and advances its output generation; reaction recovery policies are
+not silently relaxed.
+
+Query output generation identifies one lifetime of the query's output. Reset
+and deletion preserve this identity information, even when rows/checkpoints are
+cleared. Stop/restart without reset preserves it. It is separate from
+`ComponentGeneration`.
+
+`QuerySourceProgressResource` reports its actual owning component's handled input,
+not adapter receipt. A query or durable transformer publishes its own committed
+position. An ordinary transformer or handled sink can explicitly opt into
+`ComponentRecovery::with_volatile_input_progress`; the graph then publishes after
+handling, all outgoing acceptances and every continuation/completion callback.
+This owner is always volatile. Failed/cancelled work and incomplete cleanup fence
+it; a replacement instance cannot reuse the stopped instance's handled prefix.
+It cannot substitute for component-owned atomic progress, and acceptance-only
+sinks cannot opt in. Query snapshot/skip decisions still use their explicit
+checkpointed-consumer recovery protocol, not this ordinary-input tracker.
+The graph supplies the actual upstream role when interpreting input positions.
+Query metadata inherited through an ordinary transform is causal history, not
+that transform's output counter; distinct emissions must not be discarded as
+duplicate query results. Explicitly validated stateless paths can retain the
+original query's logical position while separately advancing both transport
+positions.
+
+The original single-owner source binding remains guarded. Shared native producers
+instead bind a `ConsumerProgressSet` containing the actual owners for all required
+branches. The graph checks pointer identity and the real data paths, allowing
+identity-preserving stateless intermediates but not arbitrary stateful bypasses.
+Each member retains its own readiness, failure, persistence, logical checkpoint,
+opaque cursor and transport counters. A source-specific `InputPositionPolicy`
+can compare positions without confusing independent bootstrap counters with
+physical source order. Validated relay paths preserve original logical producer
+identity and both transport positions; arbitrary inherited provenance does not.
+
+Membership is immutable for an activation. Reconciliation awaits the producer's
+actual stop before replacing a required owner or changing its path; dropping a
+reader does not retire a consumer. `WalReplaySourceFactory` accepts an optional
+`consumer_progress` checkpoint resource, mutually exclusive with `source_progress`.
+It resumes from the earliest actual persistent checkpoint, preserves the maximum
+observed transport counter, and rejects a configured resume that skips an existing
+member. It reports unavailable history explicitly and never owns partition
+deletion or pruning.
+
+Durable middleware saves its element state, input position and transformed output
+together. The driver calls `Transformer::delivery_completed` only after every
+outgoing branch accepts the output; this also applies to wakeups and
+continuations. Durable middleware requires durable, replayable output connections
+and cannot discard unconfirmed output when its retention limit is reached.
+Replaying saved output uses new delivery numbers but preserves the batch identity
+and saved middleware position used by downstream queries.
+
+`QueryReplayTransformer` joins a snapshot or retained suffix to a live stream.
+It checks the query's identity as well as its sequence and output generation.
+Rebuilding an in-memory query creates a new identity; reopening the same
+persistent query retains its identity. Matching numbers alone are not enough
+to reuse a consumer checkpoint.
+Factory-created queries also include their owning instance's scope, so equal
+local query names in different instances do not share an identity. For directly
+constructed queries, give `ContinuousQueryDefinition.graph_id` a stable name
+that distinguishes the logical graph whose progress is being saved.
+
+Missing live results are recovered from retained history before later results
+are delivered. If that history is no longer available, Strict fails, AutoReset
+replaces the consumer's state from a snapshot, and AutoSkipGap deliberately skips
+the missing results. A changed query identity follows the same explicit policy;
+old results from a replaced query are not accepted as its replacement's results.
+
+`CheckpointedSink` independently checks identity and sequence continuity and
+advances progress only after successful handling or snapshot replacement.
+Accepting an explicit skip requires `allow_skipped_resets`; it is not permission
+to silently advance past an unexplained missing result.
+The existing Reaction adapter records in-memory accepted positions;
+the reaction itself is responsible for saving successfully handled progress.
+Fresh trigger reactions capture the subscription-time query head.
+
+Reaction snapshot streams retain a consistent view. They first validate encoded
+rows one at a time, without keeping a converted copy of the whole snapshot, then
+produce JSON rows as the consumer requests them. A capped consumer therefore
+avoids a complete JSON conversion, although validation still scans the snapshot.
+The non-streaming snapshot API can still allocate the complete requested snapshot.
+
+### Recovery conformance
+
+From the drasi-core repository root, run the recovery scenarios against the
+single runtime:
+
+```bash
+cargo test --locked -p lib-integration-tests --test reaction_recovery_conformance
+cargo test --locked -p drasi-reaction-http -p drasi-reaction-grpc --test recovery_e2e
+
+cargo test --locked -p lib-integration-tests --features computation-middleware-tests \
+  --test computation_middleware_durability
+```
+
+The subprocess fixtures verify distinct processes and actual graph-backed
+execution; they cannot fall back to ComponentGraph. The middleware target
+includes abrupt process exits before
+delivery, during partial fanout, and before/after delivery confirmation.
+
+Post-commit query timestamps are appended only to live output annotations.
+`QueryChangeCodec::metadata` applies them without rewriting committed output
+bytes and without borrowing another query's inherited completion stamps.
+Disk replay can therefore lack completion times.
+
+## Existing plugin interfaces
+
+| Integration type | Role and limits |
+|---|---|
+| `SourcePluginHost` | Owns, recreates or borrows an existing Source; full subscriptions preserve filtering, bootstrap and source metadata |
+| `ReactionPluginHost` | Supplies snapshot/history recovery to an existing Reaction; enqueue completion remains Accepted |
+| `LegacySourceFactory` / `LegacyReactionFactory` | Lower-level adapters for supplied existing interfaces, not automatic injection of every service |
+| `LegacyIndexProviderAdapter` | Uses existing index providers in graph-specific storage namespaces |
+| `drasi-plugin-sdk/computation` factories | Descriptor-backed construction with retained unresolved configuration recipes |
+
+A plugin has one lifecycle owner. Borrowing it does not permit another graph to
+initialize, start, stop, deprovision or reconfigure it. Use a constructor when the
+plugin needs reconstruction for restart. In `SourceSubscriptionOptions`,
+`borrowed_recovery` and `allow_broadcast_loss` both default to false; enabling
+either gives permission to use that behaviour, not a capability the source lacks.
+
+Descriptor factories validate kind/configuration version and available schema.
+The host must first safely load and version-check dynamic plugins. The existing
+Source/Reaction ABI remains at 0.15; the earlier recovery update distinguished
+an absent resume sequence from an explicit sequence zero. Native graph plugins
+use a different ABI family. Task-scoped secret resolution
+for in-process creation does not replace a dynamic plugin's injected resolver.
+
+Export does not recover construction recipes by reading resolved secret-bearing
+`properties()`. Retain original recipes and re-supply external bindings on import.
+The dynamic SourceProxy forwards the loaded plugin's replay capability and
+position-handle removal calls. Replay therefore depends on the actual plugin;
+dynamic loading by itself neither supplies nor rules out replay support.
+
+## Native dynamic plugins
+
+The [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
+[native SDK](../../components/computation-plugin-sdk/README.md) are separate from
+the existing Source/Reaction plugin interface. ABI 1.0 loads sources,
+transformers, sinks and services directly into graph-native proxies; it does not
+translate them back into the older component model.
+
+Use `drasi_host_sdk::computation::load` when a native library is required.
+`PluginLoader::load_all_families` shares candidate discovery with legacy loading
+and selects the family from exported symbols and validated metadata. Missing
+native symbols permit the legacy path; a partial or invalid native declaration
+is an error, never an instruction to interpret its memory as another ABI.
+Native metadata, wire version, table size, target, schemas and capabilities are
+checked before instances are used. Artifact resolution compares native ABI
+compatibility independently of the legacy SDK/core/lib Rust package versions.
+
+Native factories retain implementation/plugin versions and configuration
+schemas. `NativeFactory::specification` supplies the graph definition, and
+`PluginRegistry::computation_factory_registry` combines native factories with
+the standard graph factories. The graph owns scheduling and cancellation;
+operations cross the boundary as poll/wake/cancel handles and owned serialized
+buffers. Control notifications do not wait behind mutable data processing.
+Libraries remain loaded for the process lifetime.
+
+Native wire version 1 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
+The binary transport preserves the complete envelope and runs the same registered
+record validators; it does not strip context, lineage or recovery metadata.
+Producer-owned reply buffers remain alive during decoding and are released
+exactly once by their producer. Borrowed asynchronous inputs still require an
+owned copy. The JSON `EnvelopeCodec` is a separate v1 storage representation.
+Both codecs preserve current event-local controls separately from historical
+lineage. Build hosts and native libraries from matching sources.
+
+The SDK's optional `TransactionalComponent` interface adds a borrowed
+`NativeTransactionContext`. It exposes step-local values/elements through the
+host's active transaction, not the Rust transaction object itself. The host
+rejects failed, cancelled or unfinished state requests before a step succeeds.
+Participants cannot commit, retain a usable transaction after the call, or
+schedule independent transaction work.
+
+ABI 1.0 deliberately does not claim native query snapshot/outbox interfaces,
+source recovery-progress handles, arbitrary provider injection, in-place
+reconfiguration, or safe library unloading. Unsupported capabilities are
+rejected. Existing query implementations and durable source adapters remain
+available in mixed graphs; this does not confer durability on a volatile native
+source.
+
+The [native network components](../../components/computation-plugins/NETWORK.md)
+provides HTTP and gRPC sources and query-result sinks for standard Server
+performance workloads. It reuses the existing external wire contracts, not
+Source/Reaction runtime adapters. Sources mark their nonpersistent streams with
+`GraphProducerIdentity::volatile` and `GraphProducerProgress::annotate`;
+persistent consumers still reject an unrecoverable upstream. Sinks use
+`QueryChangeCodec::row_values_to_json` for the established outward JSON
+projection without manufacturing legacy query results. Adaptive batching,
+bootstrap and source replay are not supplied by these initial network factories.
+
+## Configuration snapshots
+
+`snapshot_configuration()` retains the ordinary source/query/reaction API.
+For the complete user configuration, use:
+
+```rust,ignore
+let snapshot = drasi.snapshot_computation_configuration().await?;
+let json = serde_json::to_string_pretty(&snapshot)?;
+```
+
+The versioned result contains `instance` (the ordinary configuration) and
+`native_components` (native declarations and resource recipes in the same
+ComputationGraph). Generated ordinary-query helpers are reconstructed from the
+ordinary query configuration, not duplicated in the native section.
+
+The native section includes its desired topology and a configuration entry for every
+component: submitted values before construction, captured values from the
+component getter, or an explicit unavailability reason. Factory definitions
+remain present when creation fails. Captures occur at construction and
+reconfiguration boundaries, so snapshotting does not borrow a component from an
+in-flight processing call. Collection detects concurrent graph/instance changes
+and retries; sustained changes produce an explicit retry error.
+
+`DesiredTopology::resource_configurations` retains host-supplied provider recipes.
+It does not inspect arbitrary provider objects or transfer ownership. Recipes
+for replaced/rebound resources are discarded rather than kept with a different
+live object. Missing recipes and external component/pipe bindings must be
+provided by the restoring host, or reported as incomplete configuration.
+
+These exports may contain secret-bearing configuration. They are not the public
+topology-as-data view and must be protected like configuration files. They do
+not include query rows, queued events, checkpoint data or a storage migration.
+
+## Inspection schema
+
+| Entity | Meaning |
+|---|---|
+| Component | Declaration, displayed kind, execution role and observations |
+| Resource | Declared or supplied provider/object and its cleanup state |
+| Plugin version | Exact supplied plugin ID/version pair and its component references |
+| Plugin family | One plugin ID, its represented versions and distinct component references |
+| Pipe | Port endpoints, provider description, policy, capabilities and binding observation |
+| Host subscription | Existing source/query/reaction delivery relationship and endpoint observations |
+
+Dependencies use `UsesResource`, `UsesComponent`, `DependsOnPlugin`,
+`VersionOfPlugin` and `DependsOnData`. Data direction uses
+`PipeInput`/`PipeOutput` or `SubscriptionInput`/`SubscriptionOutput`.
+`ControlConnection` represents notification adjacency, not a data dependency.
+These descriptive links do not substitute for `RelationshipPolicy`.
+
+`ComputationTopologySource` exposes these as queryable graph nodes and
+relationships. Retained `FLOWS_TO`/`ComputationRelationship` summaries describe the
+same connections, not additional delivery paths.
+
+Each scope is consistent, but a combined inventory is not a transaction across
+all running graphs. The topology source converges to the latest state rather
+than preserving every intermediate event. Inspector history is bounded to 256
+publications and fails explicitly when requested history has been evicted.
+
+Desired snapshots are shared across observation-only publications.
+`ObservedGraph` uses persistent ordered maps for components, relationships and
+resources, and shares its completed deployment/startup reports. The registry
+likewise shares unchanged metadata. Slots mark captures dirty when configuration
+or reader capabilities change; a topology-revision-only cache would miss those
+changes. Additions and provider reports publish their desired metadata before
+the corresponding coherent observation.
+
+Compatibility events use observed-map differences and an immutable kind lookup.
+Desired metadata changes still trigger the necessary record-token/generation
+checks. Current-member events precede removals, and removal clears that member's
+history. Full exports and opt-in topology-as-data projection still reflect the
+size of the requested output.
+
+Supplied providers are represented even if unused. Reports can arrive during
+initialization or later; an add acknowledgement is not proof that every internal
+provider has already been reported. Shared instances can be deduplicated with
+`ResourceHandle::with_shared_identity`. Index aliases for the same instance use
+the lexically first name as their canonical binding.
+
+A resource link can mean an available service, configured dependency or reported
+binding; it is not per-event usage tracking. Private plugin objects need explicit
+reports. Plugin versions are exact identifiers, not inferred from Rust type
+names or configuration versions. Reference nodes are not a plugin-loader inventory.
+
+Public graph-as-data output omits configuration values, resolved secrets and
+failure messages. Detailed error objects and desired configuration exports are
+different surfaces and must not be assumed safe for public disclosure.
+
+## Code locations and checks
+
+| Area | Main implementation |
+|---|---|
+| Ownership, execution and cleanup | [`graph.rs`](../src/computation/v1/graph.rs), [`controller.rs`](../src/computation/v1/graph/controller.rs) |
+| Addition and safe changes | [`addition.rs`](../src/computation/v1/graph/addition.rs), [`reconcile.rs`](../src/computation/v1/graph/reconcile.rs) |
+| Factories and export/import | [`specification.rs`](../src/computation/v1/graph/specification.rs), [`topology.rs`](../src/computation/v1/graph/topology.rs) |
+| Query execution and ordering | [`query.rs`](../src/computation/v1/query.rs), [`ranked_pipe.rs`](../src/computation/v1/ranked_pipe.rs), [`query_scheduling.rs`](../src/computation/v1/query_scheduling.rs) |
+| Standalone graph middleware | [`middleware.rs`](../src/computation/v1/middleware.rs) |
+| Instance and query task ownership | [`instance.rs`](../src/computation/instance.rs), [`execution.rs`](../src/computation/v1/graph/execution.rs), [`query_assembly.rs`](../src/computation/runtime/query_assembly.rs) |
+| Ordinary APIs and plugin integration | [`runtime`](../src/computation/runtime), [`pipeline.rs`](../src/computation/v1/pipeline.rs), [`plugin_source.rs`](../src/computation/v1/plugin_source.rs), [`plugin_reaction.rs`](../src/computation/v1/plugin_reaction.rs) |
+| Inspection and inventory | [`entities.rs`](../src/computation/v1/entities.rs), [`inventory.rs`](../src/computation/v1/inventory.rs) |
+
+The general graph modules do not decode the plugin adapter's private configuration
+or construct the old managers. Provider translation and plugin factory assembly
+are outside those modules. This is an enforced code boundary, not a separate crate.
+
+From the drasi-core repository root:
+
+```bash
+env -u RUST_LOG bash lib/tests/run-runtime-parity.sh
+cargo test --locked -p drasi-lib --features computation-rocksdb-tests \
+  --test computation_query_codec --test computation_query_faults \
+  --test computation_query_recovery
+cargo test --locked -p lib-integration-tests
+```
+
+The integration suite includes container-backed cases and needs a
+Docker-compatible daemon; this workspace uses Podman.
+The runtime runner executes default, no-default-feature, extra-capability,
+integration and SDK descriptor-factory profiles. These are build configurations
+of one engine, not alternate execution modes. Leave `RUST_LOG` unset for suites
+that assert logging behaviour.
+
+### Main-branch contracts and graph-specific coverage
+
+The comparison baseline is main commit
+[`c2d80aa7`](https://github.com/drasi-project/drasi-core/commit/c2d80aa7e4de874302b301584a6c7134c3609ed7).
+The library [inventory](../tests/runtime_parity/original-cases.tsv) includes all
+970 test cases at that revision, plus nine older names retained by the previous
+baseline. The [integration inventory](../tests/runtime_parity/integration-cases.tsv)
+records all 88 main integration cases. Tests whose implementation moved have
+explicit [case mappings](../tests/runtime_parity/case-mappings.tsv); a removed
+mutable graph API is not a blanket exemption from its observable contract.
+
+The runner checks both discovery and actual passing results. Adding `#[ignore]`,
+dropping a test file, losing a mapped replacement, or filtering required tests
+out of execution fails the run. The only
+[permitted ignores](../tests/runtime_parity/allowed-ignored.tsv) are the named
+manual serialization/publication diagnostics and subprocess workers whose crash drivers must
+pass, plus explicitly owned, expiring environment exceptions. The
+macOS/Linux network case runs when its Linux peer is prepared; its unprepared
+exception does not establish network acceptance. The Host SDK subscribe/drop
+stress case runs as an ordinary test; its bounded cycles do not qualify
+sustained DLL ownership. The
+[runner self-check](../tests/runtime_parity/check-runner.sh) exercises these
+failure paths without compiling Rust.
+
+The native input crash matrix independently qualifies admission QoS, retained
+inputs and shared journals with eager/paged RocksDB storage on both runtimes.
+Its parent drivers execute the ignored worker in fresh processes and check
+28 SIGKILL scenarios, exact accepted frames, retry identities, query progress,
+projection and output. See
+[`native_input_crash_recovery.rs`](../../lib-integration-tests/tests/native_input_crash_recovery.rs).
+This is process-restart evidence, not universal provider, power-loss or
+exactly-once external-effect qualification.
+
+The [graph contract inventory](../tests/runtime_parity/computation-contracts.tsv)
+also requires named coverage for functionality with no ComponentGraph equivalent:
+
+| Capability | Required behavior |
+|---|---|
+| Admission, readiness and control | Accepted nodes retain errors; pending creation and full data queues do not block unrelated control |
+| Lifecycle and live changes | Revision/generation fencing, safe replacement, drain boundaries, cancellation and retryable cleanup |
+| Typed events and transport | Ordered operations, schema validation, isolated fanout context, FIFO and explicit retention gaps |
+| Resources and inspection | Shared identity, obsolete-report rejection, scoped inventory, topology import and bounded history |
+| Query/plugin integration | Matching join/middleware results, source progress, producer identity and handled-only reaction checkpoints |
+| Descriptor factories | Real source/reaction pipelines, configuration validation, isolated secrets and transactional provider commit/rollback/reopen |
+| Transaction sequences | Isolated values/elements, relation identity, rollback before another step consumes invalid output, standalone participation |
+| Durable reconstruction | Actual process exit before transaction commit and before/after partial fanout and delivery confirmation; real RocksDB query reset/deprovision and merger commit/handoff child deaths |
+| Independent execution and scoped force | Owned tasks on both runtime flavors; full actual-domain validation, retained interrupted-work joins, and no false interruption or wait on idle peer-control observers |
+| Native process/network hosting | Same normal DrasiLib in Unix parent/child/grandchild processes; prepared mutual-TLS macOS/Linux-VM faults, persistent reopen and independent remote ownership |
+
+Preserved main tests run against ComputationGraph, not a second copy of the old
+engine. The result trace additionally pins exact Add/Update/Delete values,
+duplicate-row identities, metadata, snapshots and outbox replay; comparing two
+runs of the same implementation is not its only oracle. Paired ordinary/direct
+graph tests compare logical results under both Tokio runtime flavors.
+Only wall-clock/profiling clock values are normalized.
+
+The inherited query-output tests now require the expected bootstrap rows, live
+results and retained sequences. They cannot pass merely because no result was
+produced. Live delivery provides a processing barrier instead of sleeps; the
+no-op case verifies that a later matching input receives sequence one.
+
+Some expectations intentionally differ from main and are asserted explicitly:
+
+| Change | Expected difference |
+|---|---|
+| Node-first addition | Later validation/startup errors remain on the accepted node and its readiness handle |
+| Source ordering | Reordering declared sources changes input rank and therefore the query configuration hash |
+| Reconfiguring an existing query | Old rows/output are removed and the generation advances, but its sequence high-water mark does not move backwards; old history requests report a gap |
+| Plugin resume sequence | `Some(0)` remains distinct from `None` across the SDK interface |
+
+Clean restart without an actual replacement snapshot is not a reset: rows,
+sequence, generation and Strict reaction progress must remain unchanged. A real
+volatile snapshot refresh does advance the generation and must fence a Strict
+consumer's obsolete checkpoint.

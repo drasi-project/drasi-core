@@ -52,6 +52,7 @@ pub async fn test_upsert_semantics(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Sending first SourceUpdate for entity1 (should create)...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "entity1"),
@@ -95,6 +96,7 @@ pub async fn test_upsert_semantics(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Sending second SourceUpdate for entity1 (should update)...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "entity1"),
@@ -154,6 +156,7 @@ pub async fn test_partial_updates(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Creating entity with full properties...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "entity2"),
@@ -186,6 +189,7 @@ pub async fn test_partial_updates(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Sending partial update (only value property)...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "entity2"),
@@ -243,6 +247,7 @@ pub async fn test_stateless_processing(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Event 1: Initial sensor reading...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("iot", "sensor1"),
@@ -283,6 +288,7 @@ pub async fn test_stateless_processing(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Event 2: Updated sensor reading...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("iot", "sensor1"),
@@ -329,6 +335,7 @@ pub async fn test_stateless_processing(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Event 3: Another sensor reading...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("iot", "sensor1"),
@@ -385,6 +392,7 @@ pub async fn test_query_matching(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Creating device with status='online'...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "device1"),
@@ -426,6 +434,7 @@ pub async fn test_query_matching(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Updating device to status='offline'...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "device1"),
@@ -467,6 +476,7 @@ pub async fn test_query_matching(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Updating device back to status='online'...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "device1"),
@@ -521,6 +531,7 @@ pub async fn test_multiple_entities(config: &(impl QueryTestConfig + Send)) {
         let name = format!("Entity {i}");
 
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", &id),
@@ -550,6 +561,7 @@ pub async fn test_multiple_entities(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Updating only entity2...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "entity2"),
@@ -605,6 +617,7 @@ pub async fn test_relationship_upsert(config: &(impl QueryTestConfig + Send)) {
     // First create the nodes
     for id in ["device1", "device2"] {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", id),
@@ -623,6 +636,7 @@ pub async fn test_relationship_upsert(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Creating relationship with SourceUpdate...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Relation {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "conn1"),
@@ -661,6 +675,7 @@ pub async fn test_relationship_upsert(config: &(impl QueryTestConfig + Send)) {
     {
         //println!("Updating relationship with SourceUpdate...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Relation {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "conn1"),
@@ -714,6 +729,7 @@ pub async fn test_aggregation_with_upserts(config: &(impl QueryTestConfig + Send
     {
         //println!("Creating first entity with status='active'...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "e1"),
@@ -753,6 +769,7 @@ pub async fn test_aggregation_with_upserts(config: &(impl QueryTestConfig + Send
     {
         //println!("Creating second entity with status='active'...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "e2"),
@@ -779,6 +796,7 @@ pub async fn test_aggregation_with_upserts(config: &(impl QueryTestConfig + Send
     {
         //println!("Updating first entity to status='inactive'...");
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "e1"),

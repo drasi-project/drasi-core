@@ -657,7 +657,7 @@ mod event_generation {
         // Extract the element from the event
         let (metadata, properties) = match &event.event {
             SourceEvent::Change(SourceChange::Insert { element })
-            | SourceEvent::Change(SourceChange::Update { element }) => match element {
+            | SourceEvent::Change(SourceChange::Update { element, .. }) => match element {
                 Element::Node {
                     metadata,
                     properties,
@@ -744,7 +744,7 @@ mod event_generation {
                                 insert_sensor_ids.insert(metadata.reference.element_id.to_string());
                             }
                         }
-                        SourceEvent::Change(SourceChange::Update { element }) => {
+                        SourceEvent::Change(SourceChange::Update { element, .. }) => {
                             seen_update = true;
                             // Verify this sensor was previously inserted
                             if let Element::Node { metadata, .. } = element {
@@ -791,7 +791,7 @@ mod event_generation {
                     if let SourceEvent::Change(change) = &event.event {
                         let element = match change {
                             SourceChange::Insert { element } => element,
-                            SourceChange::Update { element } => element,
+                            SourceChange::Update { element, .. } => element,
                             _ => continue,
                         };
                         if let Element::Node { metadata, .. } = element {
@@ -899,9 +899,8 @@ mod event_generation {
                 if let Ok(event) = rx.recv().await {
                     if let SourceEvent::Change(change) = &event.event {
                         let element = match change {
-                            SourceChange::Insert { element } | SourceChange::Update { element } => {
-                                element
-                            }
+                            SourceChange::Insert { element }
+                            | SourceChange::Update { element, .. } => element,
                             _ => continue,
                         };
                         if matches!(element, Element::Relation { .. }) {
@@ -1333,7 +1332,7 @@ mod inject_event {
             metadata,
             properties,
         };
-        let change = SourceChange::Update { element };
+        let change = SourceChange::update(element);
 
         // Inject the Update event
         source.inject_event(change).await.unwrap();
@@ -1345,7 +1344,7 @@ mod inject_event {
             .expect("No event");
 
         match &event.event {
-            SourceEvent::Change(SourceChange::Update { element }) => {
+            SourceEvent::Change(SourceChange::Update { element, .. }) => {
                 if let Element::Node { metadata, .. } = element {
                     assert_eq!(metadata.reference.element_id.as_ref(), "updated_element");
                 }

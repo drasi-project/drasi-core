@@ -169,7 +169,7 @@ async fn test_gtfs_rt_source_detects_insert_update_delete() -> Result<()> {
             RETURN vp.entity_id AS entity_id, vp.vehicle_id AS vehicle_id, vp.latitude AS latitude
             "#,
         )
-        .from_source(source_id.clone())
+        .from_input(source_id.clone())
         .auto_start(true)
         .enable_bootstrap(false)
         .build();

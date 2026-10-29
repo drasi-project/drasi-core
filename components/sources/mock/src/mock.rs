@@ -27,7 +27,7 @@ use tokio::sync::RwLock;
 
 use drasi_lib::channels::*;
 use drasi_lib::identity::{CredentialContext, IdentityProvider};
-use drasi_lib::managers::{log_component_start, log_component_stop};
+use drasi_lib::observability::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
@@ -457,7 +457,7 @@ impl Source for MockSource {
                             if is_new {
                                 SourceChange::Insert { element }
                             } else {
-                                SourceChange::Update { element }
+                                SourceChange::update(element)
                             }
                         }
                         DataType::Generic => {
@@ -1062,9 +1062,7 @@ async fn emit_mesh_tick(
         dispatch_generated_change(
             base.clone_shared(),
             source_id,
-            SourceChange::Update {
-                element: connected_to_element(source_name, &edge, random_strength()),
-            },
+            SourceChange::update(connected_to_element(source_name, &edge, random_strength())),
         )
         .await;
     }

@@ -32,8 +32,37 @@
 //!   and for tests. Not used on the durable output path.
 
 use async_trait::async_trait;
+use std::num::NonZeroUsize;
 
 use super::IndexError;
+
+/// Bounds one read's record count and stored payload bytes. A first record larger
+/// than the byte limit is returned alone so paging always makes progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboxPageLimits {
+    pub max_records: NonZeroUsize,
+    pub max_bytes: NonZeroUsize,
+}
+
+impl OutboxPageLimits {
+    pub fn admits(&self, records: usize, bytes: usize, next_bytes: usize) -> bool {
+        records < self.max_records.get()
+            && (records == 0
+                || (bytes <= self.max_bytes.get() && next_bytes <= self.max_bytes.get() - bytes))
+    }
+
+    pub fn validate_page(&self, entries: &[(u64, Vec<u8>)]) -> Result<(), IndexError> {
+        let mut bytes = 0;
+        for (records, (_, value)) in entries.iter().enumerate() {
+            if !self.admits(records, bytes, value.len()) {
+                return Err(IndexError::CorruptedData);
+            }
+            bytes += value.len();
+        }
+        Ok(())
+    }
+}
 
 /// Persistent outbox storage for query result replay.
 ///
@@ -57,6 +86,19 @@ pub trait OutboxWriter: Send + Sync {
         query_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError>;
+
+    /// Read a bounded prefix of the entries strictly after `after_sequence`.
+    /// Empty means EOF, not an unsupported operation or a record that does not fit.
+    /// Callers needing a consistent multi-page view must exclude concurrent writers.
+    /// Implementations must not materialize all history and truncate afterwards.
+    async fn read_page(
+        &self,
+        _query_id: &str,
+        _after_sequence: u64,
+        _limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        Err(IndexError::NotSupported)
+    }
 
     /// Read the highest sequence number stored for this query.
     ///

@@ -503,7 +503,7 @@ impl FfiWalU64Result {
 
 unsafe impl Send for FfiWalU64Result {}
 
-/// Result of `oldest_sequence` which returns Option<u64>.
+/// Result of `oldest_sequence` which returns `Option<u64>`.
 #[repr(C)]
 pub struct FfiWalOptionalU64Result {
     pub value: u64,

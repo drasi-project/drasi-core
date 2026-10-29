@@ -23,9 +23,12 @@
 //! - `ss:{<query_id>}:pos:<source_id>` → raw opaque bytes
 //! - `ss:{<query_id>}:sources` → JSON array of source IDs with checkpoints
 //! - `ss:{<query_id>}:config_hash` → decimal u64 hash
+//! - `ss:{<query_id>}:result_seq` → last committed result sequence
+//! - `ss:{<query_id>}:output_gen` → durable output generation
 //!
-//! `stage_checkpoint` writes into the active `GarnetSessionState` write buffer
-//! so it commits atomically with index updates.
+//! Source and result-sequence staging share the active `GarnetSessionState`
+//! buffer. Result-head reads only expose committed data. Clearing bootstrap
+//! checkpoints preserves the independently managed result head and generation.
 
 use std::collections::HashMap;
 use std::sync::Arc;

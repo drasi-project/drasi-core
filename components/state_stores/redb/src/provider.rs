@@ -20,9 +20,97 @@ use log::{debug, info};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use tokio::sync::{oneshot, RwLock};
+use tokio::task::JoinHandle;
+
+#[derive(Default)]
+struct OperationFailures(Mutex<Vec<StateStoreError>>);
+
+impl OperationFailures {
+    fn record(&self, error: StateStoreError) {
+        let mut failures = self.0.lock().unwrap_or_else(|poisoned| {
+            log::error!("Retaining state-store failure after poisoned failure tracking");
+            poisoned.into_inner()
+        });
+        failures.push(error);
+    }
+
+    fn check(&self) -> StateStoreResult<()> {
+        let failures = self.0.lock().map_err(|error| {
+            StateStoreError::Other(format!("State-store failure tracking is poisoned: {error}"))
+        })?;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(StateStoreError::StorageError(format!(
+                "Unobserved blocking state-store failures: {failures:?}"
+            )))
+        }
+    }
+}
+
+struct OperationResult<T> {
+    result: Option<StateStoreResult<T>>,
+    failures: Arc<OperationFailures>,
+}
+
+impl<T> OperationResult<T> {
+    fn take(mut self) -> StateStoreResult<T> {
+        self.result.take().ok_or_else(|| {
+            StateStoreError::Other("Blocking state-store result was already consumed".into())
+        })?
+    }
+}
+
+impl<T> Drop for OperationResult<T> {
+    fn drop(&mut self) {
+        if let Some(Err(error)) = self.result.take() {
+            self.failures.record(error);
+        }
+    }
+}
+
+#[derive(Default)]
+struct BlockingWork {
+    jobs: Vec<JoinHandle<()>>,
+}
+
+impl BlockingWork {
+    fn completed(result: Result<(), tokio::task::JoinError>, failures: &OperationFailures) {
+        if let Err(error) = result {
+            failures.record(StateStoreError::Other(format!(
+                "Blocking state-store worker failed: {error}"
+            )));
+        }
+    }
+
+    fn reap_ready(&mut self, failures: &OperationFailures) {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut index = 0;
+        while index < self.jobs.len() {
+            match Pin::new(&mut self.jobs[index]).poll(&mut context) {
+                Poll::Ready(result) => {
+                    drop(self.jobs.swap_remove(index));
+                    Self::completed(result, failures);
+                }
+                Poll::Pending => index += 1,
+            }
+        }
+    }
+
+    async fn join(&mut self, failures: &OperationFailures) {
+        while let Some(job) = self.jobs.last_mut() {
+            let result = job.await;
+            drop(self.jobs.pop());
+            Self::completed(result, failures);
+        }
+    }
+}
 
 /// Redb-based state store provider.
 ///
@@ -38,6 +126,14 @@ use tokio::sync::RwLock;
 ///
 /// All read and write operations are atomic. Batch operations (set_many, delete_many)
 /// are performed in a single transaction.
+///
+/// # Cancellation and shutdown
+///
+/// Submitted blocking operations remain owned when their caller is cancelled.
+/// Stop submitting new operations, then await [`StateStoreProvider::sync`] before
+/// releasing the provider or reopening its database. Sync joins submitted reads
+/// and writes, reports abandoned failures, and performs an immediate durable
+/// commit. Cancelling sync retains unfinished jobs for a subsequent sync.
 ///
 /// # Memory Considerations
 ///
@@ -74,6 +170,10 @@ pub struct RedbStateStoreProvider {
     /// Cache of leaked table name references to avoid repeated allocations
     /// for the same store_id
     table_name_cache: Arc<RwLock<HashMap<String, &'static str>>>,
+    work: tokio::sync::Mutex<BlockingWork>,
+    failures: Arc<OperationFailures>,
+    #[cfg(test)]
+    blocking_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl fmt::Debug for RedbStateStoreProvider {
@@ -121,7 +221,57 @@ impl RedbStateStoreProvider {
         Ok(Self {
             db: Arc::new(db),
             table_name_cache: Arc::new(RwLock::new(HashMap::new())),
+            work: tokio::sync::Mutex::new(BlockingWork::default()),
+            failures: Arc::new(OperationFailures::default()),
+            #[cfg(test)]
+            blocking_hook: Mutex::new(None),
         })
+    }
+
+    fn submit<T, F>(
+        &self,
+        work: &mut BlockingWork,
+        operation: F,
+    ) -> oneshot::Receiver<OperationResult<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> StateStoreResult<T> + Send + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let failures = self.failures.clone();
+        #[cfg(test)]
+        let hook = self.blocking_hook.lock().expect("test hook").take();
+        // Register ownership before the caller can yield after submission.
+        work.jobs.push(tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook();
+            }
+            let result = OperationResult {
+                result: Some(operation()),
+                failures,
+            };
+            // Dropping an undelivered result retains its error for sync.
+            drop(sender.send(result));
+        }));
+        receiver
+    }
+
+    async fn blocking<T, F>(&self, operation: F) -> StateStoreResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> StateStoreResult<T> + Send + 'static,
+    {
+        let receiver = {
+            let mut work = self.work.lock().await;
+            work.reap_ready(&self.failures);
+            self.submit(&mut work, operation)
+        };
+        let delivered = receiver.await.map_err(|error| {
+            StateStoreError::Other(format!("Blocking state-store result unavailable: {error}"))
+        })?;
+        self.work.lock().await.reap_ready(&self.failures);
+        delivered.take()
     }
 
     /// Clear the table name cache.
@@ -179,13 +329,17 @@ impl RedbStateStoreProvider {
 
 #[async_trait]
 impl StateStoreProvider for RedbStateStoreProvider {
+    fn durability(&self) -> drasi_lib::state_store::StorageDurability {
+        drasi_lib::state_store::StorageDurability::LOCAL_POWER_LOSS
+    }
+
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         let table_name = self.get_or_create_table_name(store_id).await;
         let db = self.db.clone();
         let key = key.to_string();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin read transaction for store '{store_id}': {e}"
@@ -211,7 +365,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
@@ -220,12 +373,13 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let key = key.to_string();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+        self.blocking(move || {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -262,7 +416,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
@@ -271,12 +424,13 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let key = key.to_string();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+        self.blocking(move || {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -313,7 +467,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
@@ -322,7 +475,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let key = key.to_string();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin read transaction for store '{store_id}': {e}"
@@ -347,7 +500,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn get_many(
@@ -360,7 +512,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let keys: Vec<String> = keys.iter().map(|k| (*k).to_string()).collect();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin read transaction for store '{store_id}': {e}"
@@ -395,7 +547,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             Ok(result)
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
@@ -409,12 +560,13 @@ impl StateStoreProvider for RedbStateStoreProvider {
             .map(|(k, v)| ((*k).to_string(), v.to_vec()))
             .collect();
 
-        tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+        self.blocking(move || {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -450,7 +602,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
@@ -459,12 +610,13 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let keys: Vec<String> = keys.iter().map(|k| (*k).to_string()).collect();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+        self.blocking(move || {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -505,7 +657,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
@@ -513,12 +664,13 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let db = self.db.clone();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+        self.blocking(move || {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             // Get count and delete table in one pass
             let table_def = Self::make_table_def(table_name);
@@ -562,7 +714,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             Ok(count)
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
@@ -570,7 +721,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let db = self.db.clone();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin read transaction for store '{store_id}': {e}"
@@ -610,7 +761,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             Ok(keys)
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
@@ -618,7 +768,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let db = self.db.clone();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin read transaction for store '{store_id}': {e}"
@@ -643,7 +793,6 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
@@ -651,7 +800,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let db = self.db.clone();
         let store_id = store_id.to_string();
 
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin read transaction for store '{store_id}': {e}"
@@ -676,20 +825,21 @@ impl StateStoreProvider for RedbStateStoreProvider {
             }
         })
         .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
     async fn sync(&self) -> StateStoreResult<()> {
-        // redb commits are synchronous and durable by default,
-        // so sync is effectively a no-op. However, we can do a
-        // checkpoint operation for consistency.
+        // Retain every join handle in the provider across cancellation of this fence.
+        let mut work = self.work.lock().await;
+        work.join(&self.failures).await;
+        self.failures.check()?;
         let db = self.db.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let receiver = self.submit(&mut work, move || {
             // Perform a write transaction with no changes to force a sync
-            let write_txn = db.begin_write().map_err(|e| {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!("Failed to begin sync transaction: {e}"))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             write_txn.commit().map_err(|e| {
                 StateStoreError::StorageError(format!("Failed to commit sync transaction: {e}"))
@@ -697,9 +847,15 @@ impl StateStoreProvider for RedbStateStoreProvider {
 
             debug!("Synced redb state store");
             Ok(())
-        })
-        .await
-        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
+        });
+        work.join(&self.failures).await;
+        self.failures.check()?;
+        receiver
+            .await
+            .map_err(|error| {
+                StateStoreError::Other(format!("State-store sync result unavailable: {error}"))
+            })?
+            .take()
     }
 
     fn is_durable(&self) -> bool {
@@ -710,7 +866,245 @@ impl StateStoreProvider for RedbStateStoreProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    const CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
+
+    fn hold_next_operation(
+        provider: &RedbStateStoreProvider,
+    ) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, observed) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *provider.blocking_hook.lock().expect("hook") = Some(Box::new(move || {
+            entered.send(()).expect("observe submitted operation");
+            released
+                .recv_timeout(CLEANUP_DEADLINE)
+                .expect("release blocking operation");
+        }));
+        (observed, release)
+    }
+
+    async fn assert_pending<F: Future>(mut future: Pin<&mut F>) {
+        std::future::poll_fn(|context| {
+            assert!(future.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    async fn cancelled_operation_sync_fence(write: bool) {
+        let directory = TempDir::new().expect("directory");
+        let path = directory.path().join("cancelled.redb");
+        let provider = RedbStateStoreProvider::new(&path).expect("provider");
+        provider.set("test", "value", vec![1]).await.expect("seed");
+        let (entered, release) = hold_next_operation(&provider);
+        let mut operation = Box::pin(async {
+            if write {
+                provider.set("test", "value", vec![2]).await
+            } else {
+                provider.get("test", "value").await.map(|_| ())
+            }
+        });
+        tokio::select! {
+            result = &mut operation => panic!("operation completed before release: {result:?}"),
+            result = entered => result.expect("operation submitted"),
+        }
+        drop(operation);
+
+        let mut fence = Box::pin(provider.sync());
+        assert_pending(fence.as_mut()).await;
+        drop(fence);
+        let mut retry = Box::pin(provider.sync());
+        assert_pending(retry.as_mut()).await;
+        release.send(()).expect("release operation");
+        tokio::time::timeout(CLEANUP_DEADLINE, retry)
+            .await
+            .expect("sync deadline")
+            .expect("sync");
+        assert!(provider.work.lock().await.jobs.is_empty());
+        drop(provider);
+
+        let reopened = RedbStateStoreProvider::new(&path).expect("immediate reopen");
+        assert_eq!(
+            reopened.get("test", "value").await.expect("read"),
+            Some(vec![if write { 2 } else { 1 }]),
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_joins_cancelled_submitted_writes_and_retains_cancelled_fences() {
+        cancelled_operation_sync_fence(true).await;
+    }
+
+    #[tokio::test]
+    async fn sync_joins_cancelled_submitted_reads_before_database_release() {
+        cancelled_operation_sync_fence(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submitted_operation_fences_also_hold_on_multithread_runtime() {
+        cancelled_operation_sync_fence(true).await;
+        cancelled_operation_sync_fence(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_sync_keeps_its_submitted_commit_owned() {
+        let directory = TempDir::new().expect("directory");
+        let path = directory.path().join("sync.redb");
+        let provider = RedbStateStoreProvider::new(&path).expect("provider");
+        let (entered, release) = hold_next_operation(&provider);
+        let mut sync = Box::pin(provider.sync());
+        tokio::select! {
+            result = &mut sync => panic!("sync completed before release: {result:?}"),
+            result = entered => result.expect("sync submitted"),
+        }
+        drop(sync);
+        let mut retry = Box::pin(provider.sync());
+        assert_pending(retry.as_mut()).await;
+        release.send(()).expect("release sync");
+        tokio::time::timeout(CLEANUP_DEADLINE, retry)
+            .await
+            .expect("sync deadline")
+            .expect("sync");
+        drop(provider);
+        drop(RedbStateStoreProvider::new(&path).expect("immediate reopen"));
+    }
+
+    #[tokio::test]
+    async fn sync_reports_abandoned_operation_errors_and_worker_panics() {
+        for panic in [false, true] {
+            let directory = TempDir::new().expect("directory");
+            let provider = RedbStateStoreProvider::new(directory.path().join("failed.redb"))
+                .expect("provider");
+            let (entered, release) = hold_next_operation(&provider);
+            let mut operation = Box::pin(provider.blocking(move || -> StateStoreResult<()> {
+                if panic {
+                    panic!("injected blocking worker panic");
+                }
+                Err(StateStoreError::StorageError(
+                    "injected operation failure".into(),
+                ))
+            }));
+            tokio::select! {
+                result = &mut operation => panic!("operation completed before release: {result:?}"),
+                result = entered => result.expect("operation submitted"),
+            }
+            drop(operation);
+            release.send(()).expect("release operation");
+            for _ in 0..2 {
+                let error = tokio::time::timeout(CLEANUP_DEADLINE, provider.sync())
+                    .await
+                    .expect("sync deadline")
+                    .expect_err("abandoned failure must remain visible");
+                assert!(
+                    error.to_string().contains(if panic {
+                        "injected blocking worker panic"
+                    } else {
+                        "injected operation failure"
+                    }),
+                    "{error}"
+                );
+            }
+            assert!(provider.work.lock().await.jobs.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_receiver_retains_an_already_queued_error() {
+        let directory = TempDir::new().expect("directory");
+        let provider = RedbStateStoreProvider::new(directory.path().join("queued-error.redb"))
+            .expect("provider");
+        let (entered, release) = hold_next_operation(&provider);
+        let mut operation = Box::pin(
+            provider
+                .blocking(|| Err::<(), _>(StateStoreError::StorageError("queued failure".into()))),
+        );
+        tokio::select! {
+            result = &mut operation => panic!("operation completed before release: {result:?}"),
+            result = entered => result.expect("operation submitted"),
+        }
+        release.send(()).expect("release operation");
+        tokio::time::timeout(CLEANUP_DEADLINE, async {
+            loop {
+                if provider
+                    .work
+                    .lock()
+                    .await
+                    .jobs
+                    .iter()
+                    .all(JoinHandle::is_finished)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker completion");
+        drop(operation);
+        let error = provider
+            .sync()
+            .await
+            .expect_err("queued error is unobserved");
+        assert!(error.to_string().contains("queued failure"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn observed_operation_errors_do_not_become_abandoned_failures() {
+        let directory = TempDir::new().expect("directory");
+        let provider = RedbStateStoreProvider::new(directory.path().join("observed-error.redb"))
+            .expect("provider");
+        assert!(provider
+            .blocking(|| { Err::<(), _>(StateStoreError::StorageError("observed failure".into())) })
+            .await
+            .is_err());
+        provider
+            .sync()
+            .await
+            .expect("all failures observed by callers");
+    }
+
+    #[tokio::test]
+    async fn committed_mutations_survive_reopen_and_progress_preserves_the_boundary() {
+        use drasi_lib::{
+            computation::v1::{ConsumerProgressStore, StateStoreConsumerProgress},
+            state_store::StorageDurability,
+        };
+        let directory = TempDir::new().expect("directory");
+        let path = directory.path().join("durability.redb");
+        {
+            let provider = Arc::new(RedbStateStoreProvider::new(&path).expect("provider"));
+            assert_eq!(provider.durability(), StorageDurability::LOCAL_POWER_LOSS);
+            let progress = StateStoreConsumerProgress::new("graph", "consumer", provider.clone())
+                .expect("progress");
+            assert_eq!(progress.durability(), provider.durability());
+            provider
+                .set("single", "removed", vec![1])
+                .await
+                .expect("set");
+            provider.delete("single", "removed").await.expect("delete");
+            provider
+                .set_many("batch", &[("kept", &[2]), ("removed", &[3])])
+                .await
+                .expect("batch");
+            provider
+                .delete_many("batch", &["removed"])
+                .await
+                .expect("delete batch");
+            provider.set("cleared", "key", vec![4]).await.expect("set");
+            provider.clear_store("cleared").await.expect("clear");
+            provider.sync().await.expect("sync");
+        }
+        let provider = RedbStateStoreProvider::new(&path).expect("reopen");
+        assert_eq!(provider.get("single", "removed").await.expect("read"), None);
+        assert_eq!(
+            provider.get("batch", "kept").await.expect("read"),
+            Some(vec![2])
+        );
+        assert_eq!(provider.get("batch", "removed").await.expect("read"), None);
+        assert_eq!(provider.get("cleared", "key").await.expect("read"), None);
+    }
 
     #[tokio::test]
     async fn test_redb_state_store_get_set() {

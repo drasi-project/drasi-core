@@ -163,6 +163,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
     //Incident becomes extreme severity
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.HumanResources", "in1000"),
@@ -422,6 +423,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
     //Incident becomes critical severity
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.HumanResources", "in1000"),
@@ -690,6 +692,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .as_millis();
 
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Contoso.HumanResources", "in1000"),

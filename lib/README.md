@@ -7,6 +7,11 @@ DrasiLib is a Rust library that brings [Drasi](https://drasi.io/) change process
 
 DrasiLib is part of the [Drasi project](https://github.com/drasi-project), a [CNCF Sandbox](https://www.cncf.io/projects/drasi/) Data Change Processing platform.
 
+**New to the Rust library? Start with the [drasi-lib developer book](docs/developer-guide/README.md).**
+Build a native Rust inventory application, then develop its queries, processing
+pipeline, recovery, deployment, and operations in order. The book includes
+a complete file-driven starter project and a retained-output recovery companion.
+
 ## How It Works
 
 ```
@@ -16,7 +21,7 @@ Data In       Change Detection       Actions Out
 ```
 
 1. **Sources** connect to databases, APIs, or streams and model incoming data as a property graph of nodes and relationships.
-2. **Continuous Queries** run [Cypher](https://opencypher.org/) or [GQL (ISO 9074:2024)](https://www.iso.org/standard/76120.html) queries perpetually against that graph. When source data changes, queries detect which results were **added**, **updated** (with before/after), or **deleted**.
+2. **Continuous Queries** run [Cypher](https://opencypher.org/) or [GQL (ISO/IEC 39075:2024)](https://www.iso.org/standard/76120.html) queries perpetually against that graph. When source data changes, queries detect which results were **added**, **updated** (with before/after), or **deleted**.
 3. **Reactions** receive those result changes and take action — send webhooks, write to databases, log alerts, or anything else.
 
 You declare *what changes matter* with a query. DrasiLib handles the rest.
@@ -29,11 +34,82 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-drasi-lib = "0.4"
+drasi-lib = { path = "../drasi-core/lib" }
 tokio = { version = "1", features = ["full"] }
 ```
 
-**Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
+This path assumes your application is beside a matching `drasi-core` checkout.
+The APIs in this branch are not necessarily available in published crate versions.
+The [development setup](docs/developer-guide/README.md#1-run-your-first-application)
+includes a complete native application, its dependencies, and the required
+toolchain. Non-jq examples do not need jq build tools.
+
+## ComputationGraph runtime
+
+**ComputationGraph is the only runtime in this branch**, including builds with
+`--no-default-features`. It owns running components, keeps failed additions
+visible, supports dependency-aware changes and lets independent queries run in
+parallel. Existing source/reaction plugins remain usable through adapters;
+there is no second execution engine.
+
+`QueryBase`, `SequenceDedup` and the old JSON query-output cache have been removed;
+there is no compatibility module or second query executor. Snapshot/outbox
+response and stream types remain supported. Use the graph-owned construction,
+result and recovery APIs described below.
+
+`start()` reports requested component startup failures through a typed
+`PartialStartError` cause. Some independent components may already be running:
+inspect their status, then call `stop()` or `shutdown()` before retrying.
+Valid declarations waiting for missing dependencies are still accepted.
+
+Start with the guide for your task:
+
+| Guide | What it covers |
+|---|---|
+| [drasi-lib developer book](docs/developer-guide/README.md) | A linear path from a native application through queries, composition, recovery, deployment and operations |
+| [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
+| [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
+| [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
+| [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
+| [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
+| [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
+| [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
+| [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
+| [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
+| [ComputationGraph remaining work](docs/computation-graph-remaining-work.md) | Single active list of validated issues, investigations, qualification gaps and improvements, with priorities, scope and completion criteria |
+| [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and interpretation of qualification evidence |
+| [Managed-query test controls](docs/query-test-control.md) | Opt-in independent physical clocks and actual due-work/output frontiers; no production clock or downstream completion substitution |
+
+From the drasi-core repository root, run a complete in-process example:
+
+```bash
+cargo run --locked -p drasi-lib --example computation_runtime
+```
+
+Use `DrasiLib::builder()` directly: no engine-selection call is needed or
+supported. The [usage guide](docs/computation-graph-usage.md#use-the-library-in-an-application)
+shows the dependency setup for this branch. There is no `computation` feature
+or runtime-selection switch.
+
+The main behaviour to understand before using it:
+
+- Adding a component accepts its node; it does not prove successful
+  initialization or startup. Use a component handle to wait for readiness.
+- Valid declarations can wait for missing dependencies. The node explains
+  what is missing and starts automatically when prerequisites arrive, subject
+  to auto-start settings and explicit stops.
+- Native components default to arrival-order input merging. Explicit
+  `EventTimeAcrossStreams` compares available stream heads while preserving
+  each stream's order. Ordinary source subscriptions use a shared ranked
+  queue with event time and source-declaration rank; neither waits for unseen
+  events from a quiet source.
+- Persistent recovery depends on the source, query storage and reaction
+  capabilities. Disk indexes alone do not make all output durable.
+- Preserve stable storage identities when restarting. Always await shutdown.
+
+[Server configuration](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#execution-engine)
+and [test-framework configuration](https://github.com/drasi-project/test-infra/blob/agentofreality-parallel-computation-graph/e2e-test-framework/README.md)
+use different settings; their guides show where each setting belongs.
 
 ## Identity Providers
 
@@ -145,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
         .with_query(
             Query::cypher("high-temp")
                 .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id, s.temperature")
-                .from_source("sensors")
+                .from_input("sensors")
                 .build()
         )
         .build()
@@ -170,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## Table of Contents
 
+- [ComputationGraph](#computationgraph-runtime)
 - [Builder API](#builder-api)
 - [Query Builder](#query-builder)
 - [Multi-Source Queries and Joins](#multi-source-queries-and-joins)
@@ -242,7 +319,7 @@ let config = Query::cypher("active-orders")
         WHERE o.status = 'active' AND o.total > 100
         RETURN o.id, o.customer, o.total
     "#)
-    .from_source("orders-db")
+    .from_input("orders-db")
     .build();
 ```
 
@@ -251,7 +328,7 @@ For GQL (ISO 9074:2024 graph query language — not GraphQL):
 ```rust
 let config = Query::gql("active-orders")
     .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o.id, o.total")
-    .from_source("orders-db")
+    .from_input("orders-db")
     .build();
 ```
 
@@ -260,11 +337,13 @@ let config = Query::gql("active-orders")
 | Method | Description | Default |
 |--------|-------------|---------|
 | `query(impl Into<String>)` | Cypher or GQL query string | **Required** |
-| `from_source(impl Into<String>)` | Subscribe to a source by ID | **Required** (at least one) |
-| `from_source_with_pipeline(id, Vec<String>)` | Subscribe with named middleware pipeline | — |
+| `from_input(impl Into<String>)` | Consume an upstream component (a source, another query or a transformer) by ID | **Required** (at least one) |
+| `from_input_port(id, port)` | Consume a named output port of an upstream component | — |
+| `from_input_with_pipeline(id, Vec<String>)` | Consume with a named middleware pipeline | — |
+| `with_input(QueryInputConfig)` | Add a fully specified input (port, label selectors, pipeline) | — |
+| `with_result_label(impl Into<String>)` | Label published result nodes (the output schema is unchanged) | `Result` |
 | `auto_start(bool)` | Start with `core.start()` | `true` |
 | `enable_bootstrap(bool)` | Load initial data from sources | `true` |
-| `with_bootstrap_buffer_size(usize)` | Buffer size during bootstrap | `10,000` |
 | `with_joins(Vec<QueryJoinConfig>)` | Synthetic joins for multi-source queries | `None` |
 | `with_priority_queue_capacity(usize)` | Override instance-level queue capacity | Inherited |
 | `with_dispatch_buffer_capacity(usize)` | Override instance-level buffer size | Inherited |
@@ -290,8 +369,8 @@ let config = Query::cypher("orders-with-customers")
         WHERE o.status = 'pending'
         RETURN o.id, c.name, c.email, o.total
     "#)
-    .from_source("orders-db")
-    .from_source("customers-db")
+    .from_input("orders-db")
+    .from_input("customers-db")
     .with_joins(vec![QueryJoinConfig {
         id: "PLACED_BY".to_string(),
         keys: vec![
@@ -389,9 +468,12 @@ core.stop_reaction("my-reaction").await?;
 `stop_query()` also cleans up queries in `Error`, including failures during
 startup or bootstrap. It releases active subscriptions and processing tasks before
 reporting `Stopped`, while preserving the query configuration and persisted state.
-The managed `stop_query()` command rejects an already stopped query through the
-component graph's transition validation. In contrast, calling a query runtime's
-`Query::stop()` directly is idempotent and returns `Ok(())` when already stopped.
+Stopping acknowledges the failure; its details remain in the component events,
+and the next start retries the query, including a failed construction. A terminal
+construction failure stays in `Error` until the query is updated or removed.
+The managed `stop_query()` command rejects an already stopped query with an
+"already stopped" error. In contrast, calling a query runtime's `Query::stop()`
+directly is idempotent and returns `Ok(())` when already stopped.
 Updating or removing a failed query, and stopping the instance, also release its
 active lifecycle resources. Updating a failed query leaves its replacement stopped
 until explicitly started.
@@ -498,7 +580,9 @@ pub struct ComponentEvent {
 
 ## Component Dependency Graph
 
-DrasiLib maintains a directed graph of all components and their relationships, backed by [petgraph](https://docs.rs/petgraph/). The graph is the single source of truth for component metadata, runtime instances, and lifecycle events.
+DrasiLib exposes a read-only component view derived from its ComputationGraph
+registry. The native graph owns component metadata, instances and lifecycle;
+the compatibility view is not a second mutable registry.
 
 ```
 Instance ("my-app")
@@ -513,18 +597,21 @@ Instance ("my-app")
 
 ```rust
 // Full graph snapshot (serializable to JSON via serde)
-let snapshot: GraphSnapshot = core.get_graph().await;
+let snapshot: GraphSnapshot = core.get_graph().await?;
 let json = serde_json::to_string_pretty(&snapshot)?;
 
 // Find what depends on a component
-let dependents: Vec<ComponentNode> = core.get_dependents("orders-db").await;
+let dependents: Vec<ComponentNode> = core.get_dependents("orders-db").await?;
 
 // Find what a component depends on
-let deps: Vec<ComponentNode> = core.get_dependencies("my-query").await;
+let deps: Vec<ComponentNode> = core.get_dependencies("my-query").await?;
 
 // Check if safe to remove (errors if other components depend on it)
 core.can_remove_component("orders-db").await?;
 ```
+
+Graph inspection and manager inventory, configuration, labels and subscriptions
+return `Result`; unavailable state is an error, not an empty result or a panic.
 
 ### Relationship Types
 
@@ -588,7 +675,7 @@ let core = DrasiLib::builder()
     .with_query(
         Query::cypher("my-query")
             .query("MATCH (n:Sensor) RETURN n")
-            .from_source("sensors")
+            .from_input("sensors")
             // 2. Assign the backend to a specific query by name
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
             .build()
@@ -729,7 +816,7 @@ use serde_json::json;
 
 let config = Query::cypher("my-query")
     .query("MATCH (n:Device) RETURN n")
-    .from_source("iot-source")
+    .from_input("iot-source")
     .with_middleware(SourceMiddlewareConfig {
         kind: "promote".into(),
         name: "extract-location".into(),
@@ -856,23 +943,27 @@ impl Reaction for MyReaction {
 
 ### Reaction Recovery
 
-Reactions can be stopped and restarted without losing data. The runtime uses a **checkpoint + outbox** mechanism to guarantee at-least-once delivery:
+Recovery combines a saved delivery position with retained query results. With
+persistent query output and a reaction that saves progress only after handling,
+restart can redeliver unconfirmed results: this is **at-least-once**, not
+exactly-once delivery. Retention gaps follow the configured recovery policy.
 
 ```
-Query emits results ──► Outbox (ring buffer) ──► Forwarder ──► Reaction
-                           │                        │
-                           │  retained N entries     │  tracks last-delivered seq
-                           │                        ▼
-                           │                   Checkpoint Store
-                           │                   (persisted per query)
-                           ▼
-                     On restart: replay from checkpoint
+Query -> Outbox -> Forwarder -> Reaction handler -> External effect
+           ^                                           |
+           | replay after saved position               | success
+           +---------------- Checkpoint store <--------+
 ```
 
 1. Each query retains the last N results in an **outbox** (configurable via `with_outbox_capacity`).
-2. Reactions persist a **checkpoint** (sequence number + config hash) after each delivered result.
+2. Reactions persist a **checkpoint** after successful handling, not merely after enqueueing. The saved position includes the query configuration/output identity.
 3. On restart, the runtime replays missed results from the outbox starting after the checkpoint.
 4. If the checkpoint falls behind the outbox (gap), the **recovery policy** decides what happens.
+
+A fresh trigger reaction starts at the head captured when it subscribes; it does
+not replay earlier retained notifications. Snapshot reactions can instead request
+an initial bootstrap. The ComputationGraph adapter never advances handled
+checkpoints simply because catch-up results entered a plugin queue.
 
 #### Recovery Policies
 
@@ -943,6 +1034,7 @@ The runtime validates these constraints at startup:
 | Condition | Result |
 |-----------|--------|
 | `is_durable=true` + no durable `StateStoreProvider` | Error: cannot persist checkpoints |
+| `is_durable=true` + any query with volatile output | Error: the saved position could not be recovered after restart |
 | `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` | Error: contradictory (skip means no snapshot) |
 | `needs_snapshot_on_fresh_start=false` + `AutoReset` | Error: AutoReset requires bootstrap capability |
 
@@ -953,7 +1045,7 @@ The outbox is a bounded ring buffer on the query side:
 ```rust
 let query = Query::cypher("q1")
     .query("MATCH (n:Sensor) RETURN n.id, n.value")
-    .from_source("sensors")
+    .from_input("sensors")
     .with_outbox_capacity(5000)   // retain last 5000 results (default: 1000)
     .build();
 ```
@@ -962,40 +1054,33 @@ If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap
 
 #### Persisted Outbox Compatibility
 
-New persisted `QueryResult` records use named-field MessagePack encoding, so omitted
-optional fields (including `Update.grouping_keys`) cannot shift subsequent values.
-The existing reader also accepts valid older compact records, including inserts
-and updates with present grouping keys (including an empty list). Valid compact
-and named records can coexist in a retained outbox; no reader or result schema
-change is required. Compact records must still have their positional fields
-intact; this compatibility guarantee does not extend to malformed compact records
-with other omitted fields, such as `QueryResult.profiling`.
+Retained query output uses the ComputationGraph binary envelope codec, which
+writes named-field MessagePack. Omitted optional fields, such as
+`Update.grouping_keys`, therefore cannot shift later values.
 
-This writer fix does **not** repair older compact updates with omitted grouping
-keys. Those malformed records still fail visibly during query startup under
-`RecoveryPolicy::Strict`; they are not silently dropped or reconstructed. Recovery
-requires an explicit rebuild decision with replay/bootstrap data available and
-downstream checkpoint consequences considered. The existing opt-in query
-`AutoReset` policy rebuilds output **and** indexes/checkpoints; clearing only the
-outbox is not a safe migration. This change performs no automatic migration and
-does not change recovery policies.
+ComputationGraph does not read outbox records written by the earlier runtime.
+A retained record that cannot be decoded makes query recovery report an
+inconsistent history; it is not dropped or reconstructed. Under `Strict` the
+query fails visibly. `AutoReset`, with a declared bootstrap provider, rebuilds
+the output **and** the indexes and checkpoints. Clearing only the outbox is not
+a safe migration.
 
 ### Result Format
 
-Reactions receive `QueryResult` values containing `ResultDiff` items:
+Reactions receive `QueryResult` values containing a `query_id`, a per-query
+`sequence`, a `timestamp`, metadata, optional profiling and an ordered
+`Vec<ResultDiff>`. Each change is one of:
 
-```rust
-pub enum ResultDiff {
-    Add { data: serde_json::Value },
-    Delete { data: serde_json::Value },
-    Update {
-        data: serde_json::Value,      // current row
-        before: serde_json::Value,    // previous values
-        after: serde_json::Value,     // new values
-        grouping_keys: Option<Vec<String>>,
-    },
-}
-```
+| Variant | Data |
+|---|---|
+| `Add` / `Delete` | `data`, `row_signature` |
+| `Update` | `data`, `before`, `after`, optional `grouping_keys`, `row_signature` |
+| `Aggregation` | optional `before`, `after`, `row_signature` |
+| `Noop` | No row change |
+
+The [application reaction guide](../components/reactions/application/README.md#what-a-result-contains)
+shows the complete message shape, serialized type tags and a handler covering
+every variant. Results are changes to rows, not just plain JSON rows.
 
 ---
 
@@ -1015,20 +1100,19 @@ queries:
       WHERE s.temperature > 75
       RETURN s.id, s.temperature, s.location
     queryLanguage: Cypher
-    sources:
-      - source_id: sensors
+    inputs:
+      - sensors
     auto_start: true
     enableBootstrap: true
-    bootstrapBufferSize: 10000
 
   - id: cross-source
     query: |
       MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
       WHERE o.status = 'pending'
       RETURN o.id, c.email, o.total
-    sources:
-      - source_id: orders
-      - source_id: customers
+    inputs:
+      - orders
+      - customers
     joins:
       - id: PLACED_BY
         keys:
@@ -1040,23 +1124,39 @@ queries:
 
 ### Loading YAML
 
-```rust
-use drasi_lib::DrasiLibConfig;
+Inside an async function, with the source/reaction objects already constructed:
+
+```rust,ignore
+use drasi_lib::{DrasiLib, DrasiLibConfig};
 
 let yaml = std::fs::read_to_string("config.yaml")?;
 let config: DrasiLibConfig = serde_yaml::from_str(&yaml)?;
 config.validate()?;
 
 let mut builder = DrasiLib::builder().with_id(&config.id);
+if let Some(capacity) = config.priority_queue_capacity {
+    builder = builder.with_priority_queue_capacity(capacity);
+}
+if let Some(capacity) = config.dispatch_buffer_capacity {
+    builder = builder.with_dispatch_buffer_capacity(capacity);
+}
 for q in &config.queries {
     builder = builder.with_query(q.clone());
 }
 let core = builder
-    .with_source(my_source)
+    .with_source(sensors_source)
+    .with_source(orders_source)
+    .with_source(customers_source)
     .with_reaction(my_reaction)
     .build()
     .await?;
 ```
+
+This excerpt uses in-memory indexes. Register actual named storage providers
+when using storage references; parsing `storage_backends` does not construct
+external providers. The three source objects must use the IDs referenced in
+the YAML above. Engine selection is also separate from `DrasiLibConfig`;
+see the [ComputationGraph configuration reference](docs/computation-graph-configuration.md).
 
 ### `DrasiLibConfig` Fields
 
@@ -1075,15 +1175,18 @@ let core = builder
 | `id` | `id` | `String` | **Required** |
 | `query` | `query` | `String` | **Required** |
 | `query_language` | `queryLanguage` | `Cypher` or `GQL` | `Cypher` |
-| `sources` | `sources` | `Vec<SourceSubscriptionConfig>` | `[]` |
+| `inputs` | `inputs` | `Vec<QueryInputConfig>` (a component name or `{component, port, nodes, relations, pipeline}`) | `[]` |
+| `result` | `result` | `QueryResultConfig` (`{label}`) | `{}` |
 | `middleware` | `middleware` | `Vec<SourceMiddlewareConfig>` | `[]` |
 | `auto_start` | `auto_start` | `bool` | `true` |
 | `enable_bootstrap` | `enableBootstrap` | `bool` | `true` |
-| `bootstrap_buffer_size` | `bootstrapBufferSize` | `usize` | `10,000` |
 | `joins` | `joins` | `Option<Vec<QueryJoinConfig>>` | `None` |
+| `priority_queue_capacity` | `priority_queue_capacity` | `Option<usize>` | Instance default, otherwise `10,000` |
+| `dispatch_buffer_capacity` | `dispatch_buffer_capacity` | `Option<usize>` | Instance default, otherwise `1,000` |
 | `dispatch_mode` | `dispatch_mode` | `Option<DispatchMode>` | `Channel` |
-| `storage_backend` | `storage_backend` | `Option<StorageBackendRef>` | In-memory |
-| `outbox_capacity` | `outbox_capacity` | `Option<usize>` | `1,000` |
+| `storage_backend` | `storage_backend` | `Option<StorageBackendRef>` | Instance default, otherwise in-memory |
+| `outbox_capacity` | `outboxCapacity` | `usize` | `1,000` |
+| `bootstrap_timeout_secs` | `bootstrapTimeoutSecs` | `u64` | `300` |
 | `recovery_policy` | `recoveryPolicy` | `Option<RecoveryPolicy>` | `Strict` (via global default) |
 
 ---
@@ -1114,7 +1217,23 @@ match core.get_source_status("unknown").await {
 | `InvalidState { message }` | Operation not valid in current state |
 | `Validation { message }` | Input validation failed |
 | `OperationFailed { component_type, component_id, operation, reason }` | Runtime operation failed |
-| `Internal(anyhow::Error)` | Unexpected internal error |
+| `Internal(anyhow::Error)` | Internal error or a public classification carrying its original cause |
+
+**Cause-preserving errors:** operation, state and configuration conversions now
+retain their underlying errors in the existing `Internal` variant. Match
+`error.classification()` rather than the outer variant to handle their public
+category. Existing enum variants and fields are unchanged; direct pattern matches
+still compile, but must adopt this accessor to recognize these wrapped errors.
+Simple structured errors, such as an unknown component, remain usable directly.
+
+Use `error.downcast_ref::<T>()` to inspect a graph, provider or worker error instead
+of parsing its message. `error::OperationFailures::failures()` exposes every error
+from a multi-component operation; `computation::v1::LifecycleReportError` retains
+the complete start, stop or reconciliation report. Their standard source chain
+follows only the primary failure. `ComputationCleanupError::cleanup_error()` keeps
+the failed cleanup separate from the original rejection, while its owner remains
+available for an explicit cleanup retry. None of these errors implies rollback or
+makes retrying an external effect safe.
 
 ---
 
@@ -1136,6 +1255,89 @@ match core.get_source_status("unknown").await {
 | `all-identity` | Enable all identity providers |
 
 ---
+
+## Testing and qualification
+
+The [requirement ledger](tests/runtime_parity/requirements.tsv) tracks all 48
+replacement-confidence scenarios. A passing test is evidence for its asserted
+contract, not proof that the entire replacement is qualified. `partial`,
+`blocked` and `unqualified` rows remain unsatisfied even when their existing tests
+pass.
+
+From the repository root, with Docker available and the pinned Rust toolchain:
+
+```bash
+make build-native-network-plugins build-test-plugins
+python3 lib/tests/runtime_parity/test_requirements.py
+bash lib/tests/runtime_parity/check-runner.sh
+bash lib/tests/run-runtime-parity.sh target/runtime-conformance
+```
+
+The cross-platform native FFI and coverage jobs use the shared
+[protoc setup action](../.github/actions/setup-protoc/action.yml). Its
+[installer](../ci/install_protoc.py) pins protoc 36.2 and each official archive's
+SHA-256, verifies the executable's version, and exports its compiler/include
+paths. Build-cache keys include the installer pin, so a tool upgrade cannot
+silently reuse artifacts generated by an older compiler. Updating the pin
+requires matching release digests and the native build/wire matrix on all
+supported runners; installer unit tests alone do not qualify that matrix.
+
+The runner checks historical case mappings, named requirements, discovery and
+actual results across default, no-default, additional recovery/middleware,
+integration, plugin-factory, Host SDK and Redis-compatible backend profiles.
+The matrix has 35 profiles: the original 32, including the source/database
+profiles, plus explicit unit-test profiles for extracted PostgreSQL/MySQL code:
+
+| Profile | Package | Selection |
+| --- | --- | --- |
+| `postgres-common` | `drasi-postgres-common` | `--no-default-features --features replication --lib` |
+| `postgres-native` | `drasi-computation-source-postgres` | `--no-default-features --lib` |
+| `mysql-common` | `drasi-mysql-common` | `--no-default-features --features native --lib` |
+
+These profiles run serially within each test binary. `mysql-common` includes
+ignored tests so its real MySQL authentication/TLS/connection-retirement case
+must execute, not count as a quarantine. A source crate's `--lib` does not execute
+its dependencies' unit tests. Keep each contract bound to its actual owning
+package, binary, case and profile when moving code.
+
+Backend cases are explicitly selected, not silently left ignored. Ignored
+subprocess workers require a passing parent driver. The sole existing DLL stress
+quarantine has an owner and expiry and cannot qualify resource-lifetime safety.
+Quarantine validation uses the local calendar date at startup, during profile
+checks and at final reporting. An expiry remains valid on that date, but a run
+crossing into the following day fails validation; a separate successful manual
+execution does not renew it or qualify other platforms.
+Redis compatibility is not a claim of retained-volume Garnet product recovery.
+
+The integration profile includes live replacement with full persistent multicast
+queues, failed handlers/construction, cancelled waits and independent branch
+traffic. Real HTTP/gRPC receivers record effects to a synced journal before
+replying; partial replies and abrupt runtime death must leave the complete
+unacknowledged query result replayable. The PostgreSQL case kills and restarts
+an owned container at a stable port, using a pinned multi-architecture image and
+a retained Docker volume, then compares recovered query rows and source
+checkpoints with the database. These bounded scenarios do not replace longer
+soak tests or qualify every connector/backend. Scheduled-query coverage also
+combines cancelled/rescheduled timers with a full durable output pipe: recovery
+must replay the original result without recalculation or advancing the live
+source's checkpoint for timer notifications.
+
+Per-profile discovery, execution logs and `qualification.json` are retained in
+the output directory. To enforce the stronger replacement gate:
+
+```bash
+python3 lib/tests/runtime_parity/check_requirements.py \
+  --evidence-dir target/runtime-conformance --require-qualified
+```
+
+This command intentionally fails while any requirement lacks complete passing
+evidence. Native durable ingress/consumer services, the Server managed API,
+real-product restart matrices and sustained-operation qualification are still
+explicit gaps; volatile/lossy configurations remain supported as such.
+
+Coverage CI enables the extra persistent test features and backend targets and
+includes Host SDK unit tests. Source coverage does not by itself measure
+assertion strength or independently loaded, uninstrumented DLL code.
 
 ## Related Projects
 

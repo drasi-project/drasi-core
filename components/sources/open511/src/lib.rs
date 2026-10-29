@@ -31,10 +31,13 @@ pub mod descriptor;
 pub mod mapping;
 pub mod models;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use drasi_lib::channels::*;
+use drasi_lib::context::workers::{
+    join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned, WorkerCompletion,
+};
 use drasi_lib::profiling::{timestamp_ns, ProfilingMetadata};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::state_store::StateStoreProvider;
@@ -43,7 +46,8 @@ use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use crate::api::Open511ApiClient;
@@ -64,6 +68,8 @@ pub struct Open511Source {
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     configured_state_store: Option<Arc<dyn StateStoreProvider>>,
     shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
+    cleanup_required: Mutex<bool>,
+    polling_task: RwLock<Option<JoinHandle<Result<()>>>>,
 }
 
 impl Open511Source {
@@ -78,6 +84,8 @@ impl Open511Source {
             state_store: Arc::new(RwLock::new(None)),
             configured_state_store: None,
             shutdown_tx: Arc::new(RwLock::new(None)),
+            cleanup_required: Mutex::new(false),
+            polling_task: RwLock::new(None),
         })
     }
 
@@ -109,9 +117,26 @@ impl Source for Open511Source {
     }
 
     async fn start(&self) -> Result<()> {
-        if self.base.get_status().await == ComponentStatus::Running {
-            return Ok(());
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.polling_task.read().await.is_some() {
+            let stopping = match self.shutdown_tx.read().await.as_ref() {
+                Some(tx) => *tx.borrow(),
+                None => true,
+            };
+            if !stopping
+                && self.base.get_status().await == ComponentStatus::Running
+                && self
+                    .polling_task
+                    .read()
+                    .await
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+            {
+                return Ok(());
+            }
+            return Err(WorkerAlreadyOwned.into());
         }
+        *cleanup_required = true;
 
         self.base
             .set_status(
@@ -141,30 +166,41 @@ impl Source for Open511Source {
             component_type = "source"
         );
 
-        let task = tokio::spawn(
-            async move {
-                if let Err(e) =
-                    run_poll_loop(source_id.clone(), config, base, state_store, shutdown_rx).await
-                {
-                    error!("Open511 source task failed for '{source_id}': {e}");
-                }
-            }
-            .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(task);
-
         self.base
             .set_status(
                 ComponentStatus::Running,
                 Some("Open511 source running".to_string()),
             )
             .await;
+        let status = self.base.status_handle();
+        spawn_owned_worker(
+            &self.polling_task,
+            async move {
+                let result =
+                    run_poll_loop(source_id.clone(), config, base, state_store, shutdown_rx).await;
+                if let Err(error) = &result {
+                    error!("Open511 source task failed for '{source_id}': {error}");
+                    status
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Polling loop failed: {error}")),
+                        )
+                        .await;
+                }
+                result
+            }
+            .instrument(span),
+        )
+        .await?;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if let Some(tx) = self.shutdown_tx.read().await.as_ref() {
+            tx.send_replace(true);
+        }
         self.base
             .set_status(
                 ComponentStatus::Stopping,
@@ -172,25 +208,18 @@ impl Source for Open511Source {
             )
             .await;
 
-        if let Some(tx) = self.shutdown_tx.write().await.take() {
-            let _ = tx.send(true);
+        if let WorkerCompletion::Completed(result) = join_owned_worker_gracefully(
+            &mut *self.polling_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Open511 '{}' polling cleanup", self.base.id))?
+        {
+            result.with_context(|| format!("Open511 '{}' polling failed", self.base.id))?;
         }
-
-        if let Some(handle) = self.base.task_handle.write().await.take() {
-            match tokio::time::timeout(Duration::from_secs(5), handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!("Open511 polling task join failed: {e}"),
-                Err(_) => warn!("Timed out waiting for Open511 polling task to stop"),
-            }
-        }
-
-        self.base
-            .set_status(
-                ComponentStatus::Stopped,
-                Some("Open511 source stopped".to_string()),
-            )
-            .await;
-
+        self.shutdown_tx.write().await.take();
+        self.base.stop_common().await?;
+        *cleanup_required = false;
         Ok(())
     }
 
@@ -246,17 +275,19 @@ async fn run_poll_loop(
     let api_client = Open511ApiClient::new(config.clone())?;
     let mut state = load_poll_state(&source_id, &state_store).await?;
 
+    if *shutdown_rx.borrow() || shutdown_rx.has_changed().is_err() {
+        return Ok(());
+    }
     initialize_poll_state(&source_id, &config, &api_client, &mut state).await?;
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
 
     loop {
         tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    info!("Open511 source '{source_id}' received shutdown signal");
-                    break;
-                }
+            biased;
+            _ = async { let _ = shutdown_rx.wait_for(|stopped| *stopped).await; } => {
+                info!("Open511 source '{source_id}' received shutdown signal");
+                break;
             }
             _ = interval.tick() => {
                 state.poll_count = state.poll_count.wrapping_add(1);
@@ -655,6 +686,8 @@ impl Open511SourceBuilder {
             state_store: Arc::new(RwLock::new(self.state_store.clone())),
             configured_state_store: self.state_store,
             shutdown_tx: Arc::new(RwLock::new(None)),
+            cleanup_required: Mutex::new(false),
+            polling_task: RwLock::new(None),
         })
     }
 }
@@ -663,7 +696,139 @@ impl Open511SourceBuilder {
 mod tests {
     use super::*;
     use crate::models::{Open511Area, Open511Event};
+    use drasi_lib::context::workers::WorkerCleanupError;
+    use drasi_lib::state_store::MemoryStateStoreProvider;
     use std::collections::HashMap;
+    use tokio::sync::Notify;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn polling_http_work_is_retained_and_restarts_clear_dispatchers() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let app = axum::Router::new().route(
+            "/events",
+            axum::routing::get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(serde_json::json!({"events":[]}))
+                    }
+                }
+            }),
+        );
+        let (stop_server, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        let source = Open511Source::builder("lifecycle")
+            .with_base_url(format!("http://{address}"))
+            .with_poll_interval_secs(60)
+            .with_state_store(store.clone())
+            .build()?;
+        source.stop().await?;
+        for cycle in 0..3 {
+            let mut receiver = source.base.try_test_subscribe().await?;
+            source.start().await?;
+            source.start().await?;
+            tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+            if cycle == 0 {
+                let error = source.stop().await.unwrap_err();
+                assert!(
+                    matches!(error.downcast_ref(), Some(WorkerCleanupError::TimedOut { timeout }) if *timeout == Duration::from_secs(5))
+                );
+            } else {
+                let stop = source.stop();
+                tokio::pin!(stop);
+                tokio::select! {
+                    result = &mut stop => panic!("HTTP poll remains active: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+            assert!(!source
+                .polling_task
+                .read()
+                .await
+                .as_ref()
+                .expect("owned poll")
+                .is_finished());
+            assert!(source
+                .start()
+                .await
+                .unwrap_err()
+                .downcast_ref::<WorkerAlreadyOwned>()
+                .is_some());
+            release.notify_one();
+            source.stop().await?;
+            assert!(source.polling_task.read().await.is_none());
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await?
+                    .unwrap_err()
+                    .to_string(),
+                "Channel closed"
+            );
+            assert!(store.get(source.id(), KEY_POLL_COUNT).await?.is_some());
+        }
+        stop_server.send(()).expect("server shutdown");
+        server.await??;
+        source.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn polling_errors_and_panics_retain_typed_causes_until_cleanup() -> Result<()> {
+        for panic in [false, true] {
+            let source = Open511Source::builder("failed")
+                .with_base_url("http://127.0.0.1:1")
+                .build()?;
+            *source.cleanup_required.lock().await = true;
+            spawn_owned_worker(&source.polling_task, async move {
+                assert!(!panic, "injected Open511 polling panic");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "injected poll failure",
+                )
+                .into())
+            })
+            .await?;
+            let error = source.stop().await.unwrap_err();
+            if panic {
+                assert!(
+                    matches!(error.downcast_ref(), Some(WorkerCleanupError::Join(error)) if error.is_panic())
+                );
+            } else {
+                assert_eq!(
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .expect("I/O cause")
+                        .kind(),
+                    std::io::ErrorKind::ConnectionReset
+                );
+            }
+            assert!(source.polling_task.read().await.is_none());
+            assert!(source
+                .start()
+                .await
+                .unwrap_err()
+                .downcast_ref::<WorkerAlreadyOwned>()
+                .is_some());
+            source.stop().await?;
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+        Ok(())
+    }
 
     #[test]
     fn builder_configures_defaults() {

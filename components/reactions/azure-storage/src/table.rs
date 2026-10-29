@@ -33,7 +33,8 @@ impl TableService {
         credentials: StorageCredentials,
         endpoint: Option<&str>,
     ) -> Self {
-        let mut builder = TableServiceClientBuilder::new(account_name, credentials);
+        let mut builder = TableServiceClientBuilder::new(account_name, credentials)
+            .client_options(crate::logging::client_options());
         if let Some(uri) = endpoint {
             builder = builder.cloud_location(CloudLocation::Custom {
                 account: account_name.to_string(),

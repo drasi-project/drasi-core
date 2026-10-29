@@ -104,6 +104,83 @@ impl QueryTestConfig for RocksDbQueryConfig {
     }
 }
 
+mod optional_match {
+    use super::RocksDbQueryConfig;
+    use serial_test::serial;
+    use shared_tests::use_cases::optional_match;
+
+    #[tokio::test]
+    #[serial]
+    async fn optional_match() {
+        optional_match::optional_match(&RocksDbQueryConfig::new()).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn optional_match_aggregating() {
+        optional_match::optional_match_aggregating(&RocksDbQueryConfig::new()).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn multi_optional_match() {
+        optional_match::multi_optional_match(&RocksDbQueryConfig::new()).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn optional_match_identity_and_join_key_changes() {
+        optional_match::optional_match_identity_and_join_key_changes(&RocksDbQueryConfig::new())
+            .await;
+    }
+}
+
+mod disconnected_match {
+    use super::RocksDbQueryConfig;
+    use serial_test::serial;
+    use shared_tests::use_cases::disconnected_match;
+
+    #[tokio::test]
+    #[serial]
+    async fn disconnected_optional_contexts_aggregate_coherently() {
+        disconnected_match::disconnected_optional_contexts_aggregate_coherently(
+            &RocksDbQueryConfig::new(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disconnected_optional_lifecycle() {
+        disconnected_match::disconnected_optional_lifecycle(&RocksDbQueryConfig::new()).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disconnected_mandatory_lifecycle() {
+        disconnected_match::disconnected_mandatory_lifecycle(&RocksDbQueryConfig::new()).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disconnected_matching_reads_current_transaction_writes() {
+        disconnected_match::disconnected_matching_reads_current_transaction_writes(
+            &RocksDbQueryConfig::new(),
+        )
+        .await;
+    }
+}
+
+mod temporal_retractions {
+    use super::RocksDbQueryConfig;
+    use serial_test::serial;
+    #[tokio::test]
+    #[serial]
+    async fn shared_context_future_hints_retract_actual_contributions() {
+        shared_tests::use_cases::temporal_retractions::shared_context_future_hints_retract_actual_contributions(&RocksDbQueryConfig::new()).await;
+    }
+}
+
 mod building_comfort {
     use super::RocksDbQueryConfig;
     use serial_test::serial;

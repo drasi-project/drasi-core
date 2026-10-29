@@ -431,7 +431,7 @@ mod event_transformation {
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
-            SourceChange::Update { element } => match element {
+            SourceChange::Update { element, .. } => match element {
                 Element::Node { metadata, .. } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "node1");
                     assert_eq!(metadata.labels.len(), 2);
@@ -550,7 +550,7 @@ mod event_transformation {
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
-            SourceChange::Update { element } => match element {
+            SourceChange::Update { element, .. } => match element {
                 Element::Relation {
                     out_node, in_node, ..
                 } => {
@@ -783,7 +783,7 @@ mod event_transformation {
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
-            SourceChange::Update { element } => match element {
+            SourceChange::Update { element, .. } => match element {
                 Element::Node {
                     metadata,
                     properties,

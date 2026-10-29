@@ -17,11 +17,9 @@ use std::sync::Arc;
 use futures::stream::{self, Stream};
 
 use crate::channels::ComponentEvent;
+use crate::computation::runtime::Runtime;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::error::DrasiError;
-use crate::queries::QueryManager;
-use crate::reactions::ReactionManager;
-use crate::sources::SourceManager;
 use crate::state_guard::StateGuard;
 
 /// Classify an `anyhow::Error` from a manager call: if it wraps a
@@ -33,10 +31,11 @@ fn classify_component_error(
     component_id: &str,
     operation: &str,
 ) -> DrasiError {
-    if let Some(not_found) = e.downcast_ref::<crate::managers::ComponentNotFoundError>() {
+    if let Some(not_found) = e.downcast_ref::<crate::error::ComponentNotFoundError>() {
         DrasiError::component_not_found(not_found.component_type, &not_found.component_id)
     } else {
         DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
+            .with_cause(e)
     }
 }
 
@@ -46,27 +45,21 @@ fn classify_component_error(
 /// separated from the main server core lifecycle management.
 #[derive(Clone)]
 pub struct InspectionAPI {
-    source_manager: Arc<SourceManager>,
-    query_manager: Arc<QueryManager>,
-    reaction_manager: Arc<ReactionManager>,
     state_guard: StateGuard,
     config: Arc<RuntimeConfig>,
+    computation: Arc<Runtime>,
 }
 
 impl InspectionAPI {
     pub(crate) fn new(
-        source_manager: Arc<SourceManager>,
-        query_manager: Arc<QueryManager>,
-        reaction_manager: Arc<ReactionManager>,
+        computation: Arc<Runtime>,
         state_guard: StateGuard,
         config: Arc<RuntimeConfig>,
     ) -> Self {
         Self {
-            source_manager,
-            query_manager,
-            reaction_manager,
             state_guard,
             config,
+            computation,
         }
     }
 
@@ -91,7 +84,7 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
         self.state_guard.require_initialized()?;
-        Ok(self.source_manager.list_sources().await)
+        Ok(self.computation.list_components("source").await?)
     }
 
     /// Get detailed information about a specific source
@@ -111,8 +104,8 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<crate::config::SourceRuntime> {
         self.state_guard.require_initialized()?;
-        self.source_manager
-            .get_source(id.to_string())
+        self.computation
+            .source_info(id)
             .await
             .map_err(|e| classify_component_error(e, "source", id, "get_info"))
     }
@@ -133,8 +126,8 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized()?;
-        self.source_manager
-            .get_source_status(id.to_string())
+        self.computation
+            .component_status(id, "source")
             .await
             .map_err(|e| classify_component_error(e, "source", id, "get_status"))
     }
@@ -145,8 +138,8 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<Option<crate::schema::SourceSchema>> {
         self.state_guard.require_initialized()?;
-        self.source_manager
-            .get_source_schema(id.to_string())
+        self.computation
+            .source_schema(id)
             .await
             .map_err(|e| classify_component_error(e, "source", id, "get_schema"))
     }
@@ -154,42 +147,7 @@ impl InspectionAPI {
     /// Get the merged graph schema across all registered sources and queries.
     pub async fn get_graph_schema(&self) -> crate::error::Result<crate::schema::GraphSchema> {
         self.state_guard.require_initialized()?;
-
-        let mut schema = crate::schema::GraphSchema::default();
-
-        for (source_id, _) in self.source_manager.list_sources().await {
-            if source_id == crate::sources::COMPONENT_GRAPH_SOURCE_ID {
-                continue;
-            }
-
-            match self
-                .source_manager
-                .get_source_schema(source_id.clone())
-                .await
-            {
-                Ok(Some(source_schema)) if !source_schema.is_empty() => {
-                    schema.merge_source_schema(&source_id, &source_schema);
-                }
-                Ok(_) => schema.record_source_without_schema(&source_id),
-                Err(e) => {
-                    log::warn!("Failed to inspect schema for source '{source_id}': {e}");
-                    schema.record_source_without_schema(&source_id);
-                }
-            }
-        }
-
-        for (query_id, labels) in self.query_manager.get_all_query_labels().await {
-            schema.mark_queried_nodes(
-                labels.node_labels.iter().map(|label| label.as_str()),
-                &query_id,
-            );
-            schema.mark_queried_relations(
-                labels.relation_labels.iter().map(|label| label.as_str()),
-                &query_id,
-            );
-        }
-
-        Ok(schema)
+        Ok(self.computation.graph_schema().await?)
     }
 
     // ============================================================================
@@ -213,7 +171,7 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
         self.state_guard.require_initialized()?;
-        Ok(self.query_manager.list_queries().await)
+        Ok(self.computation.list_components("query").await?)
     }
 
     /// Get detailed information about a specific query
@@ -225,7 +183,7 @@ impl InspectionAPI {
     /// let query_info = core.get_query_info("my-query").await?;
     /// println!("Query: {}", query_info.query);
     /// println!("Status: {:?}", query_info.status);
-    /// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
+    /// println!("Inputs: {:?}", query_info.inputs);
     /// # Ok(())
     /// # }
     /// ```
@@ -234,8 +192,8 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<crate::config::QueryRuntime> {
         self.state_guard.require_initialized()?;
-        self.query_manager
-            .get_query(id.to_string())
+        self.computation
+            .query_info(id)
             .await
             .map_err(|e| classify_component_error(e, "query", id, "get_info"))
     }
@@ -256,8 +214,8 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized()?;
-        self.query_manager
-            .get_query_status(id.to_string())
+        self.computation
+            .component_status(id, "query")
             .await
             .map_err(|e| classify_component_error(e, "query", id, "get_status"))
     }
@@ -281,11 +239,7 @@ impl InspectionAPI {
 
         // Check preconditions explicitly instead of parsing error strings.
         // First verify the query exists via its status.
-        let status = self
-            .query_manager
-            .get_query_status(id.to_string())
-            .await
-            .map_err(|e| classify_component_error(e, "query", id, "get_status"))?;
+        let status = self.get_query_status(id).await?;
 
         if status != crate::channels::ComponentStatus::Running {
             return Err(DrasiError::invalid_state(format!(
@@ -293,10 +247,18 @@ impl InspectionAPI {
             )));
         }
 
-        self.query_manager
-            .get_query_results(id)
+        let query = self
+            .computation
+            .query_instance(id)
             .await
-            .map_err(|e| DrasiError::operation_failed("query", id, "get_results", e.to_string()))
+            .map_err(|error| classify_component_error(error, "query", id, "get_results"))?;
+        crate::queries::Query::fetch_snapshot(query.as_ref())
+            .await
+            .map(|snapshot| snapshot.to_vec())
+            .map_err(|e| {
+                DrasiError::operation_failed("query", id, "get_results", e.to_string())
+                    .with_cause(e)
+            })
     }
 
     /// Get the full configuration for a specific query
@@ -318,10 +280,10 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<crate::config::QueryConfig> {
         self.state_guard.require_initialized()?;
-        self.query_manager
-            .get_query_config(id)
+        self.computation
+            .query_configuration(id)
             .await
-            .ok_or_else(|| DrasiError::component_not_found("query", id))
+            .map_err(|error| classify_component_error(error, "query", id, "get_config"))
     }
 
     // ============================================================================
@@ -345,7 +307,7 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
         self.state_guard.require_initialized()?;
-        Ok(self.reaction_manager.list_reactions().await)
+        Ok(self.computation.list_components("reaction").await?)
     }
 
     /// Get detailed information about a specific reaction
@@ -366,8 +328,8 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<crate::config::ReactionRuntime> {
         self.state_guard.require_initialized()?;
-        self.reaction_manager
-            .get_reaction(id.to_string())
+        self.computation
+            .reaction_info(id)
             .await
             .map_err(|e| classify_component_error(e, "reaction", id, "get_info"))
     }
@@ -388,8 +350,8 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized()?;
-        self.reaction_manager
-            .get_reaction_status(id.to_string())
+        self.computation
+            .component_status(id, "reaction")
             .await
             .map_err(|e| classify_component_error(e, "reaction", id, "get_status"))
     }
@@ -416,28 +378,18 @@ impl InspectionAPI {
     pub async fn get_current_config(&self) -> crate::error::Result<DrasiLibConfig> {
         self.state_guard.require_initialized()?;
 
-        // Collect all query configs
-        let query_ids: Vec<String> = self
-            .query_manager
-            .list_queries()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        let mut queries = Vec::new();
-        for id in query_ids {
-            if let Some(config) = self.query_manager.get_query_config(&id).await {
-                queries.push(config);
-            }
-        }
-
         Ok(DrasiLibConfig {
             id: self.config.id.clone(),
             priority_queue_capacity: self.config.global_priority_queue_capacity,
             dispatch_buffer_capacity: self.config.global_dispatch_buffer_capacity,
+            activation_timeout_secs: self.config.activation_timeout_secs,
+            startup_timeout_secs: self.config.startup_timeout_secs,
+            shutdown_timeout_secs: self.config.shutdown_timeout_secs,
+            construction_timeout_secs: self.config.construction_timeout_secs,
+            resource_construction_timeout_secs: self.config.resource_construction_timeout_secs,
+            cleanup_timeout_secs: self.config.cleanup_timeout_secs,
             storage_backends: self.config.storage_backends.clone(),
-            queries,
+            queries: self.computation.query_configurations().await?,
         })
     }
 
@@ -466,8 +418,7 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
-        let events = self.source_manager.get_source_events(id).await;
-        Ok(stream::iter(events))
+        Ok(stream::iter(self.computation.component_events(id).await))
     }
 
     /// Get events for a specific query as an async stream.
@@ -491,8 +442,7 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
-        let events = self.query_manager.get_query_events(id).await;
-        Ok(stream::iter(events))
+        Ok(stream::iter(self.computation.component_events(id).await))
     }
 
     /// Get events for a specific reaction as an async stream.
@@ -516,8 +466,7 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
-        let events = self.reaction_manager.get_reaction_events(id).await;
-        Ok(stream::iter(events))
+        Ok(stream::iter(self.computation.component_events(id).await))
     }
 
     /// Get all events across all sources as an async stream.
@@ -540,8 +489,11 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
-        let events = self.source_manager.get_all_events().await;
-        Ok(stream::iter(events))
+        Ok(stream::iter(
+            self.computation
+                .events(Some(crate::ComponentType::Source))
+                .await,
+        ))
     }
 
     /// Get all events across all queries as an async stream.
@@ -564,8 +516,11 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
-        let events = self.query_manager.get_all_events().await;
-        Ok(stream::iter(events))
+        Ok(stream::iter(
+            self.computation
+                .events(Some(crate::ComponentType::Query))
+                .await,
+        ))
     }
 
     /// Get all events across all reactions as an async stream.
@@ -588,8 +543,11 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
-        let events = self.reaction_manager.get_all_events().await;
-        Ok(stream::iter(events))
+        Ok(stream::iter(
+            self.computation
+                .events(Some(crate::ComponentType::Reaction))
+                .await,
+        ))
     }
 
     /// Get all events across all components (sources, queries, reactions) as an async stream.
@@ -610,17 +568,7 @@ impl InspectionAPI {
     /// ```
     pub async fn get_all_events(&self) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
-
-        // Collect events from all managers
-        let mut all_events = Vec::new();
-        all_events.extend(self.source_manager.get_all_events().await);
-        all_events.extend(self.query_manager.get_all_events().await);
-        all_events.extend(self.reaction_manager.get_all_events().await);
-
-        // Sort by timestamp
-        all_events.sort_by_key(|a| a.timestamp);
-
-        Ok(stream::iter(all_events))
+        Ok(stream::iter(self.computation.events(None).await))
     }
 
     // ============================================================================
@@ -654,14 +602,14 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.state_guard.require_initialized()?;
-        self.source_manager
-            .subscribe_logs(id)
+        self.computation
+            .subscribe_logs(id, "source")
             .await
-            .ok_or_else(|| DrasiError::component_not_found("source", id))
+            .map_err(|error| classify_component_error(error, "source", id, "subscribe_logs"))
     }
 
     /// Subscribe to live logs for a query.
@@ -672,14 +620,14 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.state_guard.require_initialized()?;
-        self.query_manager
-            .subscribe_logs(id)
+        self.computation
+            .subscribe_logs(id, "query")
             .await
-            .ok_or_else(|| DrasiError::component_not_found("query", id))
+            .map_err(|error| classify_component_error(error, "query", id, "subscribe_logs"))
     }
 
     /// Subscribe to live logs for a reaction.
@@ -690,14 +638,14 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.state_guard.require_initialized()?;
-        self.reaction_manager
-            .subscribe_logs(id)
+        self.computation
+            .subscribe_logs(id, "reaction")
             .await
-            .ok_or_else(|| DrasiError::component_not_found("reaction", id))
+            .map_err(|error| classify_component_error(error, "reaction", id, "subscribe_logs"))
     }
 
     /// Subscribe to live events for a source.
@@ -707,7 +655,8 @@ impl InspectionAPI {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
     /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
     ///
@@ -731,10 +680,10 @@ impl InspectionAPI {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         self.state_guard.require_initialized()?;
-        self.source_manager
-            .subscribe_events(id)
+        self.computation
+            .subscribe_events(id, "source")
             .await
-            .ok_or_else(|| DrasiError::component_not_found("source", id))
+            .map_err(|error| classify_component_error(error, "source", id, "subscribe_events"))
     }
 
     /// Subscribe to live events for a query.
@@ -749,10 +698,10 @@ impl InspectionAPI {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         self.state_guard.require_initialized()?;
-        self.query_manager
-            .subscribe_events(id)
+        self.computation
+            .subscribe_events(id, "query")
             .await
-            .ok_or_else(|| DrasiError::component_not_found("query", id))
+            .map_err(|error| classify_component_error(error, "query", id, "subscribe_events"))
     }
 
     /// Subscribe to live events for a reaction.
@@ -767,10 +716,10 @@ impl InspectionAPI {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         self.state_guard.require_initialized()?;
-        self.reaction_manager
-            .subscribe_events(id)
+        self.computation
+            .subscribe_events(id, "reaction")
             .await
-            .ok_or_else(|| DrasiError::component_not_found("reaction", id))
+            .map_err(|error| classify_component_error(error, "reaction", id, "subscribe_events"))
     }
 
     // ============================================================================
@@ -788,18 +737,18 @@ impl InspectionAPI {
         query_id: &str,
     ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
         self.state_guard.require_initialized()?;
-        let instance = self.query_manager.get_query_instance(query_id).await.ok();
-        match instance {
-            Some(q) => match q.output_metrics() {
-                Some(m) => Ok(m.snapshot()),
-                None => Err(crate::error::DrasiError::component_not_found(
-                    "query", query_id,
-                )),
-            },
-            None => Err(crate::error::DrasiError::component_not_found(
-                "query", query_id,
-            )),
-        }
+        self.computation
+            .query_instance(query_id)
+            .await
+            .and_then(|query| {
+                query
+                    .output_metrics()
+                    .map(|metrics| metrics.snapshot())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Query '{query_id}' does not expose output metrics")
+                    })
+            })
+            .map_err(|error| classify_component_error(error, "query", query_id, "get_metrics"))
     }
 
     /// Get per-reaction metrics for a specific reaction.
@@ -816,10 +765,12 @@ impl InspectionAPI {
         std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>,
     > {
         self.state_guard.require_initialized()?;
-        self.reaction_manager
-            .get_reaction_metrics(reaction_id)
+        self.computation
+            .reaction_metrics(reaction_id)
             .await
-            .map_err(|_| crate::error::DrasiError::component_not_found("reaction", reaction_id))
+            .map_err(|error| {
+                classify_component_error(error, "reaction", reaction_id, "get_metrics")
+            })
     }
 
     /// Get global lifecycle metrics.
@@ -830,7 +781,7 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<crate::metrics::LifecycleMetricsSnapshot> {
         self.state_guard.require_initialized()?;
-        Ok(self.reaction_manager.lifecycle_metrics().snapshot())
+        Ok(self.computation.lifecycle_metrics.snapshot())
     }
 }
 
@@ -954,7 +905,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("test-source")
+                    .from_input("test-source")
                     .auto_start(false)
                     .build(),
             )

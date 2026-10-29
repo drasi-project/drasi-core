@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Message, status and dispatch types for ordinary Source/Reaction integration.
+//!
+//! These public types are distinct from native graph envelopes and ports in
+//! [`crate::computation::v1`]. Preserve their existing imports and serialized
+//! forms for compatibility; new native plugins use `drasi-computation-contracts`.
+
+mod component_status;
 pub mod dispatcher;
 pub mod events;
 pub mod priority_queue;
@@ -19,6 +26,7 @@ pub mod priority_queue;
 #[cfg(test)]
 mod events_test;
 
+pub use component_status::*;
 pub use dispatcher::{
     BroadcastChangeDispatcher, BroadcastChangeReceiver, ChangeDispatcher, ChangeReceiver,
     ChannelChangeDispatcher, ChannelChangeReceiver, DispatchMode, ReplayThenLiveReceiver,

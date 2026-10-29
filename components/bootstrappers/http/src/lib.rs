@@ -20,14 +20,11 @@
 //! It supports multiple endpoints, various authentication methods, pagination
 //! strategies, and Handlebars-based response-to-element mapping.
 
-pub mod auth;
-pub mod config;
-pub mod content_parser;
 pub mod descriptor;
-pub mod pagination;
 pub mod provider;
-pub mod response;
-pub mod template_engine;
+pub use drasi_http_common::bootstrap::{
+    auth, config, content_parser, pagination, response, template_engine,
+};
 
 pub use config::HttpBootstrapConfig;
 pub use provider::HttpBootstrapProvider;

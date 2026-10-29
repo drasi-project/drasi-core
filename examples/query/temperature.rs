@@ -62,6 +62,7 @@ async fn main() {
                 let new_temp: usize = rng.gen_range(0..31);
                 println!("Component1 - temperature: {new_temp}");
                 process_change(&query, SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: Element::Node {
                         metadata: ElementMetadata {
                             reference: ElementReference::new("", "Component1"),
@@ -77,6 +78,7 @@ async fn main() {
                 let new_temp: usize = rng.gen_range(0..31);
                 println!("Component2 - temperature: {new_temp}");
                 process_change(&query, SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: Element::Node {
                         metadata: ElementMetadata {
                             reference: ElementReference::new("", "Component2"),

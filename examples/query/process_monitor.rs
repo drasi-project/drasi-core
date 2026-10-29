@@ -89,6 +89,7 @@ fn sync_data(sys: &mut System) -> Vec<SourceChange> {
         .processes()
         .iter()
         .map(|(pid, process)| SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("System", &pid.to_string()),

@@ -72,6 +72,11 @@ pub struct LoadedPlugin {
 }
 
 impl LoadedPlugin {
+    /// The package version exported by this loaded library, not its config version.
+    pub fn plugin_version(&self) -> Option<String> {
+        crate::proxies::source::read_plugin_version(&self._library)
+    }
+
     /// Inject a config value resolver callback into this plugin.
     ///
     /// The plugin will use this callback (via `DtoMapper`) to resolve
@@ -138,9 +143,88 @@ pub struct PluginLoader {
     config: PluginLoaderConfig,
 }
 
+pub enum LoadedPluginFamily {
+    Legacy(LoadedPlugin),
+    Computation {
+        file_path: PathBuf,
+        plugin: Arc<crate::computation::NativePlugin>,
+    },
+}
+
+#[derive(Default)]
+pub struct PluginLoadBatch {
+    pub loaded: Vec<LoadedPluginFamily>,
+    pub failures: Vec<(PathBuf, String)>,
+}
+
 impl PluginLoader {
     pub fn new(config: PluginLoaderConfig) -> Self {
         Self { config }
+    }
+
+    /// Shared candidate discovery with explicit ABI-family dispatch. Native
+    /// admission errors never fall through to the legacy registration layout.
+    pub fn load_all_families(
+        &self,
+        log_ctx: *mut c_void,
+        log_callback: LogCallbackFn,
+        lifecycle_ctx: *mut c_void,
+        lifecycle_callback: LifecycleCallbackFn,
+    ) -> anyhow::Result<PluginLoadBatch> {
+        let mut batch = PluginLoadBatch::default();
+        if !self.config.plugin_dir.exists() {
+            log::warn!(
+                "Plugin directory does not exist: {}",
+                self.config.plugin_dir.display()
+            );
+            return Ok(batch);
+        }
+        std::fs::read_dir(&self.config.plugin_dir).map_err(|error| {
+            anyhow::anyhow!(
+                "Cannot read plugin directory {}: {error}",
+                self.config.plugin_dir.display()
+            )
+        })?;
+        for (name, files) in
+            discover_plugin_candidates(&self.config.plugin_dir, &self.config.file_patterns)
+        {
+            let candidates: Vec<_> = files
+                .into_iter()
+                .filter(|path| {
+                    CDYLIB_EXTENSIONS
+                        .iter()
+                        .any(|extension| path.to_string_lossy().ends_with(extension))
+                })
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            if candidates.len() != 1 {
+                let message = format!(
+                    "Plugin {name} has ambiguous shared-library candidates: {candidates:?}"
+                );
+                log::error!("{message}");
+                batch
+                    .failures
+                    .push((self.config.plugin_dir.join(name), message));
+                continue;
+            }
+            let path = &candidates[0];
+            match load_plugin_family_from_path(
+                path,
+                log_ctx,
+                log_callback,
+                lifecycle_ctx,
+                lifecycle_callback,
+            ) {
+                Ok(plugin) => batch.loaded.push(plugin),
+                Err(error) => {
+                    log::error!("Failed to load plugin {}: {error:#}", path.display());
+                    batch.failures.push((path.clone(), format!("{error:#}")));
+                }
+            }
+        }
+        Ok(batch)
     }
 
     /// Load all plugins matching the configured patterns.
@@ -262,7 +346,52 @@ pub fn load_plugin_from_path(
         Library::new(path)
             .map_err(|e| anyhow::anyhow!("Failed to load {}: {}", path.display(), e))?
     });
+    load_legacy_plugin_from_library(
+        path,
+        lib,
+        log_ctx,
+        log_callback,
+        lifecycle_ctx,
+        lifecycle_callback,
+    )
+}
 
+pub fn load_plugin_family_from_path(
+    path: &Path,
+    log_ctx: *mut c_void,
+    log_callback: LogCallbackFn,
+    lifecycle_ctx: *mut c_void,
+    lifecycle_callback: LifecycleCallbackFn,
+) -> anyhow::Result<LoadedPluginFamily> {
+    let library = Arc::new(unsafe {
+        Library::new(path)
+            .map_err(|error| anyhow::anyhow!("Failed to load {}: {error}", path.display()))?
+    });
+    if let Some(plugin) = crate::computation::try_load_library(library.clone())? {
+        return Ok(LoadedPluginFamily::Computation {
+            file_path: path.to_path_buf(),
+            plugin,
+        });
+    }
+    load_legacy_plugin_from_library(
+        path,
+        library,
+        log_ctx,
+        log_callback,
+        lifecycle_ctx,
+        lifecycle_callback,
+    )
+    .map(LoadedPluginFamily::Legacy)
+}
+
+fn load_legacy_plugin_from_library(
+    path: &Path,
+    lib: Arc<Library>,
+    log_ctx: *mut c_void,
+    log_callback: LogCallbackFn,
+    lifecycle_ctx: *mut c_void,
+    lifecycle_callback: LifecycleCallbackFn,
+) -> anyhow::Result<LoadedPlugin> {
     // Step 1: Read and validate metadata
     let metadata_info = read_plugin_metadata(&lib);
     let plugin_sdk_version = validate_plugin_metadata(&lib, path)?;
@@ -497,65 +626,52 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     Some((v.major as u32, v.minor as u32, v.patch as u32))
 }
 
+fn supported_legacy_abi(version: &str) -> bool {
+    semver::Version::parse(version)
+        .ok()
+        .is_some_and(|version| version.major == 0 && matches!(version.minor, 16 | 17))
+}
+
 /// Validate plugin metadata against the host SDK version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
-/// For cdylib plugins, we check major.minor compatibility (patch differences are OK).
+/// ABI 0.17 and the explicitly compatible ABI 0.16 prefix are supported.
+/// Patch differences are allowed; arbitrary older/newer contracts are not.
 ///
-/// On success returns the plugin's reported `sdk_version` string (if metadata
-/// was present), so callers can gate access to ABI fields introduced in a
-/// later SDK revision.
+/// Metadata is mandatory: an unknown ABI cannot safely use the current vtables.
+/// On success returns the plugin's reported `sdk_version` string.
 fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option<String>> {
     let meta_fn = unsafe {
         match lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata") {
             Ok(f) => f,
             Err(_) => {
-                log::warn!(
-                    "Plugin '{}' does not export drasi_plugin_metadata — skipping version check",
+                anyhow::bail!(
+                    "Plugin '{}' does not export drasi_plugin_metadata; rebuild it with the current SDK",
                     path.display()
                 );
-                return Ok(None);
             }
         }
     };
 
     let meta_ptr = unsafe { meta_fn() };
     if meta_ptr.is_null() {
-        log::warn!(
-            "Plugin '{}' returned null metadata — skipping version check",
+        anyhow::bail!(
+            "Plugin '{}' returned null metadata; cannot establish ABI compatibility",
             path.display()
         );
-        return Ok(None);
     }
 
     let meta = unsafe { &*meta_ptr };
     let plugin_sdk_version = unsafe { meta.sdk_version.to_string() };
     let host_sdk_version = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
 
-    // Check major.minor compatibility
-    let plugin_parts: Vec<&str> = plugin_sdk_version.split('.').collect();
-    let host_parts: Vec<&str> = host_sdk_version.split('.').collect();
-
-    let plugin_major_minor = format!(
-        "{}.{}",
-        plugin_parts.first().unwrap_or(&"0"),
-        plugin_parts.get(1).unwrap_or(&"0")
-    );
-    let host_major_minor = format!(
-        "{}.{}",
-        host_parts.first().unwrap_or(&"0"),
-        host_parts.get(1).unwrap_or(&"0")
-    );
-
-    if plugin_major_minor != host_major_minor {
+    if !supported_legacy_abi(&plugin_sdk_version) {
         anyhow::bail!(
             "Plugin '{}' SDK version mismatch: plugin={}, host={}. \
-             Major.minor versions must match ({} != {}).",
+             Supported legacy contracts are 0.16.x and 0.17.x; older or unknown ABIs require an upgrade.",
             path.display(),
             plugin_sdk_version,
             host_sdk_version,
-            plugin_major_minor,
-            host_major_minor,
         );
     }
 
@@ -716,13 +832,15 @@ pub fn plugin_kind_from_filename(filename: &str) -> Option<String> {
 
 /// Summary of a plugin's metadata read without full initialization.
 ///
-/// Obtained by calling only `drasi_plugin_metadata()` — no tokio runtime
-/// is started and no `drasi_plugin_init()` is called.
+/// Obtained from the selected family's metadata export without creating
+/// component instances or calling a plugin entry/initialization function.
 #[derive(Debug, Clone)]
 pub struct PluginMetadataSummary {
     pub plugin_id: String,
     pub version: String,
     pub sdk_version: String,
+    pub abi_family: Option<String>,
+    pub abi_version: Option<String>,
     pub core_version: String,
     pub target_triple: String,
     pub git_commit: String,
@@ -732,13 +850,38 @@ pub struct PluginMetadataSummary {
 
 /// Read a plugin's metadata without fully initializing it.
 ///
-/// This calls only `drasi_plugin_metadata()` via `dlopen` + symbol lookup.
-/// No tokio runtime is created and no `drasi_plugin_init()` is called, making
-/// this safe and fast for scanning/inspection flows.
+/// This calls the selected family's metadata export via `dlopen` and symbol
+/// lookup, never its entry/initialization function. Library constructors and
+/// metadata code are still trusted executable code. Identified native libraries
+/// remain process-pinned even if their metadata is invalid.
 ///
 /// Returns `None` if the library cannot be loaded or does not export metadata.
 pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
-    let lib = unsafe { Library::new(path).ok()? };
+    let lib = Arc::new(unsafe { Library::new(path).ok()? });
+    match crate::computation::try_read_metadata(lib.clone()) {
+        Ok(Some(metadata)) => {
+            return Some(PluginMetadataSummary {
+                plugin_id: crate::plugin_registry::computation_plugin_id(&metadata),
+                version: metadata.plugin.version.to_string(),
+                sdk_version: metadata.abi_version.clone(),
+                abi_family: Some("computation".into()),
+                abi_version: Some(metadata.abi_version),
+                core_version: String::new(),
+                target_triple: drasi_computation_plugin_sdk::metadata::TARGET.to_owned(),
+                git_commit: String::new(),
+                build_timestamp: String::new(),
+                file_path: path.to_path_buf(),
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            log::error!(
+                "Invalid native plugin metadata in {}: {error:#}",
+                path.display()
+            );
+            return None;
+        }
+    }
     let meta_fn = unsafe {
         lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata")
             .ok()?
@@ -771,6 +914,8 @@ pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
         plugin_id,
         version: plugin_version,
         sdk_version,
+        abi_family: None,
+        abi_version: None,
         core_version,
         target_triple,
         git_commit,
@@ -783,6 +928,102 @@ pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn only_current_and_explicitly_compatible_legacy_abis_are_accepted() {
+        assert!(supported_legacy_abi(drasi_plugin_sdk::ffi::FFI_SDK_VERSION));
+        for version in ["0.16.0", "0.16.99", "0.17.0", "0.17.3"] {
+            assert!(supported_legacy_abi(version), "{version}");
+        }
+        for version in [
+            "0.15.0",
+            "0.18.0",
+            "1.0.0",
+            "0.16",
+            "0.16.invalid",
+            "4294967296.16.0",
+        ] {
+            assert!(!supported_legacy_abi(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn incompatible_or_missing_metadata_is_rejected_before_initialization() {
+        fn metadata(version: &str, target: &str) -> String {
+            format!(
+                r#"
+                #[repr(C)]
+                #[derive(Clone, Copy)]
+                struct Str {{ ptr: *const u8, len: usize }}
+                unsafe impl Sync for Str {{}}
+                const fn text(s: &'static str) -> Str {{ Str {{ ptr: s.as_ptr(), len: s.len() }} }}
+                static METADATA: [Str; 7] = [
+                    text({version:?}), text("0"), text("0"), text("0"),
+                    text({target:?}), text("test"), text("test")
+                ];
+                #[no_mangle]
+                pub extern "C" fn drasi_plugin_metadata() -> *const u8 {{
+                    METADATA.as_ptr().cast()
+                }}
+                "#
+            )
+        }
+        let target = drasi_plugin_sdk::ffi::TARGET_TRIPLE;
+        for (name, source, expected) in [
+            (
+                "missing",
+                "pub fn fixture() {}".to_string(),
+                "does not export drasi_plugin_metadata",
+            ),
+            (
+                "null",
+                "#[no_mangle] pub extern \"C\" fn drasi_plugin_metadata() -> *const u8 { std::ptr::null() }".to_string(),
+                "returned null metadata",
+            ),
+            (
+                "old",
+                metadata("0.15.0", target),
+                "SDK version mismatch",
+            ),
+            ("future", metadata("0.18.0", target), "SDK version mismatch"),
+            ("malformed", metadata("0.16.invalid", target), "SDK version mismatch"),
+            ("oversized", metadata("4294967296.16.0", target), "SDK version mismatch"),
+            ("wrong_target", metadata("0.16.0", "incompatible-target"), "target mismatch"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("fixture.rs");
+            let output = dir.path().join(format!(
+                "{}fixture{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ));
+            // Any accidental initialization aborts the test process.
+            fs::write(
+                &input,
+                format!("{source}\n#[no_mangle] pub extern \"C\" fn drasi_plugin_init() -> *mut u8 {{ std::process::abort() }}"),
+            )
+            .unwrap();
+            let build = std::process::Command::new(
+                std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()),
+            )
+            .args(["--crate-type", "cdylib", "--edition", "2021", "-o"])
+            .arg(&output)
+            .arg(&input)
+            .output()
+            .unwrap();
+            assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+            let error = load_plugin_from_path(
+                &output,
+                std::ptr::null_mut(),
+                crate::callbacks::default_log_callback_fn(),
+                std::ptr::null_mut(),
+                crate::callbacks::default_lifecycle_callback_fn(),
+            )
+            .err()
+            .expect("unsafe ABI must be rejected");
+            assert!(error.to_string().contains(expected), "{name}: {error:#}");
+        }
+    }
 
     /// Create a temp dir with the given filenames (empty files).
     fn setup_temp_dir(files: &[&str]) -> tempfile::TempDir {

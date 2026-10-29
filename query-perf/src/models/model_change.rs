@@ -46,9 +46,7 @@ impl ModelChangeResult {
             _change_type: ModelChangeType::Update,
             _node_before: Some(node_before),
             node_after: Some(node_after.clone()),
-            _node_source_change: Some(SourceChange::Update {
-                element: node_after,
-            }),
+            _node_source_change: Some(SourceChange::update(node_after)),
         }
     }
 

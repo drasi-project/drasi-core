@@ -321,11 +321,10 @@ mod tests {
                     .unwrap();
                 core.start().await.unwrap();
                 let graph = core.component_graph();
-                let runtime = graph
-                    .read()
+                let runtime = core
+                    .source_manager()
+                    .get_source_instance("managed-source")
                     .await
-                    .get_runtime::<StdArc<dyn Source>>("managed-source")
-                    .cloned()
                     .unwrap();
                 let source = runtime
                     .as_any()
@@ -353,38 +352,46 @@ mod tests {
                 .await
                 .unwrap();
                 let task = source
-                    .base
-                    .task_handle
+                    .replication_task
                     .read()
                     .await
                     .as_ref()
                     .unwrap()
                     .abort_handle();
 
-                match action {
-                    "stop" => core.stop_source(source.id()).await.unwrap(),
-                    "stop_all" => core.stop().await.unwrap(),
-                    "remove" => core.remove_source(source.id(), false).await.unwrap(),
-                    "update" => {
-                        core.update_source(
-                            source.id(),
-                            MySqlSourceBuilder::new(source.id())
-                                .with_database("test")
-                                .with_user("test")
-                                .build()
-                                .unwrap(),
-                        )
-                        .await
-                        .unwrap();
+                for attempt in 0..2 {
+                    let result = match action {
+                        "stop" => core.stop_source(source.id()).await,
+                        "stop_all" => core.stop().await,
+                        "remove" => core.remove_source(source.id(), false).await,
+                        "update" => {
+                            core.update_source(
+                                source.id(),
+                                MySqlSourceBuilder::new(source.id())
+                                    .with_database("test")
+                                    .with_user("test")
+                                    .build()
+                                    .unwrap(),
+                            )
+                            .await
+                        }
+                        _ => unreachable!(),
+                    };
+                    if attempt == 0 {
+                        assert!(
+                            result.is_err(),
+                            "{action} must preserve the replication failure"
+                        );
+                    } else {
+                        result.unwrap();
                     }
-                    _ => unreachable!(),
                 }
 
                 assert!(
                     task.is_finished(),
                     "{action} must join the replication task"
                 );
-                assert!(source.base.task_handle.read().await.is_none());
+                assert!(source.replication_task.read().await.is_none());
                 assert!(source.subscriber_resume_positions.read().await.is_empty());
                 assert_eq!(source.status().await, ComponentStatus::Stopped);
                 assert!(
@@ -394,7 +401,7 @@ mod tests {
                         .is_err()
                 );
                 if action == "remove" {
-                    assert!(!graph.read().await.contains(source.id()));
+                    assert!(!graph.snapshot().await.unwrap().contains(source.id()));
                 } else {
                     wait_for_status(
                         &graph,
@@ -412,6 +419,7 @@ mod tests {
                 if action != "stop_all" {
                     core.stop().await.unwrap();
                 }
+                core.shutdown().await.unwrap();
             }
         }
 
@@ -422,13 +430,18 @@ mod tests {
                 .with_user("test")
                 .build()
                 .unwrap();
+            source.start().await.unwrap();
             source
                 .base
                 .set_status(ComponentStatus::Starting, None)
                 .await;
-            let task = tokio::spawn(std::future::pending::<()>());
-            let abort_handle = task.abort_handle();
-            source.base.set_task_handle(task).await;
+            let abort_handle = source
+                .replication_task
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .abort_handle();
             let mut receiver = source.base.create_streaming_receiver().await.unwrap();
             source.subscriber_resume_positions.write().await.insert(
                 "old-query".into(),
@@ -437,7 +450,7 @@ mod tests {
 
             source.stop().await.unwrap();
             assert!(abort_handle.is_finished());
-            assert!(source.base.task_handle.read().await.is_none());
+            assert!(source.replication_task.read().await.is_none());
             assert!(source.subscriber_resume_positions.read().await.is_empty());
             assert_eq!(source.status().await, ComponentStatus::Stopped);
             assert!(
@@ -482,11 +495,16 @@ mod tests {
                 .await
                 .expect("invalid bootstrap boundary must fail the replication task")
                 .unwrap();
-                assert!(source.base.task_handle.read().await.is_some());
+                assert!(source.replication_task.read().await.is_some());
 
+                source
+                    .stop()
+                    .await
+                    .expect_err("replication failure must remain observable after cleanup");
+                assert_eq!(source.status().await, ComponentStatus::Error);
                 source.stop().await.unwrap();
                 assert_eq!(source.status().await, ComponentStatus::Stopped);
-                assert!(source.base.task_handle.read().await.is_none());
+                assert!(source.replication_task.read().await.is_none());
                 assert!(source.subscriber_resume_positions.read().await.is_empty());
                 assert!(
                     tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
@@ -509,8 +527,7 @@ mod tests {
                 source.start().await.unwrap();
                 assert_eq!(source.status().await, ComponentStatus::Running);
                 let task = source
-                    .base
-                    .task_handle
+                    .replication_task
                     .read()
                     .await
                     .as_ref()
@@ -519,7 +536,7 @@ mod tests {
                 source.stop().await.unwrap();
                 assert!(
                     task.is_finished(),
-                    "stop must await the aborted replication task"
+                    "stop must await the gracefully signalled replication task"
                 );
                 assert_eq!(source.status().await, ComponentStatus::Stopped);
                 source.stop().await.unwrap();
@@ -534,19 +551,23 @@ mod tests {
                 .build()
                 .unwrap();
             source.start().await.unwrap();
-            let failed = tokio::spawn(async { panic!("simulated replication task panic") });
-            while !failed.is_finished() {
+            source.stop().await.unwrap();
+            source.base.set_status(ComponentStatus::Running, None).await;
+            drasi_lib::context::workers::spawn_owned_worker(&source.replication_task, async {
+                panic!("simulated replication task panic")
+            })
+            .await
+            .unwrap();
+            while !source
+                .replication_task
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .is_finished()
+            {
                 tokio::task::yield_now().await;
             }
-            let previous = source
-                .base
-                .task_handle
-                .write()
-                .await
-                .replace(failed)
-                .unwrap();
-            previous.abort();
-            assert!(previous.await.unwrap_err().is_cancelled());
             let mut receiver = source.base.create_streaming_receiver().await.unwrap();
             let (update_tx, mut updates) = tokio::sync::mpsc::channel(8);
             source.base.status_handle().wire(update_tx).await;
@@ -555,12 +576,12 @@ mod tests {
                 .stop()
                 .await
                 .expect_err("task panic must be surfaced");
-            assert!(error
-                .downcast_ref::<tokio::task::JoinError>()
-                .unwrap()
-                .is_panic());
+            assert!(matches!(
+                error.downcast_ref(),
+                Some(drasi_lib::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+            ));
             assert_eq!(source.status().await, ComponentStatus::Error);
-            assert!(source.base.task_handle.read().await.is_none());
+            assert!(source.replication_task.read().await.is_none());
             let mut error_message = None;
             while let Ok(ComponentUpdate::Status {
                 status, message, ..

@@ -33,20 +33,7 @@ fn default_sse_host() -> String {
     "0.0.0.0".to_string()
 }
 
-/// SSE-specific extension for template specifications.
-///
-/// This extension adds path routing capabilities specific to SSE reactions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct SseExtension {
-    /// Optional custom path for this specific template.
-    /// If provided, events will be sent to this path. Absolute paths (starting with '/')
-    /// are used as-is, while relative paths are appended to the base SSE path.
-    /// For example, if the base sse_path is "/events" and path is "sensors",
-    /// events will be sent to "/events/sensors".
-    /// Supports Handlebars templates for dynamic paths.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
+pub use drasi_reaction_common::sse::SseExtension;
 
 /// Type alias for SSE template specification using the common generic type.
 ///
@@ -56,13 +43,13 @@ pub struct SseExtension {
 /// with fields `queryId`, `result` (singular), and `timestamp`. This differs from
 /// the global default (when no custom template is configured), which uses a
 /// `results` array with multiple items.
-pub type TemplateSpec = drasi_lib::reactions::common::TemplateSpec<SseExtension>;
+pub type TemplateSpec = drasi_reaction_common::sse::TemplateSpec;
 
 /// Type alias for SSE query configuration using the common generic type.
 ///
 /// Defines different template specifications for each operation type (added, updated, deleted).
 /// Each operation type can have its own template and optionally its own endpoint.
-pub type QueryConfig = drasi_lib::reactions::common::QueryConfig<SseExtension>;
+pub type QueryConfig = drasi_reaction_common::sse::QueryConfig;
 
 /// SSE (Server-Sent Events) reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

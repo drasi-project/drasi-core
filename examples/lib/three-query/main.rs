@@ -47,17 +47,15 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use drasi_lib::{DrasiLib, Query};
-use drasi_source_http::HttpSource;
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
+use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_log::LogReaction;
+use drasi_source_http::HttpSource;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging - set RUST_LOG=debug for more detail
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("╔════════════════════════════════════════════╗");
     println!("║     DrasiLib Stock Monitor Example         ║");
@@ -69,8 +67,7 @@ async fn main() -> Result<()> {
     // The ScriptFile bootstrap provider loads initial stock data from a JSONL
     // file. This data is used to populate queries when they first start.
 
-    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("bootstrap_data.jsonl");
+    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bootstrap_data.jsonl");
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
 
@@ -105,43 +102,49 @@ async fn main() -> Result<()> {
 
     // Query 1: All Prices - Returns all stock prices with their details
     let all_prices_query = Query::cypher("all-prices")
-        .query(r#"
+        .query(
+            r#"
             MATCH (sp:stock_prices)
             RETURN sp.symbol AS symbol,
                    sp.price AS price,
                    sp.previous_close AS previous_close,
                    sp.volume AS volume
-        "#)
-        .from_source("stock-prices")
+        "#,
+        )
+        .from_input("stock-prices")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
 
     // Query 2: Gainers - Stocks where current price exceeds previous close
     let gainers_query = Query::cypher("gainers")
-        .query(r#"
+        .query(
+            r#"
             MATCH (sp:stock_prices)
             WHERE sp.price > sp.previous_close
             RETURN sp.symbol AS symbol,
                    sp.price AS price,
                    sp.previous_close AS previous_close,
                    ((sp.price - sp.previous_close) / sp.previous_close * 100) AS gain_percent
-        "#)
-        .from_source("stock-prices")
+        "#,
+        )
+        .from_input("stock-prices")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
 
     // Query 3: High Volume - Stocks with trading volume over 1 million
     let high_volume_query = Query::cypher("high-volume")
-        .query(r#"
+        .query(
+            r#"
             MATCH (sp:stock_prices)
             WHERE sp.volume > 1000000
             RETURN sp.symbol AS symbol,
                    sp.price AS price,
                    sp.volume AS volume
-        "#)
-        .from_source("stock-prices")
+        "#,
+        )
+        .from_input("stock-prices")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -159,7 +162,9 @@ async fn main() -> Result<()> {
         .from_query("gainers_query")
         .from_query("high-volume_query")
         .with_added_template("[{{query_name}}] + {{after.symbol}}: ${{after.price}}")
-        .with_updated_template("[{{query_name}}] ~ {{after.symbol}}: ${{before.price}} -> ${{after.price}}")
+        .with_updated_template(
+            "[{{query_name}}] ~ {{after.symbol}}: ${{before.price}} -> ${{after.price}}",
+        )
         .with_deleted_template("[{{query_name}}] - {{before.symbol}} removed")
         .build();
 
@@ -178,7 +183,7 @@ async fn main() -> Result<()> {
             .with_query(high_volume_query)
             .with_reaction(log_reaction)
             .build()
-            .await?
+            .await?,
     );
 
     // =========================================================================

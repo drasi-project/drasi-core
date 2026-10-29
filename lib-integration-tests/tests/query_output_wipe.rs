@@ -14,13 +14,13 @@
 
 //! Tests for #823: wipe query output on reconfigure and delete-and-recreate.
 
+mod index_observation;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use drasi_core::interface::{CheckpointStore, IndexBackendPlugin};
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
-use drasi_lib::queries::output_epoch_hash;
-use drasi_lib::queries::Query as QueryInstance;
+use drasi_lib::queries::{FetchError, Query as QueryInstance};
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
     CapacityPolicy, DrasiLib, DurabilityConfig, Query, Reaction, ReactionBase, ReactionBaseParams,
@@ -85,7 +85,7 @@ impl Paths {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct DurableObservation {
     result_sequence: Option<u64>,
     outbox_sequences: Vec<u64>,
@@ -93,8 +93,7 @@ struct DurableObservation {
 }
 
 async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
-    let provider = RocksDbIndexProvider::new(rocks, false, false);
-    let created = provider.create_indexes(QUERY_ID).await?;
+    let created = index_observation::open_query_indexes(rocks, QUERY_ID).await?;
     let store = created
         .checkpoint_store
         .as_ref()
@@ -116,7 +115,6 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         .row_count(QUERY_ID)
         .await?;
     drop(created);
-    drop(provider);
     Ok(DurableObservation {
         result_sequence,
         outbox_sequences,
@@ -127,7 +125,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
 fn query_config(text: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(QUERY_ID)
         .query(text)
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(false)
         .with_outbox_capacity(32)
@@ -316,6 +314,14 @@ struct CoreOpts {
 }
 
 async fn build_core(paths: &Paths, opts: CoreOpts) -> Result<(DrasiLib, ApplicationSourceHandle)> {
+    build_core_with_admission(paths, opts, false).await
+}
+
+async fn build_core_with_admission(
+    paths: &Paths,
+    opts: CoreOpts,
+    native: bool,
+) -> Result<(DrasiLib, ApplicationSourceHandle)> {
     let source_config = ApplicationSourceConfig {
         properties: HashMap::new(),
         durability: Some(DurabilityConfig {
@@ -329,12 +335,18 @@ async fn build_core(paths: &Paths, opts: CoreOpts) -> Result<(DrasiLib, Applicat
     let mut builder = DrasiLib::builder()
         .with_id("query-output-wipe")
         .with_source(source)
-        .with_query(query_config(opts.query_text))
         .with_wal_provider(wal)
         .with_index_provider(
             "rocks",
-            Arc::new(RocksDbIndexProvider::new(&paths.rocks, false, false)),
+            Arc::new(index_observation::ObservedIndexProvider::new(
+                Arc::new(RocksDbIndexProvider::new(&paths.rocks, false, false)),
+                &paths.rocks,
+                QUERY_ID,
+            )),
         );
+    if !native {
+        builder = builder.with_query(query_config(opts.query_text));
+    }
 
     if let Some(store) = opts.state {
         builder = builder.with_state_store_provider(store);
@@ -343,13 +355,38 @@ async fn build_core(paths: &Paths, opts: CoreOpts) -> Result<(DrasiLib, Applicat
         builder = builder.with_reaction(reaction);
     }
 
-    Ok((builder.build().await?, handle))
+    let core = builder.build().await?;
+    if native {
+        use drasi_lib::computation::v1::{SourcePluginHost, SourceSubscriptionOptions};
+        let pipeline = core
+            .computation_pipeline()?
+            .source(
+                SourcePluginHost::borrowed(
+                    core.source_manager()
+                        .get_source_instance(SOURCE_ID)
+                        .await
+                        .context("source must be created before native query admission")?,
+                ),
+                SourceSubscriptionOptions {
+                    borrowed_recovery: true,
+                    allow_broadcast_loss: true,
+                    ..Default::default()
+                },
+            )?
+            .query(query_config(opts.query_text));
+        let report = core.add_components(pipeline.build()?).await?;
+        anyhow::ensure!(
+            report.committed,
+            "native query was not accepted: {report:?}"
+        );
+    }
+    Ok((core, handle))
 }
 
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let graph = core.get_graph().await;
+        let graph = core.get_graph().await.expect("graph snapshot");
         if graph
             .nodes
             .iter()
@@ -383,7 +420,9 @@ async fn wait_for_snapshot_seq(core: &DrasiLib, min_seq: u64) -> Result<u64> {
             .get_query_instance(QUERY_ID)
             .await
             .map_err(anyhow::Error::msg)?;
-        let snapshot = query.fetch_snapshot().await?;
+        let snapshot = timeout(Duration::from_secs(10), query.fetch_snapshot())
+            .await
+            .context("query snapshot read timed out while waiting for sequence")??;
         if snapshot.as_of_sequence >= min_seq {
             return Ok(snapshot.as_of_sequence);
         }
@@ -412,9 +451,9 @@ async fn fetch_query(core: &DrasiLib) -> Result<Arc<dyn QueryInstance>> {
         .map_err(anyhow::Error::msg)
 }
 
-async fn outbox_sequences(core: &DrasiLib) -> Result<(u64, Vec<u64>, u64)> {
+async fn outbox_sequences(core: &DrasiLib, after_sequence: u64) -> Result<(u64, Vec<u64>, u64)> {
     let query = fetch_query(core).await?;
-    let outbox = query.fetch_outbox(0).await?;
+    let outbox = query.fetch_outbox(after_sequence).await?;
     Ok((
         outbox.latest_sequence,
         outbox.results.iter().map(|r| r.sequence).collect(),
@@ -422,14 +461,15 @@ async fn outbox_sequences(core: &DrasiLib) -> Result<(u64, Vec<u64>, u64)> {
     ))
 }
 
-fn assert_new_generation_outbox(sequences: &[u64], latest: u64) {
+fn assert_new_generation_outbox(sequences: &[u64], latest: u64, prior_high_water: u64) {
     if sequences.is_empty() {
-        assert_eq!(latest, 0);
+        assert_eq!(latest, prior_high_water);
         return;
     }
     assert_eq!(
-        sequences[0], 1,
-        "wiped output must restart at sequence 1, got {sequences:?}"
+        sequences[0],
+        prior_high_water + 1,
+        "wiped output must continue above the retained high-water, got {sequences:?}"
     );
     assert!(
         sequences.windows(2).all(|w| w[1] == w[0] + 1),
@@ -438,12 +478,21 @@ fn assert_new_generation_outbox(sequences: &[u64], latest: u64) {
     assert_eq!(sequences.last(), Some(&latest));
 }
 
-async fn wait_for_wipe(core: &DrasiLib) -> Result<u64> {
+async fn wait_for_wipe(core: &DrasiLib, previous_generation: u64, high_water: u64) -> Result<u64> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let snapshot = fetch_query(core).await?.fetch_snapshot().await?;
-        if snapshot.output_generation >= 1 {
-            break;
+        let query = fetch_query(core).await?;
+        let snapshot = match timeout(Duration::from_secs(10), query.fetch_snapshot()).await {
+            Ok(snapshot) => snapshot?,
+            Err(error) => anyhow::bail!(
+                "query snapshot read timed out after replacement: {error}; observations: {:?}",
+                core.computation_control()?.observed().components
+            ),
+        };
+        if snapshot.output_generation > previous_generation {
+            assert_eq!(snapshot.as_of_sequence, high_water);
+            assert!(snapshot.is_empty(), "reset must discard every old live row");
+            return Ok(snapshot.as_of_sequence);
         }
         if tokio::time::Instant::now() >= deadline {
             anyhow::bail!(
@@ -454,20 +503,6 @@ async fn wait_for_wipe(core: &DrasiLib) -> Result<u64> {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let mut last = None;
-    for _ in 0..40 {
-        let seq = fetch_query(core)
-            .await?
-            .fetch_snapshot()
-            .await?
-            .as_of_sequence;
-        if last == Some(seq) {
-            return Ok(seq);
-        }
-        last = Some(seq);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Ok(last.unwrap_or(0))
 }
 
 async fn read_reaction_checkpoint(
@@ -480,16 +515,51 @@ async fn read_reaction_checkpoint(
     }
 }
 
+async fn wait_for_reaction_checkpoint_sequence(
+    store: &RedbStateStoreProvider,
+    sequence: u64,
+) -> Result<ReactionCheckpoint> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(checkpoint) = read_reaction_checkpoint(store).await? {
+                anyhow::ensure!(
+                    checkpoint.sequence <= sequence,
+                    "reaction checkpoint advanced beyond expected sequence {sequence}"
+                );
+                if checkpoint.sequence == sequence {
+                    return Ok(checkpoint);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("reaction checkpoint did not reach the handled output")?
+}
+
 async fn stop_reaction_and_wait(core: &DrasiLib) -> Result<()> {
     core.stop_reaction(REACTION_ID).await?;
     wait_for_status(core, REACTION_ID, ComponentStatus::Stopped).await
 }
 
-/// 1. Update query text in-process: old output disappears, next emission is seq 1 of H2.
+/// Update query text in-process: old output disappears without reusing result sequences.
 #[tokio::test]
 async fn update_query_text_wipes_output_in_process() -> Result<()> {
-    let paths = Paths::new("update-in-process")?;
-    let (core, source) = build_core(
+    update_query_text_in_process(false).await
+}
+
+#[tokio::test]
+async fn native_query_text_update_wipes_output_in_process() -> Result<()> {
+    update_query_text_in_process(true).await
+}
+
+async fn update_query_text_in_process(native: bool) -> Result<()> {
+    let paths = Paths::new(if native {
+        "update-native-query"
+    } else {
+        "update-in-process"
+    })?;
+    let (core, source) = build_core_with_admission(
         &paths,
         CoreOpts {
             query_text: QUERY_TEXT_V1,
@@ -497,6 +567,7 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
             state: None,
             reaction: None,
         },
+        native,
     )
     .await?;
     start_running(&core).await?;
@@ -506,25 +577,34 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
     insert_person(&source, "p3", "Carol").await?;
     let seq = wait_for_snapshot_seq(&core, 3).await?;
     assert_eq!(seq, 3);
-    let (latest, sequences, hash_v1) = outbox_sequences(&core).await?;
+    let (latest, sequences, hash_v1) = outbox_sequences(&core, 0).await?;
     assert_eq!(latest, 3);
     assert_eq!(sequences, vec![1, 2, 3]);
+    let generation_v1 = fetch_query(&core)
+        .await?
+        .fetch_snapshot()
+        .await?
+        .output_generation;
 
     core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
         .await?;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-    let post_wipe = wait_for_wipe(&core).await?;
+    let post_wipe = wait_for_wipe(&core, generation_v1, 3).await?;
 
     let query = fetch_query(&core).await?;
     let snapshot = query.fetch_snapshot().await?;
     assert!(
-        snapshot.output_generation >= 1,
+        snapshot.output_generation > generation_v1,
         "reconfigure must bump output generation"
     );
     assert_ne!(snapshot.config_hash, hash_v1);
-    let outbox = query.fetch_outbox(0).await?;
+    assert!(matches!(
+        query.fetch_outbox(0).await,
+        Err(FetchError::OutboxGap(_))
+    ));
+    let outbox = query.fetch_outbox(3).await?;
     let sequences: Vec<u64> = outbox.results.iter().map(|r| r.sequence).collect();
-    assert_new_generation_outbox(&sequences, outbox.latest_sequence);
+    assert_new_generation_outbox(&sequences, outbox.latest_sequence, 3);
     assert_eq!(outbox.config_hash, snapshot.config_hash);
     assert_eq!(outbox.latest_sequence, post_wipe);
 
@@ -535,9 +615,10 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
         post_wipe + 1,
         "next live emission after reconfigure must continue from the wiped head"
     );
-    let (latest, sequences, hash_v2) = outbox_sequences(&core).await?;
+    let (latest, sequences, hash_v2) = outbox_sequences(&core, 3).await?;
     assert_eq!(latest, post_wipe + 1);
-    assert_new_generation_outbox(&sequences, latest);
+    assert_eq!(sequences, vec![4]);
+    assert_new_generation_outbox(&sequences, latest, 3);
     assert_eq!(hash_v2, snapshot.config_hash);
 
     core.shutdown().await?;
@@ -565,25 +646,28 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
         insert_person(&source, "p2", "Bob").await?;
         insert_person(&source, "p3", "Carol").await?;
         wait_for_snapshot_seq(&core, 3).await?;
+        let generation_v1 = fetch_query(&core)
+            .await?
+            .fetch_snapshot()
+            .await?
+            .output_generation;
 
         core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
             .await?;
         wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-        let post_wipe = wait_for_wipe(&core).await?;
+        let post_wipe = wait_for_wipe(&core, generation_v1, 3).await?;
         insert_person(&source, "p4", "Dana").await?;
         wait_for_snapshot_seq(&core, post_wipe + 1).await?;
         core.shutdown().await?;
     }
 
     let durable = inspect_durable(&paths.rocks).await?;
-    assert!(
-        durable.result_sequence.unwrap_or(0) >= 1,
-        "durable result sequence must be the new-config head, got {:?}",
-        durable.result_sequence
-    );
+    assert_eq!(durable.result_sequence, Some(4));
+    assert_eq!(durable.outbox_sequences, vec![4]);
     assert_new_generation_outbox(
         &durable.outbox_sequences,
         durable.result_sequence.unwrap_or(0),
+        3,
     );
     assert_eq!(
         durable.outbox_sequences.last().copied(),
@@ -592,9 +676,8 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
         durable.outbox_sequences
     );
     assert_eq!(
-        durable.live_row_count,
-        durable.result_sequence.unwrap_or(0) as usize,
-        "live rows must match the new-config head, not leftover old-config state"
+        durable.live_row_count, 1,
+        "live rows must contain only the new-config event, not leftover old-config state"
     );
 
     {
@@ -610,6 +693,48 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
             },
         )
         .await?;
+        let error = core
+            .start()
+            .await
+            .expect_err("missing source history must be reported by instance startup");
+        assert!(error
+            .downcast_ref::<drasi_lib::error::PartialStartError>()
+            .is_some());
+        wait_for_status(&core, QUERY_ID, ComponentStatus::Error).await?;
+        let observed = core.computation_component(QUERY_ID)?.observed()?;
+        let failure = observed
+            .failure
+            .context("missing source history must fail")?;
+        assert!(
+            matches!(
+                failure.cause.as_ref(),
+                drasi_lib::computation::v1::GraphError::Component { source, .. }
+                    if matches!(
+                        source.downcast_ref::<drasi_lib::computation::v1::QueryRecoveryError>(),
+                        Some(drasi_lib::computation::v1::QueryRecoveryError::SourceResetRequired)
+                    )
+            ),
+            "{failure:?}"
+        );
+        core.shutdown().await?;
+    }
+    assert_eq!(
+        inspect_durable(&paths.rocks).await?,
+        durable,
+        "a missing source WAL must not reset committed query output under Strict"
+    );
+
+    {
+        let (core, _source) = build_core(
+            &paths,
+            CoreOpts {
+                query_text: QUERY_TEXT_V2,
+                wal: paths.wal.clone(),
+                state: None,
+                reaction: None,
+            },
+        )
+        .await?;
         start_running(&core).await?;
         let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
         assert_eq!(
@@ -617,7 +742,7 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
             durable.result_sequence.unwrap_or(0)
         );
         assert_eq!(snapshot.len(), durable.live_row_count);
-        let (latest, sequences, _) = outbox_sequences(&core).await?;
+        let (latest, sequences, _) = outbox_sequences(&core, 3).await?;
         assert_eq!(latest, durable.result_sequence.unwrap_or(0));
         assert_eq!(sequences, durable.outbox_sequences);
         core.shutdown().await?;
@@ -627,11 +752,11 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
     Ok(())
 }
 
-/// 3. Delete-and-recreate the same query id with cleanup starts at sequence 0.
+/// Delete-and-recreate discards old output and starts a new generation at sequence zero.
 ///
 /// `DrasiLib::remove_query` always performs persistent cleanup (there is no
 /// `cleanup: false` for queries, unlike sources/reactions). Recreating the
-/// same id must not see preserved outbox/snapshot/sequence.
+/// same id must not see preserved outbox/snapshot/sequence from the old generation.
 #[tokio::test]
 async fn delete_and_recreate_same_query_id_starts_at_sequence_zero() -> Result<()> {
     let paths = Paths::new("delete-recreate")?;
@@ -678,7 +803,7 @@ async fn delete_and_recreate_same_query_id_starts_at_sequence_zero() -> Result<(
     let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
     assert_eq!(snapshot.as_of_sequence, 0);
     assert!(snapshot.is_empty());
-    let (latest, sequences, _) = outbox_sequences(&core).await?;
+    let (latest, sequences, _) = outbox_sequences(&core, 0).await?;
     assert_eq!(latest, 0);
     assert!(sequences.is_empty());
 
@@ -720,7 +845,7 @@ async fn stop_query_same_config_preserves_output() -> Result<()> {
         "stop/start must not wipe sequence"
     );
     assert_eq!(snapshot.len(), 2);
-    let (latest, sequences, _) = outbox_sequences(&core).await?;
+    let (latest, sequences, _) = outbox_sequences(&core, 0).await?;
     assert_eq!(latest, 2);
     assert_eq!(sequences, vec![1, 2]);
 
@@ -758,8 +883,12 @@ async fn seed_reaction_then_update_query(
         },
     )
     .await?;
-    start_running(&core).await?;
-    core.start_reaction(REACTION_ID).await?;
+    timeout(Duration::from_secs(15), start_running(&core))
+        .await
+        .context("initial query startup timed out")??;
+    timeout(Duration::from_secs(15), core.start_reaction(REACTION_ID))
+        .await
+        .context("initial reaction startup timed out")??;
     wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
 
     insert_person(&source, "p1", "Alice").await?;
@@ -774,8 +903,12 @@ async fn seed_reaction_then_update_query(
     );
 
     let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
-    let hash_v1 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
-    stop_reaction_and_wait(&core).await?;
+    let hash_v1 = snapshot.config_hash;
+    // Callback delivery precedes checkpoint persistence; await the latter before stopping.
+    wait_for_reaction_checkpoint_sequence(store.as_ref(), 3).await?;
+    timeout(Duration::from_secs(15), stop_reaction_and_wait(&core))
+        .await
+        .context("reaction stop before query replacement timed out")??;
 
     let checkpoint = read_reaction_checkpoint(store.as_ref())
         .await?
@@ -783,10 +916,14 @@ async fn seed_reaction_then_update_query(
     assert_eq!(checkpoint.sequence, 3);
     assert_eq!(checkpoint.config_hash, hash_v1);
 
-    core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
-        .await?;
+    timeout(
+        Duration::from_secs(15),
+        core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2)),
+    )
+    .await
+    .context("query replacement with a stopped reaction timed out")??;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-    wait_for_wipe(&core).await?;
+    wait_for_wipe(&core, snapshot.output_generation, 3).await?;
     Ok((core, source, receiver, store, hash_v1))
 }
 
@@ -805,10 +942,12 @@ async fn reaction_strict_hash_mismatch_fails_start() -> Result<()> {
     insert_person(&source, "p4", "Dana").await?;
     wait_for_snapshot_seq(&core, before + 1).await?;
     let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
-    let hash_v2 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
+    let hash_v2 = snapshot.config_hash;
     assert_ne!(hash_v2, hash_v1);
 
-    let result = core.start_reaction(REACTION_ID).await;
+    let result = timeout(Duration::from_secs(15), core.start_reaction(REACTION_ID))
+        .await
+        .context("mismatched reaction restart timed out")?;
     assert!(
         result.is_err(),
         "Strict policy should fail on config-hash mismatch"
@@ -845,7 +984,7 @@ async fn reaction_autoreset_hash_mismatch_bootstraps_new_query() -> Result<()> {
     insert_person(&source, "p4", "Dana").await?;
     let as_of = wait_for_snapshot_seq(&core, before + 1).await?;
     let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
-    let hash_v2 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
+    let hash_v2 = snapshot.config_hash;
     assert_ne!(hash_v2, hash_v1);
 
     core.start_reaction(REACTION_ID).await?;
@@ -889,7 +1028,7 @@ async fn reaction_autoskipgap_hash_mismatch_jumps_to_head() -> Result<()> {
     let head = wait_for_snapshot_seq(&core, before + 2).await?;
     assert_eq!(head, before + 2);
     let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
-    let hash_v2 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
+    let hash_v2 = snapshot.config_hash;
     assert_ne!(hash_v2, hash_v1);
 
     core.start_reaction(REACTION_ID).await?;

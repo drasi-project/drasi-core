@@ -1,0 +1,11 @@
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "bolts",
+    "labels": ["Product"],
+    "properties": {
+      "quantity": 8
+    }
+  }
+}

@@ -30,8 +30,8 @@ use std::sync::Arc;
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let api_token = env::var("CF_RADAR_TOKEN")
-        .map_err(|_| anyhow::anyhow!("CF_RADAR_TOKEN is required"))?;
+    let api_token =
+        env::var("CF_RADAR_TOKEN").map_err(|_| anyhow::anyhow!("CF_RADAR_TOKEN is required"))?;
     let api_base_url = env::var("CF_RADAR_API_BASE_URL")
         .unwrap_or_else(|_| "https://api.cloudflare.com/client/v4".to_string());
     let poll_interval_secs = env::var("CF_RADAR_POLL_INTERVAL_SECS")
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
                    l.code AS country
         "#,
         )
-        .from_source("radar")
+        .from_input("radar")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
                    h.confidenceScore AS confidence
         "#,
         )
-        .from_source("radar")
+        .from_input("radar")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
             RETURN d.name AS domain, r.rank AS rank
         "#,
         )
-        .from_source("radar")
+        .from_input("radar")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -108,7 +108,9 @@ async fn main() -> Result<()> {
         .from_query("top-domains")
         .with_default_template(QueryConfig {
             added: Some(TemplateSpec::new("[{{query_name}}] + {{after}}")),
-            updated: Some(TemplateSpec::new("[{{query_name}}] ~ {{before}} -> {{after}}")),
+            updated: Some(TemplateSpec::new(
+                "[{{query_name}}] ~ {{before}} -> {{after}}",
+            )),
             deleted: Some(TemplateSpec::new("[{{query_name}}] - {{before}}")),
         })
         .build()?;
@@ -133,8 +135,7 @@ async fn main() -> Result<()> {
         .route("/queries/:id/results", get(get_query_results))
         .with_state(api_core);
 
-    let bind_addr = env::var("CF_RADAR_BIND_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let bind_addr = env::var("CF_RADAR_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
 
     let api_handle = tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();

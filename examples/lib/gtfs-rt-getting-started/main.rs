@@ -605,7 +605,7 @@ fn build_queries() -> [QueryConfig; 3] {
                    vp.timestamp AS timestamp
             "#,
         )
-        .from_source("gtfs-rt-source")
+        .from_input("gtfs-rt-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -621,7 +621,7 @@ fn build_queries() -> [QueryConfig; 3] {
                    tu.timestamp AS timestamp
             "#,
         )
-        .from_source("gtfs-rt-source")
+        .from_input("gtfs-rt-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -644,7 +644,7 @@ fn build_queries() -> [QueryConfig; 3] {
                    s.stop_id AS stop_id
             "#,
         )
-        .from_source("gtfs-rt-source")
+        .from_input("gtfs-rt-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

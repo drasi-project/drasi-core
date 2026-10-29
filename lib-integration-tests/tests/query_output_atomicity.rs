@@ -15,6 +15,8 @@
 //! Fault-injection tests for #822: query output must commit atomically with
 //! index writes and source checkpoints.
 
+mod index_observation;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::interface::{
@@ -29,6 +31,9 @@ use drasi_lib::bootstrap::{
 };
 use drasi_lib::channels::BootstrapEventSender;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::computation::v1::{
+    EnvelopeCodec, GraphChangeCodec, QueryChangeCodec, Record, RecordImage, ResultNodeProjector,
+};
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
     CapacityPolicy, DrasiLib, DurabilityConfig, Query, Reaction, ReactionBase, ReactionBaseParams,
@@ -44,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -158,7 +164,18 @@ struct FaultInjectingIndexProvider {
 #[async_trait]
 impl IndexBackendPlugin for FaultInjectingIndexProvider {
     async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
-        let mut created = self.inner.create_indexes(query_id).await?;
+        self.create_scoped_indexes(query_id, query_id).await
+    }
+
+    async fn create_scoped_indexes(
+        &self,
+        storage_scope: &str,
+        query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
+        let mut created = self
+            .inner
+            .create_scoped_indexes(storage_scope, query_id)
+            .await?;
         created.set.session_control = Arc::new(FailingSessionControl {
             inner: created.set.session_control,
             fault: self.fault.clone(),
@@ -186,6 +203,10 @@ impl IndexBackendPlugin for FaultInjectingIndexProvider {
 
     fn is_volatile(&self) -> bool {
         false
+    }
+
+    fn supports_atomic_query_output(&self) -> bool {
+        self.inner.supports_atomic_query_output()
     }
 }
 
@@ -778,16 +799,24 @@ fn person_name_from_diff(diff: &ResultDiff) -> Option<String> {
 }
 
 async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
-    let provider = RocksDbIndexProvider::new(rocks, false, false);
-    let created = provider.create_indexes(QUERY_ID).await?;
+    let created = index_observation::open_query_indexes(rocks, QUERY_ID).await?;
     let store = created
         .checkpoint_store
         .as_ref()
         .context("checkpoint store")?;
-    let source_sequence = store
-        .read_checkpoint(SOURCE_ID)
+    let source_progress: Vec<_> = store
+        .read_all_checkpoints()
         .await?
-        .map(|cp| cp.sequence);
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with('\0'))
+        .collect();
+    anyhow::ensure!(
+        source_progress.len() <= 1,
+        "single-source fixture has unexpected source checkpoints: {source_progress:?}"
+    );
+    let source_sequence = source_progress
+        .first()
+        .map(|(_, checkpoint)| checkpoint.sequence);
     let result_sequence = store.read_result_sequence(QUERY_ID).await?;
     let raw_outbox = created
         .outbox_writer
@@ -798,9 +827,21 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let outbox_sequences: Vec<u64> = raw_outbox.iter().map(|(seq, _)| *seq).collect();
     let mut outbox_names = Vec::new();
     let mut outbox_source_ids = Vec::new();
+    let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("storage limit"));
+    codec.register_schema(QueryChangeCodec::schema())?;
+    let mut output_scope: Option<ResultNodeProjector> = None;
     for (_seq, data) in &raw_outbox {
-        let result: QueryResult =
-            rmp_serde::from_slice(data).context("deserialize durable outbox")?;
+        let envelope = codec
+            .decode(data)
+            .context("decode durable query envelope")?;
+        let projection =
+            QueryChangeCodec::projection(&envelope).context("durable query projection")?;
+        match &output_scope {
+            Some(scope) => assert_eq!(scope, projection.projector()),
+            None => output_scope = Some(projection.projector().clone()),
+        }
+        let result = QueryChangeCodec::to_legacy_result(&envelope)
+            .context("project the durable query envelope")?;
         if let Some(source_id) = result
             .metadata
             .get("source_id")
@@ -822,10 +863,26 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         .await?;
     let live_row_count = live_rows.len();
     let mut live_names = Vec::new();
-    for (_sig, data) in live_rows {
-        let value: serde_json::Value =
-            rmp_serde::from_slice(&data).context("deserialize live row")?;
-        if let Some(name) = value.get("name").and_then(serde_json::Value::as_str) {
+    for (signature, data) in live_rows {
+        let scope = output_scope
+            .as_ref()
+            .context("live rows require a durable output envelope that supplies their scope")?;
+        let identity = GraphChangeCodec::element_reference(
+            &scope.reference(&ResultNodeProjector::signature_identity(signature))?,
+        )?
+        .identity()
+        .clone();
+        let record = Record::try_new(
+            &QueryChangeCodec::schema(),
+            identity,
+            RecordImage::Full,
+            bytes::Bytes::from(data),
+        )?;
+        let row =
+            QueryChangeCodec::decode_row_in(scope, &record).context("decode durable live row")?;
+        assert_eq!(row.dataset, scope.dataset());
+        assert_eq!(row.signature, Some(signature));
+        if let Some(name) = row.values.get("name") {
             live_names.push(name.to_string());
         }
     }
@@ -838,7 +895,6 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         .is_some();
     created.set.session_control.rollback()?;
     drop(created);
-    drop(provider);
     Ok(DurableObservation {
         source_sequence,
         result_sequence,
@@ -854,6 +910,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
 #[derive(Clone)]
 struct FixtureOpts {
     query_text: &'static str,
+    recovery: RecoveryPolicy,
     fault: Option<Arc<FaultInjector>>,
     include_reaction: bool,
     durable_reaction: bool,
@@ -888,30 +945,32 @@ async fn build_core(
         .with_query(
             Query::cypher(QUERY_ID)
                 .query(opts.query_text)
-                .from_source(SOURCE_ID)
+                .from_input(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(std::env::var(BOOTSTRAP_ENV).ok().as_deref() == Some("1"))
                 .with_outbox_capacity(32)
                 .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-                .with_recovery_policy(RecoveryPolicy::Strict)
+                .with_recovery_policy(opts.recovery)
                 .build(),
         )
         .with_wal_provider(wal);
 
-    if let Some(fault) = opts.fault {
-        builder = builder.with_index_provider(
-            "rocks",
-            Arc::new(FaultInjectingIndexProvider {
-                inner: RocksDbIndexProvider::new(&paths.rocks, false, false),
-                fault,
-            }),
-        );
+    let provider: Arc<dyn IndexBackendPlugin> = if let Some(fault) = opts.fault {
+        Arc::new(FaultInjectingIndexProvider {
+            inner: RocksDbIndexProvider::new(&paths.rocks, false, false),
+            fault,
+        })
     } else {
-        builder = builder.with_index_provider(
-            "rocks",
-            Arc::new(RocksDbIndexProvider::new(&paths.rocks, false, false)),
-        );
-    }
+        Arc::new(RocksDbIndexProvider::new(&paths.rocks, false, false))
+    };
+    builder = builder.with_index_provider(
+        "rocks",
+        Arc::new(index_observation::ObservedIndexProvider::new(
+            provider,
+            &paths.rocks,
+            QUERY_ID,
+        )),
+    );
 
     if opts.durable_reaction {
         let state_store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
@@ -935,7 +994,7 @@ async fn shutdown_and_release(core: DrasiLib, source: ApplicationSourceHandle) -
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let graph = core.get_graph().await;
+        let graph = core.get_graph().await.expect("graph snapshot");
         if graph
             .nodes
             .iter()
@@ -972,8 +1031,6 @@ async fn wait_for_fault(fault: &FaultInjector) -> Result<()> {
     })
     .await
     .context("timed out waiting for injected failure")?;
-    // Give rollback a moment to finish.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
 }
 
@@ -1303,6 +1360,7 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
             &paths,
             FixtureOpts {
                 query_text: QUERY_TEXT,
+                recovery: RecoveryPolicy::Strict,
                 fault: None,
                 include_reaction: true,
                 durable_reaction: false,
@@ -1423,6 +1481,7 @@ async fn run_bootstrap_idle_phase() -> Result<()> {
         &paths,
         FixtureOpts {
             query_text: QUERY_TEXT,
+            recovery: RecoveryPolicy::AutoReset,
             fault: None,
             include_reaction: false,
             durable_reaction: false,
@@ -1433,7 +1492,6 @@ async fn run_bootstrap_idle_phase() -> Result<()> {
     .await?;
     start_running(&core).await?;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
     shutdown_and_release(core, source).await?;
     Ok(())
 }
@@ -1452,6 +1510,7 @@ async fn run_fault_phase() -> Result<()> {
         FixtureOpts {
             query_text,
             fault: Some(fault.clone()),
+            recovery: RecoveryPolicy::Strict,
             include_reaction: false,
             durable_reaction,
             captured: Arc::new(RwLock::new(Vec::new())),
@@ -1489,6 +1548,7 @@ async fn run_recover_phase() -> Result<()> {
         FixtureOpts {
             query_text,
             fault: None,
+            recovery: RecoveryPolicy::Strict,
             include_reaction: false,
             durable_reaction,
             captured: Arc::new(RwLock::new(Vec::new())),

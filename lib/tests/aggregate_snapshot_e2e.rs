@@ -155,8 +155,8 @@ fn join(id: &str, keys: &[(&str, &str)]) -> QueryJoinConfig {
 fn portfolio_config() -> QueryConfig {
     Query::cypher(SUMMARY_ID)
         .query(PORTFOLIO_SUMMARY)
-        .from_source("postgres-stocks")
-        .from_source("price-feed")
+        .from_input("postgres-stocks")
+        .from_input("price-feed")
         .with_joins(vec![
             join(
                 "OWNS_STOCK",
@@ -194,7 +194,7 @@ async fn assert_summary_snapshot(
     assert_eq!(
         core.get_query_results(SUMMARY_ID).await?,
         vec![expected.clone()],
-        "get_query_results must return exactly the current aggregate"
+        "get_query_results must return exactly the current aggregate (keyed snapshot: {rows:?})"
     );
     assert_eq!(
         rows.len(),
@@ -226,6 +226,68 @@ async fn assert_live_update(
             row_signature: signature,
         }]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn trading_bootstrap_reuses_the_same_solver_in_both_source_orders() -> Result<()> {
+    use drasi_core::{
+        evaluation::{context::QueryPartEvaluationContext, functions::FunctionRegistry},
+        query::QueryBuilder,
+    };
+    use drasi_functions_cypher::CypherFunctionSet;
+    use drasi_query_cypher::CypherParser;
+    for prices_first in [false, true] {
+        let functions = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
+        let query = QueryBuilder::new(
+            PORTFOLIO_SUMMARY,
+            Arc::new(CypherParser::new(functions.clone())),
+        )
+        .with_function_registry(functions)
+        .with_joins(
+            portfolio_config()
+                .joins
+                .unwrap()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+        .try_build()
+        .await?;
+        let prices = vec![price("AAPL", 110, 1), price("MSFT", 180, 1)];
+        let changes = if prices_first {
+            prices
+                .into_iter()
+                .chain(portfolio_rows())
+                .collect::<Vec<_>>()
+        } else {
+            portfolio_rows()
+                .into_iter()
+                .chain(prices)
+                .collect::<Vec<_>>()
+        };
+        let mut last = None;
+        for element in changes {
+            for diff in query
+                .process_source_change(SourceChange::Insert { element })
+                .await?
+            {
+                match diff {
+                    QueryPartEvaluationContext::Adding { after, .. }
+                    | QueryPartEvaluationContext::Updating { after, .. }
+                    | QueryPartEvaluationContext::Aggregation { after, .. } => {
+                        last = Some(serde_json::to_value(after)?);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            last,
+            Some(summary(2000.0, 1800.0, 2)),
+            "prices_first={prices_first}"
+        );
+    }
     Ok(())
 }
 
@@ -265,6 +327,7 @@ async fn aggregate_snapshot_trading_bootstrap_updates_deletes_and_rebootstrap() 
     for (time, price_value, before, after) in [(2, 115, 2000.0, 2050.0), (3, 125, 2050.0, 2150.0)] {
         price_feed
             .send(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: price("AAPL", price_value, time),
             })
             .await?;
@@ -395,7 +458,7 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         .with_query(
             Query::cypher("comfort")
                 .query(query_text)
-                .from_source("building")
+                .from_input("building")
                 .with_joins(vec![join(
                     "PART_OF_FLOOR",
                     &[("Room", "floor_id"), ("Floor", "id")],
@@ -440,6 +503,7 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         let after = json!({"FloorId": floor, "ComfortLevel": comfort});
         handle
             .send(SourceChange::Update {
+                removed_properties: Default::default(),
                 element: room(room_id, floor, temperature, time),
             })
             .await?;
@@ -468,7 +532,7 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
         .with_source(source)
         .with_query(Query::cypher("numeric-summary")
             .query("MATCH (p:Position) WITH p.group AS groupKey, sum(p.value) AS totalValue RETURN groupKey, totalValue")
-            .from_source("numeric")
+            .from_input("numeric")
             .enable_bootstrap(false)
             .build())
         .build().await?;
@@ -497,6 +561,7 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
     };
     handle
         .send(SourceChange::Update {
+            removed_properties: Default::default(),
             element: node(
                 "numeric",
                 "Position",
@@ -517,6 +582,7 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
     );
     handle
         .send(SourceChange::Update {
+            removed_properties: Default::default(),
             element: node(
                 "numeric",
                 "Position",
@@ -550,7 +616,7 @@ async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result
         .with_query(
             Query::cypher("terminal-summary")
                 .query("MATCH (p:Position) RETURN sum(p.value) AS totalValue")
-                .from_source("terminal")
+                .from_input("terminal")
                 .enable_bootstrap(false)
                 .build(),
         )
