@@ -57,6 +57,7 @@ pub async fn exceeds_one_standard_deviation(config: &(impl QueryTestConfig + Sen
 
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -83,6 +84,7 @@ pub async fn exceeds_one_standard_deviation(config: &(impl QueryTestConfig + Sen
         // Standard Deviation: 2
         // No result
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -111,6 +113,7 @@ pub async fn exceeds_one_standard_deviation(config: &(impl QueryTestConfig + Sen
         // Standard Deviation: 1.699673171197595
         // No result
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -138,6 +141,7 @@ pub async fn exceeds_one_standard_deviation(config: &(impl QueryTestConfig + Sen
         // Standard Deviation: 1.4724023736737184
         // No result
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -165,6 +169,7 @@ pub async fn exceeds_one_standard_deviation(config: &(impl QueryTestConfig + Sen
         // Standard Deviation: 1.8681541692269403
         // Should be getting one result
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),

@@ -116,7 +116,9 @@ fn should_send_change(change: &SourceChange, request: &BootstrapRequest) -> bool
     };
 
     match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => match element {
+        SourceChange::Insert { element }
+        | SourceChange::Replace { element }
+        | SourceChange::Update { element, .. } => match element {
             Element::Node { metadata, .. } => labels_match(&metadata.labels, &request.node_labels),
             Element::Relation { metadata, .. } => {
                 labels_match(&metadata.labels, &request.relation_labels)

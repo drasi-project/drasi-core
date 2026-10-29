@@ -169,7 +169,7 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
 
     let query = Query::cypher("test-query")
         .query("MATCH (n:TestNode) RETURN n.id AS id, n.value AS value")
-        .from_source("test-source")
+        .from_input("test-source")
         .build();
 
     let reaction = McpReaction::builder("test-reaction")

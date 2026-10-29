@@ -67,6 +67,12 @@ impl crate::bootstrap::BootstrapProvider for SharedBootstrap {
 
 /// One lifecycle owner for a legacy source, shared by native subscription nodes.
 /// Borrowed hosts never initialize, start, stop, or deprovision the legacy source.
+#[async_trait]
+pub(crate) trait SourceSubscriptionObserver: Send + Sync {
+    fn begin_subscriptions(&self);
+    async fn subscriptions_changed(&self) -> anyhow::Result<()>;
+}
+
 pub struct SourcePluginHost {
     id: String,
     source: Mutex<Arc<dyn Source>>,
@@ -77,6 +83,7 @@ pub struct SourcePluginHost {
     life: tokio::sync::Mutex<SourceLife>,
     observations: PluginObservations,
     expected_subscriptions: AtomicUsize,
+    subscription_observer: Option<Arc<dyn SourceSubscriptionObserver>>,
 }
 
 impl SourcePluginHost {
@@ -85,6 +92,16 @@ impl SourcePluginHost {
     }
     pub fn borrowed(source: Arc<dyn Source>) -> Arc<Self> {
         Self::new(source, LegacyPluginServices::empty("borrowed"), false)
+    }
+    pub(crate) fn borrowed_with_subscription_observer(
+        source: Arc<dyn Source>,
+        observer: Arc<dyn SourceSubscriptionObserver>,
+    ) -> Arc<Self> {
+        let mut host = Self::borrowed(source);
+        Arc::get_mut(&mut host)
+            .expect("new source host")
+            .subscription_observer = Some(observer);
+        host
     }
     pub async fn recreatable(
         constructor: Arc<dyn SourcePluginConstructor>,
@@ -118,6 +135,7 @@ impl SourcePluginHost {
             life: tokio::sync::Mutex::new(SourceLife::default()),
             observations,
             expected_subscriptions: AtomicUsize::new(1),
+            subscription_observer: None,
         })
     }
     pub fn id(&self) -> &str {
@@ -283,6 +301,9 @@ impl SourcePluginHost {
         if notify {
             self.source()?.on_subscriptions_complete().await;
         }
+        if let Some(observer) = &self.subscription_observer {
+            observer.subscriptions_changed().await?;
+        }
         Ok(())
     }
     async fn release(&self, id: &str) -> anyhow::Result<()> {
@@ -380,9 +401,10 @@ enum SubscriptionPhase {
     Waiting,
     Reset { generation: u64, volatile: bool },
     Ready,
-    Failed(Arc<str>),
+    Failed(crate::error::RetainedError),
     Closed,
 }
+
 struct SubscriptionState {
     bootstrap: Option<BootstrapEventReceiver>,
     result: Option<tokio::sync::oneshot::Receiver<anyhow::Result<BootstrapResult>>>,
@@ -457,12 +479,15 @@ impl LegacySourceSubscription {
     pub(crate) fn prepare_start(&self) {
         self.phase.send_replace(SubscriptionPhase::Waiting);
     }
+    pub(crate) fn is_subscribed(&self) -> bool {
+        matches!(*self.phase.borrow(), SubscriptionPhase::Ready)
+    }
     pub(crate) async fn wait_subscribed(&self) -> anyhow::Result<()> {
         let mut phase = self.phase.subscribe();
         loop {
             match phase.borrow_and_update().clone() {
                 SubscriptionPhase::Ready => return Ok(()),
-                SubscriptionPhase::Failed(error) => anyhow::bail!("{error}"),
+                SubscriptionPhase::Failed(error) => return Err(error.into()),
                 SubscriptionPhase::Closed => {
                     anyhow::bail!("source subscription closed before binding")
                 }
@@ -526,6 +551,9 @@ impl LegacySourceSubscription {
         Ok(())
     }
     async fn subscribe(&self) -> anyhow::Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
+        if let Some(observer) = &self.host.subscription_observer {
+            observer.begin_subscriptions();
+        }
         self.phase.send_replace(SubscriptionPhase::Waiting);
         let result = async {
             loop {
@@ -535,10 +563,9 @@ impl LegacySourceSubscription {
                     Arc::new(SourceProgressSnapshot::default())
                 };
                 let saved = self.checkpoint(&view);
-                let refresh_volatile = !view.ready
+                let refresh_snapshot = !view.ready
                     && view.bootstrap_complete
-                    && self.options.enable_bootstrap
-                    && !view.persistent;
+                    && self.options.enable_bootstrap;
                 let source = self.host.source()?;
                 if source.dispatch_mode() == crate::DispatchMode::Broadcast
                     && !self.options.allow_broadcast_loss
@@ -650,11 +677,11 @@ impl LegacySourceSubscription {
                     state.position = response.position_handle;
                     state.generation = view.reset_generation;
                 }
-                // Request a fresh snapshot before discarding volatile query state.
-                // A source with no bootstrap channel cannot rebuild that state,
-                // and must not invent a reset on an otherwise clean restart.
-                if refresh_volatile && supplies_bootstrap {
-                    self.reset(&view, true).await?;
+                // Keep the prepared cut owned until the query accepts a reset.
+                // A source without a snapshot must not invent a refresh, while
+                // persistent Strict recovery must not overwrite an existing cut.
+                if refresh_snapshot && supplies_bootstrap {
+                    self.reset(&view, !view.persistent).await?;
                     let generation = self.progress.as_ref()
                         .ok_or_else(|| anyhow::anyhow!("snapshot refresh lost source progress"))?
                         .snapshot().reset_generation;
@@ -669,11 +696,12 @@ impl LegacySourceSubscription {
             }
         }
         .await;
-        if let Err(error) = &result {
+        result.map_err(|error| {
+            let error = crate::error::RetainedError::from(error);
             self.phase
-                .send_replace(SubscriptionPhase::Failed(Arc::from(format!("{error:#}"))));
-        }
-        result
+                .send_replace(SubscriptionPhase::Failed(error.clone()));
+            anyhow::Error::new(error)
+        })
     }
     async fn close(&self) -> anyhow::Result<()> {
         self.phase.send_replace(SubscriptionPhase::Closed);
@@ -729,7 +757,7 @@ impl LegacySourceSubscription {
                                 BootstrapPreparation::ResetRequired
                             });
                         }
-                        SubscriptionPhase::Failed(error) => anyhow::bail!("{error}"),
+                        SubscriptionPhase::Failed(error) => return Err(error.clone().into()),
                         _ => {}
                     }
                     phase.changed().await?;
@@ -777,12 +805,13 @@ impl ComputationComponent for SourcePluginAdapter {
             .phase
             .send_replace(SubscriptionPhase::Waiting);
         let result = self.subscription.host.acquire(&self.subscription.id).await;
-        if let Err(error) = &result {
+        result.map_err(|error| {
+            let error = crate::error::RetainedError::from(error);
             self.subscription
                 .phase
-                .send_replace(SubscriptionPhase::Failed(Arc::from(format!("{error:#}"))));
-        }
-        result
+                .send_replace(SubscriptionPhase::Failed(error.clone()));
+            anyhow::Error::new(error)
+        })
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.live = None;
@@ -819,6 +848,9 @@ impl EnvelopeSource for SourcePluginAdapter {
                     != view.reset_generation
                 {
                     self.live = None;
+                    self.subscription
+                        .phase
+                        .send_replace(SubscriptionPhase::Waiting);
                     self.subscription.clear_subscription().await?;
                     continue;
                 }
@@ -882,6 +914,18 @@ impl LegacySourceBootstrap {
 }
 #[async_trait]
 impl ComputationBootstrapProvider for LegacySourceBootstrap {
+    fn input_origin(&self, stream: &StreamId) -> anyhow::Result<Option<super::OutputEndpoint>> {
+        for subscription in &self.subscriptions {
+            if stream == &StreamId::try_new(format!("{}/bootstrap", subscription.stream))? {
+                return Ok(Some(super::OutputEndpoint::new(
+                    ComponentId::try_new(subscription.host.id())?,
+                    PortId::try_new("out")?,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
         for subscription in &self.subscriptions {
             let state = subscription
@@ -979,6 +1023,7 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
                     continue;
                 }
                 watermarks.push(BootstrapWatermark {
+                    producer: None,
                     stream: subscription.stream.clone(),
                     source_id: Some(subscription.host.id().to_owned()),
                     sequence: 0,
@@ -1217,5 +1262,33 @@ impl ComponentFactory for SourcePluginAdapterFactory {
         }
         adapter.buffer_before_ready = buffer_before_ready;
         Ok(ConstructedComponent::source(Box::new(adapter)))
+    }
+}
+
+#[cfg(test)]
+mod failure_classification_tests {
+    use super::*;
+
+    #[test]
+    fn shared_subscription_failures_keep_retry_and_quarantine_classification() {
+        let transient = crate::error::RetainedError::from(anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "subscription reset",
+        )));
+        let replayed = anyhow::Error::new(transient);
+        assert_eq!(
+            super::super::lifecycle::operation_failure_disposition(&replayed),
+            super::super::FailureDisposition::Retryable,
+        );
+        assert!(replayed.chain().any(|cause| cause.is::<std::io::Error>()));
+        let panic = crate::error::RetainedError::from(anyhow::Error::new(
+            super::super::ComponentPanic::new(anyhow::anyhow!("source panic")),
+        ));
+        let graph_error = super::super::GraphError::Component {
+            component: ComponentId::try_new("source").unwrap(),
+            operation: "subscription",
+            source: panic.into(),
+        };
+        assert!(graph_error.damages_generation());
     }
 }

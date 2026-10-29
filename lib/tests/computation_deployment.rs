@@ -131,7 +131,8 @@ fn entire_definition_preflight_happens_before_any_factory_call() {
         "unknown-field",
         "factory",
         "plugin",
-        "missing-resource",
+        "resource-role",
+        "resource-type",
         "secret-literal",
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -168,7 +169,7 @@ fn entire_definition_preflight_happens_before_any_factory_call() {
                     version: Arc::from("2"),
                 })
             }
-            "missing-resource" => {
+            "resource-role" | "resource-type" => {
                 Arc::get_mut(&mut factory)
                     .expect("unique factory")
                     .descriptor
@@ -203,9 +204,74 @@ fn entire_definition_preflight_happens_before_any_factory_call() {
             }
             _ => unreachable!(),
         }
-        assert!(graph_builder(spec, factory).build().is_err(), "{fault}");
+        let mut builder = graph_builder(spec, factory);
+        if matches!(fault, "resource-role" | "resource-type") {
+            let id = ResourceId::try_new("missing").expect("resource id");
+            builder = builder
+                .declare_resource(ResourceSpecification {
+                    id: id.clone(),
+                    role: if fault == "resource-role" {
+                        ResourceRole::SecretStore
+                    } else {
+                        ResourceRole::StateStore
+                    },
+                    ownership: ResourceOwnership::Borrowed,
+                    binding: Arc::from("incorrect-state"),
+                })
+                .expect("resource declaration");
+            if fault == "resource-type" {
+                builder = builder
+                    .provide_resource(
+                        id,
+                        ResourceHandle::new(ResourceRole::StateStore, Arc::new("not a usize")),
+                    )
+                    .expect("resource binding");
+            }
+        }
+        assert!(builder.build().is_err(), "{fault}");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{fault}");
     }
+}
+
+#[tokio::test]
+async fn missing_resource_waits_without_calling_the_factory() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut factory = factory(false, calls.clone());
+    Arc::get_mut(&mut factory)
+        .expect("unique factory")
+        .descriptor
+        .dependencies
+        .insert(
+            Arc::from("state"),
+            ResourceRequirement::exactly_one::<usize>(ResourceRole::StateStore),
+        );
+    let resource = ResourceId::try_new("later-state").expect("resource id");
+    let mut spec = specification("source");
+    spec.dependencies
+        .insert(Arc::from("state"), vec![resource.clone()]);
+    let mut graph = graph_builder(spec, factory)
+        .build()
+        .expect("missing resources are valid deferred declarations");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let run = graph.run().expect("controller");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        let deployment = control.deployment_report().await.expect("deployment");
+        assert!(matches!(
+            deployment.components[&component("source")],
+            CreationOutcome::Blocked { .. }
+        ));
+        let observed = control.observed();
+        let source = &observed.components[&component("source")];
+        assert!(source.failure.is_none());
+        assert!(source.waiting_for.contains(&DependencyWait::Resource {
+            id: resource.clone()
+        }));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    graph.dispose().await.expect("cleanup");
 }
 
 #[tokio::test]

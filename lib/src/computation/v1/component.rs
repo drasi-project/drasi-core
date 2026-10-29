@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use super::{ChangeEnvelope, ComponentDescriptor, PortId};
 
 pub use drasi_computation_contracts::{
-    InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, WakeupSource,
+    InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, SnapshotConsumer,
+    SourceSchemaReader, WakeupSource,
 };
 
 /// Host-owned component lifecycle, independent of legacy Source/Reaction contexts.
@@ -45,6 +46,21 @@ pub trait ComputationComponent: Send + Sync {
     fn query_api(&self) -> Option<std::sync::Arc<super::QueryApi>> {
         None
     }
+    /// Publish optional source-data schema inspection independently of mutable
+    /// processing. The graph captures this handle at construction/reconfiguration;
+    /// the getter must not perform discovery or other network I/O.
+    fn source_schema_reader(&self) -> Option<std::sync::Arc<dyn SourceSchemaReader>> {
+        None
+    }
+    /// Optional snapshot/replay providers registered per declared output port.
+    /// Capability is exactly the set of registered providers: a component that
+    /// cannot actually serve a read registers nothing. Captured by the graph at
+    /// construction/reconfiguration boundaries, never per envelope; the getter
+    /// must not perform I/O. Providers must stay bound to this component
+    /// generation's own state and return typed errors when they cannot answer.
+    fn output_readers(&self) -> super::OutputReaders {
+        super::OutputReaders::default()
+    }
     /// Configuration values, not live processing state. Identity, lifecycle
     /// policy and external resource bindings are recorded by the graph.
     /// Values may change only through construction or reconfiguration, not
@@ -58,6 +74,24 @@ pub trait ComputationComponent: Send + Sync {
             "component {} does not expose its configuration; retain its external binding",
             self.descriptor().id()
         )
+    }
+    /// Opt in to the graph's resolved incoming bindings
+    /// ([`Self::bind_inputs`]). A component supplied already constructed has no
+    /// factory context, so this is how it learns the actual producing output and
+    /// stream of each input; it must not infer a producer from payloads or
+    /// stream spelling. Factory-created components read
+    /// [`super::ConstructionContext::input_bindings`] instead.
+    fn binds_inputs(&self) -> bool {
+        false
+    }
+    /// Called only for an opted-in component, before every start and before each
+    /// processing operation, with the validated declared incoming edges ordered by
+    /// input port then producer output. The call is repeated (with possibly
+    /// different bindings) after a live rebind, and implementations compare
+    /// with what they hold. It happens at an operation boundary, never during
+    /// data handling. An error fails that operation; it is never ignored.
+    async fn bind_inputs(&mut self, _bindings: &[super::InputBinding]) -> anyhow::Result<()> {
+        Ok(())
     }
     /// Supplies a generation-bound sender. This is optional for components that
     /// do not originate control notifications.
@@ -199,11 +233,13 @@ pub trait EnvelopeSink: ComputationComponent {
     async fn handle_batch(&mut self, _inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
         anyhow::bail!("this sink does not implement host-owned batching")
     }
-    fn supports_snapshot(&self) -> bool {
-        false
-    }
-    async fn replace_snapshot(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
-        anyhow::bail!("this sink does not support replacing its state from a snapshot")
+    /// The handler that replaces this sink's state from a snapshot on `port`, if
+    /// that input registered one. Capability is per input port and read at
+    /// construction/operation boundaries: it must perform no I/O and must not
+    /// appear or disappear after activation. `None` means snapshots on that
+    /// port are unsupported and are rejected, never silently accepted.
+    fn snapshot_consumer(&mut self, _port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        None
     }
     /// Immutable for this component instance. A legacy Reaction enqueue adapter
     /// must declare Accepted, never Handled. ExplicitAcknowledgement on a pipe

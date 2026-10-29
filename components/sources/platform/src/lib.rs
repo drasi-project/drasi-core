@@ -1376,7 +1376,7 @@ fn transform_platform_event(
         // Build SourceChange
         let source_change = match op {
             "i" => SourceChange::Insert { element },
-            "u" => SourceChange::Update { element },
+            "u" => SourceChange::update(element),
             _ => unreachable!(),
         };
 

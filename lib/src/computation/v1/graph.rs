@@ -93,6 +93,8 @@ pub enum GraphError {
         expected: GraphRevision,
         actual: GraphRevision,
     },
+    #[error("reconciliation impact changed at revision {revision:?}; obtain a new preview")]
+    StalePreview { revision: GraphRevision },
     #[error("observation or command targets an obsolete component generation or operation")]
     StaleGeneration,
     #[error("the graph controller is closed")]
@@ -259,30 +261,47 @@ fn validate_edge_contract(
 fn dependency_order(
     ids: &BTreeMap<ComponentId, usize>,
     edges: &[EdgeSnapshot],
+    subscriptions: &[(ComponentId, ComponentId)],
 ) -> GraphResult<Vec<usize>> {
-    let mut successors = vec![Vec::new(); ids.len()];
-    let mut indegree = vec![0; ids.len()];
-    for edge in edges {
-        let from = *ids
-            .get(&edge.definition.from.component)
-            .ok_or_else(|| topology("unknown producer"))?;
-        let to = *ids
-            .get(&edge.definition.to.component)
-            .ok_or_else(|| topology("unknown consumer"))?;
-        successors[from].push(to);
-        indegree[to] += 1;
+    let mut successors: BTreeMap<_, BTreeSet<_>> = ids
+        .values()
+        .map(|index| (*index, BTreeSet::new()))
+        .collect();
+    let mut indegree: BTreeMap<_, usize> = ids.values().map(|index| (*index, 0)).collect();
+    let links = edges
+        .iter()
+        .map(|edge| {
+            (
+                &edge.definition.from.component,
+                &edge.definition.to.component,
+            )
+        })
+        .chain(subscriptions.iter().map(|(from, to)| (from, to)));
+    for (from, to) in links {
+        let to = *ids.get(to).ok_or_else(|| topology("unknown consumer"))?;
+        // A declared subscription may wait for a producer that has not been added.
+        let Some(&from) = ids.get(from) else {
+            continue;
+        };
+        if successors
+            .get_mut(&from)
+            .expect("declared producer")
+            .insert(to)
+        {
+            *indegree.get_mut(&to).expect("declared consumer") += 1;
+        }
     }
     let mut ready: VecDeque<_> = indegree
         .iter()
-        .enumerate()
-        .filter_map(|(index, degree)| (*degree == 0).then_some(index))
+        .filter_map(|(index, degree)| (*degree == 0).then_some(*index))
         .collect();
     let mut order = Vec::new();
     while let Some(index) = ready.pop_front() {
         order.push(index);
-        for successor in &successors[index] {
-            indegree[*successor] -= 1;
-            if indegree[*successor] == 0 {
+        for successor in &successors[&index] {
+            let degree = indegree.get_mut(successor).expect("declared successor");
+            *degree -= 1;
+            if *degree == 0 {
                 ready.push_back(*successor);
             }
         }
@@ -474,6 +493,28 @@ impl Component {
         }
     }
 
+    fn source_schema_reader(&self) -> Option<Arc<dyn super::SourceSchemaReader>> {
+        match self {
+            Self::Source(component) => component.source_schema_reader(),
+            Self::Transformer(component) | Self::Query(component) => {
+                component.source_schema_reader()
+            }
+            Self::Sink(component) => component.source_schema_reader(),
+            Self::Service(component) => component.source_schema_reader(),
+            Self::Deferred { .. } | Self::Unresolved(_) => None,
+        }
+    }
+
+    fn output_readers(&self) -> super::OutputReaders {
+        match self {
+            Self::Source(component) => component.output_readers(),
+            Self::Transformer(component) | Self::Query(component) => component.output_readers(),
+            Self::Sink(component) => component.output_readers(),
+            Self::Service(component) => component.output_readers(),
+            Self::Deferred { .. } | Self::Unresolved(_) => super::OutputReaders::default(),
+        }
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         match self {
             Self::Source(component) => component.descriptor(),
@@ -517,6 +558,26 @@ impl Component {
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 Err(anyhow::anyhow!("component has not been constructed"))
             }
+        }
+    }
+
+    fn binds_inputs(&self) -> bool {
+        match self {
+            Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => false,
+            Self::Transformer(component) | Self::Query(component) => component.binds_inputs(),
+            Self::Sink(component) => component.binds_inputs(),
+            Self::Service(component) => component.binds_inputs(),
+        }
+    }
+
+    async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
+        match self {
+            Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => Ok(()),
+            Self::Transformer(component) | Self::Query(component) => {
+                component.bind_inputs(bindings).await
+            }
+            Self::Sink(component) => component.bind_inputs(bindings).await,
+            Self::Service(component) => component.bind_inputs(bindings).await,
         }
     }
 
@@ -623,6 +684,7 @@ pub struct ComputationGraphBuilder {
     requirements: PipeRequirements,
     recovery_requirements: Vec<super::RecoveryRequirement>,
     cleanup_timeout: Duration,
+    activation_timeout: Duration,
     lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
     relationship_policies: BTreeMap<EdgeDefinition, RelationshipPolicy>,
     resources: BTreeMap<ResourceId, ResourceSpecification>,
@@ -802,6 +864,13 @@ impl ComputationGraphBuilder {
         self
     }
 
+    /// Bounds each component's input binding, start hook and output binding.
+    /// Defaults to 300 seconds. A timeout quarantines interrupted work until cleanup.
+    pub fn activation_timeout(mut self, timeout: Duration) -> Self {
+        self.activation_timeout = timeout;
+        self
+    }
+
     pub fn build(mut self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
         if self
@@ -834,6 +903,15 @@ impl ComputationGraphBuilder {
         {
             return Err(topology(
                 "cleanup timeout must be nonzero and representable",
+            ));
+        }
+        if self.activation_timeout.is_zero()
+            || std::time::Instant::now()
+                .checked_add(self.activation_timeout)
+                .is_none()
+        {
+            return Err(topology(
+                "activation timeout must be nonzero and representable",
             ));
         }
         let mut ids = BTreeMap::new();
@@ -887,6 +965,10 @@ impl ComputationGraphBuilder {
                 return Err(topology(format!("duplicate component {}", descriptor.id())));
             }
             validate_role(descriptor, component.role(), component.completion())?;
+            component
+                .output_readers()
+                .validate(descriptor)
+                .map_err(|error| topology(error.to_string()))?;
             nodes.push(NodeSnapshot {
                 descriptor: descriptor.clone(),
                 role: component.role(),
@@ -1035,6 +1117,11 @@ impl ComputationGraphBuilder {
                 return Err(topology("duplicate edge"));
             }
             let (from, output) = resolve(&ids, &nodes, &edge.from)?;
+            if !nodes[from].output_streams.contains_key(&edge.from.port) {
+                return Err(topology(
+                    "connect an output only after binding its producer stream",
+                ));
+            }
             if let Some(DesiredPipe::Qos(config)) = provider.specification() {
                 if nodes[from].output_streams.get(&edge.from.port)
                     != Some(&config.definition.stream)
@@ -1087,7 +1174,7 @@ impl ComputationGraphBuilder {
                 resources,
             });
         }
-        let order = dependency_order(&ids, &edges)?;
+        let order = dependency_order(&ids, &edges, &[])?;
         if self
             .lifecycle_policies
             .keys()
@@ -1213,6 +1300,21 @@ impl ComputationGraphBuilder {
                     components[*index].query_api().map(|api| (id.clone(), api))
                 })
                 .collect(),
+            ids.iter()
+                .filter_map(|(id, index)| {
+                    components[*index]
+                        .source_schema_reader()
+                        .map(|reader| (id.clone(), reader))
+                })
+                .collect(),
+            ids.iter()
+                .filter_map(|(id, index)| {
+                    components[*index]
+                        .output_readers()
+                        .map(|readers| (id.clone(), readers))
+                })
+                .collect(),
+            &factories,
             BTreeSet::new(),
         )))
         .0;
@@ -1241,6 +1343,7 @@ impl ComputationGraphBuilder {
             reserved_components: BTreeSet::new(),
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
+            activation_timeout: self.activation_timeout,
             resource_handles: self.resource_handles,
             resource_constructors: self.resource_constructors,
             pending_resource_cleanup: BTreeMap::new(),
@@ -1357,6 +1460,10 @@ pub struct GraphControl {
 }
 
 impl GraphControl {
+    pub(crate) fn output_catalogue(&self) -> super::OutputCatalogue {
+        super::OutputCatalogue::from_publications(self.registry.clone(), self.state.clone())
+    }
+
     pub(crate) fn protect_configuration(&self) {
         self.management_protected
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1437,6 +1544,7 @@ pub struct ComputationGraph {
     desired: watch::Sender<Arc<GraphSnapshot>>,
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
+    activation_timeout: Duration,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
     resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     pending_resource_cleanup: BTreeMap<ResourceId, ResourceHandle>,
@@ -1518,6 +1626,7 @@ impl ComputationGraph {
             requirements: PipeRequirements::default(),
             recovery_requirements: Vec::new(),
             cleanup_timeout: Duration::from_secs(5),
+            activation_timeout: Duration::from_secs(300),
             lifecycle_policies: BTreeMap::new(),
             relationship_policies: BTreeMap::new(),
             resources: BTreeMap::new(),
@@ -2174,6 +2283,34 @@ fn output_bindings(
     result.map_err(|error| component_error(node, "validate output destinations", error))
 }
 
+/// Supply an opted-in component with the graph's declared incoming bindings.
+async fn bind_inputs(
+    component: &mut Component,
+    node: &NodeSnapshot,
+    snapshot: &GraphSnapshot,
+) -> GraphResult<()> {
+    if !component.binds_inputs() {
+        return Ok(());
+    }
+    let bindings = specification::snapshot_input_bindings(snapshot, node.descriptor.id()).map_err(
+        |endpoint| {
+            component_error(
+                node,
+                "bind inputs",
+                anyhow::anyhow!(
+                    "input '{}:{}' has no declared output stream",
+                    endpoint.component,
+                    endpoint.port
+                ),
+            )
+        },
+    )?;
+    component
+        .bind_inputs(&bindings)
+        .await
+        .map_err(|error| component_error(node, "bind inputs", error))
+}
+
 async fn bind_output_destinations(
     component: &mut Component,
     node: &NodeSnapshot,
@@ -2343,6 +2480,9 @@ fn check_descriptor(component: &Component, node: &NodeSnapshot) -> GraphResult<(
             node,
             "descriptor or sink completion changed",
         ));
+    }
+    if let Err(error) = component.output_readers().validate(&node.descriptor) {
+        return Err(emission_error(node, error.to_string()));
     }
     Ok(())
 }
@@ -2902,6 +3042,7 @@ fn validate_emissions(
     let mut pending = sequences.clone();
     let mut identities = std::collections::HashSet::new();
     for emission in emissions {
+        emission.envelope.validate_lineage()?;
         let port = node
             .descriptor
             .ports()

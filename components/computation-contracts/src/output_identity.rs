@@ -7,9 +7,33 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    AdmissionRejection, ChangeEnvelope, EnvelopeCodec, GraphProducerIdentity,
-    GraphProducerProgress, QueryChangeCodec, QueryRecoveryIdentity, StreamId,
+    AdmissionRejection, ChangeEnvelope, ComponentId, EnvelopeCodec, GraphProducerIdentity,
+    GraphProducerProgress, PortId, QueryChangeCodec, QueryRecoveryIdentity, StreamId,
 };
+
+/// Stable namespace for records owned by one output endpoint. Epochs and
+/// transport sequences are deliberately separate from record identity.
+pub fn dataset_namespace(
+    construction_scope: &str,
+    graph_id: &str,
+    component: &ComponentId,
+    port: &PortId,
+) -> super::Result<String> {
+    super::data::validate_identifier("output construction scope", construction_scope)?;
+    super::data::validate_identifier("output graph", graph_id)?;
+    let mut hash = Sha256::new();
+    hash.update(b"drasi.output-dataset.v1");
+    for part in [
+        construction_scope,
+        graph_id,
+        component.as_str(),
+        port.as_str(),
+    ] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    Ok(format!("drasi.output/{:x}", hash.finalize()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReplayRejection {
@@ -80,7 +104,7 @@ pub struct Candidate {
 
 impl Candidate {
     pub fn new(envelope: &ChangeEnvelope, codec: &EnvelopeCodec) -> anyhow::Result<Self> {
-        let query = envelope.changes().schema() == QueryChangeCodec::schema().descriptor();
+        let query = QueryChangeCodec::is_query_output(envelope);
         let progress = if query {
             GraphProducerProgress::from_query_envelope(envelope)
         } else {
@@ -115,7 +139,7 @@ impl Candidate {
         // Immediate-query completion timings are added after its outbox commit.
         // Inherited timings remain immutable history.
         let mut normalized = envelope.reemit(1)?;
-        if matches!(producer, Producer::Query { .. }) {
+        if query {
             normalized = QueryChangeCodec::without_post_commit_profiling(&normalized)?;
         }
         Ok(Self {
@@ -129,5 +153,46 @@ impl Candidate {
 impl From<ReplayRejection> for crate::PipeError {
     fn from(error: ReplayRejection) -> Self {
         crate::PipeError::Backend(error.into())
+    }
+}
+
+#[cfg(test)]
+mod dataset_tests {
+    use super::*;
+
+    #[test]
+    fn dataset_identity_is_stable_and_scoped_to_every_output_dimension() {
+        let namespace = |scope: &str, graph: &str, component: &str, port: &str| {
+            dataset_namespace(
+                scope,
+                graph,
+                &ComponentId::try_new(component).unwrap(),
+                &PortId::try_new(port).unwrap(),
+            )
+            .unwrap()
+        };
+        let first = namespace("instance", "graph", "query", "out");
+        assert_eq!(first, namespace("instance", "graph", "query", "out"));
+        for other in [
+            namespace("another-instance", "graph", "query", "out"),
+            namespace("instance", "another-graph", "query", "out"),
+            namespace("instance", "graph", "another-query", "out"),
+            namespace("instance", "graph", "query", "another-out"),
+        ] {
+            assert_ne!(first, other);
+        }
+        assert_ne!(
+            namespace("a/b", "c", "query", "out"),
+            namespace("a", "b/c", "query", "out")
+        );
+        assert_eq!(first.len(), "drasi.output/".len() + 64);
+    }
+
+    #[test]
+    fn missing_output_scope_is_not_replaced_with_a_default() {
+        let component = ComponentId::try_new("query").unwrap();
+        let port = PortId::try_new("out").unwrap();
+        assert!(dataset_namespace("", "graph", &component, &port).is_err());
+        assert!(dataset_namespace("instance", "", &component, &port).is_err());
     }
 }

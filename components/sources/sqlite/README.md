@@ -75,14 +75,18 @@ The replay/paired constructors also accept a `SourceProgressReader` for a
 read-only host boundary. Local readers retain the actual ownership check;
 external readers do not claim local ownership. Snapshot pairing requires the
 same reader handle, and revoked reads stop processing without retiring retained
-input. This Rust interface does not yet expose the live SQLite source through the native plugin
-ABI; see [W7](../../../lib/docs/computation-graph-reliability-plan.md#w7-preserve-errors-and-expose-shared-services-through-plugins).
-The standalone file bootstrap has its own independently built native library.
+input. The [independent native source library](../../computation-plugins/sources/sqlite)
+exports fixed-schema source factories, reusing this implementation without a
+Source-plugin adapter. The standalone file bootstrap has its own independently
+built native library. The same bootstrap library also exports paired single/shared
+factories using the source-owned graph resource. Their internal coordination is
+separate from file initialization; it is not a public SQL service on DrasiLib or
+across the ABI.
 
 | Settings | Output and guarantee |
 |----------|----------------------|
 | `output: Changes`, `replay: None` | Ordinary `drasi.graph-change` batches, without a source journal, checkpoint feedback or whole-transaction query guarantee. This is the fast path. |
-| `output: Transactions`, `replay: None` | One complete `drasi.source-transaction` record per committed SQLite transaction. No restart replay. |
+| `output: Transactions`, `replay: None` | One standard graph-change envelope per committed SQLite transaction, carrying every operation in order plus a current complete-transaction marker. No restart replay. |
 | `output: Transactions`, `replay: Some(...)` | SQLite data and the bounded replay record commit in the same SQLite transaction. Records remain until every required consumer commits its input progress. Requires a real file-backed database and persistent query storage. |
 
 Transaction output requires the query's `source_transactions` execution setting,
@@ -98,6 +102,13 @@ handle provides `execute`, `execute_parameterized`, `execute_batch`, `query`,
 `query_parameterized` and `transaction`. It becomes usable after source startup.
 The transaction callback receives a cloneable `SqliteTransactionHandle` with the
 same SQL operations, but cannot start another transaction.
+
+`handle.describe_schema().await?` retrieves the actual worker's bounded
+`SourceSchema`, including captured columns and element-key descriptions. It is
+available only while that SQL client is active, remains usable while source
+`next()` is pending, and cannot make a retired generation follow a replacement.
+SQLite integer/text/real affinities are hints; numeric, untyped and BLOB columns
+do not falsely advertise one fixed graph property type.
 
 - One source-owned blocking worker owns the connection. Each transaction has a
   private bounded command queue, so other handles cannot execute inside it.
@@ -276,9 +287,16 @@ paired `SqliteSnapshot` under `snapshot` (`ResourceRole::Bootstrap`). The query
 must use that same provider. Resolved source settings and actual progress ownership
 are checked, not just resource names.
 
-Native REST endpoints, Server registration and a
-separately exported native plugin ABI are not implemented. The existing REST
-server and dynamic-plugin export still serve only the legacy implementation.
+The native Rust REST endpoints described above use the same shared routes as
+the legacy source, through the native SQL worker. This crate's `dynamic-plugin`
+export still serves only the legacy implementation. SQL handles stay in the
+plugin-specific Rust API; no public SQL-access service is exposed through the
+native ABI. Build `drasi-computation-source-sqlite` for the native ABI; ordinary
+Server file initialization and persistent single/shared coordination are
+demonstrated by the `file`, `single` and `shared` modes of
+`drasi-server/examples/native-sqlite.rs`. All modes keep query evaluation in the
+hosting instance's graph and expose the actual worker-backed schema through
+DrasiLib inspection.
 
 ### Shared native recovery
 

@@ -34,7 +34,7 @@ const QUERY_V2: &str = "MATCH (p:Person) RETURN p.name AS name, p.age AS age, p.
 fn persistent_query(text: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(QUERY_ID)
         .query(text)
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(false)
         .with_outbox_capacity(100)
@@ -300,7 +300,7 @@ async fn update_query_twice_in_quick_succession_does_not_lock() -> Result<()> {
 fn volatile_query(text: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(QUERY_ID)
         .query(text)
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .enable_bootstrap(false)
         .with_outbox_capacity(100)

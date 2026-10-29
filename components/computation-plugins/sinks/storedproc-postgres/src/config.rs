@@ -2,15 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 use anyhow::{Context, Result};
-use drasi_computation_contracts::ComponentId;
+use drasi_computation_contracts::{OutputAliases, SinkOutputs};
 use drasi_postgres_common::sql::{resolve_template, CompiledTemplate};
 use drasi_reaction_common::{OperationType, QueryConfig, TemplateRouting, TemplateSpec};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    num::NonZeroU64,
-    time::Duration,
-};
+use std::{collections::HashMap, num::NonZeroU64, time::Duration};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +27,10 @@ pub struct PostgresStoredProcConfig {
     pub tls_client_cert_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_key_pem: Option<String>,
-    pub queries: Vec<String>,
+    /// Optional aliases for the incoming outputs; the graph supplies each
+    /// output's producing component, port and stream.
+    #[serde(default, skip_serializing_if = "OutputAliases::is_empty")]
+    pub outputs: OutputAliases,
     #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,26 +101,7 @@ impl PostgresStoredProcConfig {
                 "PostgreSQL TLS material requires SSL and 1..=65536 bytes without NUL"
             );
         }
-        let mut queries = HashSet::new();
-        anyhow::ensure!(
-            !self.queries.is_empty(),
-            "PostgreSQL sink requires at least one query"
-        );
-        for query in &self.queries {
-            ComponentId::try_new(query.as_str())?;
-            anyhow::ensure!(
-                queries.insert(query),
-                "duplicate PostgreSQL query subscription"
-            );
-        }
-        for key in self.routes.keys() {
-            anyhow::ensure!(
-                self.queries
-                    .iter()
-                    .any(|query| query == key || query.rsplit('.').next() == Some(key.as_str())),
-                "route '{key}' does not match a configured query or its last dotted segment"
-            );
-        }
+        self.outputs.validate()?;
         anyhow::ensure!(
             !self.compile_templates()?.is_empty(),
             "PostgreSQL sink requires at least one nonempty stored-procedure template"
@@ -146,6 +126,22 @@ impl PostgresStoredProcConfig {
             }
         }
         Ok(templates)
+    }
+}
+
+impl PostgresStoredProcConfig {
+    /// Checks that depend on the incoming edges: every route must name an
+    /// output of this sink.
+    pub fn validate_outputs(&self, outputs: &SinkOutputs) -> Result<()> {
+        for key in self.routes.keys() {
+            anyhow::ensure!(
+                outputs
+                    .aliases()
+                    .any(|alias| alias == key || alias.rsplit('.').next() == Some(key.as_str())),
+                "route '{key}' does not match an output alias or its last dotted segment"
+            );
+        }
+        Ok(())
     }
 }
 

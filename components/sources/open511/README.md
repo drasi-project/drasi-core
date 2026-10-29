@@ -109,7 +109,7 @@ let query = Query::cypher("highway-closures")
                r.to AS to_location,
                r.direction AS direction
     "#)
-    .from_source("road-events")
+    .from_input("road-events")
     .auto_start(true)
     .enable_bootstrap(true)
     .build();
@@ -143,7 +143,7 @@ let query = Query::cypher("rockies-major")
                r.name AS road,
                r.state AS road_state
     "#)
-    .from_source("rockies-incidents")
+    .from_input("rockies-incidents")
     .auto_start(true)
     .enable_bootstrap(true)
     .build();
@@ -176,7 +176,7 @@ let query = Query::cypher("construction-events")
                e.created AS started,
                e.updated AS last_update
     "#)
-    .from_source("construction")
+    .from_input("construction")
     .auto_start(true)
     .enable_bootstrap(true)
     .build();
@@ -222,7 +222,7 @@ let bc_query = Query::cypher("bc-closures")
         WHERE r.state = 'CLOSED'
         RETURN e.id AS event_id, r.name AS road, e.severity AS severity
     "#)
-    .from_source("bc-events")
+    .from_input("bc-events")
     .auto_start(true)
     .enable_bootstrap(true)
     .build();
@@ -234,7 +234,7 @@ let ab_query = Query::cypher("ab-closures")
         WHERE r.state = 'CLOSED'
         RETURN e.id AS event_id, r.name AS road, e.severity AS severity
     "#)
-    .from_source("ab-events")
+    .from_input("ab-events")
     .auto_start(true)
     .enable_bootstrap(true)
     .build();
@@ -253,7 +253,7 @@ let query = Query::cypher("area-events")
                a.id AS area_id,
                count(e) AS active_events
     "#)
-    .from_source("road-events")
+    .from_input("road-events")
     .auto_start(true)
     .enable_bootstrap(true)
     .build();

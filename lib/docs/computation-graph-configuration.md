@@ -50,6 +50,7 @@ Server YAML.
 | `with_priority_queue_capacity(n)` | 10,000 when no override is set | Default query input-queue capacity |
 | `with_dispatch_buffer_capacity(n)` | 1,000 when no override is set | Default runtime dispatch-buffer capacity |
 | `with_default_recovery_policy(policy)` | `RecoveryPolicy::Strict` | Query recovery default when the query has no override |
+| `with_activation_timeout_secs(seconds)` | 300 | Positive per-component deadline covering input binding, startup and output binding |
 | `with_index_provider(name, provider)` | None registered by this call | Register an existing index provider under a name |
 | `with_default_index_provider(name, provider)` | In-memory indexes otherwise | Register the provider and make it the default for queries |
 | `with_state_store_provider(provider)` | In-memory state store | Storage for component state, including supported reaction checkpoints |
@@ -96,8 +97,11 @@ a replacement for Server's configuration DTOs.
 |---|---|---|
 | `Query::cypher(id)` / `Query::gql(id)` | `id`, `queryLanguage` | ID required; default language `Cypher`, alternative `GQL` |
 | `query(text)` | `query` | Required query text |
-| `from_source(id)` | `sources[].source_id` | Ordered list; position determines source rank |
-| `from_source_with_pipeline(id, names)` | `sources[].pipeline` | No per-source middleware pipeline by default |
+| `from_input(id)` | `inputs[].component` (or the bare `inputs[]` name) | Ordered list of upstream components; position determines input rank |
+| `from_input_port(id, port)` | `inputs[].port` | Consume a named output port; otherwise the component's primary (or only) output is used |
+| `from_input_with_pipeline(id, names)` | `inputs[].pipeline` | No per-input middleware pipeline by default |
+| `with_input(input)` | `inputs[]` | Fully specified input with port, label selectors and pipeline |
+| `with_result_label(label)` | `result.label` | Optional non-empty node label for published results; the output schema stays graph-change |
 | `with_middleware(item)` | `middleware` | Empty; each call adds one middleware definition |
 | `with_joins(items)` | `joins` | None |
 | `auto_start(value)` | `auto_start` | `true`; startup still needs creation and dependencies to succeed |
@@ -110,9 +114,20 @@ a replacement for Server's configuration DTOs.
 | `with_outbox_capacity(n)` | `outboxCapacity` | 1,000 recent result emissions; minimum retained count is 1 |
 | `with_bootstrap_timeout_secs(n)` | `bootstrapTimeoutSecs` | 300 seconds for snapshot/history fetches waiting for readiness |
 
-`SourceSubscriptionConfig` also exposes `nodes` and `relations` label mappings.
+`QueryInputConfig` also exposes `nodes` and `relations` label mappings. A query input
+serializes as a bare component name when it sets only the component, otherwise as an
+object with `component`, optional `port`, `nodes`, `relations` and `pipeline`; any
+other key (including the removed `sources`/`source_id`) is rejected.
 An omitted mapping does not mean that all data will match the query; the query
 and source still perform their normal label filtering.
+
+Native query updates can wait for an undeclared input producer. An existing
+explicit boundary endpoint is retained; a new input with an omitted port stays
+unresolved until the producer's declared ports and factory primary are available.
+The graph's declaration refresh then resolves the actual primary without guessing
+`out`, while preserving the query's native catalogue, middleware, index provider,
+and explicit bootstrap bindings. Internal pending boundaries are construction
+dependencies, not producer ports or additional executing components.
 
 Use `priority_queue_capacity` for live events queued while the query
 bootstraps. There is no separate bootstrap-buffer setting. Unknown query
@@ -125,8 +140,8 @@ use drasi_lib::{channels::DispatchMode, Query, RecoveryPolicy};
 
 let query = Query::cypher("order-names")
     .query("MATCH (o:Order) RETURN o.name AS name")
-    .from_source("primary")
-    .from_source("secondary")
+    .from_input("primary")
+    .from_input("secondary")
     .enable_bootstrap(false)
     .auto_start(true)
     .with_priority_queue_capacity(10_000)
@@ -144,9 +159,9 @@ The corresponding library query configuration is:
 id: order-names
 query: "MATCH (o:Order) RETURN o.name AS name"
 queryLanguage: Cypher
-sources:
-  - source_id: primary
-  - source_id: secondary
+inputs:
+  - primary
+  - secondary
 enableBootstrap: false
 auto_start: true
 priority_queue_capacity: 10000
@@ -232,6 +247,11 @@ stale; choose AutoReset with a snapshot-capable reaction when it must be replace
 
 Do not treat restart as a way to reuse unrelated state under the same ID.
 Query reset/recreation identity and configuration checks protect against that.
+AutoReset does not erase output with a valid foreign producer identity; that
+ownership mismatch is an error under every policy. A replacement snapshot after
+completed durable bootstrap requires explicit reset authorization: Strict rejects
+it, while AutoReset starts a new output generation before replacing state.
+The snapshot cannot silently change rows at an unchanged output identity/cursor.
 
 ## Startup, shutdown and worker count
 
@@ -239,10 +259,40 @@ Query reset/recreation identity and configuration checks protect against that.
 reached when an add call returns. Use a component handle and a caller deadline
 when readiness matters.
 
+`DrasiLib::start()` returns a typed `PartialStartError` cause for failed requested
+startup, including ordinary queries. Already started components remain owned and
+`is_running()` remains true so that inspection and cleanup are available. Call
+`stop()` or `shutdown()` before retrying startup. Missing dependencies remain
+visible waits, not errors. Ordinary additions serialize with instance startup
+and stop, so their auto-start decision uses the completed lifecycle boundary.
+Quiescing and quiesced components appear as `Reconfiguring`, not `Running`.
+An initialized query can still serve generation-fenced snapshot/history reads
+while quiesced; that read capability does not mean it is processing new inputs.
+
 `bootstrapTimeoutSecs` is a snapshot/history readiness timeout, not a universal
-startup or shutdown timeout. A directly built graph has a separate
-`ComputationGraphBuilder::cleanup_timeout(Duration)` setting, defaulting to
-5 seconds.
+startup or shutdown timeout. Each component's input binding, start hook and
+output binding are bounded by graph activation, defaulting to 300 seconds.
+Direct graph builders can set `activation_timeout(Duration)`. Configuration
+resolution uses the existing construction/cleanup boundary. A directly built
+graph also has `cleanup_timeout(Duration)`, defaulting to 5 seconds; it is a
+per-cleanup-pass bound, not an overall shutdown deadline. Interrupted activation
+retains cleanup ownership rather than allowing immediate reuse of damaged state.
+Component batches carry definitions and bindings, not a separate execution
+policy; they use the owning instance's deadlines.
+For DrasiLib, use `with_activation_timeout_secs`; its configuration snapshot
+retains `activation_timeout_secs`. Server exposes the same setting as
+`instances[].activationTimeoutSecs`, including environment references, and on
+instance creation. Set it high enough for the intended full bootstrap workload;
+changing a YAML instance setting takes effect when that instance is reconstructed.
+
+Reconciliation is bound to the preview's affected components, resources, bindings
+and generations. A changed impact returns `GraphError::StalePreview`; obtain a
+new preview rather than applying the old one. Always inspect the returned
+`ReconciliationReport`'s `committed`, `summary` and `failures`. A pre-commit cleanup
+failure can leave the old topology intact with some components stopped.
+`report.ensure_committed()?` checks acceptance and retains the complete rejected
+report as a typed error. It deliberately does not claim that accepted components
+have finished construction or become ready.
 
 There is no ComputationGraph-specific worker-count setting. It uses the host's
 Tokio runtime. Independent DrasiLib queries can run on separate workers when that

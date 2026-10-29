@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! A complete source transaction is ordinary graph data: its operations are the
+//! standard `GraphChangeCodec` records. Completeness is a separate, scoped
+//! annotation bound to the envelope's own logical `ChangeSetId`, exactly like a
+//! query projection. The graph schema alone never means "complete transaction".
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::Duration,
 };
 
@@ -26,12 +31,19 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ChangeEnvelope, ChangeOperation, ChangeSet, ChangeSetId, ComponentId, ContextEntry,
-    ContextValue, ContractError, Record, RecordId, RecordImage, RecordValidationError,
-    RecordValidator, Schema, SchemaDescriptor, SchemaId, SchemaVersion, StreamId, SystemMetadata,
+    ContextValue, ContractError, GraphChangeCodec, GraphCodecError, Record, RecordId, RecordImage,
+    Schema, StreamId, SystemMetadata, UpdateSemantics,
 };
 
 const TRANSACTION_CONTEXT: &str = "drasi.source-transaction.v1";
 const REPLAY_CONTEXT: &str = "drasi.source-transaction-replay.v1";
+const CONTEXT_VERSION: u32 = 1;
+
+/// Fixed bincode framing of the private prepared-storage encoding: the version,
+/// three length prefixes and the operation count, then a tag and two length
+/// prefixes per operation. Record and metadata bytes are counted separately.
+const STORED_FRAME_OVERHEAD: usize = 36;
+const STORED_OPERATION_OVERHEAD: usize = 20;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,8 +54,75 @@ struct ReplayProgress {
     sequence: u64,
 }
 
+/// The explicit completion marker. It is valid only for the logical change set
+/// named here; an annotation inherited by any other change set is history.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransactionContext {
+    version: u32,
+    change_set_namespace: String,
+    #[serde(with = "hex")]
+    change_set_value: Vec<u8>,
+    source_id: String,
+    #[serde(with = "hex")]
+    transaction_id: Vec<u8>,
+    #[serde(with = "hex")]
+    position: Vec<u8>,
+    operations: u64,
+    complete: bool,
+}
+
+/// Just enough of a marker to decide whether it belongs to the current change set.
+#[derive(Deserialize)]
+struct ContextScope {
+    change_set_namespace: String,
+    #[serde(with = "hex")]
+    change_set_value: Vec<u8>,
+}
+
+impl ContextScope {
+    fn is_current(&self, id: &ChangeSetId) -> bool {
+        self.change_set_namespace == id.namespace() && self.change_set_value == id.value()[..]
+    }
+}
+
+mod hex {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    #[allow(clippy::ptr_arg)]
+    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error> {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            text.push(DIGITS[usize::from(byte >> 4)] as char);
+            text.push(DIGITS[usize::from(byte & 15)] as char);
+        }
+        serializer.serialize_str(&text)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        fn nibble<E: Error>(digit: u8) -> Result<u8, E> {
+            match digit {
+                b'0'..=b'9' => Ok(digit - b'0'),
+                b'a'..=b'f' => Ok(digit - b'a' + 10),
+                _ => Err(E::custom("expected lowercase hexadecimal")),
+            }
+        }
+        let text = String::deserialize(deserializer)?;
+        if text.len() % 2 != 0 {
+            return Err(D::Error::custom("odd hexadecimal length"));
+        }
+        text.as_bytes()
+            .chunks(2)
+            .map(|pair| Ok(nibble::<D::Error>(pair[0])? << 4 | nibble::<D::Error>(pair[1])?))
+            .collect()
+    }
+}
+
 /// Explicit admission bounds for opt-in complete-source-transaction processing.
-/// Bytes count the complete binary transaction payload, not transport framing.
+/// Bytes count the complete graph wire data: the identity and payload of every
+/// operation record plus the source id, transaction id and commit position.
+/// Neither transport framing nor the private prepared-storage framing counts.
 /// The pipe's envelope limit is an additional bound, never a fragmentation hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,38 +166,25 @@ pub enum SourceTransactionError {
     MixedSources,
     #[error("source transaction cannot contain a scheduled query notification")]
     ScheduledChange,
-    #[error("expected one complete source transaction, not a fragment or ordinary change")]
+    #[error("source transaction contains a malformed change: {0}")]
+    InvalidChange(#[from] drasi_core_types::models::SourceChangeError),
+    #[error("expected one complete source transaction, not a fragment or control event")]
     Envelope,
+    #[error("the envelope has no current complete source transaction marker")]
+    Unmarked,
     #[error(transparent)]
     Contract(#[from] ContractError),
+    #[error("invalid source transaction graph data: {0}")]
+    Graph(Box<GraphCodecError>),
     #[error("invalid source transaction frame: {0}")]
     Encoding(#[from] Box<bincode::ErrorKind>),
     #[error("invalid source transaction context: {0}")]
     Context(#[from] serde_json::Error),
 }
 
-#[derive(Serialize, Deserialize)]
-struct Frame {
-    version: u32,
-    source_id: String,
-    transaction_id: Vec<u8>,
-    position: Vec<u8>,
-    changes: Vec<SourceChange>,
-}
-
-impl Frame {
-    fn validate(&self) -> Result<(), SourceTransactionError> {
-        ComponentId::try_new(self.source_id.as_str())?;
-        if self.version != 1 || self.transaction_id.is_empty() || self.transaction_id.len() > 256 {
-            return Err(SourceTransactionError::Identity);
-        }
-        if self.position.is_empty() || self.position.len() > crate::MAX_SOURCE_POSITION_BYTES {
-            return Err(SourceTransactionError::Position);
-        }
-        for change in &self.changes {
-            validate_change(&self.source_id, change)?;
-        }
-        Ok(())
+impl From<GraphCodecError> for SourceTransactionError {
+    fn from(error: GraphCodecError) -> Self {
+        Self::Graph(Box::new(error))
     }
 }
 
@@ -129,17 +195,190 @@ fn validate_change(source: &str, change: &SourceChange) -> Result<(), SourceTran
     if change.get_reference().source_id.as_ref() != source {
         return Err(SourceTransactionError::MixedSources);
     }
+    change.validate()?;
     Ok(())
 }
 
-fn decode_frame(payload: &[u8]) -> Result<Frame, SourceTransactionError> {
-    let frame: Frame = bincode::options()
-        .with_fixint_encoding()
-        .with_limit(payload.len() as u64)
-        .reject_trailing_bytes()
-        .deserialize(payload)?;
-    frame.validate()?;
-    Ok(frame)
+fn validate_identity(
+    source_id: &str,
+    transaction_id: &[u8],
+    position: &[u8],
+) -> Result<(), SourceTransactionError> {
+    ComponentId::try_new(source_id)?;
+    if transaction_id.is_empty() || transaction_id.len() > 256 {
+        return Err(SourceTransactionError::Identity);
+    }
+    if position.is_empty() || position.len() > crate::MAX_SOURCE_POSITION_BYTES {
+        return Err(SourceTransactionError::Position);
+    }
+    Ok(())
+}
+
+fn record_bytes(record: &Record) -> u64 {
+    (record.identity().value().len() + record.payload().len()) as u64
+}
+
+fn operation_bytes(operation: &ChangeOperation) -> u64 {
+    match operation {
+        ChangeOperation::Added { after, .. } => record_bytes(after),
+        ChangeOperation::Updated { before, after, .. } => {
+            before.as_ref().map_or(0, record_bytes) + record_bytes(after)
+        }
+        ChangeOperation::Deleted {
+            identity, before, ..
+        } => identity.identity().value().len() as u64 + before.as_ref().map_or(0, record_bytes),
+    }
+}
+
+fn metadata_bytes(source_id: &str, transaction_id: &[u8], position: &[u8]) -> u64 {
+    (source_id.len() + transaction_id.len() + position.len()) as u64
+}
+
+/// The complete group as validated graph operations plus its decoded changes.
+struct Group {
+    source_id: String,
+    transaction_id: Bytes,
+    position: Bytes,
+    changes: Vec<SourceChange>,
+    operations: Vec<ChangeOperation>,
+}
+
+impl Group {
+    fn wire_bytes(&self) -> u64 {
+        self.operations.iter().map(operation_bytes).fold(
+            metadata_bytes(&self.source_id, &self.transaction_id, &self.position),
+            u64::saturating_add,
+        )
+    }
+
+    fn check_limits(&self, limits: SourceTransactionLimits) -> Result<(), SourceTransactionError> {
+        if self.operations.len() > limits.max_changes.get() {
+            return Err(SourceTransactionError::Limit {
+                kind: SourceTransactionLimit::Changes,
+                limit: limits.max_changes.get(),
+            });
+        }
+        if self.wire_bytes() > limits.max_bytes.get() as u64 {
+            return Err(SourceTransactionError::Limit {
+                kind: SourceTransactionLimit::Bytes,
+                limit: limits.max_bytes.get(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Private prepared-storage encoding. It carries the same graph records the wire
+/// carries, with the image implied by the operation kind, so restoring a group
+/// passes through the standard graph record validator rather than a second schema.
+#[derive(Serialize, Deserialize)]
+struct StoredFrame {
+    version: u32,
+    source_id: String,
+    transaction_id: Vec<u8>,
+    position: Vec<u8>,
+    operations: Vec<StoredOperation>,
+}
+
+#[derive(Serialize, Deserialize)]
+enum StoredOperation {
+    Added(StoredRecord),
+    Replaced(StoredRecord),
+    Patched(StoredRecord),
+    Deleted(StoredRecord),
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredRecord {
+    identity: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+impl StoredOperation {
+    fn from_operation(operation: &ChangeOperation) -> Result<Self, SourceTransactionError> {
+        let stored = |record: &Record| StoredRecord {
+            identity: record.identity().value().to_vec(),
+            payload: record.payload().to_vec(),
+        };
+        Ok(match operation {
+            ChangeOperation::Added { after, .. } => Self::Added(stored(after)),
+            ChangeOperation::Updated {
+                before: None,
+                after,
+                semantics: UpdateSemantics::Replace,
+                ..
+            } => Self::Replaced(stored(after)),
+            ChangeOperation::Updated {
+                before: None,
+                after,
+                semantics: UpdateSemantics::Patch,
+                ..
+            } => Self::Patched(stored(after)),
+            ChangeOperation::Deleted {
+                before: Some(before),
+                ..
+            } => Self::Deleted(stored(before)),
+            _ => return Err(SourceTransactionError::Envelope),
+        })
+    }
+
+    fn into_operation(self, ordinal: u64) -> Result<ChangeOperation, SourceTransactionError> {
+        let schema = GraphChangeCodec::schema();
+        let record = |stored: StoredRecord, image| {
+            Record::try_new(
+                &schema,
+                RecordId::try_new(
+                    crate::graph_codec::GRAPH_IDENTITY,
+                    Bytes::from(stored.identity),
+                )?,
+                image,
+                Bytes::from(stored.payload),
+            )
+        };
+        Ok(match self {
+            Self::Added(stored) => ChangeOperation::Added {
+                ordinal,
+                after: record(stored, RecordImage::Full)?,
+            },
+            Self::Replaced(stored) => ChangeOperation::Updated {
+                ordinal,
+                before: None,
+                after: record(stored, RecordImage::Full)?,
+                semantics: UpdateSemantics::Replace,
+            },
+            Self::Patched(stored) => ChangeOperation::Updated {
+                ordinal,
+                before: None,
+                after: record(stored, RecordImage::Patch)?,
+                semantics: UpdateSemantics::Patch,
+            },
+            Self::Deleted(stored) => {
+                let before = record(stored, RecordImage::Partial)?;
+                ChangeOperation::Deleted {
+                    ordinal,
+                    identity: before.reference().clone(),
+                    before: Some(before),
+                }
+            }
+        })
+    }
+}
+
+/// Decode ordered operations into changes and validate each one for `source`.
+/// `event_time` supplies the time identity-only deletions need, if any.
+fn changes_from_operations(
+    source: &str,
+    operations: &[ChangeOperation],
+    event_time: &dyn Fn() -> Result<u64, GraphCodecError>,
+) -> Result<Vec<SourceChange>, SourceTransactionError> {
+    let changes: Vec<SourceChange> = GraphChangeCodec::decode_operations(operations, event_time)?
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect();
+    for change in &changes {
+        validate_change(source, change)?;
+    }
+    Ok(changes)
 }
 
 /// An incomplete assembly has no envelope/serialization API. After any rejected
@@ -148,7 +387,8 @@ fn decode_frame(payload: &[u8]) -> Result<Frame, SourceTransactionError> {
 pub struct SourceTransactionBuilder {
     source_id: String,
     changes: Vec<SourceChange>,
-    change_bytes: u64,
+    operations: Vec<ChangeOperation>,
+    operation_bytes: u64,
     limits: SourceTransactionLimits,
     deadline: tokio::time::Instant,
     failed: bool,
@@ -166,7 +406,8 @@ impl SourceTransactionBuilder {
         Ok(Self {
             source_id: source_id.into(),
             changes: Vec::new(),
-            change_bytes: 0,
+            operations: Vec::new(),
+            operation_bytes: 0,
             limits,
             deadline,
             failed: false,
@@ -196,14 +437,18 @@ impl SourceTransactionBuilder {
         if result.is_err() {
             self.failed = true;
         }
-        let bytes = result?;
+        let (operation, bytes) = result?;
         self.check_deadline()?;
-        self.change_bytes = bytes;
+        self.operation_bytes = bytes;
+        self.operations.push(operation);
         self.changes.push(change);
         Ok(())
     }
 
-    fn admit(&self, change: &SourceChange) -> Result<u64, SourceTransactionError> {
+    fn admit(
+        &self,
+        change: &SourceChange,
+    ) -> Result<(ChangeOperation, u64), SourceTransactionError> {
         if self.changes.len() == self.limits.max_changes.get() {
             return Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Changes,
@@ -211,16 +456,17 @@ impl SourceTransactionBuilder {
             });
         }
         validate_change(&self.source_id, change)?;
-        let bytes = self
-            .change_bytes
-            .checked_add(bincode::serialized_size(change)?);
-        match bytes {
-            Some(bytes) if bytes <= self.limits.max_bytes.get() as u64 => Ok(bytes),
-            _ => Err(SourceTransactionError::Limit {
+        let operation = GraphChangeCodec::encode_operation(self.changes.len() as u64, change)?;
+        let total = self
+            .operation_bytes
+            .saturating_add(operation_bytes(&operation));
+        if total.saturating_add(self.source_id.len() as u64) > self.limits.max_bytes.get() as u64 {
+            return Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Bytes,
                 limit: self.limits.max_bytes.get(),
-            }),
+            });
         }
+        Ok((operation, total))
     }
 
     /// Call only after the upstream commit is known. Returning a value does not
@@ -243,71 +489,73 @@ impl SourceTransactionBuilder {
         position: Bytes,
     ) -> Result<PreparedSourceTransaction, SourceTransactionError> {
         self.check_deadline()?;
-        if transaction_id.is_empty() || transaction_id.len() > 256 {
-            return Err(SourceTransactionError::Identity);
-        }
-        if position.is_empty() || position.len() > crate::MAX_SOURCE_POSITION_BYTES {
-            return Err(SourceTransactionError::Position);
-        }
-        let frame = Frame {
-            version: 1,
+        validate_identity(&self.source_id, &transaction_id, &position)?;
+        let group = Group {
             source_id: self.source_id,
-            transaction_id: transaction_id.to_vec(),
-            position: position.to_vec(),
+            transaction_id,
+            position,
             changes: self.changes,
+            operations: self.operations,
         };
-        frame.validate()?;
-        if bincode::serialized_size(&frame)? > self.limits.max_bytes.get() as u64 {
-            return Err(SourceTransactionError::Limit {
-                kind: SourceTransactionLimit::Bytes,
-                limit: self.limits.max_bytes.get(),
-            });
-        }
+        group.check_limits(self.limits)?;
         if tokio::time::Instant::now() >= self.deadline {
             return Err(SourceTransactionError::Deadline);
         }
-        Ok(PreparedSourceTransaction { frame })
+        Ok(PreparedSourceTransaction { group })
     }
 }
 
 /// Inert source-transaction storage, not evidence that the source has committed.
 pub struct PreparedSourceTransaction {
-    frame: Frame,
+    group: Group,
 }
 
 impl PreparedSourceTransaction {
     pub fn encode(&self) -> Result<Bytes, SourceTransactionError> {
-        Ok(Bytes::from(bincode::serialize(&self.frame)?))
+        let frame = StoredFrame {
+            version: CONTEXT_VERSION,
+            source_id: self.group.source_id.clone(),
+            transaction_id: self.group.transaction_id.to_vec(),
+            position: self.group.position.to_vec(),
+            operations: self
+                .group
+                .operations
+                .iter()
+                .map(StoredOperation::from_operation)
+                .collect::<Result<_, _>>()?,
+        };
+        Ok(Bytes::from(bincode::serialize(&frame)?))
     }
 
     /// Call only after the source transaction containing these changes commits.
     /// The pre-commit admission deadline no longer applies to committed data.
     pub fn confirm_committed(self) -> SourceTransaction {
-        SourceTransaction { frame: self.frame }
+        SourceTransaction { group: self.group }
     }
 }
 
-/// One committed, bounded group. The complete group occupies one typed record,
-/// so a pipe cannot accidentally deliver its rows as separate source changes.
+/// One committed, bounded group. Its operations are ordinary graph records in
+/// one change set, and only an envelope carrying the scoped completion marker
+/// is a complete transaction.
 pub struct SourceTransaction {
-    frame: Frame,
+    group: Group,
 }
 
 impl SourceTransaction {
     pub fn source_id(&self) -> &str {
-        &self.frame.source_id
+        &self.group.source_id
     }
 
     pub fn transaction_id(&self) -> &[u8] {
-        &self.frame.transaction_id
+        &self.group.transaction_id
     }
 
     pub fn position(&self) -> &[u8] {
-        &self.frame.position
+        &self.group.position
     }
 
     pub fn into_changes(self) -> Vec<SourceChange> {
-        self.frame.changes
+        self.group.changes
     }
 
     /// Retain the upstream logical position while assigning a fresh transport
@@ -323,9 +571,9 @@ impl SourceTransaction {
             return Err(SourceTransactionError::Identity);
         }
         let progress = ReplayProgress {
-            version: 1,
-            source_id: self.frame.source_id.clone(),
-            transaction_id: self.frame.transaction_id.clone(),
+            version: CONTEXT_VERSION,
+            source_id: self.group.source_id.clone(),
+            transaction_id: self.group.transaction_id.to_vec(),
             sequence: source_sequence,
         };
         let mut envelope = self.into_envelope(stream, transport_sequence, timestamp)?;
@@ -337,51 +585,86 @@ impl SourceTransaction {
         Ok(envelope)
     }
 
+    /// The only constructor of a completion marker: the whole validated group
+    /// becomes one standard graph change set, marked for that change set alone.
     pub fn into_envelope(
         self,
         stream: StreamId,
         sequence: u64,
         timestamp: DateTime<Utc>,
     ) -> Result<ChangeEnvelope, SourceTransactionError> {
-        let schema = SourceTransactionCodec::schema();
-        let record = Record::try_new(
-            &schema,
-            RecordId::try_new(
-                self.frame.source_id.as_str(),
-                Bytes::copy_from_slice(&self.frame.transaction_id),
-            )?,
-            RecordImage::Full,
-            Bytes::from(bincode::serialize(&self.frame)?),
+        let Group {
+            source_id,
+            transaction_id,
+            position,
+            operations,
+            ..
+        } = self.group;
+        let id = ChangeSetId::try_new(
+            stream.as_str(),
+            Bytes::copy_from_slice(&sequence.to_be_bytes()),
         )?;
+        let context = TransactionContext {
+            version: CONTEXT_VERSION,
+            change_set_namespace: id.namespace().to_owned(),
+            change_set_value: id.value().to_vec(),
+            source_id,
+            transaction_id: transaction_id.to_vec(),
+            position: position.to_vec(),
+            operations: operations.len() as u64,
+            complete: true,
+        };
         let changes = ChangeSet::try_new(
-            ChangeSetId::try_new(
-                stream.as_str(),
-                Bytes::copy_from_slice(&sequence.to_be_bytes()),
-            )?,
-            schema.descriptor().clone(),
-            vec![ChangeOperation::Added {
-                ordinal: 0,
-                after: record,
-            }],
+            id,
+            GraphChangeCodec::schema().descriptor().clone(),
+            operations,
         )?;
         let mut envelope = ChangeEnvelope::new(
             super::emission_id(&stream, sequence)?,
             changes,
             SystemMetadata::new(stream, sequence)
                 .with_timestamp(timestamp)
-                .with_source_position(Bytes::from(self.frame.position)),
+                .with_source_position(position),
         );
         envelope.append_annotation(ContextEntry::try_new(
-            ComponentId::try_new(self.frame.source_id.as_str())?,
+            ComponentId::try_new(context.source_id.as_str())?,
             TRANSACTION_CONTEXT,
-            ContextValue::Bytes(Arc::from(serde_json::to_vec(&(
-                1u32,
-                &self.frame.source_id,
-                &self.frame.transaction_id,
-            ))?)),
+            ContextValue::Bytes(Arc::from(serde_json::to_vec(&context)?)),
         )?)?;
         Ok(envelope)
     }
+}
+
+/// Identity of a current, valid complete-transaction marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceTransactionMetadata {
+    source_id: String,
+    transaction_id: Bytes,
+    position: Bytes,
+    operations: usize,
+}
+
+impl SourceTransactionMetadata {
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    pub fn transaction_id(&self) -> &[u8] {
+        &self.transaction_id
+    }
+
+    pub fn position(&self) -> &[u8] {
+        &self.position
+    }
+
+    pub fn operations(&self) -> usize {
+        self.operations
+    }
+}
+
+struct Current {
+    metadata: SourceTransactionMetadata,
+    replay: Option<u64>,
 }
 
 pub struct SourceTransactionCodec;
@@ -393,146 +676,212 @@ impl SourceTransactionCodec {
         payload: &[u8],
         limits: SourceTransactionLimits,
     ) -> Result<SourceTransaction, SourceTransactionError> {
-        if payload.len() > limits.max_bytes.get() {
+        let ceiling = limits
+            .max_bytes
+            .get()
+            .saturating_add(
+                limits
+                    .max_changes
+                    .get()
+                    .saturating_mul(STORED_OPERATION_OVERHEAD),
+            )
+            .saturating_add(STORED_FRAME_OVERHEAD);
+        if payload.len() > ceiling {
             return Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Bytes,
                 limit: limits.max_bytes.get(),
             });
         }
-        let frame = decode_frame(payload)?;
-        if frame.changes.len() > limits.max_changes.get() {
+        let frame: StoredFrame = bincode::options()
+            .with_fixint_encoding()
+            .with_limit(payload.len() as u64)
+            .reject_trailing_bytes()
+            .deserialize(payload)?;
+        if frame.version != CONTEXT_VERSION {
+            return Err(SourceTransactionError::Identity);
+        }
+        validate_identity(&frame.source_id, &frame.transaction_id, &frame.position)?;
+        if frame.operations.len() > limits.max_changes.get() {
             return Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Changes,
                 limit: limits.max_changes.get(),
             });
         }
-        Ok(SourceTransaction { frame })
+        let operations = frame
+            .operations
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, operation)| operation.into_operation(ordinal as u64))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Stored groups carry only metadata deletions, so no event time exists.
+        let changes = changes_from_operations(&frame.source_id, &operations, &|| {
+            Err(GraphCodecError::MissingEventTime)
+        })?;
+        let group = Group {
+            source_id: frame.source_id,
+            transaction_id: Bytes::from(frame.transaction_id),
+            position: Bytes::from(frame.position),
+            changes,
+            operations,
+        };
+        group.check_limits(limits)?;
+        Ok(SourceTransaction { group })
     }
 
+    /// Complete transactions use the standard graph schema. The marker, not the
+    /// schema, distinguishes one; see [`Self::metadata`].
     pub fn schema() -> Arc<Schema> {
-        static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
-        SCHEMA.get_or_init(|| Arc::new(Schema::new(
-            SchemaDescriptor::try_new(
-                SchemaId::try_new("drasi.source-transaction").expect("schema id"),
-                SchemaVersion::try_new(1).expect("schema version"),
-                "drasi-source-transaction-bincode1",
-                Bytes::from_static(b"CommittedSourceTransaction-v1;source-id;transaction-id;commit-position;ordered-SourceChange-v1;one-full-record"),
-            ).expect("transaction schema"),
-            Arc::new(TransactionValidator),
-        ))).clone()
+        GraphChangeCodec::schema()
     }
 
+    /// Whether the envelope carries a current, valid completion marker for its
+    /// own change set. A matching schema, an inherited marker or a malformed one
+    /// is not a complete transaction.
+    pub fn is_complete_transaction(envelope: &ChangeEnvelope) -> bool {
+        matches!(Self::metadata(envelope), Ok(Some(_)))
+    }
+
+    /// The current marker, `Ok(None)` when absent or inherited from another
+    /// logical change set, or an error when the current marker is malformed,
+    /// duplicated or contradicts the envelope.
+    pub fn metadata(
+        envelope: &ChangeEnvelope,
+    ) -> Result<Option<SourceTransactionMetadata>, SourceTransactionError> {
+        Ok(Self::current(envelope)?.map(|current| current.metadata))
+    }
+
+    /// Decode exactly one complete transaction. An envelope without its own
+    /// current marker is rejected, however well formed its graph records are.
     pub fn decode(
         envelope: &ChangeEnvelope,
         limits: SourceTransactionLimits,
     ) -> Result<SourceTransaction, SourceTransactionError> {
-        super::data::validate_schema(Self::schema().descriptor(), envelope.changes().schema())?;
-        let [ChangeOperation::Added { ordinal: 0, after }] = envelope.changes().operations() else {
-            return Err(SourceTransactionError::Envelope);
+        let metadata = Self::metadata(envelope)?.ok_or(SourceTransactionError::Unmarked)?;
+        let operations = envelope.changes().operations();
+        if operations.len() > limits.max_changes.get() {
+            return Err(SourceTransactionError::Limit {
+                kind: SourceTransactionLimit::Changes,
+                limit: limits.max_changes.get(),
+            });
+        }
+        let mut group = Group {
+            source_id: metadata.source_id,
+            transaction_id: metadata.transaction_id,
+            position: metadata.position,
+            changes: Vec::new(),
+            operations: operations.to_vec(),
         };
-        let SourceTransaction { frame } = Self::decode_committed(after.payload(), limits)?;
-        if after.identity().namespace() != frame.source_id
-            || after.identity().value().as_ref() != frame.transaction_id
-        {
-            return Err(SourceTransactionError::Identity);
-        }
-        if envelope.system().source_position().map(Bytes::as_ref) != Some(frame.position.as_slice())
-        {
-            return Err(SourceTransactionError::Position);
-        }
-        let expected = serde_json::to_vec(&(1u32, &frame.source_id, &frame.transaction_id))?;
-        let mut entries = envelope
-            .annotations()
-            .entries()
-            .filter(|entry| entry.key() == TRANSACTION_CONTEXT);
-        let valid = entries.next().is_some_and(|entry| {
-            entry.contributor() == frame.source_id
-                && matches!(entry.value(), ContextValue::Bytes(bytes) if bytes.as_ref() == expected)
-        });
-        if !valid || entries.next().is_some() {
-            return Err(SourceTransactionError::Identity);
-        }
-        Self::replay_progress(envelope)?;
-        Ok(SourceTransaction { frame })
+        group.check_limits(limits)?;
+        let time = envelope
+            .system()
+            .timestamp()
+            .and_then(|timestamp| u64::try_from(timestamp.timestamp_millis()).ok());
+        group.changes = changes_from_operations(&group.source_id, operations, &|| {
+            time.ok_or(GraphCodecError::MissingEventTime)
+        })?;
+        Ok(SourceTransaction { group })
     }
 
     pub fn replay_progress(
         envelope: &ChangeEnvelope,
     ) -> Result<Option<(String, u64)>, SourceTransactionError> {
-        if envelope.changes().schema().id().as_str() != "drasi.source-transaction" {
+        Ok(Self::current(envelope)?.and_then(|current| {
+            current
+                .replay
+                .map(|sequence| (current.metadata.source_id, sequence))
+        }))
+    }
+
+    fn current(envelope: &ChangeEnvelope) -> Result<Option<Current>, SourceTransactionError> {
+        let mut replay = Vec::new();
+        let mut entries = envelope.annotations().entries();
+        let entry = loop {
+            match entries.next() {
+                None => return Ok(None),
+                Some(entry) if entry.key() == TRANSACTION_CONTEXT => break entry,
+                Some(entry) if entry.key() == REPLAY_CONTEXT => replay.push(entry),
+                Some(_) => {}
+            }
+        };
+        let id = envelope.changes().id();
+        let bytes = Self::bytes(&entry)?;
+        let scope: ContextScope = serde_json::from_slice(&bytes)?;
+        if !scope.is_current(id) {
             return Ok(None);
         }
-        let mut entries = envelope
-            .annotations()
-            .entries()
-            .filter(|entry| entry.key() == REPLAY_CONTEXT);
-        let Some(entry) = entries.next() else {
-            return Ok(None);
-        };
-        if entries.next().is_some() {
+        let older_is_current = entries
+            .filter(|older| older.key() == TRANSACTION_CONTEXT)
+            .any(|older| {
+                Self::bytes(&older)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<ContextScope>(&bytes).ok())
+                    .is_some_and(|scope| scope.is_current(id))
+            });
+        if older_is_current || replay.len() > 1 {
             return Err(SourceTransactionError::Identity);
         }
-        super::data::validate_schema(Self::schema().descriptor(), envelope.changes().schema())?;
-        let ContextValue::Bytes(bytes) = entry.value() else {
+        let context: TransactionContext = serde_json::from_slice(&bytes)?;
+        if context.version != CONTEXT_VERSION
+            || !context.complete
+            || entry.contributor() != context.source_id
+        {
             return Err(SourceTransactionError::Identity);
-        };
-        let progress: ReplayProgress = serde_json::from_slice(&bytes)?;
-        let [ChangeOperation::Added { ordinal: 0, after }] = envelope.changes().operations() else {
+        }
+        validate_identity(
+            &context.source_id,
+            &context.transaction_id,
+            &context.position,
+        )?;
+        super::data::validate_schema(
+            GraphChangeCodec::schema().descriptor(),
+            envelope.changes().schema(),
+        )?;
+        if envelope.system().control().is_some()
+            || context.operations != envelope.changes().operations().len() as u64
+        {
             return Err(SourceTransactionError::Envelope);
-        };
-        if progress.version != 1
+        }
+        if envelope.system().source_position().map(Bytes::as_ref)
+            != Some(context.position.as_slice())
+        {
+            return Err(SourceTransactionError::Position);
+        }
+        let replay = replay
+            .pop()
+            .map(|entry| Self::replay_sequence(&entry, &context))
+            .transpose()?;
+        Ok(Some(Current {
+            metadata: SourceTransactionMetadata {
+                operations: envelope.changes().operations().len(),
+                source_id: context.source_id,
+                transaction_id: Bytes::from(context.transaction_id),
+                position: Bytes::from(context.position),
+            },
+            replay,
+        }))
+    }
+
+    fn replay_sequence(
+        entry: &ContextEntry,
+        context: &TransactionContext,
+    ) -> Result<u64, SourceTransactionError> {
+        let progress: ReplayProgress = serde_json::from_slice(&Self::bytes(entry)?)?;
+        if progress.version != CONTEXT_VERSION
             || progress.sequence == 0
             || entry.contributor() != progress.source_id
-            || after.identity().namespace() != progress.source_id
-            || after.identity().value().as_ref() != progress.transaction_id
+            || progress.source_id != context.source_id
+            || progress.transaction_id != context.transaction_id
         {
             return Err(SourceTransactionError::Identity);
         }
-        Ok(Some((progress.source_id, progress.sequence)))
-    }
-}
-
-struct TransactionValidator;
-
-impl RecordValidator for TransactionValidator {
-    fn validate_identity(
-        &self,
-        schema: &SchemaDescriptor,
-        identity: &RecordId,
-    ) -> Result<(), RecordValidationError> {
-        if schema != SourceTransactionCodec::schema().descriptor()
-            || ComponentId::try_new(identity.namespace()).is_err()
-            || identity.value().is_empty()
-            || identity.value().len() > 256
-        {
-            return Err(RecordValidationError::new(
-                "identity",
-                "invalid source transaction identity",
-            ));
-        }
-        Ok(())
+        Ok(progress.sequence)
     }
 
-    fn validate(
-        &self,
-        schema: &SchemaDescriptor,
-        identity: &RecordId,
-        image: RecordImage,
-        payload: &[u8],
-    ) -> Result<(), RecordValidationError> {
-        self.validate_identity(schema, identity)?;
-        let frame = decode_frame(payload)
-            .map_err(|error| RecordValidationError::new("transaction", error.to_string()))?;
-        if image != RecordImage::Full
-            || identity.namespace() != frame.source_id
-            || identity.value().as_ref() != frame.transaction_id
-        {
-            return Err(RecordValidationError::new(
-                "transaction",
-                "transaction identity or image mismatch",
-            ));
+    fn bytes(entry: &ContextEntry) -> Result<Arc<[u8]>, SourceTransactionError> {
+        match entry.value() {
+            ContextValue::Bytes(bytes) => Ok(bytes),
+            _ => Err(SourceTransactionError::Identity),
         }
-        Ok(())
     }
 }
 
@@ -540,7 +889,7 @@ impl RecordValidator for TransactionValidator {
 mod tests {
     use super::*;
     use drasi_core_types::models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference,
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
     };
 
     fn limits(changes: usize, bytes: usize) -> SourceTransactionLimits {
@@ -551,16 +900,20 @@ mod tests {
         }
     }
 
+    fn element(source: &str, id: &str, time: u64) -> Element {
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source, id),
+                labels: Arc::from([Arc::from("Person")]),
+                effective_from: time,
+            },
+            properties: ElementPropertyMap::new(),
+        }
+    }
+
     fn change(source: &str, id: &str) -> SourceChange {
         SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new(source, id),
-                    labels: Arc::from([Arc::from("Person")]),
-                    effective_from: 1000,
-                },
-                properties: ElementPropertyMap::new(),
-            },
+            element: element(source, id, 1000),
         }
     }
 
@@ -581,39 +934,284 @@ mod tests {
         )
     }
 
+    fn timestamp() -> DateTime<Utc> {
+        DateTime::from_timestamp_millis(1000).unwrap()
+    }
+
+    fn stream() -> StreamId {
+        StreamId::try_new("source-output").unwrap()
+    }
+
     fn envelope(count: usize) -> ChangeEnvelope {
         commit(builder(limits(10, 4096), count))
             .unwrap()
-            .into_envelope(
-                StreamId::try_new("source-output").unwrap(),
-                7,
-                DateTime::from_timestamp_millis(1000).unwrap(),
+            .into_envelope(stream(), 7, timestamp())
+            .unwrap()
+    }
+
+    fn wire_size(envelope: &ChangeEnvelope) -> usize {
+        let metadata = SourceTransactionCodec::metadata(envelope).unwrap().unwrap();
+        (envelope
+            .changes()
+            .operations()
+            .iter()
+            .map(operation_bytes)
+            .sum::<u64>()
+            + metadata_bytes(
+                metadata.source_id(),
+                metadata.transaction_id(),
+                metadata.position(),
+            )) as usize
+    }
+
+    fn marker(envelope: &ChangeEnvelope) -> ContextEntry {
+        envelope
+            .annotations()
+            .entries()
+            .find(|entry| entry.key() == TRANSACTION_CONTEXT)
+            .unwrap()
+    }
+
+    fn marker_with(
+        envelope: &ChangeEnvelope,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> ContextEntry {
+        let ContextValue::Bytes(bytes) = marker(envelope).value() else {
+            panic!("marker bytes");
+        };
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        edit(&mut value);
+        ContextEntry::try_new(
+            ComponentId::try_new("source").unwrap(),
+            TRANSACTION_CONTEXT,
+            ContextValue::Bytes(Arc::from(serde_json::to_vec(&value).unwrap())),
+        )
+        .unwrap()
+    }
+
+    /// An ordinary graph batch given a well-formed marker for its own change set,
+    /// standing in for a producer that never validated a source transaction.
+    fn forged(changes: &[SourceChange], source: &str) -> ChangeEnvelope {
+        let batch =
+            GraphChangeCodec::encode_changes(changes, stream(), 7, Some(timestamp())).unwrap();
+        let positioned = batch.derive(
+            batch.id().clone(),
+            batch.changes().clone(),
+            batch
+                .system()
+                .as_ref()
+                .clone()
+                .with_source_position(Bytes::from_static(b"commit-position")),
+        );
+        envelope_with_marker(&positioned, source)
+    }
+
+    fn envelope_with_marker(input: &ChangeEnvelope, source: &str) -> ChangeEnvelope {
+        let id = input.changes().id();
+        let context = TransactionContext {
+            version: 1,
+            change_set_namespace: id.namespace().to_owned(),
+            change_set_value: id.value().to_vec(),
+            source_id: source.into(),
+            transaction_id: b"transaction".to_vec(),
+            position: b"commit-position".to_vec(),
+            operations: input.changes().operations().len() as u64,
+            complete: true,
+        };
+        input
+            .append_context(
+                ContextEntry::try_new(
+                    ComponentId::try_new(source).unwrap(),
+                    TRANSACTION_CONTEXT,
+                    ContextValue::Bytes(Arc::from(serde_json::to_vec(&context).unwrap())),
+                )
+                .unwrap(),
             )
             .unwrap()
     }
 
     #[tokio::test]
+    async fn one_ordered_mixed_transaction_is_ordinary_standard_graph_records() {
+        let changes = vec![
+            change("source", "0"),
+            SourceChange::update_with_removals(
+                element("source", "0", 2000),
+                ["gone".to_string()].into(),
+            )
+            .unwrap(),
+            SourceChange::replace(element("source", "0", 3000)),
+            SourceChange::update(element("source", "0", 4000)),
+            SourceChange::Delete {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("source", "0"),
+                    labels: Arc::from([Arc::from("Person")]),
+                    effective_from: 5000,
+                },
+            },
+        ];
+        let mut assembly = SourceTransactionBuilder::new("source", limits(8, 4096)).unwrap();
+        for change in &changes {
+            assembly.push(change.clone()).unwrap();
+        }
+        let envelope = commit(assembly)
+            .unwrap()
+            .into_envelope(stream(), 1, timestamp())
+            .unwrap();
+
+        // The data is the standard graph schema and operation shapes, in order.
+        assert_eq!(
+            envelope.changes().schema(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        assert_eq!(
+            SourceTransactionCodec::schema().descriptor(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        let shapes: Vec<_> = envelope
+            .changes()
+            .operations()
+            .iter()
+            .map(|operation| match operation {
+                ChangeOperation::Added { ordinal, after } => (*ordinal, "add", after.image()),
+                ChangeOperation::Updated {
+                    ordinal,
+                    after,
+                    semantics: UpdateSemantics::Patch,
+                    ..
+                } => (*ordinal, "patch", after.image()),
+                ChangeOperation::Updated {
+                    ordinal,
+                    after,
+                    semantics: UpdateSemantics::Replace,
+                    ..
+                } => (*ordinal, "replace", after.image()),
+                ChangeOperation::Deleted {
+                    ordinal, before, ..
+                } => (*ordinal, "delete", before.as_ref().unwrap().image()),
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (0, "add", RecordImage::Full),
+                (1, "patch", RecordImage::Patch),
+                (2, "replace", RecordImage::Full),
+                (3, "patch", RecordImage::Patch),
+                (4, "delete", RecordImage::Partial),
+            ]
+        );
+        assert_eq!(
+            GraphChangeCodec::decode_changes(&envelope).unwrap(),
+            changes
+        );
+        assert!(SourceTransactionCodec::is_complete_transaction(&envelope));
+        let restored = SourceTransactionCodec::decode(&envelope, limits(8, 4096)).unwrap();
+        assert_eq!(restored.into_changes(), changes);
+
+        // An update that sets and removes one property is malformed and poisons assembly.
+        let mut assembly = SourceTransactionBuilder::new("source", limits(8, 4096)).unwrap();
+        let mut conflicting = element("source", "0", 2000);
+        if let Element::Node { properties, .. } = &mut conflicting {
+            properties.insert("both", ElementValue::Null);
+        }
+        assert!(matches!(
+            assembly.push(SourceChange::Update {
+                element: conflicting,
+                removed_properties: ["both".to_string()].into(),
+            }),
+            Err(SourceTransactionError::InvalidChange(_))
+        ));
+        assert!(matches!(
+            assembly.push(change("source", "1")),
+            Err(SourceTransactionError::Interrupted)
+        ));
+    }
+
+    #[tokio::test]
     async fn prepared_storage_is_bounded_and_restores_only_as_a_complete_committed_group() {
-        let prepared = builder(limits(2, 4096), 2)
+        let changes = vec![
+            change("source", "0"),
+            SourceChange::update_with_removals(
+                element("source", "0", 2000),
+                ["gone".to_string()].into(),
+            )
+            .unwrap(),
+            SourceChange::replace(element("source", "0", 3000)),
+            SourceChange::Delete {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("source", "0"),
+                    labels: Arc::from([Arc::from("Person")]),
+                    effective_from: 5000,
+                },
+            },
+        ];
+        let mut assembly = SourceTransactionBuilder::new("source", limits(4, 4096)).unwrap();
+        for change in &changes {
+            assembly.push(change.clone()).unwrap();
+        }
+        let prepared = assembly
             .prepare(
                 Bytes::from_static(b"transaction"),
                 Bytes::from_static(b"position"),
             )
             .unwrap();
         let bytes = prepared.encode().unwrap();
-        assert!(SourceTransactionCodec::decode_committed(&bytes, limits(1, 4096)).is_err());
+        let wire = prepared.group.wire_bytes() as usize;
         assert!(
-            SourceTransactionCodec::decode_committed(&bytes, limits(2, bytes.len() - 1)).is_err()
+            bytes.len() <= wire + STORED_FRAME_OVERHEAD + 4 * STORED_OPERATION_OVERHEAD,
+            "the private storage framing is bounded by the wire size and fixed overheads"
         );
-        let restored =
-            SourceTransactionCodec::decode_committed(&bytes, limits(2, bytes.len())).unwrap();
+        assert!(SourceTransactionCodec::decode_committed(&bytes, limits(3, 4096)).is_err());
+        assert!(matches!(
+            SourceTransactionCodec::decode_committed(&bytes, limits(4, wire - 1)),
+            Err(SourceTransactionError::Limit {
+                kind: SourceTransactionLimit::Bytes,
+                ..
+            })
+        ));
+        let restored = SourceTransactionCodec::decode_committed(&bytes, limits(4, wire)).unwrap();
         assert_eq!(restored.transaction_id(), b"transaction");
         assert_eq!(restored.position(), b"position");
-        assert_eq!(restored.into_changes().len(), 2);
-        assert_eq!(prepared.confirm_committed().into_changes().len(), 2);
+        let envelope = restored.into_envelope(stream(), 3, timestamp()).unwrap();
+        assert_eq!(
+            SourceTransactionCodec::decode(&envelope, limits(4, wire))
+                .unwrap()
+                .into_changes(),
+            changes
+        );
+        assert_eq!(prepared.confirm_committed().into_changes(), changes);
+
         let mut malformed = bytes.to_vec();
         malformed.push(0);
-        assert!(SourceTransactionCodec::decode_committed(&malformed, limits(2, 4096)).is_err());
+        assert!(SourceTransactionCodec::decode_committed(&malformed, limits(4, 4096)).is_err());
+        for length in [0, 1, bytes.len() - 1] {
+            assert!(
+                SourceTransactionCodec::decode_committed(&bytes[..length], limits(4, 4096))
+                    .is_err()
+            );
+        }
+        let mut stale: StoredFrame = bincode::deserialize(&bytes).unwrap();
+        stale.version = 2;
+        assert!(SourceTransactionCodec::decode_committed(
+            &bincode::serialize(&stale).unwrap(),
+            limits(4, 4096)
+        )
+        .is_err());
+        let mut mismatched: StoredFrame = bincode::deserialize(&bytes).unwrap();
+        let Some(StoredOperation::Added(first)) = mismatched.operations.first_mut() else {
+            panic!("stored operations");
+        };
+        first.identity =
+            GraphChangeCodec::element_reference(&ElementReference::new("source", "other"))
+                .unwrap()
+                .identity()
+                .value()
+                .to_vec();
+        assert!(SourceTransactionCodec::decode_committed(
+            &bincode::serialize(&mismatched).unwrap(),
+            limits(4, 4096)
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -626,7 +1224,7 @@ mod tests {
                     StreamId::try_new("stream").unwrap(),
                     42,
                     sequence,
-                    DateTime::from_timestamp_millis(1000).unwrap(),
+                    timestamp(),
                 )
                 .unwrap()
         };
@@ -652,13 +1250,7 @@ mod tests {
             .entries()
             .find(|entry| entry.key() == REPLAY_CONTEXT)
             .unwrap();
-        let extra = ContextEntry::try_new(
-            ComponentId::try_new("source").unwrap(),
-            REPLAY_CONTEXT,
-            entry.value(),
-        )
-        .unwrap();
-        duplicate.append_annotation(extra).unwrap();
+        duplicate.append_annotation(entry).unwrap();
         assert!(SourceTransactionCodec::decode(&duplicate, limits(2, 4096)).is_err());
         for (source, transaction, sequence) in [
             ("wrong", b"transaction".as_slice(), 42),
@@ -686,10 +1278,30 @@ mod tests {
                 .unwrap();
             assert!(SourceTransactionCodec::decode(&envelope, limits(2, 4096)).is_err());
         }
+
+        // Replay progress is scoped to the marker's change set: a fresh change set
+        // does not inherit it, and an ordinary envelope never has any.
+        let derived = GraphChangeCodec::derive_changes(
+            &replay(4),
+            &[change("source", "0")],
+            StreamId::try_new("derived").unwrap(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            SourceTransactionCodec::replay_progress(&derived).unwrap(),
+            None
+        );
+        let ordinary =
+            GraphChangeCodec::encode_changes(&[change("source", "0")], stream(), 1, None).unwrap();
+        assert_eq!(
+            SourceTransactionCodec::replay_progress(&ordinary).unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
-    async fn complete_frame_preserves_identity_position_context_and_order_through_storage() {
+    async fn complete_group_preserves_identity_position_context_and_order_through_storage() {
         let input = envelope(3);
         let mut codec = super::super::EnvelopeCodec::new(NonZeroUsize::new(16384).unwrap());
         codec
@@ -703,16 +1315,12 @@ mod tests {
         assert_eq!(transaction.transaction_id(), b"transaction");
         assert_eq!(transaction.position(), b"commit-position");
         assert_eq!(
-            bincode::serialize(&transaction.into_changes()).unwrap(),
-            bincode::serialize(
-                &(0..3)
-                    .map(|n| change("source", &n.to_string()))
-                    .collect::<Vec<_>>()
-            )
-            .unwrap()
+            transaction.into_changes(),
+            (0..3)
+                .map(|n| change("source", &n.to_string()))
+                .collect::<Vec<_>>()
         );
-        assert!(super::super::GraphChangeCodec::decode_changes(&restored).is_err());
-        assert_eq!(restored.changes().operations().len(), 1);
+        assert_eq!(restored.changes().operations().len(), 3);
         assert_eq!(restored.annotations().entries().count(), 1);
         let empty = SourceTransactionCodec::decode(&envelope(0), limits(1, 4096)).unwrap();
         assert!(
@@ -763,15 +1371,13 @@ mod tests {
                 limit: 2
             })
         ));
+        assert!(SourceTransactionCodec::decode(&envelope(3), limits(3, 4096)).is_ok());
     }
 
     #[tokio::test]
     async fn byte_limit_includes_metadata_and_accepts_the_exact_boundary() {
         let input = envelope(1);
-        let [ChangeOperation::Added { after, .. }] = input.changes().operations() else {
-            panic!("one transaction record");
-        };
-        let size = after.payload().len();
+        let size = wire_size(&input);
         assert!(commit(builder(limits(1, size), 1)).is_ok());
         assert!(SourceTransactionCodec::decode(&input, limits(1, size)).is_ok());
         assert!(matches!(
@@ -781,6 +1387,17 @@ mod tests {
         assert!(matches!(
             SourceTransactionCodec::decode(&input, limits(1, size - 1)),
             Err(SourceTransactionError::Limit { kind: SourceTransactionLimit::Bytes, limit }) if limit == size - 1
+        ));
+        // One byte of commit metadata alone is enough to cross the boundary.
+        assert!(matches!(
+            builder(limits(1, size), 1).commit(
+                Bytes::from_static(b"transaction!"),
+                Bytes::from_static(b"commit-position")
+            ),
+            Err(SourceTransactionError::Limit {
+                kind: SourceTransactionLimit::Bytes,
+                ..
+            })
         ));
         let mut tiny = builder(limits(1, 1), 0);
         assert!(matches!(
@@ -860,74 +1477,164 @@ mod tests {
             Bytes::from(vec![1; crate::MAX_SOURCE_POSITION_BYTES + 1]),
         ] {
             assert!(matches!(
-                builder(limits(1, 16384), 1).commit(Bytes::from_static(b"tx"), position),
+                builder(limits(1, 1 << 20), 1).commit(Bytes::from_static(b"tx"), position),
                 Err(SourceTransactionError::Position)
             ));
         }
     }
 
     #[tokio::test]
-    async fn truncated_changed_or_fragmented_records_are_not_committed_groups() {
-        let input = envelope(1);
-        let [ChangeOperation::Added { after, .. }] = input.changes().operations() else {
-            panic!("one transaction record");
-        };
-        let schema = SourceTransactionCodec::schema();
-        let payload = after.payload();
-        for length in [0, 1, payload.len() - 1] {
-            assert!(Record::try_new(
-                &schema,
-                after.identity().clone(),
-                RecordImage::Full,
-                payload.slice(..length),
-            )
-            .is_err());
-        }
-        let mut wrong = decode_frame(payload).unwrap();
-        wrong.version = 2;
-        assert!(Record::try_new(
-            &schema,
-            after.identity().clone(),
-            RecordImage::Full,
-            Bytes::from(bincode::serialize(&wrong).unwrap()),
-        )
-        .is_err());
-        assert!(Record::try_new(
-            &schema,
-            RecordId::try_new("source", Bytes::from_static(b"wrong-id")).unwrap(),
-            RecordImage::Full,
-            payload.clone(),
-        )
-        .is_err());
-        let fragmented = ChangeSet::try_new(
-            input.changes().id().clone(),
-            schema.descriptor().clone(),
-            vec![
-                ChangeOperation::Added {
-                    ordinal: 0,
-                    after: after.clone(),
-                },
-                ChangeOperation::Added {
-                    ordinal: 1,
-                    after: after.clone(),
-                },
-            ],
+    async fn ordinary_batches_and_forged_or_inconsistent_markers_are_not_complete_groups() {
+        let input = envelope(2);
+        let changes = GraphChangeCodec::decode_changes(&input).unwrap();
+
+        // The same standard records without a marker are an ordinary batch.
+        let ordinary =
+            GraphChangeCodec::encode_changes(&changes, stream(), 7, Some(timestamp())).unwrap();
+        assert!(!SourceTransactionCodec::is_complete_transaction(&ordinary));
+        assert_eq!(SourceTransactionCodec::metadata(&ordinary).unwrap(), None);
+        assert!(matches!(
+            SourceTransactionCodec::decode(&ordinary, limits(8, 4096)),
+            Err(SourceTransactionError::Unmarked)
+        ));
+
+        // A marker for another logical change set is inherited history.
+        let derived = GraphChangeCodec::derive_changes(
+            &input,
+            &changes,
+            StreamId::try_new("derived").unwrap(),
+            1,
         )
         .unwrap();
-        let fragmented = input.derive(
+        assert!(!SourceTransactionCodec::is_complete_transaction(&derived));
+        assert!(matches!(
+            SourceTransactionCodec::decode(&derived, limits(8, 4096)),
+            Err(SourceTransactionError::Unmarked)
+        ));
+        let regrouped = input.derive(
             input.id().clone(),
-            fragmented,
+            GraphChangeCodec::encode_changes(&changes, stream(), 8, None)
+                .unwrap()
+                .changes()
+                .clone(),
             input.system().as_ref().clone(),
         );
         assert!(matches!(
-            SourceTransactionCodec::decode(&fragmented, limits(2, 4096)),
+            SourceTransactionCodec::decode(&regrouped, limits(8, 4096)),
+            Err(SourceTransactionError::Unmarked)
+        ));
+
+        // The marker states the operation count: a fragment of the group is refused.
+        let regenerated = forged(&changes, "source");
+        assert!(SourceTransactionCodec::decode(&regenerated, limits(8, 4096)).is_ok());
+        let fragment = input.derive(
+            input.id().clone(),
+            GraphChangeCodec::encode_changes(&changes[..1], stream(), 7, None)
+                .unwrap()
+                .changes()
+                .clone(),
+            input.system().as_ref().clone(),
+        );
+        assert!(matches!(
+            SourceTransactionCodec::decode(&fragment, limits(8, 4096)),
             Err(SourceTransactionError::Envelope)
         ));
+
+        // Malformed, unknown-version, incomplete, wrong-contributor markers fail.
+        for edit in [
+            Box::new(|value: &mut serde_json::Value| value["version"] = 2.into())
+                as Box<dyn Fn(&mut serde_json::Value)>,
+            Box::new(|value| value["complete"] = false.into()),
+            Box::new(|value| value["source_id"] = "other".into()),
+            Box::new(|value| value["transaction_id"] = "".into()),
+            Box::new(|value| value["position"] = "zz".into()),
+            Box::new(|value| value["operations"] = 3.into()),
+            Box::new(|value| value["extra"] = true.into()),
+        ] {
+            let bare = ChangeEnvelope::new(
+                input.id().clone(),
+                input.changes().clone(),
+                input.system().as_ref().clone(),
+            );
+            let broken = bare.append_context(marker_with(&input, edit)).unwrap();
+            assert!(SourceTransactionCodec::decode(&broken, limits(8, 4096)).is_err());
+            assert!(!SourceTransactionCodec::is_complete_transaction(&broken));
+        }
     }
 
     #[tokio::test]
-    async fn commit_position_and_context_cannot_be_rebound_or_duplicated() {
+    async fn marker_survives_reemit_and_unchanged_relay_but_not_fresh_change_sets() {
+        let input = envelope(2);
+        let again = input.reemit(9).unwrap();
+        assert_eq!(again.system().sequence(), 9);
+        assert_eq!(
+            SourceTransactionCodec::decode(&again, limits(8, 4096))
+                .unwrap()
+                .into_changes(),
+            SourceTransactionCodec::decode(&input, limits(8, 4096))
+                .unwrap()
+                .into_changes()
+        );
+
+        // A relay that keeps the same logical change set keeps its completeness.
+        let relay = input.derive(
+            super::super::emission_id(&StreamId::try_new("relay").unwrap(), 1).unwrap(),
+            input.changes().clone(),
+            SystemMetadata::new(StreamId::try_new("relay").unwrap(), 1)
+                .with_timestamp(timestamp())
+                .with_source_position(input.system().source_position().unwrap().clone()),
+        );
+        assert!(SourceTransactionCodec::is_complete_transaction(&relay));
+
+        // Transformed output has its own change set, however it keeps annotations.
+        let transformed = GraphChangeCodec::derive_changes(
+            &input,
+            &GraphChangeCodec::decode_changes(&input).unwrap(),
+            StreamId::try_new("transformed").unwrap(),
+            1,
+        )
+        .unwrap();
+        assert!(!SourceTransactionCodec::is_complete_transaction(
+            &transformed
+        ));
+        assert!(SourceTransactionCodec::replay_progress(&transformed)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            transformed.annotations().entries().count(),
+            input.annotations().entries().count(),
+            "annotations were inherited yet completeness was not"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_sources_controls_and_positions_are_rejected_explicitly() {
+        // A well-formed marker over another source's records.
+        let mixed = forged(&[change("another", "1")], "source");
+        assert!(matches!(
+            SourceTransactionCodec::decode(&mixed, limits(8, 4096)),
+            Err(SourceTransactionError::MixedSources)
+        ));
+
+        // A marked envelope cannot carry an event-local control.
         let input = envelope(1);
+        let controlled = input.derive(
+            input.id().clone(),
+            input.changes().clone(),
+            input.system().as_ref().clone().with_control(
+                super::super::ControlMessage::try_new("drasi.graph-control.v1", Bytes::new())
+                    .unwrap(),
+            ),
+        );
+        assert!(matches!(
+            SourceTransactionCodec::decode(&controlled, limits(8, 4096)),
+            Err(SourceTransactionError::Envelope)
+        ));
+        let due = GraphChangeCodec::encode_futures_due(stream(), 7, timestamp()).unwrap();
+        let due = envelope_with_marker(&due, "source");
+        assert!(SourceTransactionCodec::decode(&due, limits(8, 4096)).is_err());
+
+        // The commit position cannot be rebound or removed, and a marker cannot repeat.
         let changed = input.derive(
             input.id().clone(),
             input.changes().clone(),
@@ -944,18 +1651,29 @@ mod tests {
         let missing = ChangeEnvelope::new(
             input.id().clone(),
             input.changes().clone(),
-            input.system().as_ref().clone(),
-        );
+            SystemMetadata::new(stream(), 7),
+        )
+        .append_context(marker(&input))
+        .unwrap();
         assert!(matches!(
             SourceTransactionCodec::decode(&missing, limits(1, 4096)),
-            Err(SourceTransactionError::Identity)
+            Err(SourceTransactionError::Position)
         ));
         let mut duplicate = input.clone();
-        duplicate
-            .append_annotation(input.annotations().entries().next().unwrap())
-            .unwrap();
+        duplicate.append_annotation(marker(&input)).unwrap();
         assert!(matches!(
             SourceTransactionCodec::decode(&duplicate, limits(1, 4096)),
+            Err(SourceTransactionError::Identity)
+        ));
+        let mut separated = input.clone();
+        separated
+            .append_annotation(marker_with(&input, |value| {
+                value["change_set_namespace"] = "historical".into();
+            }))
+            .unwrap();
+        separated.append_annotation(marker(&input)).unwrap();
+        assert!(matches!(
+            SourceTransactionCodec::decode(&separated, limits(1, 4096)),
             Err(SourceTransactionError::Identity)
         ));
     }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::evaluation::variable_value::integer::Integer;
+use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display};
 use core::hash::{Hash, Hasher};
 use serde::de::{self, Deserialize, Deserializer, Visitor};
@@ -43,6 +44,37 @@ impl PartialEq<Integer> for Float {
     }
 }
 
+impl PartialOrd for Float {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.value.partial_cmp(&other.value)
+    }
+}
+
+impl PartialOrd<Integer> for Float {
+    fn partial_cmp(&self, other: &Integer) -> Option<Ordering> {
+        let value = self.value;
+        if value.is_nan() {
+            return None;
+        }
+        if value < i64::MIN as f64 {
+            return Some(Ordering::Less);
+        }
+        if value >= u64::MAX as f64 {
+            return Some(Ordering::Greater);
+        }
+        // Compare the integer part without rounding the other operand to f64.
+        let integral = if value < 0.0 {
+            Integer::from(value as i64)
+        } else {
+            Integer::from(value as u64)
+        };
+        match integral.cmp(other) {
+            Ordering::Equal => value.partial_cmp(&value.trunc()),
+            ordering => Some(ordering),
+        }
+    }
+}
+
 impl Eq for Float {}
 
 impl Hash for Float {
@@ -59,12 +91,18 @@ impl Hash for Float {
 }
 
 impl Float {
+    /// Return the exact IEEE-754 representation, including nonfinite values and signed zero.
+    pub fn to_bits(&self) -> u64 {
+        self.value.to_bits()
+    }
+
     /// Convert an integral float without rounding or saturating at an integer boundary.
     pub(super) fn as_integer_exact(&self) -> Option<Integer> {
         let value = self.value;
         if value.fract() != 0.0 {
             return None;
         }
+
         // u64::MAX rounds to 2^64 in f64, so the upper bound must be exclusive.
         if value >= 0.0 && value < u64::MAX as f64 {
             Some(Integer::from(value as u64))
@@ -115,6 +153,26 @@ impl Float {
             Some(Float { value: f as f64 })
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod bit_tests {
+    use super::Float;
+
+    #[test]
+    fn preserves_every_float_representation() {
+        for bits in [
+            0.0_f64.to_bits(),
+            (-0.0_f64).to_bits(),
+            1.25_f64.to_bits(),
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            0x7ff8_0000_0000_0042,
+            0xfff8_0000_0000_0081,
+        ] {
+            assert_eq!(Float::from(f64::from_bits(bits)).to_bits(), bits);
         }
     }
 }

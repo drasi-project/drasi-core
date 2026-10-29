@@ -20,13 +20,17 @@ use std::{
 
 use async_trait::async_trait;
 
-use super::{Component, ComponentRole, GraphError, GraphResult};
+use super::{Component, ComponentRole, EdgeDefinition, Endpoint, GraphError, GraphResult};
 use crate::computation::v1::{
     data::validate_identifier, ComponentDescriptor, ComponentGeneration, ComponentId, EnvelopeSink,
-    EnvelopeSource, FailureDisposition, ResourceId, SinkCompletion, Transformer,
+    EnvelopeSource, FailureDisposition, OutputEndpoint, PortId, ResourceId, SinkCompletion,
+    StreamId, Transformer,
 };
 
-pub use drasi_computation_contracts::{ImplementationIdentity, PluginIdentity};
+pub use drasi_computation_contracts::{
+    port_format_name, ImplementationIdentity, InputBinding, PluginIdentity, PortFormatAlternative,
+    PortFormatCatalogue, PortPrimaries, PORT_FORMATS_KEY,
+};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ConfigurationValue {
@@ -75,6 +79,20 @@ pub struct ConfigurationSchema {
 }
 
 impl ConfigurationSchema {
+    /// Declare the optional literal `ports` field a factory needs to accept
+    /// per-port format overrides. See [`ComponentFactory::port_formats`].
+    pub fn with_port_formats(mut self) -> Self {
+        self.fields.insert(
+            Arc::from(PORT_FORMATS_KEY),
+            ConfigurationField {
+                value_type: ConfigurationType::Object,
+                required: false,
+                secret: false,
+            },
+        );
+        self
+    }
+
     /// Validate unresolved values without fetching configuration or secrets.
     /// Missing resources remain dependencies; supplied declarations and handles
     /// must have the expected role and interface.
@@ -200,6 +218,7 @@ pub enum ResourceRole {
     LegacySource,
     SourceSubscription,
     QueryCatalog,
+    OutputCatalogue,
     LegacyReaction,
     Component,
 }
@@ -517,6 +536,25 @@ impl ConstructedComponent {
 #[async_trait]
 pub trait ComponentFactory: Send + Sync {
     fn descriptor(&self) -> &FactoryDescriptor;
+    /// Ports this factory can describe and the formats it actually implements
+    /// for each. When present, the graph checks before construction that a
+    /// specification's declared ports are exactly those its literal `ports`
+    /// configuration resolves to, and rejects unsupported formats or ports.
+    /// The factory must also declare the `ports` field
+    /// ([`ConfigurationSchema::with_port_formats`]) and use
+    /// [`PortFormatCatalogue::describe`] in `specification_from_config`.
+    fn port_formats(&self) -> Option<&PortFormatCatalogue> {
+        None
+    }
+    /// The factory's designated primary input and output, used to resolve
+    /// shorthand endpoints that name a component without a port. Designations
+    /// name ports by id, are validated against every specification's declared
+    /// ports before construction, and are unaffected by format overrides. With
+    /// none, a shorthand resolves only a direction's single port, never a guess
+    /// among several ([`PortPrimaries::resolve`]).
+    fn primary_ports(&self) -> PortPrimaries {
+        PortPrimaries::default()
+    }
     /// Describe a literal configuration using the factory's actual ports and
     /// schemas, without constructing a component, opening resources or starting
     /// workers. The caller supplies resource dependencies before validation.
@@ -536,6 +574,15 @@ pub trait ComponentFactory: Send + Sync {
         Vec::new()
     }
     fn supports_reconfiguration(&self) -> bool {
+        false
+    }
+    /// Whether construction consumes [`ConstructionContext::input_bindings`].
+    /// Only such factories wait for their declared incoming endpoints and
+    /// streams before creation, and are reconstructed when those bindings
+    /// change. Waiting needs only the declared output port and stream, never
+    /// the producer's construction or the pipe, so paired bootstrap cycles
+    /// still resolve.
+    fn binds_inputs(&self) -> bool {
         false
     }
     /// Additional pure definition validation, after generic schema/dependency checks.
@@ -572,6 +619,51 @@ pub trait ConfigurationResolver: Send + Sync {
 
 pub struct ConfigurationResolverResource(pub Arc<dyn ConfigurationResolver>);
 
+/// The declared incoming bindings of `component` in `snapshot`; an endpoint
+/// whose output has no declared stream is the error.
+pub(super) fn snapshot_input_bindings(
+    snapshot: &super::GraphSnapshot,
+    component: &ComponentId,
+) -> Result<Vec<InputBinding>, Endpoint> {
+    collect_input_bindings(
+        component,
+        snapshot.edges.iter().map(|edge| &edge.definition),
+        |endpoint| {
+            snapshot
+                .nodes
+                .iter()
+                .find(|node| node.descriptor.id() == &endpoint.component)
+                .and_then(|node| node.output_streams.get(&endpoint.port))
+                .cloned()
+        },
+    )
+}
+
+/// Bindings for `component`'s declared incoming `edges`, ordered by input port
+/// then producer endpoint. `stream` gives a producer output's declared stream;
+/// an endpoint without one is returned as the error.
+pub(super) fn collect_input_bindings<'a>(
+    component: &ComponentId,
+    edges: impl IntoIterator<Item = &'a EdgeDefinition>,
+    stream: impl Fn(&Endpoint) -> Option<StreamId>,
+) -> Result<Vec<InputBinding>, Endpoint> {
+    let mut bindings = Vec::new();
+    for edge in edges
+        .into_iter()
+        .filter(|edge| &edge.to.component == component)
+    {
+        let stream = stream(&edge.from).ok_or_else(|| edge.from.clone())?;
+        bindings.push(InputBinding {
+            input_port: edge.to.port.clone(),
+            output: OutputEndpoint::new(edge.from.component.clone(), edge.from.port.clone()),
+            stream,
+        });
+    }
+    bindings.sort();
+    bindings.dedup();
+    Ok(bindings)
+}
+
 /// Runtime-only context: resolved values and actual resource instances cannot be
 /// obtained by serializing the desired specification.
 pub struct ConstructionContext {
@@ -582,9 +674,25 @@ pub struct ConstructionContext {
     pub specification: Arc<ComponentSpecification>,
     configuration: BTreeMap<Arc<str>, serde_json::Value>,
     resources: BTreeMap<ResourceId, ResourceHandle>,
+    output_catalogue: crate::computation::v1::OutputCatalogue,
+    input_bindings: Vec<InputBinding>,
 }
 
 impl ConstructionContext {
+    /// The component's validated, declared incoming edges. Populated only for
+    /// factories reporting [`ComponentFactory::binds_inputs`]; those are held
+    /// until every incoming output has a declared stream and are reconstructed
+    /// when the bindings change.
+    pub fn input_bindings(&self) -> &[InputBinding] {
+        &self.input_bindings
+    }
+
+    /// Read-only access to this graph's actual output providers. The view holds
+    /// no graph control authority and is available during factory construction.
+    pub fn output_catalogue(&self) -> &crate::computation::v1::OutputCatalogue {
+        &self.output_catalogue
+    }
+
     pub fn configuration(&self) -> &BTreeMap<Arc<str>, serde_json::Value> {
         &self.configuration
     }
@@ -616,6 +724,8 @@ impl ConstructionContext {
         specification: Arc<ComponentSpecification>,
         resources: BTreeMap<ResourceId, ResourceHandle>,
         schema: &ConfigurationSchema,
+        output_catalogue: crate::computation::v1::OutputCatalogue,
+        input_bindings: Vec<InputBinding>,
     ) -> Result<Self, ComponentCreationError> {
         let configuration = schema
             .resolve_values(&specification.configuration, &resources)
@@ -628,6 +738,8 @@ impl ConstructionContext {
             specification,
             configuration,
             resources,
+            output_catalogue,
+            input_bindings,
         })
     }
 }
@@ -663,6 +775,24 @@ pub(super) fn validate_specification(
             .collect(),
         resources,
     )?;
+    if let Some(catalogue) = factory.port_formats() {
+        let overrides = match spec.configuration.get(PORT_FORMATS_KEY) {
+            None => None,
+            Some(ConfigurationValue::Literal(value)) => Some(value),
+            Some(ConfigurationValue::Reference { .. }) => {
+                return Err(super::topology(
+                    "port format overrides must be literal configuration",
+                ));
+            }
+        };
+        catalogue
+            .validate_ports(spec.descriptor.ports(), overrides)
+            .map_err(|error| super::topology(format!("invalid port formats: {error}")))?;
+    }
+    factory
+        .primary_ports()
+        .validate(spec.descriptor.ports())
+        .map_err(|error| super::topology(format!("invalid primary port: {error}")))?;
     for (slot, requirement) in &descriptor.dependencies {
         validate_identifier("dependency slot", slot)?;
         let dependencies = spec

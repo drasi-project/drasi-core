@@ -18,8 +18,9 @@
 //! the full dynamic loading pipeline: metadata validation, callback wiring,
 //! descriptor factory invocation, and trait method dispatch through FFI vtables.
 //!
-//! **Prerequisites**: These tests load plugins from `target/debug/plugins/`,
-//! not `target/debug/`. Build AND copy them in one step with:
+//! **Prerequisites**: These tests load plugins from `target/debug/plugins/`
+//! (under `CARGO_TARGET_DIR` when set), not directly from `target/debug/`.
+//! Build AND copy them in one step with:
 //!
 //! ```sh
 //! cd /path/to/drasi-core
@@ -32,8 +33,11 @@
 //! ```sh
 //! cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 //! cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
+//! cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
 //! cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
 //! ```
+//! Rebuild and recopy these libraries after changing shared event contracts;
+//! old binaries can load successfully but reject later UPDATE payloads.
 //!
 //! For old/new compatibility runs, set `DRASI_HOST_TEST_PLUGINS_DIR` to a
 //! directory of separately built libraries and `DRASI_HOST_TEST_EXPECTED_LEGACY_ABI`
@@ -49,13 +53,8 @@ use drasi_plugin_sdk::descriptor::{
 };
 use serial_test::serial;
 
-/// Locate the drasi-core build output directory.
-///
-/// Looks for plugins in the workspace target directory (drasi-core/target/debug/).
+/// Locate the fixtures belonging to the selected Cargo build output.
 fn plugin_dir() -> PathBuf {
-    if let Some(directory) = std::env::var_os("DRASI_HOST_TEST_PLUGINS_DIR") {
-        return directory.into();
-    }
     // Walk up from this crate's manifest dir to the workspace root
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // host-sdk is at components/host-sdk, workspace root is ../../
@@ -63,7 +62,49 @@ fn plugin_dir() -> PathBuf {
         .parent()
         .and_then(|p| p.parent())
         .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
-    workspace_root.join("target").join("debug").join("plugins")
+    selected_plugin_dir(
+        workspace_root,
+        std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
+        std::env::var_os("DRASI_HOST_TEST_PLUGINS_DIR").map(PathBuf::from),
+    )
+}
+
+fn selected_plugin_dir(
+    workspace_root: &Path,
+    target: Option<PathBuf>,
+    fixtures: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(directory) = fixtures {
+        return directory;
+    }
+    let target = match target {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => workspace_root.join(path),
+        None => workspace_root.join("target"),
+    };
+    target.join("debug").join("plugins")
+}
+
+#[test]
+fn plugin_directory_honors_cargo_target_and_fixture_override() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let absolute = root.join("selected-target");
+    assert_eq!(
+        selected_plugin_dir(root, None, None),
+        root.join("target/debug/plugins")
+    );
+    assert_eq!(
+        selected_plugin_dir(root, Some("selected-target".into()), None),
+        absolute.join("debug/plugins")
+    );
+    assert_eq!(
+        selected_plugin_dir(root, Some(absolute.clone()), None),
+        absolute.join("debug/plugins")
+    );
+    assert_eq!(
+        selected_plugin_dir(root, Some(absolute), Some("older-fixtures".into())),
+        PathBuf::from("older-fixtures")
+    );
 }
 
 /// Get the platform-specific plugin filename.
@@ -2839,7 +2880,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
         .with_query(
             drasi_lib::Query::cypher("e2e-query")
                 .query("MATCH (n:Counter) RETURN n.value AS Value")
-                .from_source("test-source")
+                .from_input("test-source")
                 .build(),
         )
         .with_reaction(reaction)
@@ -3019,20 +3060,20 @@ async fn test_e2e_multi_source_query_reaction() {
         .with_query(
             drasi_lib::Query::cypher("query-counters-all")
                 .query("MATCH (n:Counter) RETURN n.value AS Value")
-                .from_source("counter-source")
+                .from_input("counter-source")
                 .build(),
         )
         .with_query(
             drasi_lib::Query::cypher("query-counters-high")
                 .query("MATCH (n:Counter) WHERE n.value > 3 RETURN n.value AS Value")
-                .from_source("counter-source")
+                .from_input("counter-source")
                 .build(),
         )
         // One query from sensor-source
         .with_query(
             drasi_lib::Query::cypher("query-sensors")
                 .query("MATCH (s:SensorReading) RETURN s.sensor_id AS SensorId, s.temperature AS Temperature")
-                .from_source("sensor-source")
+                .from_input("sensor-source")
                 .build(),
         )
         .with_reaction(sse_all)
@@ -3055,7 +3096,8 @@ async fn test_e2e_multi_source_query_reaction() {
         collect_sse_events("http://127.0.0.1:19201/events", 3, timeout),
         collect_sse_events("http://127.0.0.1:19202/events", 3, timeout),
         collect_sse_events("http://127.0.0.1:19203/events", 3, timeout),
-        collect_sse_events("http://127.0.0.1:19204/events", 3, timeout),
+        // Four readings from three stable sensors must include a live update.
+        collect_sse_events("http://127.0.0.1:19204/events", 4, timeout),
     );
 
     // ── Assert: query-counters-all reaction ──
@@ -3089,11 +3131,38 @@ async fn test_e2e_multi_source_query_reaction() {
         !sensor_events.is_empty(),
         "sse-sensors should receive events from query-sensors"
     );
+    let mut sensor_updates = 0;
     for ev in &sensor_events {
         let v: serde_json::Value = serde_json::from_str(ev).unwrap();
         assert_eq!(v["queryId"].as_str(), Some("query-sensors"));
-        assert!(v["results"].is_array());
+        let results = v["results"].as_array().expect("sensor result changes");
+        assert!(
+            !results.is_empty(),
+            "sensor events must contain actual changes"
+        );
+        for result in results {
+            assert!(matches!(result["type"].as_str(), Some("ADD" | "UPDATE")));
+            let data = &result["data"];
+            assert!(matches!(
+                data["SensorId"].as_str(),
+                Some("sensor_0" | "sensor_1" | "sensor_2")
+            ));
+            let temperature = data["Temperature"]
+                .as_f64()
+                .expect("projected sensor temperature");
+            assert!((20.0..30.0).contains(&temperature));
+            if result["type"] == "UPDATE" {
+                sensor_updates += 1;
+                assert_eq!(result["before"]["SensorId"], result["after"]["SensorId"]);
+                assert!(result["before"]["Temperature"].is_number());
+                assert_eq!(result["after"], *data);
+            }
+        }
     }
+    assert!(
+        sensor_updates > 0,
+        "live sensor updates must survive both cdylib boundaries, not only initial inserts"
+    );
 
     // ── Verify query state ──
     let all_results = core
@@ -3264,13 +3333,8 @@ async fn test_cdylib_source_dispatches_events() {
 /// receiver while the plugin forwarder may still be pushing events. Repeats
 /// many times to exercise shutdown/cleanup timing windows.
 ///
-/// Currently ignored: this test surfaces a long-standing timing race in the
-/// source change_receiver FFI forwarder on Linux/Windows that is tracked
-/// separately. Re-enable once the change_receiver shutdown synchronization
-/// is hardened (similar to the reaction sentinel pattern).
 #[tokio::test]
 #[serial]
-#[ignore = "flaky cross-platform; tracked separately"]
 async fn test_stress_rapid_subscribe_drop_under_load() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIPPING: cdylib mock source plugin not found");
@@ -3735,7 +3799,7 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
         .with_query(
             drasi_lib::Query::cypher("ckpt-query")
                 .query("MATCH (n:Counter) RETURN n.value AS Value")
-                .from_source("ckpt-source")
+                .from_input("ckpt-source")
                 .build(),
         )
         .build()

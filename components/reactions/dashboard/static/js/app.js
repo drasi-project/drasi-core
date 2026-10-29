@@ -190,12 +190,16 @@ async function refreshDashboards() {
 }
 
 // ─── Subscriptions ──────────────────────────────────────────
-function syncSubscriptions() {
+function syncSubscriptions(refreshQueryIds = []) {
   const next = new Set(designer.subscribedQueryIds());
-  const toSub = Array.from(next).filter((q) => !activeSubscriptions.has(q));
+  const toSub = new Set([
+    ...Array.from(next).filter((q) => !activeSubscriptions.has(q)),
+    ...refreshQueryIds.filter((q) => next.has(q)),
+  ]);
   const toUnsub = Array.from(activeSubscriptions).filter((q) => !next.has(q));
-  if (toSub.length > 0) socket.subscribe(toSub);
   if (toUnsub.length > 0) socket.unsubscribe(toUnsub);
+  // Subscribing also requests the ordered snapshot for newly loaded/rebound widgets.
+  if (toSub.size > 0) socket.subscribe(Array.from(toSub));
   activeSubscriptions = next;
 }
 
@@ -218,9 +222,8 @@ async function openDashboard(id) {
     currentDashboard = normalizeDashboard(dashboard);
     designer.loadDashboard(currentDashboard);
     setEditorTitle();
-    syncSubscriptions();
+    syncSubscriptions(designer.subscribedQueryIds());
     showEditorView();
-    await designer.fetchAllSnapshots();
   } catch (e) {
     showToast(`Failed to open dashboard: ${e.message}`, "error");
   }
@@ -286,12 +289,11 @@ function bindEvents() {
   sidebarCollapseButton.addEventListener("click", () => setSidebarCollapsed(true));
   sidebarExpandButton.addEventListener("click", () => setSidebarCollapsed(false));
 
-  designer.onChanged(async (dashboard) => {
+  designer.onChanged((dashboard, refreshQueryIds) => {
     if (!dashboard) return;
     currentDashboard = dashboard;
     setEditorTitle();
-    syncSubscriptions();
-    await designer.fetchAllSnapshots();
+    syncSubscriptions(refreshQueryIds);
   });
 }
 
@@ -299,6 +301,7 @@ function bindEvents() {
 function bootSocket() {
   socket.onStatus(setSocketStatus);
   socket.onQueryResult((msg) => designer.handleQueryResult(msg));
+  socket.onQuerySnapshot((msg) => designer.handleQuerySnapshot(msg));
   socket.start();
 }
 

@@ -33,7 +33,7 @@ workspace = true
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
-drasi-mysql-common = { workspace = true, features = ["api"] }
+drasi-mysql-common = { workspace = true, features = ["api", "native"] }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
@@ -58,6 +58,7 @@ sha2 = "0.10"
 dynamic-plugin = []
 
 [dev-dependencies]
+drasi-mysql-common = { workspace = true, features = ["native", "storedproc"] }
 tokio-test = "0.4"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["mysql"] }

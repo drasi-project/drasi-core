@@ -313,15 +313,15 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
     )
     .is_err());
     let tables = BTreeMap::new();
-    let single = source::source_binding(
+    let single = drasi_mysql_common::native::source::source_binding(
         &settings,
         "server",
         &tables,
         &id("source"),
         &stream("changes"),
-        Some(&SourceProgressReader::from(owners[0].clone())),
+        Some(&SourceProgressReader::from(owners[0].clone()).read_only()),
     )?;
-    let shared = source::shared_source_binding(
+    let shared = drasi_mysql_common::native::source::shared_source_binding(
         &settings,
         "server",
         &tables,

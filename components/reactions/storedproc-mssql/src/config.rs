@@ -232,28 +232,12 @@ impl MsSqlStoredProcReactionConfig {
         query_id: &str,
         operation: OperationType,
     ) -> Option<&TemplateSpec> {
-        if let Some(spec) = self
-            .routes
-            .get(query_id)
-            .and_then(|qc| Self::get_spec_from_config(qc, operation))
-        {
-            return Some(spec);
-        }
-
-        let segment = last_segment(query_id);
-        if segment != query_id {
-            if let Some(spec) = self
-                .routes
-                .get(segment)
-                .and_then(|qc| Self::get_spec_from_config(qc, operation))
-            {
-                return Some(spec);
-            }
-        }
-
-        self.default_template
-            .as_ref()
-            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+        drasi_mssql_common::sql::resolve_template(
+            &self.routes,
+            self.default_template.as_ref(),
+            query_id,
+            operation,
+        )
     }
 
     /// Validate the configuration against the reaction's subscribed queries.

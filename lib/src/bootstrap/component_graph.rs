@@ -291,8 +291,8 @@ mod tests {
             .with_query(
                 crate::Query::cypher("q1")
                     .query("MATCH (n) RETURN n")
-                    .from_source("src1")
-                    .from_source("src2")
+                    .from_input("src1")
+                    .from_input("src2")
                     .auto_start(false)
                     .build(),
             )
@@ -344,7 +344,7 @@ mod tests {
             .with_query(
                 crate::Query::cypher("my-query")
                     .query("MATCH (n) RETURN n")
-                    .from_source("my-source")
+                    .from_input("my-source")
                     .auto_start(false)
                     .build(),
             )

@@ -59,6 +59,7 @@ fn create_node_insert_change(props: Value) -> SourceChange {
 
 fn create_node_update_change(props: Value) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test_source", "node1"),
@@ -108,9 +109,9 @@ fn create_future_change() -> SourceChange {
 
 fn get_props_from_change(change: &SourceChange) -> &ElementPropertyMap {
     match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => {
-            element.get_properties()
-        }
+        SourceChange::Insert { element }
+        | SourceChange::Replace { element }
+        | SourceChange::Update { element, .. } => element.get_properties(),
         _ => panic!("Expected Insert or Update change to get properties"),
     }
 }
@@ -724,7 +725,7 @@ mod process {
 
         assert_eq!(result.len(), 1);
         match &result[0] {
-            SourceChange::Update { element } => {
+            SourceChange::Update { element, .. } => {
                 let props = element.get_properties();
                 assert_eq!(
                     props.get("user_role"),
@@ -1177,5 +1178,71 @@ mod factory {
                 "Failed for on_error: {value}"
             );
         }
+    }
+}
+
+mod canonical_mutation {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    async fn run(change: SourceChange) -> Vec<SourceChange> {
+        PromoteMiddlewareFactory::new()
+            .create(&create_mw_config(json!({
+                "mappings": [{"path": "$.user.id", "target_name": "id"}]
+            })))
+            .unwrap()
+            .process(change, &InMemoryElementIndex::new())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn promoted_property_is_set_so_it_leaves_the_removal_set() {
+        let SourceChange::Update { element, .. } =
+            create_node_update_change(json!({"user": {"id": "u1"}}))
+        else {
+            panic!("expected update");
+        };
+        let change = SourceChange::update_with_removals(
+            element,
+            BTreeSet::from(["id".to_string(), "gone".to_string()]),
+        )
+        .unwrap();
+        let result = run(change).await;
+        let [SourceChange::Update {
+            element,
+            removed_properties,
+        }] = result.as_slice()
+        else {
+            panic!("an update stays one update");
+        };
+        assert_eq!(
+            element.get_properties().get("id"),
+            Some(&ElementValue::String("u1".into()))
+        );
+        assert_eq!(removed_properties, &BTreeSet::from(["gone".to_string()]));
+        assert!(SourceChange::Update {
+            element: element.clone(),
+            removed_properties: removed_properties.clone()
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn replacement_is_promoted_and_stays_a_replacement() {
+        let SourceChange::Insert { element } =
+            create_node_insert_change(json!({"user": {"id": "u1"}}))
+        else {
+            panic!("expected insert");
+        };
+        let result = run(SourceChange::replace(element)).await;
+        let [SourceChange::Replace { element }] = result.as_slice() else {
+            panic!("a replacement stays a replacement");
+        };
+        assert_eq!(
+            element.get_properties().get("id"),
+            Some(&ElementValue::String("u1".into()))
+        );
     }
 }

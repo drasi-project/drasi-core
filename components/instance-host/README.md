@@ -178,6 +178,10 @@ independent health value of `Unknown` is not itself failed startup. Internal
 inspection nodes and intentionally stopped components do not invent readiness
 requirements. This is not inferred from a PID, successful spawn or listener.
 Startup errors remain observable through control.
+Waiting for missing dependencies keeps the host healthy but not ready. Once
+DrasiLib startup returns, management operations remain available even before
+readiness: an operator can reconcile, correct the configuration, or stop the
+host without waiting for the missing dependency to appear.
 The supervisor verifies host version/capabilities, instance ID, generation,
 manifest fingerprint and health. A cached child observation is explicitly
 marked stale when unavailable; unreachable does not mean exited.

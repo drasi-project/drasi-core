@@ -6,7 +6,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use async_trait::async_trait;
 use drasi_computation_bridge_common::{
-    BridgeConfig, BridgeEgressControl, BridgeEndpointControl, Limits, Namespace, PortableSchema,
+    BridgeConfig, BridgeEgressControl, BridgeEndpointControl, Limits, Namespace, PortableDelivery,
     Profile, TlsRecipeKind, TlsResourceRecipe, TlsRole, Transport,
 };
 use drasi_core::{
@@ -400,13 +400,12 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         receiver_endpoint: "bridge-in".into(),
         stream: "sender/out".into(),
         peer_stream: "receiver/in".into(),
-        schema: PortableSchema::GraphChange,
+        delivery: PortableDelivery::Events,
         profile: Profile::Durable,
         failure_scope: FailureMode::ProcessRestart,
         namespace: Namespace {
             version: 1,
             source_prefixes: vec!["plant/".into()],
-            query_prefixes: vec![],
         },
         transport: Transport::Tls {
             data_address: data_address.clone(),

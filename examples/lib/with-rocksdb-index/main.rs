@@ -41,10 +41,10 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use drasi_lib::{DrasiLib, Query, StorageBackendRef};
-use drasi_source_http::HttpSource;
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
+use drasi_lib::{DrasiLib, Query, StorageBackendRef};
 use drasi_reaction_log::LogReaction;
+use drasi_source_http::HttpSource;
 
 // Import the RocksDB index plugin
 use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -52,9 +52,7 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging - set RUST_LOG=debug for more detail
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("========================================");
     println!("  DrasiLib with RocksDB Index Example");
@@ -79,16 +77,15 @@ async fn main() -> Result<()> {
 
     let rocksdb_provider = RocksDbIndexProvider::new(
         rocksdb_path,
-        true,   // enable_archive: support for past() function
-        false,  // direct_io: let OS manage caching
+        true,  // enable_archive: support for past() function
+        false, // direct_io: let OS manage caching
     );
 
     // =========================================================================
     // Step 2: Create Bootstrap Provider
     // =========================================================================
 
-    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("bootstrap_data.jsonl");
+    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bootstrap_data.jsonl");
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
 
@@ -116,14 +113,16 @@ async fn main() -> Result<()> {
     // =========================================================================
 
     let all_prices_query = Query::cypher("all-prices")
-        .query(r#"
+        .query(
+            r#"
             MATCH (sp:stock_prices)
             RETURN sp.symbol AS symbol,
                    sp.price AS price,
                    sp.previous_close AS previous_close,
                    sp.volume AS volume
-        "#)
-        .from_source("stock-prices")
+        "#,
+        )
+        .from_input("stock-prices")
         .auto_start(true)
         .enable_bootstrap(true)
         // Reference the named RocksDB index provider injected into the builder below.
@@ -154,7 +153,7 @@ async fn main() -> Result<()> {
             .with_query(all_prices_query)
             .with_reaction(log_reaction)
             .build()
-            .await?
+            .await?,
     );
 
     // =========================================================================
@@ -183,13 +182,13 @@ async fn main() -> Result<()> {
     println!(" Index Backend: RocksDB (persistent)");
     println!(" Data Dir: {}", data_dir.path().display());
     println!("----------------------------------------");
-    println!(" HTTP Source: http://localhost:9000");        // DevSkim: ignore DS162092
+    println!(" HTTP Source: http://localhost:9000"); // DevSkim: ignore DS162092
     println!("   POST /sources/stock-prices/events");
     println!("   GET  /health");
     println!("----------------------------------------");
     println!(" Query: all-prices");
     println!("----------------------------------------");
-    println!(" Results API: http://localhost:8080");        // DevSkim: ignore DS162092
+    println!(" Results API: http://localhost:8080"); // DevSkim: ignore DS162092
     println!("   GET /queries/all-prices/results");
     println!("----------------------------------------");
     println!(" Press Ctrl+C to stop");

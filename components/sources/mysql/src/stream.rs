@@ -700,22 +700,7 @@ impl ReplicationStream {
 }
 
 fn parse_gtid_set(gtid: &str) -> Result<Vec<Sid<'static>>> {
-    let mut sids = Vec::new();
-    for part in gtid
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        let sid: Sid<'static> =
-            Sid::from_str(part).map_err(|e| anyhow!("Invalid GTID set entry '{part}': {e}"))?;
-        sids.push(sid);
-    }
-
-    if sids.is_empty() {
-        anyhow::bail!("Invalid GTID set: no GTID intervals were provided");
-    }
-
-    Ok(sids)
+    drasi_mysql_common::native::parse_gtid_set(gtid)
 }
 
 #[cfg(test)]
@@ -881,7 +866,7 @@ mod tests {
         };
         vec![
             insert_change(source_id, "row-1"),
-            SourceChange::Update { element: second },
+            SourceChange::update(second),
             SourceChange::Delete {
                 metadata: third.get_metadata().clone(),
             },

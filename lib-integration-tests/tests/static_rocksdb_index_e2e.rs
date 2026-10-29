@@ -185,7 +185,7 @@ async fn insert_person(handle: &TestSourceHandle, id: &str, name: &str, age: i64
 fn person_query(storage_backend: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher("people")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("people-src")
+        .from_input("people-src")
         .auto_start(true)
         .enable_bootstrap(true)
         .with_storage_backend(StorageBackendRef::Named(storage_backend.to_string()))
@@ -305,7 +305,7 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
             .with_query(
                 Query::cypher("people")
                     .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_source("people-src")
+                    .from_input("people-src")
                     .auto_start(true)
                     .enable_bootstrap(false)
                     .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
@@ -386,7 +386,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
             .with_query(
                 Query::cypher("people")
                     .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_source("people-src")
+                    .from_input("people-src")
                     .auto_start(true)
                     .enable_bootstrap(false)
                     .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
@@ -422,7 +422,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
             .with_query(
                 Query::cypher("people")
                     .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_source("people-src")
+                    .from_input("people-src")
                     .auto_start(true)
                     .enable_bootstrap(false)
                     .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
@@ -486,7 +486,7 @@ async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()>
             .with_query(
                 Query::cypher("people")
                     .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_source("people-src")
+                    .from_input("people-src")
                     .auto_start(true)
                     .enable_bootstrap(false)
                     .build(),

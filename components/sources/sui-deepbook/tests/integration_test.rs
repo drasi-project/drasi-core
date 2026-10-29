@@ -248,7 +248,7 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
             RETURN e.entity_id AS entity_id, e.change_type AS change_type, e.event_type AS event_type
         "#,
         )
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .build();
 
@@ -348,7 +348,7 @@ async fn test_grpc_transport_receives_events() -> Result<()> {
               e.timestamp_ms AS timestamp_ms
             "#,
         )
-        .from_source(SOURCE_ID)
+        .from_input(SOURCE_ID)
         .auto_start(true)
         .build();
 

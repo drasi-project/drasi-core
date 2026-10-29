@@ -30,7 +30,7 @@ impl ConsumerMode {
             metadata.role == drasi_computation_contracts::ComponentRole::Sink
                 && metadata.completion
                     == Some(drasi_computation_contracts::SinkCompletion::Handled)
-                && !metadata.capabilities.snapshot,
+                && metadata.capabilities.snapshot_inputs.is_empty(),
             "native consumer requires a handled, non-snapshot sink"
         );
         anyhow::ensure!(

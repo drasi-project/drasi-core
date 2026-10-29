@@ -220,6 +220,7 @@ async fn instance_lifecycle() {
         if drasi
             .get_graph()
             .await
+            .unwrap()
             .nodes
             .iter()
             .all(|node| node.status != drasi_lib::ComponentStatus::Stopping)

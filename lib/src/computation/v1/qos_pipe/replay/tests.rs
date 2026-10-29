@@ -34,7 +34,6 @@ fn options(capacity: usize) -> ReplayOptions {
 fn codec() -> EnvelopeCodec {
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).unwrap());
     codec.register_schema(GraphChangeCodec::schema()).unwrap();
-    codec.register_schema(QueryChangeCodec::schema()).unwrap();
     codec
 }
 
@@ -89,6 +88,7 @@ fn query_output(input: Option<&ChangeEnvelope>, sequence: u64) -> ChangeEnvelope
         input,
         &component,
         SystemMetadata::new(StreamId::try_new("out").unwrap(), sequence),
+        &crate::computation::v1::ResultNodeProjector::try_new("test/replay/query", None).unwrap(),
         &[QueryPartEvaluationContext::Adding {
             after: BTreeMap::new(),
             row_signature: sequence,
@@ -579,6 +579,7 @@ async fn replay_rejects_unstable_missing_foreign_and_recovery_only_output_identi
         ReplayRejection::MissingProgress,
     );
     let mut control = QueryChangeCodec::progress_envelope(
+        &crate::computation::v1::ResultNodeProjector::try_new("test/replay/query", None).unwrap(),
         "query",
         1,
         0,

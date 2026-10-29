@@ -206,7 +206,7 @@ async fn run() -> anyhow::Result<()> {
 
     let query = Query::cypher("counter-query")
         .query("MATCH (c:Counter) RETURN c.value AS value")
-        .from_source("mock-source")
+        .from_input("mock-source")
         .build();
 
     let reaction = MyReaction::builder("my-reaction")

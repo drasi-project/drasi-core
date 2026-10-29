@@ -1,5 +1,55 @@
 # Drasi Host SDK
 
+## Native activation identity
+
+Factories negotiating `activation_credentials_v1` accept an optional `identity`
+dependency with `ResourceRole::Identity` and concrete type
+`computation::NativeIdentityResource`. Static callers supply the actual existing
+`Arc<dyn drasi_lib::identity::IdentityProvider>` with
+`NativeIdentityResource::new(provider)` and `Arc::new(resource).resource()`, or use
+`NativeFactory::create_component_with_identity(id, configuration, resource)`.
+No provider object, trait, Arc or Rust string layout crosses the native ABI.
+
+Host and Server share this reconstructible resource recipe:
+
+```yaml
+kind: nativeIdentity
+provider:
+  kind: your-loaded-identity-provider
+  config_version: "1"
+  config:
+    password:
+      kind: Secret
+      name: database-password
+```
+
+Declare it as an `Identity` resource without resource dependencies, and bind its
+ID to the component's `identity` slot. The recipe uses the already loaded ordinary
+identity-provider catalogue, its `PluginConfiguration`/descriptor schema checks,
+and existing instance-scoped secret resolution. Provider configuration references
+remain references in persistence. Provider construction and credential I/O occur
+on **each START**, never in a native component or resource constructor.
+An injected provider (`with_injected_provider`) takes precedence over a configured
+provider. Without an identity binding, literal-only startup is unchanged.
+Ordinary native `ConfigurationValue` references remain construction-scoped;
+credential rotation requires the explicit identity resource path above, not a
+password reference resolved once by the component constructor.
+
+Each activation supplies exactly the configured hostname/port in the ordinary
+`CredentialContext`. Failed providers, oversized credentials and certificates
+fail before native START, without literal or stale-credential fallback. Provider
+errors are sanitized. Cancellation drops the caller-owned resolution future;
+there is no cached credential or unrestricted fetch callback that can later
+apply old credentials to a replacement.
+
+For a coordinated source, declare the same optional Identity resource as a
+dependency of its `nativeSourceBootstrap` resource. The Host validates exact
+resource identity and passes only the construction marker to the coordinator;
+the live source still receives credentials through its normal START. This does
+not independently add authentication to a connector's bootstrap implementation.
+Consumer-wrapper factories currently reject identity dependencies rather than
+silently ignoring them.
+
 ## Native consumer completion
 
 Native consumer-v1 factories use the Host's existing `DeliveryRunner`, not a
@@ -92,6 +142,45 @@ Secret-bearing native configuration uses canonical component specifications with
 readable graph `config` object contains literal values; embedding a reference-like
 object there does not turn it into a reference or bypass secret validation.
 
+## Native source data inspection
+
+The Host negotiates the optional `source_schema_v1` extension and exposes its
+actual `SourceSchemaReader` through the component's read capability. Schema reads
+do not occupy `next()`'s operation slot and cannot retain a removed component
+through an inspection handle. The SDK fences activation changes and the Host
+fences proxy retirement; neither substitutes configuration metadata or an empty
+schema for a failed read. Older binaries without the extension remain supported.
+No application SQL read/write API is added to DrasiLib or the native ABI.
+
+## Native output snapshot, replay and follow
+
+The Host negotiates `output_reads_v1` and `output_follow_v1` only for factories
+that declare `output_snapshots`, `output_replays` or `output_follows`, and opens
+exactly the declared providers at construction. `NativeComponentProxy` exposes
+them through `ComputationComponent::output_readers()` as real shared
+`SnapshotProvider`, `ReplayProvider` and `SnapshotFollowProvider` objects; no
+executor, row store or graph is created. Reads never use the component's data
+operation slot. The proxy's fence ends reads and closes follow leases on stop,
+restart and release, whatever the library does, and decoded snapshots, replays and
+live items are validated (schema, owner, full images, logical progress, complete
+tail, item order) before they are returned; malformed or oversized buffers are
+`Invalid` or explicit limit errors. A lease's follow acknowledges only items it
+actually returned. Providers hold only their own library's handles, released once
+when the last provider reference is dropped.
+
+## Native port format selection
+
+When a plugin factory opts in (it declares `Capabilities::port_formats` or an
+optional object `ports` configuration field), `NativeFactory`
+resolves the literal `ports` configuration against the plugin's own declared
+schemas and nothing else. `specification`/`specification_from_config` describe the
+selected ports before construction; `validate` and the graph's definition check
+reject a specification whose ports differ from the resolution, and an unknown
+port or format, before `create`. The factory's `port_formats()` exposes the
+catalogue; instances are built with the resolved ports and the Host re-checks the
+constructed component's descriptor. No format is converted or defaulted. See the
+plugin SDK's "Optional per-port format selection".
+
 ## Managed native bootstrap
 
 `nativeBootstrap` recipes create one graph-owned `Bootstrap` resource for the
@@ -115,6 +204,90 @@ retirement also stops the provider and revokes its progress binding; a retained
 old handle cannot restart it. Recipes preserve references through persistence
 and reconstruction. These contracts are qualified with test-only native
 libraries; production bootstrap/consumer plugin migrations remain separate.
+
+## Internal native source/bootstrap coordination
+
+Sources negotiating `bootstrap_coordination_v1` may share their actual engine
+with a separately loaded paired bootstrap factory. This is not a SQL or general
+service API. The graph owns one `Bootstrap` resource with the distinct concrete
+type `NativeSourceBootstrapResource`; it is not a query's `QueryBootstrapResource`.
+There is no path-based component lookup, global coordinator registry, copied
+worker, or forwarding task.
+
+The `nativeSourceBootstrap` recipe names the **source** component and its actual
+source factory's `implementation`, `configurationVersion`, and unresolved
+`configuration`. Exactly one of `sourceProgress` or `consumerProgress` names
+its actual checkpoint dependency. Configuration references declare their exact
+`SecretStore` dependencies and remain references in persisted definitions.
+For example, a shared source uses:
+
+```yaml
+kind: nativeSourceBootstrap
+component: source
+implementation: # the registered native source implementation identity
+  name: example/source
+  version: "1"
+configurationVersion: 1
+configuration: {} # same ConfigurationValue map as the source specification
+consumerProgress: consumers
+```
+
+Use the implementation identity from loaded metadata, including plugin provenance;
+the abbreviated identity above illustrates only the recipe shape.
+Bind that resource to the source's `source_bootstrap` slot **and** bind the
+actual progress resource to its ordinary `source_progress` or `consumer_progress`
+slot. A paired `nativeBootstrap` recipe names the **query**, its bootstrap factory,
+`sourceBootstrap: <coordinator-resource>`, and
+`sourceProgress: <query-progress-resource>`. Declare both as resource dependencies,
+with roles `Bootstrap` and `Checkpoint`, respectively. Bind the resulting query
+bootstrap resource under the query's existing `bootstrap` slot and the same actual
+query progress under `source_progress`.
+
+The coordinator captures the real single owner or complete consumer set, including
+all actual member owners. Pairing requires Arc identity, not matching IDs, paths,
+configuration, or an equal reconstructed member map. Source construction also
+checks source ID, implementation, resolved configuration, instance, and graph.
+Component generation may change without changing its coordinator. Live source
+leases prevent overlapping reconstruction; resource retirement fences old opens.
+
+Coordinator-owned group/member read capabilities activate when the resource is
+constructed, without snapshot, subscription, or network I/O. The source still
+receives its separate normal live binding, activated by source lifecycle.
+Cleanup retains an accepted STOP operation and readers across cancelled/timed-out
+awaits and failed cleanup. Successful final resource cleanup revokes every reader.
+Paired query providers retain the real query recovery reader and use the existing
+bounded bootstrap operations and retirement behavior. Standalone file bootstrap
+and ordinary source construction are unchanged.
+
+A successfully stopped paired provider may be replaced even while its old handle
+is retained. The old lease cannot resume, cancel, or stop the replacement. Active
+providers and incomplete, cancelled, or failed cleanup remain fenced until the
+actual cleanup operation succeeds; dropping their handles does not erase that
+obligation. A rejected replacement open, reader, or scope leaves the stopped
+original usable. Dropping a never-started source permits reconstruction, but
+dropping after failed or cancelled START/STOP does not bypass cleanup.
+Retained subscriptions remain usable through
+failed or cancelled coordinator cleanup and are revoked only at final retirement.
+
+`PluginRegistry::computation_source_bootstrap_factories()` snapshots immutable
+native source factories from loaded plugins. Programmatic graph assembly uses
+`NativeFactory::create_source_bootstrap(...)`,
+`create_component_with_source_bootstrap(...)`, and
+`NativeBootstrapFactory::create_paired_query_provider(...)`.
+`NativeSourceBootstrapProgress::{Single, Shared}` supplies actual owners; retain
+the coordinator as a graph resource with its cleanup and dependency edges.
+
+The focused Host coordination tests cover both progress modes, both Tokio runtime
+flavors, real malformed/partial library discovery, constructor callback counters,
+exactly-once release of transferred owners, actual owner identity,
+retained-provider replacement, dropped cleanup obligations, and subscription retirement.
+Build the discovery fixtures before running this suite:
+
+```sh
+cargo build -p drasi-host-sdk --example native_bootstrap_coordination_metadata \
+  --example native_bootstrap_coordination_partial
+cargo test -p drasi-host-sdk --lib bootstrap_coordination
+```
 
 ## Integrated desired-state management
 
@@ -325,11 +498,13 @@ capabilities. Do not fall back to legacy registration after such an error.
 lifetime, including identified candidates whose initialization fails; hot
 unloading is unsupported.
 
-Native ABI 1.0 uses wire version 2: bounded MessagePack and bulk binary envelope
-buffers. Version-1 prototype native libraries must be rebuilt and are rejected
-before plugin entry. Native response buffers remain producer-owned while being
-decoded, then are released through their callback; graph envelopes contain
-fully owned local values. Legacy ABI 0.15 and persisted JSON envelopes are unchanged.
+Native ABI 1.0 uses wire version 1: bounded MessagePack and bulk binary envelope
+buffers. Build native libraries and the host from matching sources; unknown
+wire versions are rejected before plugin entry. Native response buffers remain
+producer-owned while being decoded, then are released through their callback;
+graph envelopes contain fully owned local values. JSON storage uses its own
+v1 envelope definition. Both representations preserve event-local controls,
+annotations and lineage.
 
 `NativeFactory` implements the existing `ComponentFactory` and, for explicitly
 opted-in factories, `TransactionalTransformerFactory`. Its `specification(id,

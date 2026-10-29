@@ -278,6 +278,22 @@ async fn real_mailbox_after_start() {
         receipt
     );
     fixture.handled.add_permits(1);
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let progress = fixture
+                .admission
+                .channel()
+                .progress()
+                .await
+                .expect("processed progress");
+            if progress.processed.get("sink") == Some(&receipt.position) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("downstream handling acknowledged before restart");
     assert_eq!(
         fixture
             .admission

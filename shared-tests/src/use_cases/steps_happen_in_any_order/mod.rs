@@ -71,6 +71,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
     // Add completion of Step X.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "cust_01_step_x"),
@@ -97,6 +98,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
     // Add completion of Step Y.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "cust_01_step_y"),
@@ -123,6 +125,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
     // Add completion of Step Z.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "cust_01_step_z"),
@@ -150,6 +153,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
     // Add completion of Step X.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "cust_02_step_x"),
@@ -176,6 +180,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
     // Add completion of Step Y.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "cust_02_step_y"),
@@ -202,6 +207,7 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
     // Add completion of Step Z.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "cust_02_step_z"),

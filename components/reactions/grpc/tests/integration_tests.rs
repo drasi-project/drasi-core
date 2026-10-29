@@ -1029,7 +1029,7 @@ async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
 
     let query = Query::cypher("e2e-query")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("e2e-source")
+        .from_input("e2e-source")
         .auto_start(true)
         .build();
 

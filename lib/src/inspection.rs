@@ -183,7 +183,7 @@ impl InspectionAPI {
     /// let query_info = core.get_query_info("my-query").await?;
     /// println!("Query: {}", query_info.query);
     /// println!("Status: {:?}", query_info.status);
-    /// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
+    /// println!("Inputs: {:?}", query_info.inputs);
     /// # Ok(())
     /// # }
     /// ```
@@ -382,6 +382,7 @@ impl InspectionAPI {
             id: self.config.id.clone(),
             priority_queue_capacity: self.config.global_priority_queue_capacity,
             dispatch_buffer_capacity: self.config.global_dispatch_buffer_capacity,
+            activation_timeout_secs: self.config.activation_timeout_secs,
             storage_backends: self.config.storage_backends.clone(),
             queries: self.computation.query_configurations().await?,
         })
@@ -649,7 +650,8 @@ impl InspectionAPI {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
     /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
     ///
@@ -898,7 +900,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("test-source")
+                    .from_input("test-source")
                     .auto_start(false)
                     .build(),
             )

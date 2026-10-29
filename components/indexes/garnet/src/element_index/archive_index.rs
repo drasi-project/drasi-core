@@ -229,7 +229,11 @@ impl ElementArchiveIndex for GarnetElementIndex {
         for (bytes, _) in candidates {
             match StoredElementContainer::decode(bytes.as_slice()) {
                 Ok(container) => match container.element {
-                    Some(element) => elements.push(Ok(Arc::new(element.into()))),
+                    Some(element) => elements.push(
+                        Element::try_from(element)
+                            .map(Arc::new)
+                            .map_err(IndexError::other),
+                    ),
                     None => elements.push(Err(IndexError::CorruptedData)),
                 },
                 Err(e) => elements.push(Err(IndexError::other(e))),
@@ -255,7 +259,9 @@ impl GarnetElementIndex {
             },
             Err(e) => return Err(IndexError::other(e)),
         };
-        Ok(Some(Arc::new(stored_element.into())))
+        Element::try_from(stored_element)
+            .map(|element| Some(Arc::new(element)))
+            .map_err(IndexError::other)
     }
 
     pub async fn insert_archive(

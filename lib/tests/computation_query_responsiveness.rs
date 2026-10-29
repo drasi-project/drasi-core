@@ -64,7 +64,7 @@ fn event(source: &str, key: &str, sequence: u64, timer: bool) -> Result<ChangeEn
         if timer || sequence == 1 {
             SourceChange::Insert { element }
         } else {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         },
         StreamId::try_new(format!("{source}/out"))?,
         sequence,

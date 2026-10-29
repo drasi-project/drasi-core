@@ -36,7 +36,7 @@ use crate::{
         ElementIndex, FutureQueue, IndexError, MiddlewareError, QueryClock, ResultKey, ResultOwner,
     },
     middleware::SourceMiddlewarePipelineCollection,
-    models::{validate_effective_from, Element, ElementReference, SourceChange},
+    models::{validate_effective_from, ChangeOrdering, Element, ElementReference, SourceChange},
     path_solver::{
         match_path::{MatchPath, SlotElementSpec},
         solution::{MatchPathSolution, SolutionSignature},
@@ -101,11 +101,38 @@ impl QueryEvaluator {
         &self,
         input: Vec<SourceChange>,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
+        self.evaluate_changes_with_ordering(input, ChangeOrdering::EventTime)
+            .await
+    }
+
+    pub async fn evaluate_changes_with_ordering(
+        &self,
+        input: Vec<SourceChange>,
+        ordering: ChangeOrdering,
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
+        self.evaluate_changes_with_input_scope(input, ordering, None)
+            .await
+    }
+
+    /// `input_scope` is the host-selected middleware pipeline key for the whole
+    /// batch. When present it replaces the element namespace for pipeline lookup
+    /// only (a scope without a pipeline runs no middleware); element identity,
+    /// data and timestamps are never changed. Absent, the element's own
+    /// namespace selects the pipeline.
+    pub async fn evaluate_changes_with_input_scope(
+        &self,
+        input: Vec<SourceChange>,
+        ordering: ChangeOrdering,
+        input_scope: Option<Arc<str>>,
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let mut changes = Vec::new();
         for change in input {
-            changes.extend(self.execute_source_middleware(change).await?);
+            changes.extend(
+                self.execute_source_middleware(change, input_scope.as_ref())
+                    .await?,
+            );
         }
-        self.process_changes_inner(changes).await
+        self.process_changes_inner(changes, ordering).await
     }
 
     pub fn future_queue(&self) -> Arc<dyn FutureQueue> {
@@ -123,9 +150,15 @@ impl QueryEvaluator {
     async fn admit_mutation(
         &self,
         change: &SourceChange,
+        ordering: ChangeOrdering,
     ) -> Result<MutationAdmission, EvaluationError> {
         let (metadata, incoming) = match change {
-            SourceChange::Insert { element } | SourceChange::Update { element } => {
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => {
+                change
+                    .validate()
+                    .map_err(EvaluationError::InvalidSourceChange)?;
                 (element.get_metadata(), Some(element))
             }
             SourceChange::Delete { metadata } => (metadata, None),
@@ -170,7 +203,9 @@ impl QueryEvaluator {
         if latest.is_some_and(|timestamp| validate_effective_from(timestamp).is_err()) {
             return Err(IndexError::CorruptedData.into());
         }
-        if let Some(latest) = latest.filter(|latest| metadata.effective_from < *latest) {
+        if let Some(latest) = latest.filter(|latest| {
+            ordering == ChangeOrdering::EventTime && metadata.effective_from < *latest
+        }) {
             tracing::warn!(
                 source_id = %metadata.reference.source_id,
                 element_id = %metadata.reference.element_id,
@@ -234,12 +269,13 @@ impl QueryEvaluator {
     async fn process_changes_inner(
         &self,
         changes: Vec<SourceChange>,
+        ordering: ChangeOrdering,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let mut result = Vec::new();
 
         for change in changes {
             let MutationAdmission::Apply { current, tombstone } =
-                self.admit_mutation(&change).await?
+                self.admit_mutation(&change, ordering).await?
             else {
                 continue;
             };
@@ -341,8 +377,16 @@ impl QueryEvaluator {
         let mut before_anchors = HashSet::new();
 
         let merge_properties = matches!(change, SourceChange::Update { .. });
+        let removed_properties = match &change {
+            SourceChange::Update {
+                removed_properties, ..
+            } => removed_properties.clone(),
+            _ => Default::default(),
+        };
         match change {
-            SourceChange::Insert { mut element } | SourceChange::Update { mut element } => {
+            SourceChange::Insert { mut element }
+            | SourceChange::Replace { mut element }
+            | SourceChange::Update { mut element, .. } => {
                 let previous = if let Some(prev_version) = current {
                     let prev_timestamp = prev_version.get_effective_from();
                     let before_clock =
@@ -355,7 +399,10 @@ impl QueryEvaluator {
                         )
                         .await?;
                     if merge_properties {
-                        element.merge_missing_properties(prev_version.as_ref());
+                        element.merge_missing_properties_except(
+                            prev_version.as_ref(),
+                            &removed_properties,
+                        );
                     }
                     Some((prev_version, before_clock, affinity_slots))
                 } else {
@@ -792,8 +839,12 @@ impl QueryEvaluator {
     async fn execute_source_middleware(
         &self,
         change: SourceChange,
+        input_scope: Option<&Arc<str>>,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
-        let source_id = change.get_reference().source_id.clone();
+        let source_id = match input_scope {
+            Some(scope) => scope.clone(),
+            None => change.get_reference().source_id.clone(),
+        };
         let mut source_changes = vec![change];
 
         let pipeline = match self.source_pipelines.get(source_id) {

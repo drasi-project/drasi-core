@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
                    r.delay AS delay
         "#,
         )
-        .from_source("road-events")
+        .from_input("road-events")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

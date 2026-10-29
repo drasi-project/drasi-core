@@ -202,6 +202,7 @@ fn live_changes() -> Vec<SourceChange> {
             ),
         },
         SourceChange::Update {
+            removed_properties: Default::default(),
             element: node(
                 STATUS_SOURCE,
                 "status-item-20",
@@ -220,7 +221,7 @@ fn fresh_snapshot() -> Vec<SourceChange> {
     changes.insert(
         3,
         match final_status {
-            SourceChange::Update { element } => SourceChange::Insert { element },
+            SourceChange::Update { element, .. } => SourceChange::Insert { element },
             _ => unreachable!(),
         },
     );

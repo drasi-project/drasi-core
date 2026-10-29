@@ -7,21 +7,27 @@ uses; there is no standard or network bundle.
 Each dynamic library owns its configuration, factory, implementation and export.
 Shared crates contain helpers, not additional registered components.
 
-The fourteen dynamic plugins use the lightweight `drasi-computation-contracts` and
+The dynamic plugins use the lightweight `drasi-computation-contracts` and
 `drasi-core-types` packages, not `drasi-lib` or the query engine. The SDK exposes
-only supported plugin operations and borrowed host services. A query-result
+only supported plugin operations and borrowed host services. Native sinks accept the standard graph-change schema from any source,
+transformer or query ([sink input contract](SINKS.md)); a query-result
 message does not require query execution. `make check-native-dependencies`
 checks every native library independently, including its build dependencies.
 
-| Role | Crate | Component kind | Hosting |
+| Role | Crate | Component kind / family modes | Hosting |
 |---|---|---|---|
 | Bootstrap | [drasi-computation-bootstrap-http](bootstrappers/http) | `drasi.network/http-bootstrap` | Dynamic or Rust SDK |
+| Bootstrap | [drasi-computation-bootstrap-mysql](bootstrappers/mysql) | [Coordinated and standalone MySQL factories](bootstrappers/mysql/README.md) | Dynamic or Rust SDK |
+| Bootstrap | [drasi-computation-bootstrap-mssql](bootstrappers/mssql) | `drasi.mssql/bootstrap`, `drasi.mssql/snapshot` | Dynamic or Rust SDK; qualification deferred |
 | Bootstrap | [drasi-computation-bootstrap-postgres](bootstrappers/postgres) | `drasi.postgres/coordinated-bootstrap`, `drasi.postgres/coordinated-row-bootstrap`, `drasi.postgres/shared-row-bootstrap`, `drasi.postgres/shared-transaction-bootstrap`, `drasi.postgres/snapshot` | Dynamic or Rust SDK |
-| Bootstrap | [drasi-computation-bootstrap-sqlite](bootstrappers/sqlite) | `drasi.sqlite/file-bootstrap` | Dynamic or Rust SDK |
+| Bootstrap | [drasi-computation-bootstrap-sqlite](bootstrappers/sqlite) | `drasi.sqlite/file-bootstrap`, `drasi.sqlite/coordinated-bootstrap`, `drasi.sqlite/shared-bootstrap` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-counter](sources/counter) | `drasi.standard/volatile-counter` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-http](sources/http) | `drasi.network/http-source` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-grpc](sources/grpc) | `drasi.network/grpc-source` | Dynamic or Rust SDK |
+| Source | [drasi-computation-source-mysql](sources/mysql) | [Row and transaction source factories](sources/mysql/README.md) | Dynamic or Rust SDK |
+| Source | [drasi-computation-source-mssql](sources/mssql) | `drasi.mssql/changes` | Dynamic or Rust SDK; qualification deferred |
 | Source | [drasi-computation-source-postgres](sources/postgres) | `drasi/postgres-transactions`, `drasi.postgres/changes`, `drasi.postgres/shared-changes`, `drasi.postgres/shared-transactions` | Dynamic or Rust SDK |
+| Source | [drasi-computation-source-sqlite](sources/sqlite) | `drasi.sqlite/changes`, `drasi.sqlite/transactions`, `drasi.sqlite/replay-transactions`, `drasi.sqlite/shared-transactions` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-bridge](sources/bridge) | `drasi.bridge/source` | Static Rust factory |
 | Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
@@ -29,8 +35,18 @@ checks every native library independently, including its build dependencies.
 | Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-sse](sinks/sse) | `drasi.network/sse-sink` | Dynamic or Rust SDK |
+| Sink | [drasi-computation-sink-storedproc-mysql](sinks/storedproc-mysql) | [MySQL stored-procedure factory](sinks/storedproc-mysql/README.md) | Dynamic or Rust SDK |
+| Sink | [drasi-computation-sink-storedproc-mssql](sinks/storedproc-mssql) | `drasi.mssql/storedproc` | Dynamic or Rust SDK; qualification deferred |
 | Sink | [drasi-computation-sink-storedproc-postgres](sinks/storedproc-postgres) | `drasi.postgres/storedproc` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-bridge](sinks/bridge) | `drasi.bridge/sink` | Static Rust factory |
+
+Registration is not qualification. The selected MySQL and SQLite scopes have
+real-library and Server qualification; SQL Server remains explicitly incomplete
+under the user-approved database-test deferral. See the
+[remaining-work inventory](../../lib/docs/computation-graph-remaining-work.md#cw-44)
+and each family guide for the tested scope and operating restrictions.
+SQLite has no legacy reaction to migrate; no new SQLite sink is implied by this
+inventory.
 
 ## Build just one plugin
 
@@ -56,11 +72,13 @@ The two bridge endpoint crates retain their existing static
 hosting contract: register the chosen crate's `factory()` in a normal
 `FactoryRegistry`. They do not export a dynamic ABI.
 
-For contributors, `make build-native-plugins` builds the fourteen separate libraries;
+For contributors, `make build-native-plugins` builds the separate native libraries;
 `make build-native-standard-plugins` and `make build-native-network-plugins` build
 the corresponding test selections. The network selection includes HTTP bootstrap.
-`make build-native-postgres-plugins` builds the three PostgreSQL libraries;
-`make build-native-sqlite-plugins` builds the SQLite file bootstrap library.
+`make build-native-postgres-plugins`, `make build-native-mysql-plugins` and
+`make build-native-mssql-plugins` build each family's source, bootstrap and
+stored-procedure libraries. `make build-native-sqlite-plugins` builds the SQLite
+source and bootstrap libraries.
 These are build conveniences, not bundles.
 Bootstrap-only libraries expose factories through the bootstrap extension, not
 a dummy entry in the processing-component list.
@@ -95,10 +113,12 @@ loading an older native ABI 1.0 library remains supported.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI remains **1.0.0**, with optional batching, query-snapshot
-and consumer-progress/cursor-policy extensions rather than changes to its base
-tables. Its version is independent of
-the workspace package version and the legacy Source/Reaction ABI.
+The native plugin ABI remains **1.0.0**, with optional batching, query-snapshot,
+consumer-progress/cursor-policy, source-schema, source/bootstrap coordination and
+activation-credential extensions rather than changes to its base tables.
+Source/bootstrap coordination exposes no application SQL API. The native ABI
+version is independent of the workspace package version and the legacy
+Source/Reaction ABI.
 
 Recovery-aware fan-out binds every actual required consumer independently.
 Native producers using `consumer_progress_v1` receive the exact read-only set,

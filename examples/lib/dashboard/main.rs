@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
                    s.timestamp AS timestamp
         "#,
         )
-        .from_source("sensors")
+        .from_input("sensors")
         .auto_start(true)
         .build();
 
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
                    s.temperature AS temperature
         "#,
         )
-        .from_source("sensors")
+        .from_input("sensors")
         .auto_start(true)
         .build();
 
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
                    s.humidity AS humidity
         "#,
         )
-        .from_source("sensors")
+        .from_input("sensors")
         .auto_start(true)
         .build();
 
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
                    s.humidity AS humidity
         "#,
         )
-        .from_source("sensors")
+        .from_input("sensors")
         .auto_start(true)
         .build();
 
@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
                    r.strength AS weight
         "#,
         )
-        .from_source("sensors")
+        .from_input("sensors")
         .auto_start(true)
         .build();
 

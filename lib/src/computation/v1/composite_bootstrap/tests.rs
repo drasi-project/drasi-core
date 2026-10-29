@@ -219,6 +219,7 @@ impl ComputationBootstrapProvider for Leaf {
             .into());
         }
         Ok(vec![BootstrapWatermark {
+            producer: None,
             stream: StreamId::try_new(self.name.as_str())?,
             source_id: Some(self.name.clone()),
             sequence: 2,

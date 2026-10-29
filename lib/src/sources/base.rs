@@ -55,15 +55,19 @@ use drasi_core::models::SourceChange;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+/// use drasi_lib::{BootstrapProvider, channels::DispatchMode};
 ///
+/// fn build_base(my_provider: impl BootstrapProvider + 'static) -> anyhow::Result<SourceBase> {
 /// let params = SourceBaseParams::new("my-source")
 ///     .with_dispatch_mode(DispatchMode::Channel)
 ///     .with_dispatch_buffer_capacity(2000)
 ///     .with_bootstrap_provider(my_provider);
 ///
 /// let base = SourceBase::new(params)?;
+/// Ok(base)
+/// }
 /// ```
 pub struct SourceBaseParams {
     /// Unique identifier for the source
@@ -210,6 +214,8 @@ pub struct SourceBase {
     /// ("no position confirmed yet"). Only populated when
     /// `request_position_handle == true`.
     position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
+    wal_subscriptions_complete: Arc<AtomicBool>,
+    wal_pruning_stop: tokio::sync::watch::Sender<bool>,
     /// Monotonically increasing counter for assigning event sequences.
     /// Used when a source does not supply its own sequence number.
     next_sequence: Arc<AtomicU64>,
@@ -361,6 +367,8 @@ impl SourceBase {
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
             identity_provider: Arc::new(RwLock::new(None)),
             position_handles: Arc::new(RwLock::new(HashMap::new())),
+            wal_subscriptions_complete: Arc::new(AtomicBool::new(false)),
+            wal_pruning_stop: tokio::sync::watch::channel(false).0,
             next_sequence: Arc::new(AtomicU64::new(1)),
             dispatch_order: Arc::new(Mutex::new(chrono::DateTime::<chrono::Utc>::MIN_UTC)),
             raw_config: None,
@@ -577,6 +585,57 @@ impl SourceBase {
         min
     }
 
+    /// Protect retained input while the initial subscribers restore their cursors.
+    /// A new empty log has no pre-start history to protect.
+    pub fn begin_wal_subscriptions(&self, committed_head: u64) {
+        self.wal_pruning_stop.send_replace(false);
+        self.wal_subscriptions_complete
+            .store(committed_head == 0, Ordering::Release);
+    }
+
+    /// Release the startup fence only after the hosting lifecycle has established
+    /// all required subscriptions. Time passing is not evidence of completion.
+    pub fn complete_wal_subscriptions(&self) {
+        self.wal_subscriptions_complete
+            .store(true, Ordering::Release);
+    }
+
+    /// Request that the pruning worker stop after its current operation.
+    pub fn stop_wal_pruning(&self) {
+        self.wal_pruning_stop.send_replace(true);
+    }
+
+    pub fn subscribe_wal_pruning_stop(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.wal_pruning_stop.subscribe()
+    }
+
+    /// Prune only an established group's minimum confirmed position.
+    pub async fn prune_confirmed_wal(
+        &self,
+        wal: &dyn crate::wal::WalProvider,
+    ) -> std::result::Result<u64, crate::wal::WalError> {
+        if !self.wal_subscriptions_complete.load(Ordering::Acquire) {
+            debug!(
+                "WAL pruning for '{}' is waiting for initial subscriptions",
+                self.id
+            );
+            return Ok(0);
+        }
+        self.cleanup_stale_handles().await;
+        // Registration takes the write side of this lock. Keep it excluded
+        // until the actual prune finishes, not just until its watermark is read.
+        let handles = self.position_handles.read().await;
+        let confirmed = handles
+            .values()
+            .map(|handle| handle.load(Ordering::Acquire))
+            .filter(|sequence| *sequence != u64::MAX)
+            .min();
+        match confirmed {
+            Some(sequence) if sequence > 0 => wal.prune_up_to(&self.id, sequence).await,
+            _ => Ok(0),
+        }
+    }
+
     /// Drop entries whose `Arc::strong_count == 1` (only `SourceBase` holds a
     /// reference).
     ///
@@ -756,6 +815,8 @@ impl SourceBase {
             bootstrap_provider: self.bootstrap_provider.clone(),
             identity_provider: self.identity_provider.clone(),
             position_handles: self.position_handles.clone(),
+            wal_subscriptions_complete: self.wal_subscriptions_complete.clone(),
+            wal_pruning_stop: self.wal_pruning_stop.clone(),
             next_sequence: self.next_sequence.clone(),
             dispatch_order: self.dispatch_order.clone(),
             raw_config: self.raw_config.clone(),
@@ -776,9 +837,11 @@ impl SourceBase {
     /// An initialized computation context is notified of the updated inventory.
     ///
     /// # Example
-    /// ```ignore
-    /// let provider = MyBootstrapProvider::new(config);
+    /// ```no_run
+    /// use drasi_lib::{BootstrapProvider, sources::SourceBase};
+    /// async fn attach(source_base: &SourceBase, provider: impl BootstrapProvider + 'static) {
     /// source_base.set_bootstrap_provider(provider).await;  // Ownership transferred
+    /// }
     /// ```
     pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static) {
         *self.bootstrap_provider.write().await = Some(Arc::new(provider));
@@ -1129,10 +1192,18 @@ impl SourceBase {
         // This ensures no live events reach the new subscriber before replay.
         let mut dispatchers = self.dispatchers.write().await;
 
-        // Capture WAL head while batcher is blocked (fast in-memory read)
+        // Capture committed history while live dispatch is blocked.
         let head = wal.head_sequence(&self.id).await.map_err(|e| {
             anyhow::anyhow!("Failed to read WAL head for source '{}': {e}", self.id)
         })?;
+        if resume_seq > head {
+            return Err(crate::wal::WalError::PositionUnavailable {
+                source_id: self.id.clone(),
+                requested: resume_seq,
+                oldest_available: wal.oldest_sequence(&self.id).await?,
+            }
+            .into());
+        }
 
         // Create dedicated channel for this subscriber
         let dispatcher = crate::channels::dispatcher::ChannelChangeDispatcher::<
@@ -1142,6 +1213,19 @@ impl SourceBase {
 
         // Add dispatcher to live list — after lock release, live events flow to it
         dispatchers.push(Box::new(dispatcher));
+        // Protect the requested history before reading it. A concurrent pruner
+        // must not discard replay input while this subscription is being built.
+        let position_handle = if settings.request_position_handle {
+            let mut handles = self.position_handles.write().await;
+            let handle = handles
+                .entry(settings.query_id.clone())
+                .or_insert_with(|| Arc::new(AtomicU64::new(resume_seq)))
+                .clone();
+            handle.store(resume_seq, Ordering::Release);
+            Some(handle)
+        } else {
+            None
+        };
         drop(dispatchers);
 
         self.subscriber_notify.notify_one();
@@ -1163,6 +1247,20 @@ impl SourceBase {
         } else {
             Vec::new()
         };
+        if resume_seq < head
+            && (replay_events.first().map(|(sequence, _)| *sequence) != Some(resume_seq + 1)
+                || replay_events.last().map(|(sequence, _)| *sequence) != Some(head)
+                || replay_events
+                    .windows(2)
+                    .any(|pair| pair[0].0.checked_add(1) != Some(pair[1].0)))
+        {
+            return Err(crate::wal::WalError::PositionUnavailable {
+                source_id: self.id.clone(),
+                requested: resume_seq + 1,
+                oldest_available: replay_events.first().map(|(sequence, _)| *sequence),
+            }
+            .into());
+        }
 
         // Build replay events (already stamped with their WAL sequence)
         let replay_wrappers: std::collections::VecDeque<
@@ -1194,18 +1292,6 @@ impl SourceBase {
         let composite: Box<
             dyn crate::channels::ChangeReceiver<crate::channels::events::SourceEventWrapper>,
         > = Box::new(ReplayThenLiveReceiver::new(replay_wrappers, live_receiver));
-
-        // Position handle — initialize to the resume sequence so a resuming
-        // subscriber is included in the min-watermark from the start (without
-        // this, a handle left at u64::MAX would be invisible to the watermark,
-        // letting upstream advance past the subscriber's checkpoint).
-        let position_handle = if settings.request_position_handle {
-            let handle = self.create_position_handle(&settings.query_id).await;
-            handle.store(resume_seq, Ordering::Release);
-            Some(handle)
-        } else {
-            None
-        };
 
         Ok(SubscriptionResponse {
             query_id: settings.query_id.clone(),
@@ -3654,7 +3740,7 @@ mod tests {
                 Ok(0)
             }
             async fn head_sequence(&self, _source_id: &str) -> Result<u64, crate::wal::WalError> {
-                Ok(0)
+                Ok(700)
             }
             async fn oldest_sequence(
                 &self,

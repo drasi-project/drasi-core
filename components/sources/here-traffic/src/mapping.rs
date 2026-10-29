@@ -197,7 +197,7 @@ pub fn build_segment_change(
             };
             match change {
                 ChangeKind::Insert => SourceChange::Insert { element },
-                ChangeKind::Update => SourceChange::Update { element },
+                ChangeKind::Update => SourceChange::update(element),
                 ChangeKind::Delete => unreachable!(),
             }
         }
@@ -226,7 +226,7 @@ pub fn build_incident_change(
             };
             match change {
                 ChangeKind::Insert => SourceChange::Insert { element },
-                ChangeKind::Update => SourceChange::Update { element },
+                ChangeKind::Update => SourceChange::update(element),
                 ChangeKind::Delete => unreachable!(),
             }
         }
@@ -257,7 +257,7 @@ pub fn build_relation_change(
 
             match change {
                 ChangeKind::Insert => SourceChange::Insert { element },
-                ChangeKind::Update => SourceChange::Update { element },
+                ChangeKind::Update => SourceChange::update(element),
                 ChangeKind::Delete => unreachable!(),
             }
         }

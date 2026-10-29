@@ -24,6 +24,14 @@ Selection is performed with JSONPath expressions; each promoted value is written
 4. **Error Handling**  
    Errors (invalid path, wrong type, conflict with `fail`, etc.) are handled according to `on_error`.
 
+## Property Removals and Replacements
+
+An update names the properties it sets and, separately, the properties it removes
+(`removed_properties`); every other property is left unchanged. A replacement
+supplies the complete element, and omitted properties are dropped. This middleware
+forwards both unchanged: a removal stays a removal and a replacement stays a
+replacement. A promoted property is set by the update, so it is not also removed.
+
 ## Configuration Options
 
 | Field         | Type & Allowed Values                              | Required | Default       | Description                                                                                |

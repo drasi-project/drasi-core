@@ -715,11 +715,10 @@ async fn auto_reset_bootstrap_snapshot_failure_propagates_without_advancing_chec
     harness.emit("q1", 1).await;
     harness.emit("q1", 2).await;
     let wrong = QueryChangeCodec::encode_row(
-        "different-query",
+        &ResultNodeProjector::try_new("test/plugin-reaction/different-output", None).unwrap(),
         1,
         &BTreeMap::new(),
-        QueryRowKind::Row,
-        RecordImage::Full,
+        0,
     )
     .unwrap();
     harness.queries["q1"]

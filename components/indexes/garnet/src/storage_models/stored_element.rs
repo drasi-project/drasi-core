@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference};
 
-use super::StoredValueMap;
+use super::{stored_value::StoredValueError, StoredValueMap};
 
 #[derive(Clone, prost::Message, Hash)]
 pub struct StoredElementReference {
@@ -123,15 +123,17 @@ impl From<&ElementMetadata> for StoredElementMetadata {
     }
 }
 
-impl From<&Element> for StoredElement {
-    fn from(element: &Element) -> Self {
-        match element {
+impl TryFrom<&Element> for StoredElement {
+    type Error = StoredValueError;
+
+    fn try_from(element: &Element) -> Result<Self, Self::Error> {
+        Ok(match element {
             Element::Node {
                 metadata,
                 properties,
             } => StoredElement::Node(StoredNode {
                 metadata: metadata.into(),
-                properties: properties.into(),
+                properties: properties.try_into()?,
             }),
             Element::Relation {
                 metadata,
@@ -142,9 +144,9 @@ impl From<&Element> for StoredElement {
                 metadata: metadata.into(),
                 in_node: in_node.into(),
                 out_node: out_node.into(),
-                properties: properties.into(),
+                properties: properties.try_into()?,
             }),
-        }
+        })
     }
 }
 
@@ -167,19 +169,101 @@ impl From<StoredElementMetadata> for ElementMetadata {
     }
 }
 
-impl From<StoredElement> for Element {
-    fn from(val: StoredElement) -> Self {
-        match val {
+impl TryFrom<StoredElement> for Element {
+    type Error = StoredValueError;
+
+    fn try_from(val: StoredElement) -> Result<Self, Self::Error> {
+        Ok(match val {
             StoredElement::Node(e) => Element::Node {
                 metadata: e.metadata.into(),
-                properties: e.properties.into(),
+                properties: e.properties.try_into()?,
             },
             StoredElement::Relation(e) => Element::Relation {
                 metadata: e.metadata.into(),
                 in_node: e.in_node.into(),
                 out_node: e.out_node.into(),
-                properties: e.properties.into(),
+                properties: e.properties.try_into()?,
             },
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::stored_value::{StoredValue, StoredValueContainer};
+    use super::*;
+    use chrono::NaiveDate;
+    use drasi_core::models::{ElementPropertyMap, ElementValue};
+    use prost::Message;
+
+    fn metadata(id: &str) -> ElementMetadata {
+        ElementMetadata {
+            reference: ElementReference {
+                source_id: Arc::from("source"),
+                element_id: Arc::from(id),
+            },
+            labels: Arc::from([Arc::<str>::from("Label")]),
+            effective_from: 42,
         }
+    }
+
+    fn rich_properties() -> ElementPropertyMap {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert(
+            "local",
+            ElementValue::LocalDateTime(
+                NaiveDate::from_ymd_opt(2024, 6, 15)
+                    .unwrap()
+                    .and_hms_nano_opt(10, 30, 45, 123_456_789)
+                    .unwrap(),
+            ),
+        );
+        properties.insert("nested", ElementValue::List(vec![ElementValue::Null]));
+        properties
+    }
+
+    #[test]
+    fn element_roundtrip_through_container_bytes() {
+        let elements = [
+            Element::Node {
+                metadata: metadata("n1"),
+                properties: rich_properties(),
+            },
+            Element::Relation {
+                metadata: metadata("r1"),
+                in_node: metadata("n1").reference,
+                out_node: metadata("n2").reference,
+                properties: rich_properties(),
+            },
+        ];
+
+        for element in elements {
+            let container = StoredElementContainer::new(StoredElement::try_from(&element).unwrap());
+            let decoded = StoredElementContainer::decode(container.encode_to_vec().as_slice())
+                .unwrap()
+                .element
+                .unwrap();
+            assert_eq!(Element::try_from(decoded).unwrap(), element);
+        }
+    }
+
+    #[test]
+    fn corrupt_property_fails_element_conversion() {
+        let mut stored = StoredElement::try_from(&Element::Node {
+            metadata: metadata("n1"),
+            properties: rich_properties(),
+        })
+        .unwrap();
+        let StoredElement::Node(node) = &mut stored else {
+            panic!("expected node");
+        };
+        node.properties.values.insert(
+            "bad".to_string(),
+            StoredValueContainer {
+                value: Some(StoredValue::Typed(vec![0xff; 8])),
+            },
+        );
+
+        assert!(Element::try_from(stored).is_err());
     }
 }

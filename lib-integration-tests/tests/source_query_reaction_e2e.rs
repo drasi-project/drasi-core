@@ -229,7 +229,7 @@ impl Reaction for CapturingReaction {
 
 async fn wait_for_status(drasi: &DrasiLib, component: &str, id: &str, expected: ComponentStatus) {
     let mut rx = drasi.subscribe_all_component_events();
-    let snapshot = drasi.get_graph().await;
+    let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()
@@ -297,7 +297,7 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
         .add_query_with_handle(
             Query::cypher("late-query")
                 .query("MATCH (s:Sensor) RETURN s.temperature AS temperature")
-                .from_source("late-source")
+                .from_input("late-source")
                 .enable_bootstrap(false)
                 .build(),
         )
@@ -409,7 +409,7 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
                 if index == 0 {
                     SourceChange::Insert { element }
                 } else {
-                    SourceChange::Update { element }
+                    SourceChange::update(element)
                 }
             }
             None => SourceChange::Delete {
@@ -490,7 +490,7 @@ async fn test_source_to_query_to_reaction_data_flow() {
         .with_query(
             Query::cypher("test-query")
                 .query("MATCH (s:Sensor) RETURN s")
-                .from_source("test-source")
+                .from_input("test-source")
                 .build(),
         )
         .with_reaction(reaction)
@@ -576,7 +576,7 @@ async fn test_multiple_events_flow_through() {
         .with_query(
             Query::cypher("multi-query")
                 .query("MATCH (s:Sensor) RETURN s")
-                .from_source("multi-src")
+                .from_input("multi-src")
                 .build(),
         )
         .with_reaction(reaction)
@@ -657,7 +657,7 @@ async fn test_aggregation_results_stored_in_current_results() {
                     "MATCH (p:Product)<-[:REVIEWED]-(r:Review) \
                      RETURN p.name AS product_name, count(r) AS review_count",
                 )
-                .from_source("agg-src")
+                .from_input("agg-src")
                 .build(),
         )
         .with_reaction(reaction)

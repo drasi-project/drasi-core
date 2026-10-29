@@ -135,6 +135,14 @@ fn options() -> DeliveryOptions {
     }
 }
 
+fn sink_inputs() -> Result<Vec<InputBinding>> {
+    Ok(vec![InputBinding {
+        input_port: PortId::try_new("in")?,
+        output: OutputEndpoint::new(ComponentId::try_new("query")?, PortId::try_new("out")?),
+        stream: StreamId::try_new("results")?,
+    }])
+}
+
 fn sink_settings(database: &Database) -> Value {
     let connection = &database.config.connection;
     json!({
@@ -142,7 +150,6 @@ fn sink_settings(database: &Database) -> Value {
         "database": connection.database, "user": connection.user, "password": connection.password,
         "ssl": connection.ssl_mode == SslMode::Require,
         "tls_ca_pem": database.config.tls_ca_pem,
-        "queries": ["query"],
         "command_timeout_ms": 5000, "connect_timeout_ms": 5000, "shutdown_timeout_ms": 5000,
         "default_template": {
             "added": {"template": "CALL native_upsert('ADD', {{param after.id}}, {{param after.name}})"},
@@ -188,12 +195,13 @@ async fn sink(
     graph: &str,
 ) -> Result<NativeConsumerProxy> {
     plugin.factories()[0]
-        .create_consumer(
+        .create_consumer_with_inputs(
             ComponentId::try_new("sink")?,
             json!({"settings": sink_settings(database)}),
             scope(graph),
             indexes(path)?,
             options(),
+            sink_inputs()?,
         )
         .await
 }
@@ -681,12 +689,13 @@ async fn native_storedproc_cancellation_rolls_back_and_requires_joined_cleanup()
     let mut settings = sink_settings(&database);
     settings["command_timeout_ms"] = json!(1000);
     let mut consumer = plugins.sink.factories()[0]
-        .create_consumer(
+        .create_consumer_with_inputs(
             ComponentId::try_new("sink")?,
             json!({"settings": settings}),
             scope("native-postgres"),
             indexes(&path)?,
             options(),
+            sink_inputs()?,
         )
         .await?;
     consumer.start().await?;

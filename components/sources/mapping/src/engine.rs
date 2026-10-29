@@ -113,7 +113,7 @@ impl SourceMappingEngine {
         // Create the appropriate SourceChange
         match operation {
             OperationType::Insert => Ok(SourceChange::Insert { element }),
-            OperationType::Update => Ok(SourceChange::Update { element }),
+            OperationType::Update => Ok(SourceChange::update(element)),
             OperationType::Delete => {
                 // For delete, we only need metadata
                 let metadata = match element {

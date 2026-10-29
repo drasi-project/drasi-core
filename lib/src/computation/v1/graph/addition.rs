@@ -461,29 +461,32 @@ impl ComponentHandle {
     }
 
     async fn wait(&self, started: bool) -> GraphResult<()> {
-        let mut changes = self.control.subscribe_observed();
+        let mut changes = self.control.subscribe_registry();
         loop {
+            self.observed()?;
             let snapshot = changes.borrow_and_update().clone();
-            let node = snapshot
+            if let Some(node) = snapshot
+                .observed
                 .components
                 .get(&self.id)
                 .filter(|node| node.generation == self.generation)
-                .ok_or(GraphError::StaleGeneration)?;
-            if started && node.started || !started && node.realization == RealizationState::Created
             {
-                return Ok(());
-            }
-            if let Some(failure) = &node.failure {
-                return Err(GraphError::Reported {
-                    cause: failure.cause.clone(),
-                });
-            }
-            // A stop acknowledges a cancelled or retryable creation failure without retrying
-            // it, so this generation cannot progress until an explicit start.
-            if node.realization == RealizationState::CreationFailed {
-                return Err(GraphError::CreationStopped {
-                    component: self.id.clone(),
-                });
+                if started && node.started
+                    || !started && node.realization == RealizationState::Created
+                {
+                    return Ok(());
+                }
+                if let Some(failure) = &node.failure {
+                    return Err(GraphError::Reported {
+                        cause: failure.cause.clone(),
+                    });
+                }
+                // A stop acknowledges a creation failure without retrying it.
+                if node.realization == RealizationState::CreationFailed {
+                    return Err(GraphError::CreationStopped {
+                        component: self.id.clone(),
+                    });
+                }
             }
             tokio::select! {
                 biased;
@@ -594,8 +597,10 @@ impl std::fmt::Debug for ComponentHandle {
 }
 
 impl GraphControl {
-    /// Declare a connection. Required reconstructible pipes wait for missing
-    /// endpoints; opaque external pipes require both endpoints to be declared.
+    /// Declare a connection. Reconstructible pipes can retain missing endpoints
+    /// as boundary declarations; required connections bind when they appear.
+    /// Optional/orphan boundaries need an explicit bind to become active.
+    /// Opaque external pipes require both endpoints to be declared.
     /// Pipe creation failures remain in the returned reconciliation report.
     pub async fn connect(
         &self,
@@ -896,7 +901,8 @@ pub(super) fn insert(
         ));
     }
     if !addition.bindings.subscriptions.is_empty() {
-        for slot in &graph.components {
+        for &index in graph.ids.values() {
+            let slot = &graph.components[index];
             if let Some(progress) = slot.consumer_progress()? {
                 let participants =
                     super::consumer_progress::participants(&graph.snapshot, &progress);
@@ -945,16 +951,27 @@ pub(super) fn insert(
             ));
         }
     }
-    if graph.snapshot.unbound_relationships.iter().any(|edge| {
-        edge.policy.required_for_binding
-            && (edge.definition.from.component == id || edge.definition.to.component == id)
-    }) {
-        let mut candidate = graph.snapshot.select(super::super::GraphSelection::All)?;
-        candidate.components.push(addition.definition.clone());
-        candidate
-            .resources
-            .extend(addition.resources.iter().cloned());
-        candidate.validate_structure()?;
+    let mut candidate = graph.snapshot.select(super::super::GraphSelection::All)?;
+    candidate.components.push(addition.definition.clone());
+    candidate
+        .resources
+        .extend(addition.resources.iter().cloned());
+    candidate
+        .subscriptions
+        .extend(addition.bindings.subscriptions.iter().cloned());
+    candidate.validate_structure()?;
+    let mut future_ids = graph.ids.clone();
+    future_ids.insert(id.clone(), graph.components.len());
+    let order =
+        super::dependency_order(&future_ids, &graph.snapshot.edges, &candidate.subscriptions)?;
+    if let ComponentConstruction::External { binding } = &addition.definition.construction {
+        if let Some(component) = addition.bindings.components.get(binding) {
+            component
+                .0
+                .output_readers()
+                .validate(&addition.definition.descriptor)
+                .map_err(|error| topology(error.to_string()))?;
+        }
     }
     let mut addition = pending.take().expect("validated addition");
     graph
@@ -997,7 +1014,7 @@ pub(super) fn insert(
         component,
         generation,
     ));
-    graph.order.push(index);
+    graph.order = order;
     let mut nodes = graph.snapshot.nodes.to_vec();
     nodes.push(node);
     graph.snapshot.nodes = nodes.into();

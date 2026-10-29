@@ -61,7 +61,6 @@ fn descriptor(id: &str, input: bool) -> anyhow::Result<ComponentDescriptor> {
 fn codec() -> anyhow::Result<EnvelopeCodec> {
     let mut codec = EnvelopeCodec::new(size(1024 * 1024));
     codec.register_schema(GraphChangeCodec::schema())?;
-    codec.register_schema(QueryChangeCodec::schema())?;
     Ok(codec)
 }
 

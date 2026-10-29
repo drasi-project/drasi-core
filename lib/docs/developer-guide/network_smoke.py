@@ -161,13 +161,19 @@ class Receiver:
         message = self.messages.get(timeout=DEADLINE)
         if isinstance(message, Exception):
             raise message
-        assert message["queryId"] == "low-stock", message
+        assert message["output"] == LOW_STOCK_OUTPUT, message
         assert message["operation"] == operation, message
         assert message.get("before") == before, message
         assert message.get("after") == after, message
-        assert isinstance(message["sequenceId"], int), message
+        assert isinstance(message["identity"]["id"], str), message
+        assert isinstance(message["sequence"], int), message
         assert isinstance(message["timestamp"], str), message
+        for stale in ("queryId", "sequenceId", "row_signature", "metadata"):
+            assert stale not in message, message
         return message
+
+
+LOW_STOCK_OUTPUT = {"alias": "low-stock", "component": "low-stock", "port": "out"}
 
 
 def post_event(port, event):
@@ -198,16 +204,17 @@ def sse_result(response, operation, quantity):
             data = []
             if message.get("type") == "heartbeat":
                 continue
-            assert message["queryId"] == "low-stock", message
-            assert isinstance(message["timestamp"], int), message
-            assert len(message["results"]) == 1, message
-            result = message["results"][0]
-            assert result["type"] == operation, result
-            assert result["data"] == row(quantity), result
-            assert isinstance(result["row_signature"], int), result
-            if operation != "UPDATE":
-                assert set(result) == {"type", "data", "row_signature"}, result
-            return result
+            assert message["output"] == LOW_STOCK_OUTPUT, message
+            assert isinstance(message["publishedAt"], int), message
+            assert len(message["changes"]) == 1, message
+            change = message["changes"][0]
+            assert change["operation"] == operation, change
+            image = "before" if operation == "DELETE" else "after"
+            assert change[image] == row(quantity), change
+            assert isinstance(change["identity"]["id"], str), change
+            for stale in ("row_signature", "queryId", "metadata"):
+                assert stale not in change, change
+            return change
     raise AssertionError("SSE result deadline elapsed")
 
 
@@ -231,12 +238,12 @@ def http_to_sse(binary, libraries):
             update = json.loads((BOOK / "stockroom/http-restock.json").read_text())
             update["element"]["properties"]["quantity"] = 2
             post_event(http_port, update)
-            changed = sse_result(response, "UPDATE", 2)
+            changed = sse_result(response, "REPLACE", 2)
             assert changed["before"] == row(3) and changed["after"] == row(2), changed
-            assert changed["row_signature"] == added["row_signature"], changed
+            assert changed["identity"] == added["identity"], changed
             post_event(http_port, json.loads((BOOK / "stockroom/http-restock.json").read_text()))
             deleted = sse_result(response, "DELETE", 2)
-            assert deleted["row_signature"] == added["row_signature"], deleted
+            assert deleted["identity"] == added["identity"], deleted
             response.close()
         finally:
             connection.close()
@@ -250,10 +257,10 @@ def webhook(binary, libraries):
             app.save_inventory(3)
             added = receiver.receive("ADD", after=row(3))
             app.save_inventory(2)
-            changed = receiver.receive("UPDATE", before=row(3), after=row(2))
+            changed = receiver.receive("REPLACE", before=row(3), after=row(2))
             app.save_inventory(8)
             deleted = receiver.receive("DELETE", before=row(2))
-            assert added["sequenceId"] < changed["sequenceId"] < deleted["sequenceId"]
+            assert added["sequence"] < changed["sequence"] < deleted["sequence"]
             app.stop()
 
 
@@ -262,7 +269,8 @@ def unreachable_webhook(binary, libraries):
         with Stockroom(binary, ["webhook", libraries, url]) as app:
             app.wait_output("Connected live webhook destination")
             app.save_inventory(3)
-            app.expect_failure("component 'webhook' failed", url)
+            app.expect_failure("component 'webhook' failed", "error sending request")
+            assert url in app.diagnostics(), app.diagnostics()
 
 
 def live_destination(binary, libraries):
@@ -274,14 +282,15 @@ def live_destination(binary, libraries):
             app.save_destination(receiver.url)
             app.wait_output("Connected live webhook destination")
             app.save_inventory(2)
-            receiver.receive("UPDATE", before=row(3), after=row(2))
+            receiver.receive("REPLACE", before=row(3), after=row(2))
             app.save_inventory(8)
             receiver.receive("DELETE", before=row(2))
             app.wait_output("low-stock: []")
             receiver.close()
             with refused_endpoint(receiver.port) as url:
                 app.save_inventory(3)
-                app.expect_failure("component 'webhook' failed", url)
+                app.expect_failure("component 'webhook' failed", "error sending request")
+                assert url in app.diagnostics(), app.diagnostics()
 
 
 def unsupported_destination_changes(binary, libraries):

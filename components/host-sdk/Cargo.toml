@@ -15,7 +15,7 @@ watcher = ["notify", "notify-debouncer-mini"]
 drasi-ffi-primitives = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-core = { workspace = true }
-drasi-plugin-sdk = { workspace = true }
+drasi-plugin-sdk = { workspace = true, features = ["computation"] }
 drasi-computation-plugin-abi = { workspace = true }
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-contracts = { workspace = true }
@@ -57,15 +57,23 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+drasi-computation-bootstrap-mssql = { workspace = true }
+drasi-computation-source-mssql = { workspace = true }
+drasi-computation-sink-storedproc-mssql = { workspace = true }
 drasi-computation-bootstrap-http = { workspace = true }
+drasi-computation-bootstrap-mysql = { workspace = true }
 drasi-computation-bootstrap-postgres = { workspace = true }
+drasi-computation-bootstrap-sqlite = { workspace = true }
 drasi-computation-network-common = { workspace = true, features = ["http-source", "grpc-source", "http-sink", "grpc-sink"] }
 drasi-computation-source-grpc = { workspace = true }
 drasi-computation-source-http = { workspace = true }
+drasi-computation-source-mysql = { workspace = true }
 drasi-computation-source-postgres = { workspace = true }
+drasi-computation-source-sqlite = { workspace = true }
 drasi-computation-sink-http = { workspace = true }
 drasi-computation-sink-grpc = { workspace = true }
 drasi-computation-sink-sse = { workspace = true }
+drasi-computation-sink-storedproc-mysql = { workspace = true }
 drasi-source-http = { path = "../sources/http" }
 drasi-source-grpc = { path = "../sources/grpc" }
 drasi-reaction-http = { workspace = true }
@@ -89,6 +97,12 @@ prost-types = "0.14"
 tonic = "0.14"
 
 [[example]]
+name = "native_activation_credentials"
+path = "tests/fixtures/native_activation_credentials.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
 name = "native_recovery"
 path = "tests/fixtures/native_recovery.rs"
 crate-type = ["cdylib"]
@@ -97,5 +111,17 @@ test = false
 [[example]]
 name = "native_consumer_progress_metadata"
 path = "tests/fixtures/native_consumer_progress_metadata.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "native_bootstrap_coordination_metadata"
+path = "tests/fixtures/native_bootstrap_coordination_metadata.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "native_bootstrap_coordination_partial"
+path = "tests/fixtures/native_bootstrap_coordination_partial.rs"
 crate-type = ["cdylib"]
 test = false

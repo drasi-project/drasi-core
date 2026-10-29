@@ -127,6 +127,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
     // Update the Person node
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "person1"),

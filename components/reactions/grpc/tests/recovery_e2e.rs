@@ -70,7 +70,7 @@ async fn build_core(
 
     let query = Query::cypher(QUERY)
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source(SOURCE)
+        .from_input(SOURCE)
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();

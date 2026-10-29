@@ -97,6 +97,19 @@ cargo() {
         package=drasi-source-postgres
         profile=postgres-transactions
         sources=(lib components/sources/postgres/tests/native_transactions.rs)
+    elif [[ " $* " == *" -p drasi-postgres-common "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-postgres-common
+        profile=postgres-common
+        sources=(lib)
+        [[ " $* " == *" --features replication "* ]] || return 102
+    elif [[ " $* " == *" -p drasi-computation-source-postgres "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-computation-source-postgres
+        profile=postgres-native
+        sources=(lib)
     elif [[ " $* " == *" -p drasi-reaction-dashboard "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
@@ -145,6 +158,14 @@ cargo() {
         package=drasi-source-mysql
         profile=mysql-lifecycle
         sources=(lib components/sources/mysql/tests/integration_test.rs)
+    elif [[ " $* " == *" -p drasi-mysql-common "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-mysql-common
+        profile=mysql-common
+        sources=(lib)
+        [[ " $* " == *" --features native "* ]] || return 102
+        [[ "$listing" == true || " $* " == *" --include-ignored "* ]] || return 102
     elif [[ " $* " == *" -p drasi-reaction-file "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
@@ -212,6 +233,13 @@ cargo() {
         profile=garnet-backends
         sources=(components/indexes/garnet/tests/computation_resources.rs components/indexes/garnet/tests/outbox_live_results_tests.rs)
     fi
+    case "$profile" in
+        postgres-common|postgres-native|mysql-common)
+            [[ " $* " == *" --lib "* && " $* " == *" --no-default-features "* ]] || return 102
+            [[ " $* " != *" --tests "* && " $* " != *" --all-features "* ]] || return 102
+            [[ "$listing" == true || " $* " == *" --test-threads=1 "* ]] || return 102
+            ;;
+    esac
     local source binary
     for source in "${sources[@]}"; do
         binary="${source##*/}"
@@ -268,8 +296,10 @@ cargo() {
             END {
                 for (name in replacements) found[name] = 1;
                 for (name in found) {
+                    if (omit == "moved-contract" && profile ~ /^(postgres-common|postgres-native|mysql-common)$/ && !omitted_contract++) continue;
                     if (omit == "capability" && name == "imported_external_components_must_be_supplied_and_execute_in_a_fresh_graph") continue;
                     if (omit == "mapping" && name == "full_pipeline_preserves_main_ownership_subscription_and_removal_results") continue;
+                    if (omit == "template-mapping" && binary == "reaction_templates") continue;
                     if (omit == "requirement" && name == omitted_requirement) continue;
                     if (listing == "true") {
                         print name ": test";
@@ -292,6 +322,9 @@ cargo() {
             printf 'test synthetic_runner_check ... concurrent log without a result\n'
         else
             printf 'test synthetic_runner_check ... ok\n'
+            if [[ "${RUNNER_CHECK_OMIT:-}" == duplicate ]]; then
+                printf 'test synthetic_runner_check ... ok\n'
+            fi
         fi
     done
     if [[ "$listing" == false ]]; then
@@ -309,14 +342,15 @@ grep -Fx $'processes\tnetwork::durable_tls_cross_os_faults_reopen_and_independen
     "$logs/network-enabled/native-instance-host.executed.tsv" > /dev/null
 RUNNER_CHECK_STYLE=interleaved bash lib/tests/run-runtime-parity.sh "$logs/interleaved" \
     >> "$logs/check.log" 2>&1
-for omitted in baseline suite discovery execution ignored failure capability mapping worker-driver lost-result requirement; do
+for omitted in baseline suite discovery execution ignored failure capability mapping template-mapping worker-driver lost-result requirement moved-contract duplicate; do
     if RUNNER_CHECK_OMIT="$omitted" bash lib/tests/run-runtime-parity.sh "$logs/missing-$omitted" \
         >> "$logs/check.log" 2>&1; then
         printf 'Runner accepted missing %s coverage.\n' "$omitted" >&2
         exit 1
     fi
-    for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+    for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions postgres-common postgres-native dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle mysql-common file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
         test -f "$logs/missing-$omitted/$profile.exit-code"
+        grep -Fx 0 "$logs/valid/$profile.exit-code" > /dev/null
     done
 done
 if DRASI_TEST_EXECUTION=component bash lib/tests/run-runtime-parity.sh "$logs/removed-selector" \
@@ -324,4 +358,4 @@ if DRASI_TEST_EXECUTION=component bash lib/tests/run-runtime-parity.sh "$logs/re
     printf 'Runner accepted the removed engine selector.\n' >&2
     exit 1
 fi
-printf 'Runner self-check passed: missing discovery/cases/suites/execution, ignored regressions, failed execution, selector rejection, all profiles attempted.\n'
+printf 'Runner self-check passed: missing discovery/cases/suites/execution, public template mappings, moved dependency contracts, duplicate results, ignored regressions, failed execution, selector rejection, all 35 profiles attempted.\n'

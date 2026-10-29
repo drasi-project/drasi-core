@@ -28,6 +28,7 @@ fn codec() -> anyhow::Result<EnvelopeCodec> {
 
 struct SaveReorder;
 
+// ANCHOR: reorder-key
 fn reorder_key(id: &RecordId) -> String {
     let bytes = id
         .value()
@@ -36,6 +37,7 @@ fn reorder_key(id: &RecordId) -> String {
         .collect::<String>();
     format!("reorder/{}/{bytes}", id.namespace())
 }
+// ANCHOR_END: reorder-key
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +89,7 @@ async fn print_saved_reorders(runner: &mut DeliveryRunner) -> anyhow::Result<()>
     Ok(())
 }
 
+// ANCHOR: save-reorder
 #[async_trait]
 impl TransactionalDeliveryHandler for SaveReorder {
     async fn handle(
@@ -149,6 +152,7 @@ impl TransactionalDeliveryHandler for SaveReorder {
         Ok(())
     }
 }
+// ANCHOR_END: save-reorder
 
 struct DurableAlerts {
     descriptor: ComponentDescriptor,
@@ -190,11 +194,13 @@ impl EnvelopeSink for DurableAlerts {
             std::future::pending::<()>().await;
         }
         let mut runner = self.runner.lock().await;
+        // ANCHOR: durable-handle
         runner.deliver_transactional(&input, &SaveReorder).await?;
         let sequence = QueryChangeCodec::query_sequence(&input.envelope)?;
         println!("Saved reorder changes through query sequence {sequence}.");
         print_saved_reorders(&mut runner).await?;
         self.completed.send_replace(sequence);
+        // ANCHOR_END: durable-handle
         Ok(())
     }
 }
@@ -202,6 +208,7 @@ impl EnvelopeSink for DurableAlerts {
 pub(super) struct PersistentStockroom {
     core: DrasiLib,
     sql: SqliteHandle,
+    hold: bool,
     #[cfg(test)]
     results: QueryResults,
     #[cfg(test)]
@@ -255,6 +262,7 @@ impl PersistentStockroom {
             progress.clone(),
         )?;
         let sql = source.handle();
+        // ANCHOR: persistent-query
         let query = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: GRAPH.into(),
@@ -277,6 +285,7 @@ impl PersistentStockroom {
         .with_source_progress(progress)?
         .with_bootstrap(bootstrap)
         .with_delivery_tracking();
+        // ANCHOR_END: persistent-query
         let results = query.results();
         // ANCHOR: output-journal
         let journal = QosChannel::persistent_with_recovery(
@@ -421,6 +430,7 @@ impl PersistentStockroom {
         Ok(Self {
             core,
             sql,
+            hold,
             #[cfg(test)]
             results,
             #[cfg(test)]
@@ -431,6 +441,51 @@ impl PersistentStockroom {
             runner,
             last_file: None,
         })
+    }
+
+    async fn finish<T>(&self, work: anyhow::Result<T>) -> anyhow::Result<T> {
+        if !self.hold {
+            return finish(&self.core, work).await;
+        }
+        let interruption = async {
+            let control = self.core.computation_control()?;
+            let revision = control.desired_snapshot().revision;
+            let stopped = control
+                .stop_components(
+                    revision,
+                    GraphSelection::Exact(vec![
+                        ComponentId::try_new("inventory")?,
+                        ComponentId::try_new("low-stock")?,
+                    ]),
+                )
+                .await?;
+            if stopped.summary != OperationSummary::Completed {
+                return Err(LifecycleReportError::Stop(stopped).into());
+            }
+            // Drain actual input owners before interrupting the deliberately held sink.
+            let forced = control
+                .force_cancel_components(revision, GraphSelection::All)
+                .await?;
+            if forced.cleanup.summary != OperationSummary::Completed {
+                return Err(LifecycleReportError::Stop(forced.cleanup).into());
+            }
+            println!("Held alert handling interrupted; pending output remains saved for restart.");
+            Ok(())
+        };
+        let interruption = tokio::time::timeout(Duration::from_secs(10), interruption)
+            .await
+            .context("timed out preparing the held-alert restart")
+            .and_then(|result| result);
+        let work = match (work, interruption) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(drasi_lib::error::OperationFailures::new(
+                "Stockroom work and held-alert interruption failed",
+                vec![error, cleanup],
+            )
+            .into()),
+        };
+        finish(&self.core, work).await
     }
 
     async fn apply_file(&mut self, path: &Path) -> anyhow::Result<bool> {
@@ -542,7 +597,7 @@ pub(super) async fn run(
         }
         Err(error) => Err(error),
     };
-    finish(&app.core, work).await
+    app.finish(work).await
 }
 
 #[cfg(test)]
@@ -608,7 +663,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await?;
+        app.finish(work).await?;
         drop(app);
 
         let mut app = PersistentStockroom::open(directory.path(), false).await?;
@@ -652,7 +707,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await
+        app.finish(work).await
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -685,7 +740,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await?;
+        app.finish(work).await?;
         drop(app);
 
         let mut app = PersistentStockroom::open(directory.path(), false).await?;
@@ -709,7 +764,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await?;
+        app.finish(work).await?;
         drop(app);
 
         let mut app = PersistentStockroom::open(directory.path(), false).await?;
@@ -742,7 +797,7 @@ mod tests {
             Ok(())
         }
         .await;
-        finish(&app.core, work).await
+        app.finish(work).await
     }
 
     #[test]

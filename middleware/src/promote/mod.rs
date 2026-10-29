@@ -25,7 +25,7 @@ use jsonpath_rust::{path::config::JsonPathConfig, JsonPathInst};
 use log::debug;
 use serde::{de, Deserialize, Deserializer};
 use serde_json::Value;
-use std::{str::FromStr, sync::Arc};
+use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
 #[cfg(test)]
 mod tests;
@@ -172,8 +172,13 @@ impl PromoteMiddleware {
         }
     }
 
-    /// Process a single element, promoting properties according to the mappings
-    fn process_element(&self, element: &mut Element) -> Result<(), MiddlewareError> {
+    /// Process a single element, promoting properties according to the mappings.
+    /// A promoted property is set, so it is no longer part of `removed`.
+    fn process_element(
+        &self,
+        element: &mut Element,
+        removed: &mut BTreeSet<String>,
+    ) -> Result<(), MiddlewareError> {
         // Access the properties mutably
         let properties = match element {
             Element::Node { properties, .. } => properties,
@@ -224,6 +229,7 @@ impl PromoteMiddleware {
             // Convert JSON value to ElementValue and insert using the mutable properties reference
             let element_value = ElementValue::from(&value);
             properties.insert(&mapping.target_name, element_value);
+            removed.remove(&mapping.target_name);
         }
 
         Ok(())
@@ -238,14 +244,24 @@ impl SourceMiddleware for PromoteMiddleware {
         _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         match source_change {
-            SourceChange::Insert { mut element } => match self.process_element(&mut element) {
-                Ok(_) => Ok(vec![SourceChange::Insert { element }]),
-                Err(e) => Err(e),
-            },
-            SourceChange::Update { mut element } => match self.process_element(&mut element) {
-                Ok(_) => Ok(vec![SourceChange::Update { element }]),
-                Err(e) => Err(e),
-            },
+            SourceChange::Insert { mut element } => {
+                self.process_element(&mut element, &mut BTreeSet::new())?;
+                Ok(vec![SourceChange::Insert { element }])
+            }
+            SourceChange::Replace { mut element } => {
+                self.process_element(&mut element, &mut BTreeSet::new())?;
+                Ok(vec![SourceChange::Replace { element }])
+            }
+            SourceChange::Update {
+                mut element,
+                mut removed_properties,
+            } => {
+                self.process_element(&mut element, &mut removed_properties)?;
+                Ok(vec![SourceChange::Update {
+                    element,
+                    removed_properties,
+                }])
+            }
             // Pass through other change types
             SourceChange::Delete { .. } | SourceChange::Future { .. } => Ok(vec![source_change]),
         }

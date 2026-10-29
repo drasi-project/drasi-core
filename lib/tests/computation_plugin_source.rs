@@ -631,7 +631,7 @@ async fn persistent_shared_source() {
             pipeline = pipeline.query(
                 drasi_lib::Query::cypher(query)
                     .query("MATCH (n:Item) RETURN n.name AS name")
-                    .from_source("app")
+                    .from_input("app")
                     .enable_bootstrap(false)
                     .build(),
             );
@@ -787,7 +787,7 @@ async fn volatile_restart(subscription_control: bool) {
         .query(
             drasi_lib::Query::cypher("query")
                 .query("MATCH (n:Item) RETURN n.name AS name")
-                .from_source("app")
+                .from_input("app")
                 .enable_bootstrap(false)
                 .build(),
         )

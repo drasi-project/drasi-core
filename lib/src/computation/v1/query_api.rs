@@ -23,6 +23,37 @@ pub struct QueryApi {
 }
 
 impl QueryApi {
+    pub(crate) fn progress_metrics(
+        &self,
+        component: &super::ObservedComponent,
+    ) -> anyhow::Result<Option<crate::metrics::QueryProgressMetricsSnapshot>> {
+        let Some(progress) = &self.output.progress else {
+            return Ok(None);
+        };
+        let progress = progress.snapshot();
+        if !progress.ready || !progress.bootstrap_complete || progress.failure.is_some() {
+            return Ok(None);
+        }
+        let output = self.output.results.snapshot()?;
+        if progress.reset_generation != output.generation {
+            return Ok(None);
+        }
+        Ok(Some(crate::metrics::QueryProgressMetricsSnapshot {
+            query_id: self.config.id.clone(),
+            component_generation: component.generation.0,
+            component_operation: component.operation.0,
+            output_generation: output.generation,
+            config_hash: self.output.config_hash,
+            persistent: progress.persistent && self.is_persistent()?,
+            input_sequences: progress
+                .checkpoints
+                .iter()
+                .map(|(key, checkpoint)| (key.clone(), checkpoint.sequence))
+                .collect(),
+            output_sequence: output.as_of_sequence,
+        }))
+    }
+
     pub(crate) fn link_catalog(&self, target: &QueryResultsCatalog) -> anyhow::Result<()> {
         let source = self.catalog.as_ref().ok_or_else(|| {
             anyhow::anyhow!(

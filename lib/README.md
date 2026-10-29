@@ -52,13 +52,15 @@ visible, supports dependency-aware changes and lets independent queries run in
 parallel. Existing source/reaction plugins remain usable through adapters;
 there is no second execution engine.
 
-The public `QueryBase`, `SequenceDedup` and old JSON `QueryOutputState` helpers are
-deprecated compatibility utilities, not the implementation of current queries.
-`QueryBase` and `SequenceDedup` now live under `compatibility`; their original
-imports remain available. The old output cache stays beside the existing public
-result-exchange types to preserve those APIs. Snapshot/outbox response and stream
-types are still used and are not deprecated. New query code should use the
-graph-owned construction, result and recovery APIs described below.
+`QueryBase`, `SequenceDedup` and the old JSON query-output cache have been removed;
+there is no compatibility module or second query executor. Snapshot/outbox
+response and stream types remain supported. Use the graph-owned construction,
+result and recovery APIs described below.
+
+`start()` reports requested component startup failures through a typed
+`PartialStartError` cause. Some independent components may already be running:
+inspect their status, then call `stop()` or `shutdown()` before retrying.
+Valid declarations waiting for missing dependencies are still accepted.
 
 Start with the guide for your task:
 
@@ -68,16 +70,14 @@ Start with the guide for your task:
 | [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
-| [Opt-in resilience and recovery plan](docs/computation-graph-reliability-plan.md) | Recovery design and dated framework-completion evidence; current actions are in the consolidated inventory |
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
-| [Consolidated outstanding-work inventory](docs/computation-graph-remaining-work.md) | Single current list: pre-review work, all review findings, post-merge status, priorities, completion criteria and tracking crosswalks |
-| [Historical CG backlog](docs/computation-graph-backlog.md) | Original CG-01 through CG-28 detail, design rationale and dated measurement evidence |
-| [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
+| [ComputationGraph remaining work](docs/computation-graph-remaining-work.md) | Single active list of validated issues, investigations, qualification gaps and improvements, with priorities, scope and completion criteria |
+| [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and interpretation of qualification evidence |
 | [Managed-query test controls](docs/query-test-control.md) | Opt-in independent physical clocks and actual due-work/output frontiers; no production clock or downstream completion substitution |
 
 From the drasi-core repository root, run a complete in-process example:
@@ -221,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
         .with_query(
             Query::cypher("high-temp")
                 .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id, s.temperature")
-                .from_source("sensors")
+                .from_input("sensors")
                 .build()
         )
         .build()
@@ -319,7 +319,7 @@ let config = Query::cypher("active-orders")
         WHERE o.status = 'active' AND o.total > 100
         RETURN o.id, o.customer, o.total
     "#)
-    .from_source("orders-db")
+    .from_input("orders-db")
     .build();
 ```
 
@@ -328,7 +328,7 @@ For GQL (ISO 9074:2024 graph query language — not GraphQL):
 ```rust
 let config = Query::gql("active-orders")
     .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o.id, o.total")
-    .from_source("orders-db")
+    .from_input("orders-db")
     .build();
 ```
 
@@ -337,8 +337,11 @@ let config = Query::gql("active-orders")
 | Method | Description | Default |
 |--------|-------------|---------|
 | `query(impl Into<String>)` | Cypher or GQL query string | **Required** |
-| `from_source(impl Into<String>)` | Subscribe to a source by ID | **Required** (at least one) |
-| `from_source_with_pipeline(id, Vec<String>)` | Subscribe with named middleware pipeline | — |
+| `from_input(impl Into<String>)` | Consume an upstream component (a source, another query or a transformer) by ID | **Required** (at least one) |
+| `from_input_port(id, port)` | Consume a named output port of an upstream component | — |
+| `from_input_with_pipeline(id, Vec<String>)` | Consume with a named middleware pipeline | — |
+| `with_input(QueryInputConfig)` | Add a fully specified input (port, label selectors, pipeline) | — |
+| `with_result_label(impl Into<String>)` | Label published result nodes (the output schema is unchanged) | `Result` |
 | `auto_start(bool)` | Start with `core.start()` | `true` |
 | `enable_bootstrap(bool)` | Load initial data from sources | `true` |
 | `with_joins(Vec<QueryJoinConfig>)` | Synthetic joins for multi-source queries | `None` |
@@ -366,8 +369,8 @@ let config = Query::cypher("orders-with-customers")
         WHERE o.status = 'pending'
         RETURN o.id, c.name, c.email, o.total
     "#)
-    .from_source("orders-db")
-    .from_source("customers-db")
+    .from_input("orders-db")
+    .from_input("customers-db")
     .with_joins(vec![QueryJoinConfig {
         id: "PLACED_BY".to_string(),
         keys: vec![
@@ -577,7 +580,9 @@ pub struct ComponentEvent {
 
 ## Component Dependency Graph
 
-DrasiLib maintains a directed graph of all components and their relationships, backed by [petgraph](https://docs.rs/petgraph/). The graph is the single source of truth for component metadata, runtime instances, and lifecycle events.
+DrasiLib exposes a read-only component view derived from its ComputationGraph
+registry. The native graph owns component metadata, instances and lifecycle;
+the compatibility view is not a second mutable registry.
 
 ```
 Instance ("my-app")
@@ -592,18 +597,21 @@ Instance ("my-app")
 
 ```rust
 // Full graph snapshot (serializable to JSON via serde)
-let snapshot: GraphSnapshot = core.get_graph().await;
+let snapshot: GraphSnapshot = core.get_graph().await?;
 let json = serde_json::to_string_pretty(&snapshot)?;
 
 // Find what depends on a component
-let dependents: Vec<ComponentNode> = core.get_dependents("orders-db").await;
+let dependents: Vec<ComponentNode> = core.get_dependents("orders-db").await?;
 
 // Find what a component depends on
-let deps: Vec<ComponentNode> = core.get_dependencies("my-query").await;
+let deps: Vec<ComponentNode> = core.get_dependencies("my-query").await?;
 
 // Check if safe to remove (errors if other components depend on it)
 core.can_remove_component("orders-db").await?;
 ```
+
+Graph inspection and manager inventory, configuration, labels and subscriptions
+return `Result`; unavailable state is an error, not an empty result or a panic.
 
 ### Relationship Types
 
@@ -667,7 +675,7 @@ let core = DrasiLib::builder()
     .with_query(
         Query::cypher("my-query")
             .query("MATCH (n:Sensor) RETURN n")
-            .from_source("sensors")
+            .from_input("sensors")
             // 2. Assign the backend to a specific query by name
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
             .build()
@@ -808,7 +816,7 @@ use serde_json::json;
 
 let config = Query::cypher("my-query")
     .query("MATCH (n:Device) RETURN n")
-    .from_source("iot-source")
+    .from_input("iot-source")
     .with_middleware(SourceMiddlewareConfig {
         kind: "promote".into(),
         name: "extract-location".into(),
@@ -1037,7 +1045,7 @@ The outbox is a bounded ring buffer on the query side:
 ```rust
 let query = Query::cypher("q1")
     .query("MATCH (n:Sensor) RETURN n.id, n.value")
-    .from_source("sensors")
+    .from_input("sensors")
     .with_outbox_capacity(5000)   // retain last 5000 results (default: 1000)
     .build();
 ```
@@ -1092,8 +1100,8 @@ queries:
       WHERE s.temperature > 75
       RETURN s.id, s.temperature, s.location
     queryLanguage: Cypher
-    sources:
-      - source_id: sensors
+    inputs:
+      - sensors
     auto_start: true
     enableBootstrap: true
 
@@ -1102,9 +1110,9 @@ queries:
       MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
       WHERE o.status = 'pending'
       RETURN o.id, c.email, o.total
-    sources:
-      - source_id: orders
-      - source_id: customers
+    inputs:
+      - orders
+      - customers
     joins:
       - id: PLACED_BY
         keys:
@@ -1167,7 +1175,8 @@ see the [ComputationGraph configuration reference](docs/computation-graph-config
 | `id` | `id` | `String` | **Required** |
 | `query` | `query` | `String` | **Required** |
 | `query_language` | `queryLanguage` | `Cypher` or `GQL` | `Cypher` |
-| `sources` | `sources` | `Vec<SourceSubscriptionConfig>` | `[]` |
+| `inputs` | `inputs` | `Vec<QueryInputConfig>` (a component name or `{component, port, nodes, relations, pipeline}`) | `[]` |
+| `result` | `result` | `QueryResultConfig` (`{label}`) | `{}` |
 | `middleware` | `middleware` | `Vec<SourceMiddlewareConfig>` | `[]` |
 | `auto_start` | `auto_start` | `bool` | `true` |
 | `enable_bootstrap` | `enableBootstrap` | `bool` | `true` |
@@ -1267,9 +1276,28 @@ bash lib/tests/run-runtime-parity.sh target/runtime-conformance
 The runner checks historical case mappings, named requirements, discovery and
 actual results across default, no-default, additional recovery/middleware,
 integration, plugin-factory, Host SDK and Redis-compatible backend profiles.
+The matrix has 35 profiles: the original 32, including the source/database
+profiles, plus explicit unit-test profiles for extracted PostgreSQL/MySQL code:
+
+| Profile | Package | Selection |
+| --- | --- | --- |
+| `postgres-common` | `drasi-postgres-common` | `--no-default-features --features replication --lib` |
+| `postgres-native` | `drasi-computation-source-postgres` | `--no-default-features --lib` |
+| `mysql-common` | `drasi-mysql-common` | `--no-default-features --features native --lib` |
+
+These profiles run serially within each test binary. `mysql-common` includes
+ignored tests so its real MySQL authentication/TLS/connection-retirement case
+must execute, not count as a quarantine. A source crate's `--lib` does not execute
+its dependencies' unit tests. Keep each contract bound to its actual owning
+package, binary, case and profile when moving code.
+
 Backend cases are explicitly selected, not silently left ignored. Ignored
 subprocess workers require a passing parent driver. The sole existing DLL stress
 quarantine has an owner and expiry and cannot qualify resource-lifetime safety.
+Quarantine validation uses the local calendar date at startup, during profile
+checks and at final reporting. An expiry remains valid on that date, but a run
+crossing into the following day fails validation; a separate successful manual
+execution does not renew it or qualify other platforms.
 Redis compatibility is not a claim of retained-volume Garnet product recovery.
 
 The integration profile includes live replacement with full persistent multicast

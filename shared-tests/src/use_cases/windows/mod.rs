@@ -190,6 +190,7 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
         now_override.store(now, Ordering::Relaxed);
 
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "s2"),
@@ -261,6 +262,7 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
         now_override.store(now, Ordering::Relaxed);
 
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "s2"),
@@ -522,6 +524,7 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
     //update sensor 2
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "s2"),

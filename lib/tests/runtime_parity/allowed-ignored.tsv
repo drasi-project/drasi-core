@@ -25,4 +25,3 @@ lib-integration-tests	computation_factory_lifecycle	factory_lifecycle_crash_work
 lib-integration-tests	computation_remote_effects	remote_effect_crash_worker	process_death_after_remote_effect_before_reply_replays_from_durable_query_output	Parent kills worker only after the separate receiver durably records the effect without replying.	runtime	-
 lib-integration-tests	computation_transaction_query	query_handoff_worker	process_crashes_preserve_atomic_query_state_and_every_durable_handoff	Worker explicitly executed and checked by the crash driver.	runtime	-
 lib-integration-tests	computation_transaction_query	scheduled_query_worker	scheduled_work_and_its_committed_output_survive_process_crashes	Worker explicitly executed and checked by the crash driver.	runtime	-
-drasi-host-sdk	integration_test	test_stress_rapid_subscribe_drop_under_load	-	Existing cross-platform flake tracked by requirements.tsv A05; cannot qualify DLL ownership.	plugin-maintainers	2026-10-26

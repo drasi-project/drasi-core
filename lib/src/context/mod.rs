@@ -30,31 +30,25 @@
 //!
 //! # Example - Source Plugin
 //!
-//! ```ignore
+//! ```no_run
 //! use drasi_lib::context::SourceRuntimeContext;
+//! use drasi_lib::sources::SourceBase;
 //!
-//! #[async_trait]
-//! impl Source for MySource {
-//!     async fn initialize(&self, context: SourceRuntimeContext) {
-//!         // Store context for later use
-//!         self.base.initialize(context).await;
-//!     }
-//!     // ...
+//! async fn initialize_source(base: &SourceBase, context: SourceRuntimeContext) {
+//!     // Called from the source's initialize method.
+//!     base.initialize(context).await;
 //! }
 //! ```
 //!
 //! # Example - Reaction Plugin
 //!
-//! ```ignore
+//! ```no_run
 //! use drasi_lib::context::ReactionRuntimeContext;
+//! use drasi_lib::reactions::ReactionBase;
 //!
-//! #[async_trait]
-//! impl Reaction for MyReaction {
-//!     async fn initialize(&self, context: ReactionRuntimeContext) {
-//!         // Store context for later use
-//!         self.base.initialize(context).await;
-//!     }
-//!     // ...
+//! async fn initialize_reaction(base: &ReactionBase, context: ReactionRuntimeContext) {
+//!     // Called from the reaction's initialize method.
+//!     base.initialize(context).await;
 //! }
 //! ```
 

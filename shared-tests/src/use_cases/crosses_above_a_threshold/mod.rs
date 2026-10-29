@@ -72,6 +72,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     // Make invoice overdue by 1 day
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -95,6 +96,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     // Make invoice overdue by 5 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -118,6 +120,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     // Make invoice overdue by 9 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -141,6 +144,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     // Make invoice overdue by 10 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -177,6 +181,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     // Make invoice overdue by 11 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -200,6 +205,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     // Make invoice overdue by 15 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -223,6 +229,7 @@ pub async fn crosses_above_a_threshold(config: &(impl QueryTestConfig + Send)) {
     // Make invoice PAID after 16 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -280,6 +287,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
     // Make invoice overdue by 1 day
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -303,6 +311,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
     // Make invoice overdue by 5 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -326,6 +335,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
     // Make invoice overdue by 9 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -349,6 +359,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
     // Make invoice overdue by 10 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -386,6 +397,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
     // Make invoice overdue by 11 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -430,6 +442,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
     // Make invoice overdue by 15 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),
@@ -474,6 +487,7 @@ pub async fn crosses_above_a_threshold_with_overdue_days(config: &(impl QueryTes
     // Make invoice PAID after 16 days
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.CRM", "invoice_status_invoice_01"),

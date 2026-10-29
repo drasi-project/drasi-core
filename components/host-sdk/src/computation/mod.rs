@@ -10,20 +10,29 @@
 //! graph execution manager, or task-local transfer between runtimes. The graph
 //! owns scheduling and cancellation of every operation.
 
+mod activation_credentials;
 mod admission;
 mod bootstrap;
+mod bootstrap_coordination;
 mod consumer;
 mod consumer_progress;
 mod control;
 mod factory;
 mod input_position;
 mod loader;
+mod output_follow;
+mod output_reads;
+mod output_snapshots;
 mod progress;
 mod proxy;
-mod query_snapshots;
+mod source_schema;
 mod transaction;
 
+pub use activation_credentials::{NativeIdentityProviders, NativeIdentityResource};
 pub use bootstrap::{NativeBootstrapFactories, NativeBootstrapFactory, NativeBootstrapProxy};
+pub use bootstrap_coordination::{
+    NativeSourceBootstrapFactories, NativeSourceBootstrapProgress, NativeSourceBootstrapResource,
+};
 pub use consumer::{NativeConsumerProxy, NativeConsumerResource};
 /// Native computation ABI version this host loads.
 pub use drasi_computation_plugin_abi::ABI_VERSION;
@@ -39,8 +48,8 @@ pub(crate) use factory::runtime_configuration_schema;
 pub use factory::NativeFactory;
 pub use loader::{load, try_load, NativePlugin};
 pub(crate) use loader::{try_load_library, try_read_metadata};
+pub use output_snapshots::{NativeOutputSnapshotsResource, OutputSelector, OutputSnapshotsService};
 pub use proxy::NativeComponentProxy;
-pub use query_snapshots::NativeQuerySnapshotsResource;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NativeConsumerFactoryMetadata {
@@ -48,5 +57,7 @@ pub struct NativeConsumerFactoryMetadata {
     pub mode: drasi_computation_plugin_sdk::ConsumerMode,
 }
 
+#[cfg(test)]
+mod activation_credentials_tests;
 #[cfg(test)]
 mod tests;

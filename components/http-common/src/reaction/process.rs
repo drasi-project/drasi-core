@@ -260,11 +260,39 @@ pub fn render_request(
     query_name: &str,
     reaction_name: &str,
 ) -> Result<Option<RenderedRequest>> {
-    let result_type = notification.op_str();
-    let context = build_context(notification);
+    render_request_with_context(
+        handlebars,
+        base_url,
+        token,
+        call_spec,
+        &build_context(notification),
+        || Ok(serde_json::to_string(notification)?),
+        query_name,
+        notification.op_str(),
+        reaction_name,
+    )
+}
 
+/// Render a request from an already-built template context.
+///
+/// `default_body` supplies the body when the route has no body template or it
+/// fails to render. `identity` names the context's producer or query for URL
+/// fallback and diagnostics, and `result_type` names its operation. Used by
+/// the producer-neutral native sink, whose context is not a query result.
+#[allow(clippy::too_many_arguments)]
+pub fn render_request_with_context(
+    handlebars: &Handlebars<'static>,
+    base_url: &str,
+    token: &Option<String>,
+    call_spec: &HttpCallSpec,
+    context: &Map<String, Value>,
+    default_body: impl FnOnce() -> Result<String>,
+    query_name: &str,
+    result_type: &str,
+    reaction_name: &str,
+) -> Result<Option<RenderedRequest>> {
     // Render the URL; on failure fall back to the default change-notification URL.
-    let rendered_spec_url = match handlebars.render_template(&call_spec.extension.url, &context) {
+    let rendered_spec_url = match handlebars.render_template(&call_spec.extension.url, context) {
         Ok(u) => u,
         Err(e) => {
             warn!(
@@ -294,17 +322,17 @@ pub fn render_request(
         debug!(
             "[{reaction_name}] Rendering body template for query '{query_name}' ({result_type})"
         );
-        match handlebars.render_template(&call_spec.template, &context) {
+        match handlebars.render_template(&call_spec.template, context) {
             Ok(b) => b,
             Err(e) => {
                 warn!(
                     "[{reaction_name}] Body template render failed for query '{query_name}' ({result_type}): {e} — using default notification envelope"
                 );
-                serde_json::to_string(notification)?
+                default_body()?
             }
         }
     } else {
-        serde_json::to_string(notification)?
+        default_body()?
     };
 
     // Build headers (with optional auth) and render header value templates
@@ -333,7 +361,7 @@ pub fn render_request(
                 continue;
             }
         };
-        let rendered_value = match handlebars.render_template(value, &context) {
+        let rendered_value = match handlebars.render_template(value, context) {
             Ok(v) => v,
             Err(e) => {
                 warn!(

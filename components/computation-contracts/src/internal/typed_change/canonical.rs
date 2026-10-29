@@ -267,8 +267,19 @@ impl CanonicalEncoder {
                 self.u8(0x00);
                 self.element(element)?;
             }
-            SourceChange::Update { element } => {
+            SourceChange::Update {
+                element,
+                removed_properties,
+            } => {
                 self.u8(0x01);
+                self.element(element)?;
+                self.length(removed_properties.len());
+                for property in removed_properties {
+                    self.string(property);
+                }
+            }
+            SourceChange::Replace { element } => {
+                self.u8(0x04);
                 self.element(element)?;
             }
             SourceChange::Delete { metadata } => {
@@ -381,6 +392,11 @@ impl CanonicalEncoder {
             ElementValue::ZonedDateTime(value) => {
                 self.u8(0x08);
                 self.fixed_datetime(value);
+            }
+            ElementValue::Typed(_) => {
+                self.u8(0x09);
+                let variable: VariableValue = value.into();
+                self.variable_value(&variable)?;
             }
         }
         Ok(())

@@ -67,7 +67,7 @@ async fn run(drasi: &DrasiLib) -> Result<()> {
     let query = |id| {
         Query::cypher(id)
             .query("MATCH (o:Order) RETURN o.name AS name")
-            .from_source("orders")
+            .from_input("orders")
             .enable_bootstrap(false)
             .build()
     };

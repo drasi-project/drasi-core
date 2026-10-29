@@ -17,8 +17,8 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use drasi_lib::channels::{QueryResult, ResultDiff};
-use futures::{SinkExt, StreamExt};
-use log::{debug, error, warn};
+use futures::{stream::SplitSink, SinkExt, StreamExt};
+use log::{debug, warn};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -88,6 +88,11 @@ pub struct WebSocketResultDiff {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryResultPayload {
     pub query_id: String,
+    #[serde(
+        serialize_with = "serialize_row_signature",
+        deserialize_with = "deserialize_row_signature"
+    )]
+    pub revision: u64,
     pub timestamp: i64,
     pub results: Vec<WebSocketResultDiff>,
 }
@@ -98,8 +103,22 @@ pub struct QueryResultPayload {
 pub enum ServerMessage {
     QueryResult {
         query_id: String,
+        #[serde(
+            serialize_with = "serialize_row_signature",
+            deserialize_with = "deserialize_row_signature"
+        )]
+        revision: u64,
         timestamp: i64,
         results: Vec<WebSocketResultDiff>,
+    },
+    QuerySnapshot {
+        query_id: String,
+        #[serde(
+            serialize_with = "serialize_row_signature",
+            deserialize_with = "deserialize_row_signature"
+        )]
+        revision: u64,
+        rows: Vec<SnapshotRow>,
     },
     Heartbeat {
         ts: i64,
@@ -118,6 +137,7 @@ impl HubMessage {
         match self {
             HubMessage::QueryResult(payload) => ServerMessage::QueryResult {
                 query_id: payload.query_id,
+                revision: payload.revision,
                 timestamp: payload.timestamp,
                 results: payload.results,
             },
@@ -126,7 +146,7 @@ impl HubMessage {
     }
 
     /// Convert Drasi query results to websocket payload.
-    pub fn from_query_result(query_result: &QueryResult) -> Self {
+    pub fn from_query_result(query_result: &QueryResult, revision: u64) -> Self {
         let results = query_result
             .results
             .iter()
@@ -192,6 +212,7 @@ impl HubMessage {
 
         HubMessage::QueryResult(QueryResultPayload {
             query_id: query_result.query_id.clone(),
+            revision,
             timestamp: query_result.timestamp.timestamp_millis(),
             results,
         })
@@ -214,10 +235,10 @@ impl WebSocketHub {
         self.sender.subscribe()
     }
 
-    pub fn broadcast_query_result(&self, query_result: &QueryResult) {
+    fn broadcast_query_result(&self, query_result: &QueryResult, revision: u64) {
         if let Err(err) = self
             .sender
-            .send(HubMessage::from_query_result(query_result))
+            .send(HubMessage::from_query_result(query_result, revision))
         {
             debug!("dashboard websocket has no active listeners for query result: {err}");
         }
@@ -247,15 +268,16 @@ pub struct SnapshotRow {
     pub data: Value,
 }
 
-/// Snapshot of accumulated query results, separating rows from aggregation state.
+/// Snapshot of all query result rows, including grouped aggregates.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct QuerySnapshot {
     pub rows: Vec<SnapshotRow>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aggregation: Option<Value>,
+    // REST snapshots remain { rows }; only ordered WebSocket frames expose this boundary.
+    #[serde(skip)]
+    pub(super) revision: u64,
 }
 
-/// In-memory snapshot store that accumulates query result rows and aggregation state.
+/// In-memory snapshot store keyed by query result identity.
 /// Clients can fetch the current state to populate widgets on first load.
 #[derive(Clone)]
 pub struct QuerySnapshotStore {
@@ -291,10 +313,18 @@ impl QuerySnapshotStore {
         self.max_rows_per_query
     }
 
-    /// Apply a query result's diffs to the accumulated snapshot.
-    pub async fn apply(&self, query_result: &QueryResult) {
+    /// Update state and publish its revision under one lock, in the same order.
+    pub async fn apply_and_broadcast(
+        &self,
+        query_result: &QueryResult,
+        hub: &WebSocketHub,
+    ) -> anyhow::Result<()> {
         let mut snapshots = self.snapshots.write().await;
         let snapshot = snapshots.entry(query_result.query_id.clone()).or_default();
+        let revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("dashboard query revision exhausted"))?;
 
         for diff in &query_result.results {
             match diff {
@@ -305,7 +335,7 @@ impl QuerySnapshotStore {
                     // Insert-of-an-existing-element is an upsert in drasi: replace
                     // an existing row with the same identity instead of appending a
                     // duplicate (see issue #605).
-                    upsert_row(&mut snapshot.rows, *row_signature, data);
+                    upsert_row(&mut snapshot.rows, *row_signature, data, None);
                 }
                 ResultDiff::Delete {
                     data,
@@ -321,22 +351,14 @@ impl QuerySnapshotStore {
                     row_signature,
                     ..
                 } => {
-                    // The row_signature is stable across an update; match on it,
-                    // falling back to the `before` payload when it is unknown.
-                    if let Some(idx) = find_row_index(&snapshot.rows, *row_signature, before) {
-                        snapshot.rows[idx] = SnapshotRow {
-                            row_signature: *row_signature,
-                            data: after.clone(),
-                        };
-                    } else {
-                        snapshot.rows.push(SnapshotRow {
-                            row_signature: *row_signature,
-                            data: after.clone(),
-                        });
-                    }
+                    upsert_row(&mut snapshot.rows, *row_signature, after, Some(before));
                 }
-                ResultDiff::Aggregation { after, .. } => {
-                    snapshot.aggregation = Some(after.clone());
+                ResultDiff::Aggregation {
+                    before,
+                    after,
+                    row_signature,
+                } => {
+                    upsert_row(&mut snapshot.rows, *row_signature, after, before.as_ref());
                 }
                 ResultDiff::Noop => {}
             }
@@ -347,6 +369,9 @@ impl QuerySnapshotStore {
             let excess = snapshot.rows.len() - self.max_rows_per_query;
             snapshot.rows.drain(..excess);
         }
+        snapshot.revision = revision;
+        hub.broadcast_query_result(query_result, revision);
+        Ok(())
     }
 
     /// Seed the accumulated snapshot for a query with bootstrap rows.
@@ -386,19 +411,24 @@ impl QuerySnapshotStore {
         snapshots.get(query_id).cloned().unwrap_or_default()
     }
 
-    /// Check whether there is any data (rows or aggregation) for a query.
+    /// Check whether there are any result rows for a query.
     pub async fn has_data(&self, query_id: &str) -> bool {
         let snapshots = self.snapshots.read().await;
         snapshots
             .get(query_id)
-            .map(|s| !s.rows.is_empty() || s.aggregation.is_some())
+            .map(|s| !s.rows.is_empty())
             .unwrap_or(false)
     }
 }
 
 /// Insert or replace a row by its identity.
-fn upsert_row(rows: &mut Vec<SnapshotRow>, row_signature: u64, data: &Value) {
-    if let Some(idx) = find_row_index(rows, row_signature, data) {
+fn upsert_row(
+    rows: &mut Vec<SnapshotRow>,
+    row_signature: u64,
+    data: &Value,
+    before: Option<&Value>,
+) {
+    if let Some(idx) = find_row_index(rows, row_signature, before.unwrap_or(data)) {
         rows[idx] = SnapshotRow {
             row_signature,
             data: data.clone(),
@@ -426,10 +456,12 @@ fn find_row_index(rows: &[SnapshotRow], row_signature: u64, data: &Value) -> Opt
         // it by id/equality rather than appending a duplicate.
     }
     if let Some(target_id) = data.get("id") {
-        rows.iter()
-            .position(|r| r.data.get("id") == Some(target_id))
+        rows.iter().position(|r| {
+            (row_signature == 0 || r.row_signature == 0) && r.data.get("id") == Some(target_id)
+        })
     } else {
-        rows.iter().position(|r| &r.data == data)
+        rows.iter()
+            .position(|r| (row_signature == 0 || r.row_signature == 0) && &r.data == data)
     }
 }
 
@@ -445,106 +477,134 @@ fn serialize_server_message(message: ServerMessage) -> Result<String, serde_json
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     hub: WebSocketHub,
+    snapshot_store: QuerySnapshotStore,
     query_ids: Vec<String>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, hub, query_ids, shutdown_rx))
+    ws.on_upgrade(move |socket| handle_socket(socket, hub, snapshot_store, query_ids, shutdown_rx))
+}
+
+#[derive(Debug)]
+struct QueryCursor {
+    snapshot_revision: u64,
+    delivered_revision: u64,
+}
+
+impl QueryCursor {
+    fn after_snapshot(revision: u64) -> Self {
+        Self {
+            snapshot_revision: revision,
+            delivered_revision: revision,
+        }
+    }
+
+    fn accept(&mut self, revision: u64) -> anyhow::Result<bool> {
+        if revision <= self.snapshot_revision {
+            return Ok(false);
+        }
+        anyhow::ensure!(
+            self.delivered_revision.checked_add(1) == Some(revision),
+            "dashboard query revision gap or out-of-order delta"
+        );
+        self.delivered_revision = revision;
+        Ok(true)
+    }
+}
+
+async fn send_snapshots(
+    sender: &mut SplitSink<WebSocket, Message>,
+    store: &QuerySnapshotStore,
+    query_ids: &[String],
+    cursors: &mut HashMap<String, QueryCursor>,
+) -> anyhow::Result<()> {
+    for query_id in query_ids {
+        let snapshot = store.get_snapshot(query_id).await;
+        let message = ServerMessage::QuerySnapshot {
+            query_id: query_id.clone(),
+            revision: snapshot.revision,
+            rows: snapshot.rows,
+        };
+        sender
+            .send(Message::Text(serialize_server_message(message)?))
+            .await?;
+        cursors.insert(
+            query_id.clone(),
+            QueryCursor::after_snapshot(snapshot.revision),
+        );
+    }
+    Ok(())
 }
 
 async fn handle_socket(
     socket: WebSocket,
     hub: WebSocketHub,
+    snapshot_store: QuerySnapshotStore,
     query_ids: Vec<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let (mut sender, mut receiver) = socket.split();
+    // Register before taking snapshots. Revisions exclude buffered deltas that
+    // the snapshots already contain, without losing updates during transmission.
     let mut hub_receiver = hub.subscribe();
-
-    // Build allowed set for validating subscription requests.
     let allowed_query_ids: HashSet<String> = query_ids.iter().cloned().collect();
-
-    // New clients are subscribed to all reaction queries by default.
-    let subscriptions = Arc::new(RwLock::new(allowed_query_ids.clone()));
-
-    let subscriptions_for_send = Arc::clone(&subscriptions);
-    let send = async move {
+    let session = async {
+        let mut cursors = HashMap::new();
+        // Keep the existing default subscription to all reaction queries.
+        send_snapshots(&mut sender, &snapshot_store, &query_ids, &mut cursors).await?;
         loop {
-            let hub_message = match hub_receiver.recv().await {
-                Ok(message) => message,
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!("dashboard websocket skipped {skipped} messages due to slow receiver");
-                    continue;
+            tokio::select! {
+                message = hub_receiver.recv() => {
+                    let hub_message = match message {
+                        Ok(message) => message,
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            anyhow::bail!("dashboard websocket lagged by {skipped}; reconnect for a fresh snapshot");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    };
+                    if let HubMessage::QueryResult(payload) = &hub_message {
+                        let Some(cursor) = cursors.get_mut(&payload.query_id) else {
+                            continue;
+                        };
+                        if !cursor.accept(payload.revision)? {
+                            continue;
+                        }
+                    }
+                    let text = serialize_server_message(hub_message.into_server_message())?;
+                    sender.send(Message::Text(text)).await?;
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-
-            if let HubMessage::QueryResult(payload) = &hub_message {
-                let is_subscribed = {
-                    let subscriptions = subscriptions_for_send.read().await;
-                    subscriptions.contains(&payload.query_id)
-                };
-                if !is_subscribed {
-                    continue;
-                }
-            }
-
-            let server_message = hub_message.into_server_message();
-            let text = match serialize_server_message(server_message) {
-                Ok(serialized) => serialized,
-                Err(err) => {
-                    error!("failed serializing websocket message: {err}");
-                    continue;
-                }
-            };
-
-            if sender.send(Message::Text(text)).await.is_err() {
-                break;
-            }
-        }
-    };
-
-    let subscriptions_for_receive = Arc::clone(&subscriptions);
-    let receive = async move {
-        while let Some(message_result) = receiver.next().await {
-            let message = match message_result {
-                Ok(message) => message,
-                Err(err) => {
-                    debug!("dashboard websocket receive error: {err}");
-                    break;
-                }
-            };
-
-            match message {
-                Message::Text(text) => match parse_client_message(text.as_ref()) {
-                    Ok(ClientMessage::Subscribe { query_ids }) => {
-                        let mut subscriptions = subscriptions_for_receive.write().await;
-                        for query_id in query_ids {
-                            if allowed_query_ids.contains(&query_id) {
-                                subscriptions.insert(query_id);
+                message = receiver.next() => {
+                    let Some(message) = message else { break };
+                    match message? {
+                        Message::Text(text) => match parse_client_message(text.as_ref()) {
+                            Ok(ClientMessage::Subscribe { query_ids }) => {
+                                let authorized: Vec<_> = query_ids.into_iter()
+                                    .filter(|id| allowed_query_ids.contains(id)).collect();
+                                send_snapshots(&mut sender, &snapshot_store, &authorized, &mut cursors).await?;
                             }
-                        }
+                            Ok(ClientMessage::Unsubscribe { query_ids }) => {
+                                for query_id in query_ids {
+                                    cursors.remove(&query_id);
+                                }
+                            }
+                            Err(err) => debug!("ignoring invalid websocket client message: {err}"),
+                        },
+                        Message::Close(_) => break,
+                        _ => {}
                     }
-                    Ok(ClientMessage::Unsubscribe { query_ids }) => {
-                        let mut subscriptions = subscriptions_for_receive.write().await;
-                        for query_id in query_ids {
-                            subscriptions.remove(&query_id);
-                        }
-                    }
-                    Err(err) => {
-                        debug!("ignoring invalid websocket client message: {err}");
-                    }
-                },
-                Message::Close(_) => break,
-                _ => {}
+                }
             }
         }
+        Ok::<(), anyhow::Error>(())
     };
 
     tokio::select! {
         biased;
         _ = shutdown_rx.wait_for(|signalled| *signalled) => {}
-        _ = send => {}
-        _ = receive => {}
+        result = session => {
+            if let Err(err) = result {
+                warn!("dashboard websocket closed; client must resynchronize: {err}");
+            }
+        }
     }
 }
 
@@ -605,7 +665,7 @@ mod tests {
             profiling: None,
         };
 
-        let hub_message = HubMessage::from_query_result(&query_result);
+        let hub_message = HubMessage::from_query_result(&query_result, 12_345_678_901_234_567_890);
         let serialized = serialize_server_message(hub_message.into_server_message())
             .expect("server message should serialize");
         let parsed: serde_json::Value =
@@ -613,6 +673,7 @@ mod tests {
 
         assert_eq!(parsed["type"], "query_result");
         assert_eq!(parsed["query_id"], "test-query");
+        assert_eq!(parsed["revision"], "12345678901234567890");
         assert_eq!(parsed["results"][0]["op"], "add");
         assert_eq!(parsed["results"][1]["op"], "update");
         assert_eq!(parsed["results"][2]["op"], "delete");
@@ -639,5 +700,201 @@ mod tests {
         let from_num: WebSocketResultDiff =
             serde_json::from_str(r#"{"op":"add","k":42,"data":{"id":1}}"#).unwrap();
         assert_eq!(from_num.row_signature, 42);
+    }
+
+    fn result(diff: ResultDiff) -> QueryResult {
+        QueryResult {
+            query_id: "q".into(),
+            sequence: 0,
+            timestamp: Utc::now(),
+            results: vec![diff],
+            metadata: HashMap::new(),
+            profiling: None,
+        }
+    }
+
+    fn add(value: i64) -> QueryResult {
+        result(ResultDiff::Add {
+            data: serde_json::json!({"value": value}),
+            row_signature: 99,
+        })
+    }
+
+    #[test]
+    fn snapshot_cursor_excludes_overlap_but_rejects_live_gaps_and_reordering() {
+        let mut cursor = QueryCursor::after_snapshot(10);
+        assert!(!cursor.accept(9).unwrap());
+        assert!(!cursor.accept(10).unwrap());
+        assert!(cursor.accept(11).unwrap());
+        assert!(cursor.accept(11).is_err());
+        assert!(cursor.accept(13).is_err());
+        assert!(cursor.accept(12).unwrap());
+    }
+
+    #[tokio::test]
+    async fn snapshot_boundary_preserves_updates_and_empty_deletes() {
+        let store = QuerySnapshotStore::new();
+        let hub = WebSocketHub::new(8);
+        let mut receiver = hub.subscribe();
+        store.apply_and_broadcast(&add(1), &hub).await.unwrap();
+        let snapshot = store.get_snapshot("q").await;
+        let mut cursor = QueryCursor::after_snapshot(snapshot.revision);
+        let HubMessage::QueryResult(overlap) = receiver.recv().await.unwrap() else {
+            panic!("expected query result")
+        };
+        assert!(!cursor.accept(overlap.revision).unwrap());
+        store.apply_and_broadcast(&add(2), &hub).await.unwrap();
+        let HubMessage::QueryResult(live) = receiver.recv().await.unwrap() else {
+            panic!("expected query result")
+        };
+        assert!(cursor.accept(live.revision).unwrap());
+        store
+            .apply_and_broadcast(
+                &result(ResultDiff::Delete {
+                    data: serde_json::json!({"value": 2}),
+                    row_signature: 99,
+                }),
+                &hub,
+            )
+            .await
+            .unwrap();
+        let empty = store.get_snapshot("q").await;
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.revision, 3);
+        let message = ServerMessage::QuerySnapshot {
+            query_id: "q".into(),
+            revision: empty.revision,
+            rows: empty.rows,
+        };
+        let wire = serde_json::to_value(message).unwrap();
+        assert_eq!(wire["rows"], serde_json::json!([]));
+        assert_eq!(wire["revision"], "3");
+    }
+
+    #[tokio::test]
+    async fn concurrent_updates_publish_in_revision_order() {
+        let store = QuerySnapshotStore::new();
+        let hub = WebSocketHub::new(8);
+        let mut receiver = hub.subscribe();
+        let first = add(1);
+        let second = add(2);
+        let (a, b) = tokio::join!(
+            store.apply_and_broadcast(&first, &hub),
+            store.apply_and_broadcast(&second, &hub),
+        );
+        a.unwrap();
+        b.unwrap();
+        let HubMessage::QueryResult(a) = receiver.recv().await.unwrap() else {
+            panic!("expected first query result")
+        };
+        let HubMessage::QueryResult(b) = receiver.recv().await.unwrap() else {
+            panic!("expected second query result")
+        };
+        assert_eq!((a.revision, b.revision), (1, 2));
+        let snapshot = store.get_snapshot("q").await;
+        assert_eq!(snapshot.revision, b.revision);
+        assert_eq!(Some(&snapshot.rows[0].data), b.results[0].data.as_ref());
+    }
+
+    #[tokio::test]
+    async fn revision_overflow_does_not_mutate_or_publish() {
+        let store = QuerySnapshotStore::new();
+        let hub = WebSocketHub::new(1);
+        let mut receiver = hub.subscribe();
+        store.snapshots.write().await.insert(
+            "q".into(),
+            QuerySnapshot {
+                rows: vec![],
+                revision: u64::MAX,
+            },
+        );
+        assert!(store.apply_and_broadcast(&add(1), &hub).await.is_err());
+        assert!(store.get_snapshot("q").await.rows.is_empty());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn websocket_resubscription_replaces_snapshot_then_streams_live() {
+        use axum::{routing::get, Router};
+        use tokio_tungstenite::{connect_async, tungstenite};
+
+        let store = QuerySnapshotStore::new();
+        let hub = WebSocketHub::new(8);
+        store.apply_and_broadcast(&add(1), &hub).await.unwrap();
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let socket_shutdown = shutdown.subscribe();
+        let socket_store = store.clone();
+        let socket_hub = hub.clone();
+        let app = Router::new().route(
+            "/ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                ws_upgrade(
+                    upgrade,
+                    socket_hub.clone(),
+                    socket_store.clone(),
+                    vec!["q".into(), "empty".into()],
+                    socket_shutdown.clone(),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.wait_for(|value| *value).await;
+                })
+                .await
+                .unwrap();
+        });
+        let (mut socket, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        async fn read(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> Value {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(message.to_text().unwrap()).unwrap()
+        }
+        let snapshot = read(&mut socket).await;
+        assert_eq!(snapshot["type"], "query_snapshot");
+        assert_eq!(snapshot["revision"], "1");
+        assert_eq!(snapshot["rows"][0]["v"]["value"], 1);
+        let empty = read(&mut socket).await;
+        assert_eq!(empty["query_id"], "empty");
+        assert_eq!(empty["rows"], serde_json::json!([]));
+        socket
+            .send(tungstenite::Message::Text(
+                r#"{"type":"subscribe","query_ids":["q"]}"#.into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(read(&mut socket).await["revision"], "1");
+        store.apply_and_broadcast(&add(2), &hub).await.unwrap();
+        let delta = read(&mut socket).await;
+        assert_eq!(delta["type"], "query_result");
+        assert_eq!(delta["revision"], "2");
+        assert_eq!(delta["results"][0]["data"]["value"], 2);
+        // A gap cannot be silently accepted: the reader must reconnect.
+        hub.broadcast_query_result(&add(3), 4);
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .unwrap();
+        assert!(matches!(
+            closed,
+            None | Some(Err(_)) | Some(Ok(tungstenite::Message::Close(_)))
+        ));
+        shutdown.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

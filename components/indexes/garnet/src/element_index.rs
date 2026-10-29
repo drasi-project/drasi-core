@@ -801,7 +801,7 @@ impl GarnetElementIndex {
 
             match self.get_element_internal(&element_key).await? {
                 Some(stored) => {
-                    let element: Element = stored.into();
+                    let element = Element::try_from(stored).map_err(IndexError::other)?;
                     results.push(Arc::new(element));
                 }
                 None => {
@@ -870,7 +870,9 @@ impl ElementIndex for GarnetElementIndex {
                 .is_some_and(|affinity| affinity.contains(slot))
             {
                 if let Some(element) = self.get_element_internal(&key).await? {
-                    rows.push(Arc::new(element.into()));
+                    rows.push(Arc::new(
+                        Element::try_from(element).map_err(IndexError::other)?,
+                    ));
                 }
             }
         }
@@ -888,7 +890,7 @@ impl ElementIndex for GarnetElementIndex {
             None => return Ok(None),
         };
 
-        let element: Element = stored.into();
+        let element = Element::try_from(stored).map_err(IndexError::other)?;
         Ok(Some(Arc::new(element)))
     }
 
@@ -898,7 +900,7 @@ impl ElementIndex for GarnetElementIndex {
         element: &Element,
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
-        let stored: StoredElement = element.into();
+        let stored = StoredElement::try_from(element).map_err(IndexError::other)?;
 
         self.set_element_internal(stored, slot_affinity).await?;
 
@@ -934,7 +936,7 @@ impl ElementIndex for GarnetElementIndex {
         // Get element data (checks buffer first via get_element_internal)
         match self.get_element_internal(&element_key).await? {
             Some(stored) => {
-                let element: Element = stored.into();
+                let element = Element::try_from(stored).map_err(IndexError::other)?;
                 Ok(Some(Arc::new(element)))
             }
             None => Ok(None),

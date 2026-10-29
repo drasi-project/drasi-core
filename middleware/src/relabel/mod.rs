@@ -95,10 +95,17 @@ impl RelabelMiddleware {
                     element: relabeled_element,
                 }])
             }
-            SourceChange::Update { element } => {
+            SourceChange::Replace { element } => Ok(vec![SourceChange::Replace {
+                element: self.relabel_element(element),
+            }]),
+            SourceChange::Update {
+                element,
+                removed_properties,
+            } => {
                 let relabeled_element = self.relabel_element(element);
                 Ok(vec![SourceChange::Update {
                     element: relabeled_element,
+                    removed_properties,
                 }])
             }
             SourceChange::Delete { metadata } => {

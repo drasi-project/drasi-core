@@ -507,6 +507,7 @@ fn append_watermarks(
         "composite bootstrap watermark bound exceeded"
     );
     for watermark in added {
+        watermark.validate()?;
         if let Some(source) = &watermark.source_id {
             ComponentId::try_new(source.as_str())?;
         }
@@ -698,6 +699,30 @@ impl ComputationBootstrapProvider for CompositeBootstrapProvider {
             .clone();
         Ok(state)
     }
+    fn take_input_replay(&self) -> Result<Vec<ChangeEnvelope>> {
+        self.available()?;
+        let mut replay = Vec::new();
+        for member in &self.members {
+            replay.extend(member.provider.take_input_replay()?);
+        }
+        Ok(replay)
+    }
+
+    fn input_origin(&self, stream: &super::StreamId) -> Result<Option<super::OutputEndpoint>> {
+        self.available()?;
+        let mut origin = None;
+        for member in &self.members {
+            if let Some(candidate) = member.provider.input_origin(stream)? {
+                anyhow::ensure!(
+                    origin.is_none(),
+                    "multiple bootstrap providers claim an input stream"
+                );
+                origin = Some(candidate);
+            }
+        }
+        Ok(origin)
+    }
+
     async fn stop(&self) -> Result<()> {
         if let Some(run) = self.current()? {
             run.stopped.send_replace(true);

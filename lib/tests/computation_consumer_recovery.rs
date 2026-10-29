@@ -99,7 +99,7 @@ fn change(sequence: u64, name: &str) -> ChangeEnvelope {
         if sequence == 1 {
             SourceChange::Insert { element }
         } else {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         },
         StreamId::try_new("people/out").unwrap(),
         sequence,
@@ -221,8 +221,8 @@ impl EnvelopeSink for Sink {
     fn completion(&self) -> SinkCompletion {
         self.completion
     }
-    fn supports_snapshot(&self) -> bool {
-        true
+    fn snapshot_consumer(&mut self, port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        (port.as_str() == "in").then_some(self as &mut dyn SnapshotConsumer)
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         let sequence = QueryChangeCodec::query_sequence(&input.envelope)?;
@@ -234,6 +234,10 @@ impl EnvelopeSink for Sink {
         self.state.sequences.lock().unwrap().push(sequence);
         Ok(())
     }
+}
+
+#[async_trait]
+impl SnapshotConsumer for Sink {
     async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         if self.state.block_snapshot.swap(false, Ordering::AcqRel) {
             self.state.entered.notify_one();
@@ -865,7 +869,7 @@ mod construction_scopes {
             .with_query(
                 Query::cypher("query")
                     .query(TEXT)
-                    .from_source("people")
+                    .from_input("people")
                     .enable_bootstrap(false)
                     .with_storage_backend(StorageBackendRef::Named("rocks".into()))
                     .build(),
@@ -1253,4 +1257,100 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
         .unwrap()
         .is_empty());
     resources.cleanup().unwrap().shutdown().await.unwrap();
+}
+
+struct PlainSink {
+    descriptor: ComponentDescriptor,
+}
+
+#[async_trait]
+impl ComputationComponent for PlainSink {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSink for PlainSink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn snapshot_support_is_absent_by_default_and_a_wrapped_unsupported_snapshot_fails() {
+    let mut plain = PlainSink {
+        descriptor: Sink::new(Arc::new(Handled::default())).descriptor,
+    };
+    let port = PortId::try_new("in").unwrap();
+    assert!(plain.snapshot_consumer(&port).is_none());
+
+    let mut query = query(4).await;
+    emit(&mut query, 1, "Alice").await;
+    let progress = Arc::new(MemoryConsumerProgress::default());
+    let mut sink = CheckpointedSink::new(Box::new(plain), progress.clone()).unwrap();
+    assert!(sink.snapshot_consumer(&port).is_none());
+    let mut replay = replay(
+        query.results(),
+        progress.clone(),
+        ConsumerRecoveryPolicy::Strict,
+    );
+    replay.start().await.unwrap();
+    let snapshot = replay.on_wakeup().await.unwrap().pop().unwrap().envelope;
+    assert!(QueryChangeCodec::is_snapshot(&snapshot));
+    assert!(sink.handle(input(snapshot)).await.is_err());
+    assert_eq!(progress.load("query").await.unwrap(), None);
+    query.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpointed_snapshot_handler_is_port_scoped_and_keeps_the_checkpointed_workflow() {
+    let mut query = query(4).await;
+    emit(&mut query, 1, "Alice").await;
+    let progress = Arc::new(MemoryConsumerProgress::default());
+    let handled = Arc::new(Handled::default());
+    let mut sink = sink(progress.clone(), handled.clone(), false);
+    let mut replay = replay(
+        query.results(),
+        progress.clone(),
+        ConsumerRecoveryPolicy::Strict,
+    );
+    replay.start().await.unwrap();
+    let snapshot = replay.on_wakeup().await.unwrap().pop().unwrap().envelope;
+    let live = emit(&mut query, 2, "Bob").await;
+
+    let port = PortId::try_new("in").unwrap();
+    assert!(sink
+        .snapshot_consumer(&PortId::try_new("other").unwrap())
+        .is_none());
+    assert!(sink
+        .snapshot_consumer(&port)
+        .expect("the inner sink handles snapshots on in")
+        .replace_snapshot(input(live))
+        .await
+        .is_err());
+    assert_eq!(handled.replacements.load(Ordering::Acquire), 0);
+    assert_eq!(progress.load("query").await.unwrap(), None);
+
+    sink.snapshot_consumer(&port)
+        .expect("the inner sink handles snapshots on in")
+        .replace_snapshot(input(snapshot))
+        .await
+        .unwrap();
+    assert_eq!(handled.replacements.load(Ordering::Acquire), 1);
+    assert_eq!(handled.names(), ["Alice"]);
+    assert_eq!(
+        progress.load("query").await.unwrap(),
+        Some(checkpoint(&query.results(), 1))
+    );
+    query.stop().await.unwrap();
 }

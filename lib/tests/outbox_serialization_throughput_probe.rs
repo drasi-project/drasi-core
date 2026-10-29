@@ -9,21 +9,14 @@ use drasi_lib::{
 };
 use serde_json::json;
 
-#[test]
-#[ignore = "diagnostic plugin serialization timing; not a computation outbox or recovery baseline"]
-#[allow(
-    clippy::print_stdout,
-    reason = "diagnostic probe emits CSV timing results"
-)]
-fn measure_plugin_result_encoding_cost() {
-    let iterations = 100000;
+fn result_cases() -> Vec<(&'static str, QueryResult)> {
     let room_before =
         json!({"RoomId":"R_000_001_000","Temperature":5110,"Humidity":5061,"Co2":4769});
     let room_after =
         json!({"RoomId":"R_000_001_000","Temperature":5111,"Humidity":5061,"Co2":4769});
     let floor_before = json!({"FloorId":"F_000_001","AvgTemperature":4973.5,"MaxCo2":5053.0,"MinHumidity":4809.0,"RoomCount":4});
     let floor_after = json!({"FloorId":"F_000_001","AvgTemperature":4973.75,"MaxCo2":5053.0,"MinHumidity":4809.0,"RoomCount":4});
-    let cases = [
+    [
         (
             "room-update",
             ResultDiff::Update {
@@ -52,26 +45,50 @@ fn measure_plugin_result_encoding_cost() {
                 row_signature: 8918764620589370281,
             },
         ),
-    ];
-    println!("case,round,encoding,iterations,encoded_bytes,encode_us");
-    for (label, diff) in cases {
-        let result = QueryResult::with_profiling(
-            "building-comfort".to_owned(),
-            99900,
-            chrono::DateTime::from_timestamp(1700000000, 0).unwrap(),
-            vec![diff],
-            HashMap::from([
-                ("source".to_owned(), json!("drasi-core")),
-                ("result_count".to_owned(), json!(1)),
-            ]),
-            ProfilingMetadata::new(),
-        );
+    ]
+    .into_iter()
+    .map(|(label, diff)| {
+        (
+            label,
+            QueryResult::with_profiling(
+                "building-comfort".to_owned(),
+                99900,
+                chrono::DateTime::from_timestamp(1700000000, 0).expect("valid fixture timestamp"),
+                vec![diff],
+                HashMap::from([
+                    ("source".to_owned(), json!("drasi-core")),
+                    ("result_count".to_owned(), json!(1)),
+                ]),
+                ProfilingMetadata::new(),
+            ),
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn named_plugin_result_encoding_preserves_updates_and_aggregations() {
+    for (label, result) in result_cases() {
         let named = rmp_serde::to_vec_named(&result).unwrap();
         let restored: QueryResult = rmp_serde::from_slice(&named).unwrap();
         assert_eq!(
             serde_json::to_value(&restored).unwrap(),
-            serde_json::to_value(&result).unwrap()
+            serde_json::to_value(&result).unwrap(),
+            "{label}"
         );
+    }
+}
+
+#[test]
+#[ignore = "diagnostic plugin serialization timing; not a computation outbox or recovery baseline"]
+#[allow(
+    clippy::print_stdout,
+    reason = "diagnostic probe emits CSV timing results"
+)]
+fn measure_plugin_result_encoding_cost() {
+    let iterations = 100000;
+    println!("case,round,encoding,iterations,encoded_bytes,encode_us");
+    for (label, result) in result_cases() {
         for round in 0..3 {
             let encodings = if round % 2 == 0 {
                 [false, true]

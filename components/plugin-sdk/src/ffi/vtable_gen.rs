@@ -3333,7 +3333,7 @@ fn wrap_subscription_response(
         let op = match &wrapper.event {
             drasi_lib::channels::events::SourceEvent::Change(change) => match change {
                 SourceChange::Insert { .. } => FfiChangeOp::Insert,
-                SourceChange::Update { .. } => FfiChangeOp::Update,
+                SourceChange::Update { .. } | SourceChange::Replace { .. } => FfiChangeOp::Update,
                 SourceChange::Delete { .. } => FfiChangeOp::Delete,
                 SourceChange::Future { .. } => FfiChangeOp::Update,
             },

@@ -100,7 +100,7 @@ pub struct SourceRuntime {
 /// let query_info = core.get_query_info("active_orders").await?;
 /// println!("Query: {}", query_info.query);
 /// println!("Status: {:?}", query_info.status);
-/// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
+/// println!("Inputs: {:?}", query_info.inputs);
 ///
 /// if let Some(joins) = query_info.joins {
 ///     println!("Synthetic joins configured: {}", joins.len());
@@ -119,8 +119,8 @@ pub struct QueryRuntime {
     /// Error message if status is Error
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
-    /// Source subscriptions with middleware pipelines
-    pub source_subscriptions: Vec<super::schema::SourceSubscriptionConfig>,
+    /// Upstream component inputs with middleware pipelines
+    pub inputs: Vec<super::schema::QueryInputConfig>,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<super::schema::QueryJoinConfig>>,
@@ -187,7 +187,7 @@ impl From<QueryConfig> for QueryRuntime {
             query: config.query,
             status: ComponentStatus::Stopped,
             error_message: None,
-            source_subscriptions: config.sources,
+            inputs: config.inputs,
             joins: config.joins,
         }
     }
@@ -222,13 +222,13 @@ impl From<QueryConfig> for QueryRuntime {
 /// queries:
 ///   - id: q1
 ///     query: "MATCH (n) RETURN n"
-///     source_subscriptions:
+///     inputs:
 ///       - source_id: s1
 ///     # priority_queue_capacity will be 50000 (inherited)
 ///
 ///   - id: q2
 ///     query: "MATCH (m) RETURN m"
-///     source_subscriptions:
+///     inputs:
 ///       - source_id: s1
 ///     priority_queue_capacity: 100000  # Override global
 /// ```
@@ -250,6 +250,8 @@ pub struct RuntimeConfig {
     pub global_priority_queue_capacity: Option<usize>,
     /// Original global dispatch buffer capacity (before applying to queries)
     pub global_dispatch_buffer_capacity: Option<usize>,
+    /// Explicit instance activation deadline, preserving omission in snapshots.
+    pub activation_timeout_secs: Option<u64>,
     /// Original storage backend configurations
     pub storage_backends: Vec<crate::indexes::StorageBackendConfig>,
     /// Global default recovery policy for all queries.
@@ -288,6 +290,7 @@ impl std::fmt::Debug for RuntimeConfig {
                 &self.global_dispatch_buffer_capacity,
             )
             .field("storage_backends", &self.storage_backends)
+            .field("activation_timeout_secs", &self.activation_timeout_secs)
             .field("default_recovery_policy", &self.default_recovery_policy)
             .finish()
     }
@@ -368,6 +371,7 @@ impl RuntimeConfig {
             queries,
             global_priority_queue_capacity,
             global_dispatch_buffer_capacity,
+            activation_timeout_secs: config.activation_timeout_secs,
             storage_backends,
             default_recovery_policy,
         }

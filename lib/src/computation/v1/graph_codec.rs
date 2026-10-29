@@ -2,3 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 
 pub use drasi_computation_contracts::graph_codec::*;
+pub use drasi_computation_contracts::{
+    ElementImage, ElementImageError, ElementPatch, ElementPatchError, ElementPatchKind,
+};

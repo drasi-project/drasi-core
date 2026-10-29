@@ -22,7 +22,10 @@ use crate::{
         AccumulatorIndex, ElementIndex, IndexError, IndexSet, NoOpSessionControl, ResultKey,
         ResultOwner,
     },
-    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
+    models::{
+        ChangeOrdering, Element, ElementMetadata, ElementPropertyMap, ElementReference,
+        SourceChange,
+    },
     query::QueryBuilder,
 };
 
@@ -147,6 +150,7 @@ fn insert(source: &str, id: &str, time: u64, value: i64) -> SourceChange {
 
 fn update(source: &str, id: &str, time: u64, value: i64) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: node(source, id, time, value),
     }
 }
@@ -397,6 +401,7 @@ async fn incompatible_insert_and_update_fail_before_changing_the_existing_elemen
                 .query
                 .process_source_change(if is_update {
                     SourceChange::Update {
+                        removed_properties: Default::default(),
                         element: replacement,
                     }
                 } else {
@@ -426,4 +431,450 @@ async fn incompatible_insert_and_update_fail_before_changing_the_existing_elemen
             subject.query.shutdown().await.unwrap();
         }
     }
+}
+
+const NOTED: &str = "MATCH (n:Item) RETURN n.key AS key, n.value AS value, n.note AS note";
+
+fn noted(time: u64, value: i64, note: &str) -> Element {
+    Element::Node {
+        metadata: metadata("a", "one", time),
+        properties: ElementPropertyMap::from(json!({"key":"a/one","value":value,"note":note})),
+    }
+}
+
+fn patch(time: u64, properties: serde_json::Value, removed: &[&str]) -> SourceChange {
+    SourceChange::update_with_removals(
+        Element::Node {
+            metadata: metadata("a", "one", time),
+            properties: ElementPropertyMap::from(properties),
+        },
+        removed.iter().map(|name| name.to_string()).collect(),
+    )
+    .unwrap()
+}
+
+async fn stored(subject: &Subject) -> Option<Arc<Element>> {
+    subject
+        .store
+        .elements
+        .get_element(&ElementReference::new("a", "one"))
+        .await
+        .unwrap()
+}
+
+fn int(value: i64) -> crate::models::ElementValue {
+    crate::models::ElementValue::Integer(value)
+}
+
+fn text(value: &str) -> crate::models::ElementValue {
+    crate::models::ElementValue::String(Arc::from(value))
+}
+
+fn assert_row(
+    row: &QueryVariables,
+    value: impl Into<VariableValue>,
+    note: impl Into<VariableValue>,
+) {
+    assert_eq!(row.get("value"), Some(&value.into()));
+    assert_eq!(row.get("note"), Some(&note.into()));
+}
+
+#[tokio::test]
+async fn update_removes_only_the_named_property_and_keeps_omitted_ones() {
+    let mut subject = Subject::new(NOTED).await;
+    subject
+        .apply(SourceChange::Insert {
+            element: noted(10, 1, "keep"),
+        })
+        .await;
+
+    // A removal deletes the property; the omitted key and value stay.
+    let changes = subject
+        .apply(patch(20, json!({"value":2}), &["note"]))
+        .await;
+    let [QueryPartEvaluationContext::Updating { before, after, .. }] = changes.as_slice() else {
+        panic!("removing a property is one row update: {changes:?}");
+    };
+    assert_row(before, 1, "keep");
+    assert_row(after, 2, VariableValue::Null);
+    let element = stored(&subject).await.unwrap();
+    let properties = element.get_properties();
+    assert!(!properties.contains_key("note"));
+    assert_eq!(properties.get("key"), Some(&text("a/one")));
+    assert_eq!(properties.get("value"), Some(&int(2)));
+    assert_eq!(element.get_effective_from(), 20);
+
+    // Omitting a property is not a removal: the earlier value is kept.
+    subject
+        .apply(SourceChange::Insert {
+            element: noted(30, 2, "again"),
+        })
+        .await;
+    subject.apply(patch(40, json!({"value":3}), &[])).await;
+    assert_eq!(
+        stored(&subject).await.unwrap().get_properties().get("note"),
+        Some(&text("again"))
+    );
+    assert_row(subject.rows.values().next().unwrap(), 3, "again");
+}
+
+#[tokio::test]
+async fn update_setting_null_stores_null_instead_of_removing_the_property() {
+    let mut subject = Subject::new(NOTED).await;
+    subject
+        .apply(SourceChange::Insert {
+            element: noted(10, 1, "keep"),
+        })
+        .await;
+    subject.apply(patch(20, json!({"note":null}), &[])).await;
+    let element = stored(&subject).await.unwrap();
+    assert_eq!(
+        element.get_properties().get("note"),
+        Some(&crate::models::ElementValue::Null)
+    );
+    assert!(element.get_properties().contains_key("note"));
+    assert_eq!(element.get_properties().get("value"), Some(&int(1)));
+    assert_row(
+        subject.rows.values().next().unwrap(),
+        1,
+        VariableValue::Null,
+    );
+}
+
+#[tokio::test]
+async fn update_without_a_base_creates_the_element_and_ignores_absent_removals() {
+    let mut subject = Subject::new(NOTED).await;
+    let changes = subject
+        .apply(patch(10, json!({"key":"a/one","value":5}), &["note"]))
+        .await;
+    assert!(matches!(
+        changes.as_slice(),
+        [QueryPartEvaluationContext::Adding { .. }]
+    ));
+    let element = stored(&subject).await.unwrap();
+    assert!(!element.get_properties().contains_key("note"));
+    assert_eq!(element.get_properties().get("value"), Some(&int(5)));
+    assert_row(
+        subject.rows.values().next().unwrap(),
+        5,
+        VariableValue::Null,
+    );
+}
+
+#[tokio::test]
+async fn replace_drops_omitted_properties_and_updates_the_row_in_place() {
+    let mut subject = Subject::new(NOTED).await;
+    subject
+        .apply(SourceChange::Insert {
+            element: noted(10, 1, "gone"),
+        })
+        .await;
+    let replacement = Element::Node {
+        metadata: metadata("a", "one", 20),
+        properties: ElementPropertyMap::from(json!({"key":"a/one","value":9})),
+    };
+    let changes = subject
+        .apply(SourceChange::replace(replacement.clone()))
+        .await;
+    // One full replacement is one row update, not an addition or delete and insert.
+    let [QueryPartEvaluationContext::Updating { before, after, .. }] = changes.as_slice() else {
+        panic!("replacing an element is one row update: {changes:?}");
+    };
+    assert_row(before, 1, "gone");
+    assert_row(after, 9, VariableValue::Null);
+    assert_eq!(stored(&subject).await.as_deref(), Some(&replacement));
+
+    // Without an existing element a replacement creates it.
+    let mut fresh = Subject::new(NOTED).await;
+    let changes = fresh.apply(SourceChange::replace(replacement)).await;
+    assert!(matches!(
+        changes.as_slice(),
+        [QueryPartEvaluationContext::Adding { .. }]
+    ));
+}
+
+#[tokio::test]
+async fn update_setting_and_removing_one_property_fails_before_changing_state() {
+    let mut subject = Subject::new(NOTED).await;
+    let initial = noted(10, 1, "keep");
+    subject
+        .apply(SourceChange::Insert {
+            element: initial.clone(),
+        })
+        .await;
+    let error = subject
+        .query
+        .process_source_change(SourceChange::Update {
+            element: Element::Node {
+                metadata: metadata("a", "one", 20),
+                properties: ElementPropertyMap::from(json!({"note":"set"})),
+            },
+            removed_properties: ["note".to_string()].into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ComputationQueryError::Evaluation(EvaluationError::InvalidSourceChange(
+            crate::models::SourceChangeError::ConflictingProperty { ref property, .. }
+        )) if property == "note"
+    ));
+    assert_eq!(stored(&subject).await.as_deref(), Some(&initial));
+    subject.query.shutdown().await.unwrap();
+}
+
+struct Stamp;
+
+#[async_trait::async_trait]
+impl crate::interface::SourceMiddleware for Stamp {
+    async fn process(
+        &self,
+        change: SourceChange,
+        _: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, crate::interface::MiddlewareError> {
+        fn stamped(mut element: Element) -> Element {
+            if let Element::Node { properties, .. } = &mut element {
+                properties.insert("tag", crate::models::ElementValue::String(Arc::from("ran")));
+            }
+            element
+        }
+        Ok(vec![match change {
+            SourceChange::Insert { element } => SourceChange::Insert {
+                element: stamped(element),
+            },
+            SourceChange::Replace { element } => SourceChange::replace(stamped(element)),
+            SourceChange::Update {
+                element,
+                removed_properties,
+            } => SourceChange::Update {
+                element: stamped(element),
+                removed_properties,
+            },
+            other => other,
+        }])
+    }
+}
+
+struct StampFactory;
+
+impl crate::interface::SourceMiddlewareFactory for StampFactory {
+    fn name(&self) -> String {
+        "stamp".into()
+    }
+
+    fn create(
+        &self,
+        _: &crate::models::SourceMiddlewareConfig,
+    ) -> Result<Arc<dyn crate::interface::SourceMiddleware>, crate::interface::MiddlewareSetupError>
+    {
+        Ok(Arc::new(Stamp))
+    }
+}
+
+const TAGGED: &str =
+    "MATCH (n:Item) RETURN n.key AS key, n.value AS value, n.note AS note, n.tag AS tag";
+const OUTPUT: &str = "drasi.output/0123abcd";
+
+impl Store {
+    /// Pipeline `stamp` is registered only under `pipeline_key`.
+    async fn query_with_pipeline(&self, pipeline_key: &str) -> ComputationQuery {
+        let functions = Arc::new(FunctionRegistry::new());
+        let mut registry = crate::middleware::MiddlewareTypeRegistry::new();
+        registry.register(Arc::new(StampFactory));
+        let builder = QueryBuilder::new(TAGGED, Arc::new(CypherParser::new(functions.clone())))
+            .with_function_registry(functions)
+            .with_middleware_registry(Arc::new(registry))
+            .with_source_middleware(Arc::new(crate::models::SourceMiddlewareConfig {
+                kind: Arc::from("stamp"),
+                name: Arc::from("stamp"),
+                config: Default::default(),
+            }))
+            .with_source_pipeline(pipeline_key, &["stamp".to_string()]);
+        let resources = ComputationIndexes::try_new(
+            IndexSet {
+                element_index: self.elements.clone(),
+                archive_index: self.elements.clone(),
+                result_index: self.results.clone(),
+                future_queue: self.futures.clone(),
+                session_control: Arc::new(NoOpSessionControl),
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        ComputationQuery::try_build(builder, resources)
+            .await
+            .unwrap()
+    }
+}
+
+async fn stamped_row(
+    pipeline_key: &str,
+    change: SourceChange,
+    scope: Option<&str>,
+) -> (Subject, Vec<QueryPartEvaluationContext>) {
+    let store = Store::new();
+    let query = store.query_with_pipeline(pipeline_key).await;
+    let mut batch = crate::computation::QueryInputBatch::from(vec![change]);
+    if let Some(scope) = scope {
+        batch = batch.with_input_scope(scope);
+    }
+    let results = query
+        .process_source_changes_with_non_atomic_result_hook(batch, |_| async { Ok(()) })
+        .await
+        .unwrap();
+    let results = results.to_vec();
+    (
+        Subject {
+            store,
+            query,
+            rows: HashMap::new(),
+        },
+        results,
+    )
+}
+
+fn tag_of(results: &[QueryPartEvaluationContext]) -> VariableValue {
+    let [QueryPartEvaluationContext::Adding { after, .. }] = results else {
+        panic!("expected one added row: {results:?}");
+    };
+    after.get("tag").cloned().unwrap()
+}
+
+#[tokio::test]
+async fn input_scope_selects_the_pipeline_without_changing_foreign_element_identity() {
+    let change = insert(OUTPUT, "one", 10, 1);
+    let (subject, results) = stamped_row("upstream", change, Some("upstream")).await;
+    assert_eq!(tag_of(&results), VariableValue::from("ran"));
+
+    let reference = ElementReference::new(OUTPUT, "one");
+    let stored = subject
+        .store
+        .elements
+        .get_element(&reference)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.get_reference(), &reference);
+    assert_eq!(stored.get_effective_from(), 10);
+    assert!(subject
+        .store
+        .elements
+        .get_element(&ElementReference::new("upstream", "one"))
+        .await
+        .unwrap()
+        .is_none());
+    subject.query.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn without_input_scope_the_element_namespace_still_selects_the_pipeline() {
+    let (subject, results) = stamped_row("upstream", insert("upstream", "one", 10, 1), None).await;
+    assert_eq!(tag_of(&results), VariableValue::from("ran"));
+    subject.query.shutdown().await.unwrap();
+
+    // The foreign namespace has no pipeline, so a named pipeline cannot run.
+    let (subject, results) = stamped_row("upstream", insert(OUTPUT, "one", 10, 1), None).await;
+    assert_eq!(tag_of(&results), VariableValue::Null);
+    subject.query.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn input_scope_without_a_pipeline_does_not_fall_back_to_the_element_namespace() {
+    let (subject, results) = stamped_row(
+        "upstream",
+        insert("upstream", "one", 10, 1),
+        Some("another-input"),
+    )
+    .await;
+    assert_eq!(tag_of(&results), VariableValue::Null);
+    subject.query.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn input_scope_preserves_replace_removals_and_producer_sequence_ordering() {
+    let store = Store::new();
+    let query = store.query_with_pipeline("upstream").await;
+    let run = |changes: Vec<SourceChange>, ordering| {
+        crate::computation::QueryInputBatch::new(changes, ordering).with_input_scope("upstream")
+    };
+    let element = |time: u64, properties: serde_json::Value| Element::Node {
+        metadata: metadata(OUTPUT, "one", time),
+        properties: ElementPropertyMap::from(properties),
+    };
+    let stored = || async {
+        store
+            .elements
+            .get_element(&ElementReference::new(OUTPUT, "one"))
+            .await
+            .unwrap()
+            .unwrap()
+    };
+
+    let first = element(
+        100,
+        json!({"key":"k","value":1,"note":"keep","extra":"drop"}),
+    );
+    query
+        .process_source_changes_with_non_atomic_result_hook(
+            run(
+                vec![SourceChange::Insert { element: first }],
+                ChangeOrdering::EventTime,
+            ),
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+
+    // An earlier time is accepted only because the owner declared producer order.
+    let patch = SourceChange::update_with_removals(
+        element(50, json!({"value":2})),
+        ["extra".to_string()].into(),
+    )
+    .unwrap();
+    query
+        .process_source_changes_with_non_atomic_result_hook(
+            run(vec![patch], ChangeOrdering::ProducerSequence),
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+    let current = stored().await;
+    assert_eq!(current.get_effective_from(), 50);
+    let properties = current.get_properties();
+    assert_eq!(properties.get("value"), Some(&int(2)));
+    assert_eq!(properties.get("note"), Some(&text("keep")));
+    assert_eq!(properties.get("tag"), Some(&text("ran")));
+    assert!(properties.get("extra").is_none());
+
+    let replacement = SourceChange::replace(element(40, json!({"key":"k","value":3})));
+    query
+        .process_source_changes_with_non_atomic_result_hook(
+            run(vec![replacement], ChangeOrdering::ProducerSequence),
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+    let current = stored().await;
+    let properties = current.get_properties();
+    assert_eq!(current.get_effective_from(), 40);
+    assert_eq!(properties.get("value"), Some(&int(3)));
+    assert_eq!(properties.get("tag"), Some(&text("ran")));
+    assert!(properties.get("note").is_none());
+
+    // Event-time ordering still rejects the stale change under the same scope.
+    let stale = SourceChange::Insert {
+        element: element(10, json!({"key":"k","value":9})),
+    };
+    query
+        .process_source_changes_with_non_atomic_result_hook(
+            run(vec![stale], ChangeOrdering::EventTime),
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored().await.get_effective_from(), 40);
+    query.shutdown().await.unwrap();
 }

@@ -376,9 +376,11 @@ impl Runtime {
         self: &Arc<Self>,
         graph_owner: &Arc<super::instance::InstanceGraph>,
     ) -> anyhow::Result<()> {
-        let mut builder = self
-            .services
-            .declare(ComputationGraph::builder("__drasi_lib_runtime__"))?;
+        let mut builder = self.services.declare(
+            ComputationGraph::builder("__drasi_lib_runtime__").activation_timeout(
+                std::time::Duration::from_secs(self.config.activation_timeout_secs.unwrap_or(300)),
+            ),
+        )?;
         for (name, provider) in self.config.index_factory.configured_providers() {
             // Provider names are configuration keys, not validated graph identifiers.
             let id = index_resource_id(&name)?;
@@ -450,10 +452,22 @@ impl Runtime {
                 }
                 _ => continue,
             };
-            for source in config.sources {
+            for source in config.inputs {
+                if batch
+                    .definition
+                    .relationships
+                    .iter()
+                    .chain(batch.definition.boundary_relationships.iter())
+                    .any(|relationship| {
+                        relationship.definition.from.component.as_str() == source.component
+                            && relationship.definition.to.component == *node.descriptor.id()
+                    })
+                {
+                    continue;
+                }
                 if !spec.dependencies.contains_key("declaration") {
                     let resource =
-                        ComputationPipelineBuilder::source_resource_id(&source.source_id)?;
+                        ComputationPipelineBuilder::source_resource_id(&source.component)?;
                     let Some(binding) = batch.bindings.resources.get(&resource) else {
                         continue;
                     };
@@ -467,7 +481,7 @@ impl Runtime {
                     let Some(record) = records
                         .as_ref()
                         .expect("source records were loaded")
-                        .get(&source.source_id)
+                        .get(&source.component)
                     else {
                         continue;
                     };
@@ -479,11 +493,11 @@ impl Runtime {
                         continue;
                     }
                 }
-                let producer = ComponentId::try_new(source.source_id.as_str())?;
+                let producer = ComponentId::try_new(source.component.as_str())?;
                 subscriptions.insert((producer.clone(), node.descriptor.id().clone()));
                 let reader = ComputationPipelineBuilder::source_component_id(
                     node.descriptor.id().as_str(),
-                    &source.source_id,
+                    &source.component,
                 )?;
                 if batch
                     .definition
@@ -912,6 +926,7 @@ impl Runtime {
             self.services.clone(),
             self.changed.clone(),
             self.control()?,
+            Arc::downgrade(self),
         );
         let handle = self
             .register(
@@ -990,6 +1005,7 @@ impl Runtime {
         }
         let batch = self.ordinary_query_batch(&config, None).await?;
         let handle = self.install_ordinary_query(batch, id, start).await?;
+        self.refresh_pending_query_inputs_locked().await?;
         self.notify();
         Ok(handle)
     }
@@ -1121,8 +1137,11 @@ impl Runtime {
             let report = control
                 .reconcile(preview, TopologyBindings::default())
                 .await?;
-            if report.summary != OperationSummary::Completed {
-                anyhow::bail!("native creation retry failed: {report:?}");
+            if !report.committed || report.summary != OperationSummary::Completed {
+                return Err(
+                    anyhow::Error::new(LifecycleReportError::Reconciliation(report))
+                        .context("native creation retry failed"),
+                );
             }
         } else if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
             self.stop_record(record).await?;
@@ -1454,8 +1473,11 @@ impl Runtime {
                     .with_cleanup(new.owner.clone()),
             );
             let report = control.reconcile(preview, bindings).await?;
-            if report.summary != OperationSummary::Completed {
-                anyhow::bail!("native reconfiguration failed: {report:?}");
+            if !report.committed || report.summary != OperationSummary::Completed {
+                return Err(
+                    anyhow::Error::new(LifecycleReportError::Reconciliation(report))
+                        .context("native reconfiguration failed"),
+                );
             }
             Ok::<_, anyhow::Error>(())
         }
@@ -1576,6 +1598,7 @@ impl Runtime {
             self.services.clone(),
             self.changed.clone(),
             self.control()?,
+            Arc::downgrade(self),
         );
         let replacement = self
             .replace_record(
@@ -1656,12 +1679,34 @@ impl Runtime {
     }
     pub(crate) async fn start_kind(self: &Arc<Self>, kind: &str) -> anyhow::Result<()> {
         let publication = self.control()?.registry_snapshot();
+        let mut failures = Vec::new();
         if kind == "query" {
             for id in self.ordinary_queries_at(&publication)?.keys() {
                 let observed = &publication.observed.components[id];
                 if publication.desired.lifecycle_policies[id].auto_start && !is_active(observed) {
                     if let Err(error) = self.start_component(id.as_str(), "query").await {
-                        log::warn!("Query startup failed: {error:#}");
+                        let observed = self.control()?.observed();
+                        let waiting = error
+                            .chain()
+                            .find_map(|cause| match cause.downcast_ref::<LifecycleReportError>() {
+                                Some(LifecycleReportError::Start(report))
+                                    if report.components.contains_key(id) =>
+                                {
+                                    Some(report)
+                                }
+                                _ => None,
+                            })
+                            .is_some_and(|report| {
+                                report.components.keys().all(|member| {
+                                    observed
+                                        .components
+                                        .get(member)
+                                        .is_some_and(|node| node.failure.is_none())
+                                }) && accept_waiting_start(report.clone(), &observed).is_ok()
+                            });
+                        if !waiting {
+                            failures.push(error.context(format!("query {id}")));
+                        }
                     }
                 }
             }
@@ -1676,7 +1721,6 @@ impl Runtime {
             })
             .cloned()
             .collect();
-        let mut failures = Vec::new();
         for record in records {
             let result = async {
                 if self.active(&record)? {
@@ -1699,7 +1743,6 @@ impl Runtime {
                     "{} was replaced or removed concurrently; its lifecycle is no longer this sweep's",
                     record.node
                 ),
-                Err(error) if kind == "query" => log::warn!("Query startup failed: {error:#}"),
                 Err(error) => failures.push(error),
             }
         }
@@ -1824,18 +1867,61 @@ impl Runtime {
         }
         Ok(())
     }
-    pub(crate) async fn subscriptions_complete(&self) -> anyhow::Result<()> {
+    pub(crate) async fn subscriptions_complete(self: &Arc<Self>) -> anyhow::Result<()> {
+        let publication = self.control()?.registry_snapshot();
+        let ordinary = self.ordinary_queries_at(&publication)?;
+        let mut queries = ordinary
+            .keys()
+            .map(|id| self.native_query_configuration_at(&publication, id.as_str()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for node in publication.desired.nodes.iter() {
+            let id = node.descriptor.id();
+            if !ordinary.contains_key(id) {
+                if let Some(api) = publication.query_api(id) {
+                    queries.push(api.config.clone());
+                }
+            }
+        }
         let sources: Vec<_> = self
             .current_records()
             .await?
             .values()
             .filter_map(|record| match &record.value {
-                Value::Source(source) => Some(source.source.clone()),
+                Value::Source(source) => Some(source.clone()),
                 _ => None,
             })
             .collect();
         for source in sources {
-            source.on_subscriptions_complete().await;
+            let mut complete = true;
+            for query in queries.iter().filter(|query| {
+                query
+                    .inputs
+                    .iter()
+                    .any(|input| input.component == source.source.id())
+            }) {
+                let id = ComponentId::try_new(query.id.as_str())?;
+                let requested = query.auto_start
+                    || publication
+                        .observed
+                        .components
+                        .get(&id)
+                        .is_some_and(|state| state.started || state.lifecycle_requested);
+                if requested {
+                    let expected = query
+                        .inputs
+                        .iter()
+                        .map(|input| &input.component)
+                        .collect::<BTreeSet<_>>()
+                        .len();
+                    if self.query(&query.id).await?.subscription_count().await != expected {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                source.notify_subscriptions_complete().await;
+            }
         }
         Ok(())
     }
@@ -2003,31 +2089,83 @@ impl Runtime {
             _ => unreachable!(),
         }
     }
-    pub(crate) async fn graph_schema(&self) -> anyhow::Result<crate::schema::GraphSchema> {
-        let records: Vec<_> = self.current_records().await?.values().cloned().collect();
-        let mut schema = crate::schema::GraphSchema::default();
-        for record in &records {
-            if let Value::Source(source) = &record.value {
-                if source.source.id() == crate::sources::COMPONENT_GRAPH_SOURCE_ID {
-                    continue;
-                }
-                if let Some(source_schema) = source
-                    .source
-                    .describe_schema()
-                    .filter(|schema| !schema.is_empty())
-                {
-                    schema.merge_source_schema(source.source.id(), &source_schema);
-                } else {
-                    schema.record_source_without_schema(source.source.id());
+    pub(crate) fn query_progress_metrics(
+        &self,
+    ) -> anyhow::Result<Vec<crate::metrics::QueryProgressMetricsSnapshot>> {
+        let control = self.control()?;
+        anyhow::ensure!(
+            !matches!(
+                control.state(),
+                GraphState::Cancelled
+                    | GraphState::Completed
+                    | GraphState::Failed
+                    | GraphState::CleanupRequired
+            ),
+            "query progress is unavailable while the graph is {:?}",
+            control.state()
+        );
+        let publication = control.registry_snapshot();
+        let mut snapshots = Vec::new();
+        for (id, component) in &publication.observed.components {
+            if component.failure.is_some()
+                || !component.started
+                || !matches!(
+                    component.lifecycle,
+                    ComponentLifecycle::Running | ComponentLifecycle::Quiesced
+                )
+            {
+                continue;
+            }
+            if let Some(api) = publication.query_api(id) {
+                if let Some(snapshot) = api.progress_metrics(component)? {
+                    snapshots.push((id, snapshot));
                 }
             }
         }
-        for (id, _) in self.list_components("source").await? {
-            if !records
-                .iter()
-                .any(|record| record.value.instance().id() == id)
+        let current = control.registry_snapshot();
+        Ok(snapshots
+            .into_iter()
+            .filter(|(id, snapshot)| {
+                current
+                    .observed
+                    .components
+                    .get(id)
+                    .is_some_and(|component| {
+                        component.generation.0 == snapshot.component_generation
+                            && component.operation.0 == snapshot.component_operation
+                            && component.failure.is_none()
+                            && component.started
+                            && matches!(
+                                component.lifecycle,
+                                ComponentLifecycle::Running | ComponentLifecycle::Quiesced
+                            )
+                    })
+            })
+            .map(|(_, snapshot)| snapshot)
+            .collect())
+    }
+    pub(crate) async fn graph_schema(&self) -> anyhow::Result<crate::schema::GraphSchema> {
+        let publication = self.control()?.registry_snapshot();
+        let sources: Vec<_> = publication
+            .desired
+            .nodes
+            .iter()
+            .filter(|node| {
+                Self::public_component_kind(&publication.desired, node) == Some("source")
+                    && node.descriptor.id().as_str() != crate::sources::COMPONENT_GRAPH_SOURCE_ID
+            })
+            .map(|node| node.descriptor.id().as_str())
+            .collect();
+        let mut schema = crate::schema::GraphSchema::default();
+        for id in &sources {
+            if let Some(source_schema) = self
+                .source_schema_at(&publication, id)
+                .await?
+                .filter(|schema| !schema.is_empty())
             {
-                schema.record_source_without_schema(&id);
+                schema.merge_source_schema(id, &source_schema);
+            } else {
+                schema.record_source_without_schema(id);
             }
         }
         for query in self.query_configurations().await? {
@@ -2040,6 +2178,9 @@ impl Runtime {
                 labels.relation_labels.iter().map(String::as_str),
                 &query.id,
             );
+        }
+        for id in sources {
+            self.ensure_source_schema_current(&publication, id)?;
         }
         Ok(schema)
     }

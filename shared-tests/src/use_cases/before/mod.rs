@@ -100,6 +100,7 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
     //update invoice 1 with increasing amount
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "i1"),
@@ -134,6 +135,7 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
     //update invoice 1 with increasing amount
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "i1"),
@@ -172,6 +174,7 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
     //update invoice 1 with decreasing amount
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "i1"),
@@ -206,6 +209,7 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
     //update invoice 1 with increasing amount
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "i1"),
@@ -298,6 +302,7 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
     //insert invoice line with increasing amount
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "l1"),
@@ -355,6 +360,7 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
     //insert invoice line with decreasing amount
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "l2"),

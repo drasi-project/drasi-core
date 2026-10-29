@@ -72,9 +72,6 @@ fn codec() -> EnvelopeCodec {
         .register_schema(GraphChangeCodec::schema())
         .expect("schema");
     codec
-        .register_schema(QueryChangeCodec::schema())
-        .expect("schema");
-    codec
 }
 
 fn producer(stream: &str) -> GraphProducerIdentity {

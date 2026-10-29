@@ -4,7 +4,10 @@
 //! SSE template selection and wire rendering extracted from the SSE reaction.
 
 use anyhow::{Context, Result};
-use drasi_computation_contracts::exchange::{QueryResult, ResultDiff};
+use drasi_computation_contracts::{
+    exchange::{QueryResult, ResultDiff},
+    ChangeNotification,
+};
 use handlebars::Handlebars;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -58,6 +61,25 @@ pub fn default_payload(result: &QueryResult, timestamp: i64) -> Value {
         "queryId": result.query_id,
         "results": result.results,
         "timestamp": timestamp,
+    })
+}
+
+/// The default browser frame for the ordered changes of one input: the
+/// configured output (alias, component and port), the producing stream's sequence, the
+/// sink's own wall-clock publication time (`publishedAt`, milliseconds; not an event
+/// or business time) and each change's real operation, canonical identity and only the
+/// images the record carries. A row consumer applies them to its own state.
+pub fn default_changes_payload(
+    output: Value,
+    sequence: u64,
+    published_at: i64,
+    changes: Vec<Value>,
+) -> Value {
+    json!({
+        "output": output,
+        "sequence": sequence,
+        "publishedAt": published_at,
+        "changes": changes,
     })
 }
 
@@ -265,6 +287,108 @@ impl SseRenderer {
             events.push(SseEvent { path, payload });
         }
         events
+    }
+
+    /// Render the ordered changes of one input from one configured output.
+    ///
+    /// Without a matching route the whole input is one default frame. With one,
+    /// each change selects its `added`/`updated`/`deleted` template (an update
+    /// covers a replacement and a patch; the context's `operation` tells them
+    /// apart). The context is the truthful change notification: `output`,
+    /// `sequence`, `operation`, `identity`, and the `element`, `before`, `after`
+    /// and `removedProperties` that the record carries.
+    pub fn render_changes(
+        &self,
+        notifications: &[ChangeNotification],
+        timestamp: i64,
+        mut report_error: impl FnMut(String),
+    ) -> Result<Vec<SseEvent>> {
+        let Some(first) = notifications.first() else {
+            return Ok(Vec::new());
+        };
+        let alias = first.alias();
+        let config = self
+            .routes
+            .get(alias)
+            .or_else(|| {
+                alias
+                    .rsplit_once('.')
+                    .and_then(|(_, last)| self.routes.get(last))
+            })
+            .or(self.default_template.as_ref());
+        let Some(config) = config else {
+            let changes = notifications
+                .iter()
+                .map(|notification| notification.change().to_json())
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(vec![SseEvent {
+                path: self.base_path.clone(),
+                payload: default_changes_payload(
+                    first.output_json(),
+                    first.sequence(),
+                    timestamp,
+                    changes,
+                )
+                .to_string(),
+            }]);
+        };
+        let mut events = Vec::new();
+        for notification in notifications {
+            let change = notification.change();
+            let spec = match change.route() {
+                drasi_computation_contracts::ChangeRoute::Added => config.added.as_ref(),
+                drasi_computation_contracts::ChangeRoute::Updated => config.updated.as_ref(),
+                drasi_computation_contracts::ChangeRoute::Deleted => config.deleted.as_ref(),
+            };
+            let Some(spec) = spec else {
+                continue;
+            };
+            let body = notification.to_json()?;
+            let context = body.as_object().context("change notification object")?;
+            let operation = change.operation();
+            let path = match spec.extension.path.as_deref() {
+                Some(path) => {
+                    let rendered = if path.contains("{{") {
+                        self.handlebars
+                            .render_template(path, context)
+                            .unwrap_or_else(|error| {
+                                report_error(format!(
+                                    "Failed to render SSE path for output '{alias}': {error}; using configured path"
+                                ));
+                                path.to_owned()
+                            })
+                    } else {
+                        path.to_owned()
+                    };
+                    self.resolve_path(&rendered)
+                }
+                None => self.base_path.clone(),
+            };
+            let change_json = change.to_json()?;
+            let default = || {
+                json!({
+                    "output": notification.output_json(),
+                    "sequence": notification.sequence(),
+                    "publishedAt": timestamp,
+                    "change": change_json,
+                })
+                .to_string()
+            };
+            let payload = if spec.template.is_empty() {
+                default()
+            } else {
+                self.handlebars
+                    .render_template(&spec.template, context)
+                    .unwrap_or_else(|error| {
+                        report_error(format!(
+                            "Failed to render SSE body for output '{alias}' ({operation}): {error}; using default change payload"
+                        ));
+                        default()
+                    })
+            };
+            events.push(SseEvent { path, payload });
+        }
+        Ok(events)
     }
 }
 

@@ -4,6 +4,7 @@
 //! Shared reaction configuration, rendering and metadata-compatible batches.
 
 pub mod batch;
+pub mod changes;
 pub mod config;
 pub mod connection;
 pub mod send;

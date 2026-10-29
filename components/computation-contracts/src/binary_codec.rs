@@ -10,10 +10,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ChangeEnvelope, ChangeOperation, ChangeSet, ChangeSetId, ComponentId, ContextEntry,
-    ContextValue, ContractError, EnvelopeCodec, EnvelopeCodecError, EnvelopeId, Lineage, Record,
-    RecordId, RecordImage, RecordReference, Schema, SchemaDescriptor, StreamId, SystemMetadata,
-    UpdateSemantics,
+    ChangeEnvelope, ChangeOperation, ChangeOrdering, ChangeSet, ChangeSetId, ComponentId,
+    ContextEntry, ContextValue, ContractError, ControlMessage, EnvelopeCodec, EnvelopeCodecError,
+    EnvelopeId, Lineage, Record, RecordId, RecordImage, RecordReference, Schema, SchemaDescriptor,
+    StreamId, SystemMetadata, UpdateSemantics,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +43,7 @@ pub struct BinaryEnvelopeCodec {
 }
 
 impl BinaryEnvelopeCodec {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 1;
 
     pub fn new(max_bytes: NonZeroUsize) -> Self {
         Self {
@@ -80,6 +80,7 @@ impl BinaryEnvelopeCodec {
         if frame.format != Self::VERSION {
             return Err(BinaryEnvelopeCodecError::Version(frame.format));
         }
+        Lineage::validate_depth(frame.lineage.len())?;
         let schema = self
             .registry
             .lookup_schema(&frame.schema.id, frame.schema.version)?;
@@ -132,6 +133,7 @@ fn with_frame<T>(
     envelope: &ChangeEnvelope,
     use_frame: impl FnOnce(&Frame<'_>) -> Result<T>,
 ) -> Result<T> {
+    envelope.validate_lineage()?;
     let mut lineage = Vec::new();
     let mut parent = envelope.lineage();
     while let Some(entry) = parent {
@@ -421,6 +423,18 @@ struct Metadata<'a> {
     timestamp: Option<DateTime<Utc>>,
     #[serde(borrow)]
     source_position: Option<Buffer<'a>>,
+    #[serde(borrow)]
+    control: Option<Control<'a>>,
+    ordering: ChangeOrdering,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Control<'a> {
+    #[serde(borrow)]
+    kind: Cow<'a, str>,
+    #[serde(borrow)]
+    payload: Buffer<'a>,
 }
 
 impl<'a> From<&'a SystemMetadata> for Metadata<'a> {
@@ -432,6 +446,11 @@ impl<'a> From<&'a SystemMetadata> for Metadata<'a> {
             source_position: value
                 .source_position()
                 .map(|position| Buffer::borrowed(position)),
+            control: value.control().map(|control| Control {
+                kind: Cow::Borrowed(control.kind()),
+                payload: Buffer::borrowed(control.payload()),
+            }),
+            ordering: value.ordering(),
         }
     }
 }
@@ -439,12 +458,19 @@ impl<'a> From<&'a SystemMetadata> for Metadata<'a> {
 impl Metadata<'_> {
     fn decode(self) -> Result<SystemMetadata> {
         let mut metadata =
-            SystemMetadata::new(StreamId::try_new(self.stream.as_ref())?, self.sequence);
+            SystemMetadata::new(StreamId::try_new(self.stream.as_ref())?, self.sequence)
+                .with_ordering(self.ordering);
         if let Some(timestamp) = self.timestamp {
             metadata = metadata.with_timestamp(timestamp);
         }
         if let Some(position) = self.source_position {
             metadata = metadata.with_source_position(position.owned());
+        }
+        if let Some(control) = self.control {
+            metadata = metadata.with_control(ControlMessage::try_new(
+                control.kind.as_ref(),
+                control.payload.owned(),
+            )?);
         }
         Ok(metadata)
     }
@@ -691,6 +717,45 @@ mod tests {
         codec
     }
 
+    #[test]
+    fn binary_lineage_depth_is_bounded_before_encoding_and_restoration() {
+        let codec = codec(4 * 1024 * 1024);
+        let mut input = envelope();
+        while input.lineage_depth() < crate::MAX_LINEAGE_DEPTH {
+            input = input
+                .try_derive(
+                    input.id().clone(),
+                    input.changes().clone(),
+                    input.system().as_ref().clone(),
+                )
+                .unwrap();
+        }
+        let encoded = codec.encode(&input).unwrap();
+        assert_eq!(
+            codec.decode(&encoded).unwrap().lineage_depth(),
+            crate::MAX_LINEAGE_DEPTH
+        );
+        let too_deep = input.derive(
+            input.id().clone(),
+            input.changes().clone(),
+            input.system().as_ref().clone(),
+        );
+        assert!(codec.encode(&too_deep).is_err());
+        assert!(BinaryEnvelopeCodec::encoded_size(&too_deep).is_err());
+        let mut frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4 * 1024 * 1024).unwrap();
+        frame.lineage.push((
+            Identity::envelope(input.id()),
+            Metadata::from(input.system().as_ref()),
+        ));
+        let oversized = rmp_serde::to_vec_named(&frame).unwrap();
+        assert!(matches!(
+            codec.decode(&oversized),
+            Err(BinaryEnvelopeCodecError::Contract(
+                ContractError::LineageTooDeep { .. }
+            ))
+        ));
+    }
+
     fn envelope() -> ChangeEnvelope {
         let changes = [1, 2].map(|value| SourceChange::Insert {
             element: Element::Node {
@@ -859,7 +924,7 @@ mod tests {
         ] {
             let mut frame: Frame<'_> = decode_bounded_messagepack(&encoded, 32_768).unwrap();
             match fault {
-                "version" => frame.format = 1,
+                "version" => frame.format = BinaryEnvelopeCodec::VERSION + 1,
                 "schema" => frame.schema.id = Cow::Borrowed("unknown"),
                 "definition" => frame.schema.definition = Buffer::borrowed(&[255]),
                 "encoding" => frame.schema.encoding = Cow::Borrowed("wrong"),
@@ -1036,5 +1101,372 @@ mod tests {
             stored.encode(&decoded).unwrap(),
             stored.encode(&original).unwrap()
         );
+    }
+
+    mod control {
+        use super::*;
+        use crate::{RecordValidationError, RecordValidator, SchemaId, SchemaVersion};
+
+        struct NoRecords;
+
+        impl RecordValidator for NoRecords {
+            fn validate_identity(
+                &self,
+                _: &SchemaDescriptor,
+                _: &RecordId,
+            ) -> std::result::Result<(), RecordValidationError> {
+                Err(RecordValidationError::new("identity", "no records"))
+            }
+
+            fn validate(
+                &self,
+                schema: &SchemaDescriptor,
+                id: &RecordId,
+                _: RecordImage,
+                _: &[u8],
+            ) -> std::result::Result<(), RecordValidationError> {
+                self.validate_identity(schema, id)
+            }
+        }
+
+        fn schema() -> Arc<Schema> {
+            Arc::new(Schema::new(
+                SchemaDescriptor::try_new(
+                    SchemaId::try_new("test.control").unwrap(),
+                    SchemaVersion::try_new(1).unwrap(),
+                    "none",
+                    Bytes::from_static(b"empty"),
+                )
+                .unwrap(),
+                Arc::new(NoRecords),
+            ))
+        }
+
+        fn codec(limit: usize) -> BinaryEnvelopeCodec {
+            let mut codec = BinaryEnvelopeCodec::new(NonZeroUsize::new(limit).unwrap());
+            codec.register_schema(schema()).unwrap();
+            codec
+        }
+
+        fn control(kind: &str, payload: &[u8]) -> ControlMessage {
+            ControlMessage::try_new(kind, Bytes::copy_from_slice(payload)).unwrap()
+        }
+
+        fn metadata(stream: &str, sequence: u64) -> SystemMetadata {
+            SystemMetadata::new(StreamId::try_new(stream).unwrap(), sequence)
+        }
+
+        fn envelope(
+            current: Option<ControlMessage>,
+            historical: Option<ControlMessage>,
+        ) -> ChangeEnvelope {
+            let changes = ChangeSet::try_new(
+                ChangeSetId::try_new("changes", Bytes::from_static(b"empty")).unwrap(),
+                schema().descriptor().clone(),
+                Vec::new(),
+            )
+            .unwrap();
+            let mut source = metadata("source", 1);
+            if let Some(control) = historical {
+                source = source.with_control(control);
+            }
+            let input = ChangeEnvelope::new(
+                EnvelopeId::try_new("source", Bytes::from_static(b"event")).unwrap(),
+                changes.clone(),
+                source,
+            );
+            let mut output = metadata("output", 2);
+            if let Some(control) = current {
+                output = output.with_control(control);
+            }
+            input.derive(
+                EnvelopeId::try_new("output", Bytes::from_static(b"event")).unwrap(),
+                changes,
+                output,
+            )
+        }
+
+        #[test]
+        fn version_is_the_unreleased_first_format() {
+            assert_eq!(BinaryEnvelopeCodec::VERSION, 1);
+            let codec = codec(4096);
+            let encoded = codec.encode(&envelope(None, None)).unwrap();
+            let mut frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4096).unwrap();
+            assert_eq!(frame.format, 1);
+            frame.format = 2;
+            let changed = encode_bounded_messagepack(&frame, 4096).unwrap();
+            assert!(matches!(
+                codec.decode(&changed),
+                Err(BinaryEnvelopeCodecError::Version(2))
+            ));
+        }
+
+        #[test]
+        fn roundtrip_preserves_current_and_historical_controls_exactly() {
+            let codec = codec(4096);
+            let mut storage = EnvelopeCodec::new(NonZeroUsize::new(4096).unwrap());
+            storage.register_schema(schema()).unwrap();
+            let payloads: [&[u8]; 3] = [&[], b"payload", &[255, 0, 128, 10]];
+            for payload in payloads {
+                let current = control("custom/reevaluate", payload);
+                let historical = control("custom/history", &[9, 0, 255]);
+                let original = envelope(Some(current.clone()), Some(historical.clone()));
+                let encoded = codec.encode(&original).unwrap();
+                let decoded = codec.decode(&encoded).unwrap();
+                assert_eq!(decoded.system().control(), Some(&current));
+                assert_eq!(
+                    decoded.lineage().unwrap().system().control(),
+                    Some(&historical)
+                );
+                assert_eq!(codec.encode(&decoded).unwrap(), encoded);
+                assert_eq!(
+                    storage.encode(&decoded).unwrap(),
+                    storage.encode(&original).unwrap()
+                );
+            }
+            let decoded = codec
+                .decode(
+                    &codec
+                        .encode(&envelope(None, Some(control("custom/history", &[]))))
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(decoded.system().control().is_none());
+            assert_eq!(
+                decoded
+                    .lineage()
+                    .unwrap()
+                    .system()
+                    .control()
+                    .unwrap()
+                    .kind(),
+                "custom/history"
+            );
+        }
+
+        #[test]
+        fn control_wire_fields_borrow_the_frame_and_use_binary_payloads() {
+            let codec = codec(256_000);
+            let bytes = vec![255; 65_536];
+            let encoded = codec
+                .encode(&envelope(
+                    Some(control("custom/current", &bytes)),
+                    Some(control("custom/history", &[1])),
+                ))
+                .unwrap();
+            let frame: Frame<'_> = decode_bounded_messagepack(&encoded, 256_000).unwrap();
+            let current = frame.system.control.as_ref().unwrap();
+            assert!(matches!(current.kind, Cow::Borrowed(_)));
+            assert!(matches!(current.payload.0, Cow::Borrowed(_)));
+            assert_eq!(current.payload.0.len(), bytes.len());
+            assert!(frame.lineage[0].1.control.is_some());
+            let empty = codec
+                .encode(&envelope(
+                    Some(control("custom/current", &[])),
+                    Some(control("custom/history", &[1])),
+                ))
+                .unwrap();
+            assert_eq!(
+                encoded.len() - empty.len(),
+                bytes.len() + 3,
+                "bin32 versus bin8 header, with exactly one byte per payload byte"
+            );
+        }
+
+        #[test]
+        fn decode_rejects_invalid_control_kinds_in_current_and_lineage_metadata() {
+            let codec = codec(4096);
+            let encoded = codec
+                .encode(&envelope(
+                    Some(control("custom/current", b"c")),
+                    Some(control("custom/history", b"h")),
+                ))
+                .unwrap();
+            for kind in ["", "has space", "line\nbreak", "nul\u{0}"] {
+                for lineage in [false, true] {
+                    let mut frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4096).unwrap();
+                    let metadata = if lineage {
+                        &mut frame.lineage[0].1
+                    } else {
+                        &mut frame.system
+                    };
+                    metadata.control.as_mut().unwrap().kind = Cow::Borrowed(kind);
+                    let changed = encode_bounded_messagepack(&frame, 4096).unwrap();
+                    assert!(
+                        matches!(
+                            codec.decode(&changed),
+                            Err(BinaryEnvelopeCodecError::Contract(
+                                ContractError::InvalidIdentifier { .. }
+                            ))
+                        ),
+                        "{kind:?} lineage={lineage}"
+                    );
+                }
+            }
+        }
+
+        fn patched(encoded: &[u8], from: &[u8], to: &[u8], occurrence: usize) -> Vec<u8> {
+            let position = encoded
+                .windows(from.len())
+                .enumerate()
+                .filter(|(_, window)| *window == from)
+                .map(|(position, _)| position)
+                .nth(occurrence)
+                .unwrap();
+            let mut changed = encoded.to_vec();
+            changed.splice(position..position + from.len(), to.iter().copied());
+            changed
+        }
+
+        fn ordered(current: ChangeOrdering, historical: ChangeOrdering) -> ChangeEnvelope {
+            let changes = ChangeSet::try_new(
+                ChangeSetId::try_new("changes", Bytes::from_static(b"empty")).unwrap(),
+                schema().descriptor().clone(),
+                Vec::new(),
+            )
+            .unwrap();
+            let input = ChangeEnvelope::new(
+                EnvelopeId::try_new("source", Bytes::from_static(b"event")).unwrap(),
+                changes.clone(),
+                metadata("source", 1).with_ordering(historical),
+            );
+            input.derive(
+                EnvelopeId::try_new("output", Bytes::from_static(b"event")).unwrap(),
+                changes,
+                metadata("output", 2).with_ordering(current),
+            )
+        }
+
+        #[test]
+        fn roundtrip_preserves_ordering_in_current_and_lineage_metadata() {
+            let codec = codec(4096);
+            for (current, historical) in [
+                (ChangeOrdering::EventTime, ChangeOrdering::ProducerSequence),
+                (ChangeOrdering::ProducerSequence, ChangeOrdering::EventTime),
+                (
+                    ChangeOrdering::ProducerSequence,
+                    ChangeOrdering::ProducerSequence,
+                ),
+            ] {
+                let original = ordered(current, historical);
+                let encoded = codec.encode(&original).unwrap();
+                let frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4096).unwrap();
+                assert_eq!(frame.format, 1);
+                assert_eq!(frame.system.ordering, current);
+                assert_eq!(frame.lineage[0].1.ordering, historical);
+                let decoded = codec.decode(&encoded).unwrap();
+                assert_eq!(decoded.system().ordering(), current);
+                assert_eq!(decoded.lineage().unwrap().system().ordering(), historical);
+                assert_eq!(codec.encode(&decoded).unwrap(), encoded);
+                let replay = decoded.reemit(3).unwrap();
+                let replayed = codec.decode(&codec.encode(&replay).unwrap()).unwrap();
+                assert_eq!(replayed.system().ordering(), current);
+                assert_eq!(replayed.lineage().unwrap().system().ordering(), historical);
+            }
+            let encoded = codec.encode(&envelope(None, None)).unwrap();
+            let frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4096).unwrap();
+            assert_eq!(frame.system.ordering, ChangeOrdering::EventTime);
+            assert_eq!(frame.lineage[0].1.ordering, ChangeOrdering::EventTime);
+        }
+
+        #[test]
+        fn wire_ordering_uses_named_variant_strings_and_rejects_invalid_values() {
+            let codec = codec(4096);
+            let encoded = codec
+                .encode(&ordered(
+                    ChangeOrdering::ProducerSequence,
+                    ChangeOrdering::EventTime,
+                ))
+                .unwrap();
+            let mut event_time = vec![0xa9];
+            event_time.extend_from_slice(b"EventTime");
+            let mut producer_sequence = vec![0xb0];
+            producer_sequence.extend_from_slice(b"ProducerSequence");
+            let mut key = vec![0xa8];
+            key.extend_from_slice(b"ordering");
+            assert_eq!(
+                encoded
+                    .windows(producer_sequence.len())
+                    .filter(|window| *window == producer_sequence.as_slice())
+                    .count(),
+                1
+            );
+            assert_eq!(
+                encoded
+                    .windows(event_time.len())
+                    .filter(|window| *window == event_time.as_slice())
+                    .count(),
+                1
+            );
+
+            let mut unknown = vec![0xa9];
+            unknown.extend_from_slice(b"EventTimf");
+            let mut lowercase = vec![0xa9];
+            lowercase.extend_from_slice(b"eventtime");
+            for invalid in [unknown, lowercase, vec![0xc0], vec![0xc3]] {
+                let lineage = patched(&encoded, &event_time, &invalid, 0);
+                assert!(codec.decode(&lineage).is_err(), "{invalid:?} lineage");
+                let current = patched(&encoded, &producer_sequence, &invalid, 0);
+                assert!(codec.decode(&current).is_err(), "{invalid:?} current");
+            }
+            let mut renamed = vec![0xa8];
+            renamed.extend_from_slice(b"orderinh");
+            for occurrence in [0, 1] {
+                assert!(codec
+                    .decode(&patched(&encoded, &key, &renamed, occurrence))
+                    .is_err());
+            }
+        }
+
+        #[test]
+        fn ordering_adds_bounded_wire_bytes_without_relaxing_limits() {
+            let value = ordered(ChangeOrdering::ProducerSequence, ChangeOrdering::EventTime);
+            let encoded = codec(1 << 20).encode(&value).unwrap();
+            assert_eq!(
+                BinaryEnvelopeCodec::encoded_size(&value).unwrap(),
+                encoded.len()
+            );
+            assert!(codec(encoded.len()).decode(&encoded).is_ok());
+            assert!(matches!(
+                codec(encoded.len() - 1).encode(&value),
+                Err(BinaryEnvelopeCodecError::SizeLimit { .. })
+            ));
+            assert!(matches!(
+                codec(encoded.len() - 1).decode(&encoded),
+                Err(BinaryEnvelopeCodecError::SizeLimit { .. })
+            ));
+        }
+
+        #[test]
+        fn encoded_size_and_frame_limit_include_current_and_historical_controls() {
+            let large = vec![255; 512];
+            let with_controls = envelope(
+                Some(control("custom/current", &large)),
+                Some(control("custom/history", &large)),
+            );
+            let without = envelope(None, None);
+            let encoded = codec(1 << 20).encode(&with_controls).unwrap();
+            assert_eq!(
+                BinaryEnvelopeCodec::encoded_size(&with_controls).unwrap(),
+                encoded.len()
+            );
+            assert!(
+                encoded.len()
+                    > BinaryEnvelopeCodec::encoded_size(&without).unwrap() + 2 * large.len()
+            );
+            assert_eq!(
+                codec(encoded.len()).encode(&with_controls).unwrap(),
+                encoded
+            );
+            assert!(codec(encoded.len()).decode(&encoded).is_ok());
+            assert!(matches!(
+                codec(encoded.len() - 1).encode(&with_controls),
+                Err(BinaryEnvelopeCodecError::SizeLimit { .. })
+            ));
+            assert!(matches!(
+                codec(encoded.len() - 1).decode(&encoded),
+                Err(BinaryEnvelopeCodecError::SizeLimit { .. })
+            ));
+        }
     }
 }

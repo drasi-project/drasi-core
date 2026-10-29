@@ -160,26 +160,26 @@ impl ApplicationBootstrapProvider {
         relation_labels: &[String],
     ) -> bool {
         match change {
-            SourceChange::Insert { element } | SourceChange::Update { element, .. } => {
-                match element {
-                    Element::Node { metadata, .. } => {
-                        node_labels.is_empty()
-                            || metadata.labels.iter().any(|label| {
-                                node_labels
-                                    .iter()
-                                    .any(|requested| requested == label.as_ref())
-                            })
-                    }
-                    Element::Relation { metadata, .. } => {
-                        relation_labels.is_empty()
-                            || metadata.labels.iter().any(|label| {
-                                relation_labels
-                                    .iter()
-                                    .any(|requested| requested == label.as_ref())
-                            })
-                    }
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => match element {
+                Element::Node { metadata, .. } => {
+                    node_labels.is_empty()
+                        || metadata.labels.iter().any(|label| {
+                            node_labels
+                                .iter()
+                                .any(|requested| requested == label.as_ref())
+                        })
                 }
-            }
+                Element::Relation { metadata, .. } => {
+                    relation_labels.is_empty()
+                        || metadata.labels.iter().any(|label| {
+                            relation_labels
+                                .iter()
+                                .any(|requested| requested == label.as_ref())
+                        })
+                }
+            },
             SourceChange::Delete { metadata } => {
                 node_labels.is_empty() && relation_labels.is_empty()
                     || metadata.labels.iter().any(|l| {

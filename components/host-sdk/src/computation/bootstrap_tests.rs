@@ -697,6 +697,7 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
             ),
         ]),
         source_progress: Some(progress_id.clone()),
+        source_bootstrap: None,
     };
     let mut recipe = serde_json::to_value(&config)?;
     recipe["kind"] = json!("nativeBootstrap");

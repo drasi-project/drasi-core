@@ -129,6 +129,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
     //Add additional container
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "p1"),
@@ -186,6 +187,7 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
     //remove container / update container
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "p1"),

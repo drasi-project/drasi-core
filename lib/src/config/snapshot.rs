@@ -139,7 +139,7 @@ mod tests {
     fn query_configuration_snapshot_round_trips_settings_and_status() {
         let config = crate::Query::cypher("query")
             .query("MATCH (n:Item) RETURN n.name AS name")
-            .from_source("source")
+            .from_input("source")
             .build();
         let expected = serde_json::json!({
             "id": "query",

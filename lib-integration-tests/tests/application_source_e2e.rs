@@ -37,7 +37,7 @@ use tokio::time::timeout;
 async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
     // Subscribe BEFORE checking to avoid missing events
     let mut rx = drasi.subscribe_all_component_events();
-    let snapshot = drasi.get_graph().await;
+    let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()
@@ -103,7 +103,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
             RETURN b.name AS friend_name
             "#,
         )
-        .from_source("test-app-source")
+        .from_input("test-app-source")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();
@@ -281,7 +281,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
             RETURN b.name AS friend_name
             "#,
         )
-        .from_source("test-app-source")
+        .from_input("test-app-source")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();
@@ -346,7 +346,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
             RETURN count(friend) AS friend_count, collect(friend.name) AS friend_names
             "#,
         )
-        .from_source("multi-rel-source")
+        .from_input("multi-rel-source")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();

@@ -16,13 +16,16 @@ use super::component::RuntimeComponent;
 use crate::{
     computation::v1::{
         plugin_services::PluginObservations, ComponentGeneration, ComponentId, GraphControl,
-        GraphResourceObserver, LegacyPluginServices, SourcePluginHost,
+        GraphResourceObserver, LegacyPluginServices, SourcePluginHost, SourceSubscriptionObserver,
     },
     ComponentStatus, Source, SourceRuntimeContext,
 };
 use async_trait::async_trait;
 use futures::FutureExt;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Weak,
+};
 use tokio::sync::{watch, Mutex};
 
 #[derive(Default)]
@@ -33,6 +36,25 @@ struct Life {
     closed: bool,
 }
 
+struct SubscriptionObserver {
+    owner: Weak<super::Runtime>,
+    revision: AtomicU64,
+}
+
+#[async_trait]
+impl SourceSubscriptionObserver for SubscriptionObserver {
+    fn begin_subscriptions(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+    }
+    async fn subscriptions_changed(&self) -> anyhow::Result<()> {
+        self.owner
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("source subscription owner was retired"))?
+            .subscriptions_complete()
+            .await
+    }
+}
+
 pub(super) struct SourceInstance {
     pub source: Arc<dyn Source>,
     pub borrowed: Arc<SourcePluginHost>,
@@ -41,6 +63,8 @@ pub(super) struct SourceInstance {
     observations: PluginObservations,
     life: Mutex<Life>,
     changed: watch::Sender<u64>,
+    subscriptions: Arc<SubscriptionObserver>,
+    subscriptions_notified: Mutex<Option<u64>>,
 }
 impl SourceInstance {
     pub(super) fn new(
@@ -48,16 +72,26 @@ impl SourceInstance {
         services: LegacyPluginServices,
         changed: watch::Sender<u64>,
         parent_control: GraphControl,
+        owner: Weak<super::Runtime>,
     ) -> Arc<Self> {
         let source: Arc<dyn Source> = source.into();
+        let subscriptions = Arc::new(SubscriptionObserver {
+            owner,
+            revision: AtomicU64::new(0),
+        });
         Arc::new(Self {
             observations: PluginObservations::new(source.id()),
-            borrowed: SourcePluginHost::borrowed(source.clone()),
+            borrowed: SourcePluginHost::borrowed_with_subscription_observer(
+                source.clone(),
+                subscriptions.clone(),
+            ),
             source,
             services,
             parent_control,
             life: Mutex::new(Life::default()),
             changed,
+            subscriptions,
+            subscriptions_notified: Mutex::new(None),
         })
     }
     pub(super) async fn deprovision(&self) -> anyhow::Result<()> {
@@ -66,6 +100,14 @@ impl SourceInstance {
     pub(super) fn notify(&self) {
         self.changed
             .send_modify(|value| *value = value.wrapping_add(1));
+    }
+    pub(super) async fn notify_subscriptions_complete(&self) {
+        let mut notified = self.subscriptions_notified.lock().await;
+        let revision = self.subscriptions.revision.load(Ordering::Acquire);
+        if *notified != Some(revision) {
+            self.source.on_subscriptions_complete().await;
+            *notified = Some(revision);
+        }
     }
 }
 #[async_trait]
@@ -122,10 +164,12 @@ impl RuntimeComponent for SourceInstance {
             anyhow::bail!("source is not initialized for activation");
         }
         life.needs_stop = true;
+        self.subscriptions.begin_subscriptions();
         self.observations.reset().await?;
         let result = self.observations.drive(self.source.start(), false).await;
         self.notify();
-        result
+        result?;
+        self.subscriptions.subscriptions_changed().await
     }
     async fn stop(&self) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;

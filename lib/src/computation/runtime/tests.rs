@@ -37,6 +37,12 @@ use tokio::sync::{mpsc, Notify};
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
 
+#[path = "output_catalogue_tests.rs"]
+mod output_catalogue_tests;
+
+#[path = "source_schema_tests.rs"]
+mod source_schema_tests;
+
 #[derive(Default)]
 struct PeerControl {
     messages: StdMutex<Vec<PeerMessage>>,
@@ -180,6 +186,8 @@ impl EnvelopeSource for UnboundNativeSource {
 
 #[derive(Default)]
 struct SourceControl {
+    schema: StdMutex<Option<crate::schema::SourceSchema>>,
+    properties_read: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     resource_observers: StdMutex<Vec<Arc<dyn crate::context::ComponentResourceObserver>>>,
     updates: StdMutex<Option<crate::channels::ComponentUpdateSender>>,
     initializations: AtomicUsize,
@@ -188,10 +196,14 @@ struct SourceControl {
     stops: AtomicUsize,
     deprovisions: AtomicUsize,
     subscriptions: AtomicUsize,
+    pending_subscription: AtomicBool,
+    subscription_entered: Notify,
+    subscription_release: Notify,
     fail_starts: AtomicUsize,
     fail_stop: AtomicBool,
     noop_stop: AtomicBool,
     pending_start: AtomicBool,
+    waiting_start: AtomicBool,
     starting_only: AtomicBool,
     subscription_fences: AtomicUsize,
     release_bootstrap_at_fence: AtomicBool,
@@ -205,6 +217,57 @@ struct SourceControl {
     pending_stop: AtomicBool,
     stop_entered: Notify,
     stop_release: Notify,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_snapshot_ignores_observation_only_publications() {
+    let (source, source_control) = ControlledSource::new("snapshot-source");
+    let core = builder().with_source(source).build().await.unwrap();
+    core.start().await.unwrap();
+    let handle = core.computation_component("snapshot-source").unwrap();
+    handle.wait_created().await.unwrap();
+    let control = core.computation_control().unwrap();
+    let revision = control.desired_snapshot().revision;
+    let (requests, mut pending) =
+        tokio::sync::mpsc::unbounded_channel::<std::sync::mpsc::SyncSender<()>>();
+    let reports = Arc::new(AtomicUsize::new(0));
+    let completed = reports.clone();
+    let observer = tokio::spawn(async move {
+        while let Some(reply) = pending.recv().await {
+            let node = handle.observed().unwrap();
+            control
+                .report_health(
+                    revision,
+                    HealthObservation {
+                        component: handle.id().clone(),
+                        generation: node.generation,
+                        operation: node.operation,
+                        health: ComponentHealth::Healthy,
+                    },
+                )
+                .await
+                .unwrap();
+            completed.fetch_add(1, Ordering::SeqCst);
+            reply.send(()).unwrap();
+        }
+    });
+    *source_control.properties_read.lock().unwrap() = Some(Arc::new(move || {
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        requests.send(reply).unwrap();
+        // Force a status publication during each synchronous configuration read.
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+    }));
+    let snapshot = core.snapshot_computation_configuration().await;
+    *source_control.properties_read.lock().unwrap() = None;
+    observer.await.unwrap();
+    core.shutdown().await.unwrap();
+    assert!(reports.load(Ordering::SeqCst) > 0);
+    let snapshot = snapshot.expect("status updates do not change configuration");
+    assert!(snapshot
+        .instance
+        .sources
+        .iter()
+        .any(|source| source.id == "snapshot-source"));
 }
 
 #[tokio::test]
@@ -263,7 +326,7 @@ async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
     );
     assert!(core.get_source_info("query").await.is_err());
     assert_eq!(
-        core.get_query_config("query").await.unwrap().sources[0].source_id,
+        core.get_query_config("query").await.unwrap().inputs[0].component,
         "source"
     );
     assert_eq!(core.get_current_config().await.unwrap().queries.len(), 1);
@@ -285,7 +348,7 @@ async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
     assert_eq!(source_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(reaction_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(
-        core.get_query_config("query").await.unwrap().sources[0].source_id,
+        core.get_query_config("query").await.unwrap().inputs[0].component,
         "source"
     );
     assert!(core.remove_source("source", false).await.is_err());
@@ -450,7 +513,7 @@ async fn provider_recipes_are_derived_from_graph_owned_configuration() {
         .wait_created()
         .await
         .unwrap();
-    let mut detached = core.get_graph().await;
+    let mut detached = core.get_graph().await.expect("graph snapshot");
     detached
         .nodes
         .retain(|node| node.id != "source-bootstrap" && node.id != "identity-provider");
@@ -471,7 +534,11 @@ async fn provider_recipes_are_derived_from_graph_owned_configuration() {
         .edges
         .iter()
         .any(|edge| edge.from == "identity-provider" && edge.to == "source"));
-    assert!(core.get_graph().await.contains("source-bootstrap"));
+    assert!(core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("source-bootstrap"));
     core.remove_source("source", false).await.unwrap();
     let (replacement, _) = ControlledSource::new("source");
     core.add_source_with_handle(replacement)
@@ -504,7 +571,7 @@ async fn detached_snapshot_status_and_membership_cannot_change_public_inspection
         .wait_created()
         .await
         .unwrap();
-    let mut snapshot = core.get_graph().await;
+    let mut snapshot = core.get_graph().await.expect("graph snapshot");
     snapshot.nodes.push(crate::component_graph::ComponentNode {
         id: "phantom".into(),
         kind: crate::component_graph::ComponentKind::Query,
@@ -535,7 +602,11 @@ async fn detached_snapshot_status_and_membership_cannot_change_public_inspection
         .unwrap()
         .queries
         .is_empty());
-    assert!(!core.get_graph().await.contains("phantom"));
+    assert!(!core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("phantom"));
     core.shutdown().await.unwrap();
 }
 
@@ -579,7 +650,7 @@ async fn invalid_plugin_metadata_fails_the_added_node_not_the_add_call() {
 async fn detached_snapshot_cannot_veto_a_graph_addition() {
     let core = builder().build().await.unwrap();
     let runtime = core.computation_runtime.as_ref();
-    let mut detached = core.get_graph().await;
+    let mut detached = core.get_graph().await.expect("graph snapshot");
     detached.nodes.push(crate::component_graph::ComponentNode {
         id: "source".into(),
         kind: crate::component_graph::ComponentKind::Query,
@@ -591,7 +662,12 @@ async fn detached_snapshot_cannot_veto_a_graph_addition() {
     handle.wait_created().await.unwrap();
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 1);
     assert_eq!(
-        core.get_graph().await.get_component("source").unwrap().kind,
+        core.get_graph()
+            .await
+            .unwrap()
+            .get_component("source")
+            .unwrap()
+            .kind,
         crate::component_graph::ComponentKind::Source,
     );
     assert!(runtime
@@ -798,7 +874,14 @@ impl Source for ControlledSource {
     fn type_name(&self) -> &str {
         "controlled"
     }
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
+        self.control.schema.lock().unwrap().clone()
+    }
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        let hook = self.control.properties_read.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         HashMap::new()
     }
     fn auto_start(&self) -> bool {
@@ -837,6 +920,10 @@ impl Source for ControlledSource {
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.control.starts.fetch_add(1, Ordering::AcqRel);
+        if self.control.waiting_start.load(Ordering::Acquire) {
+            self.control.entered.notify_one();
+            self.control.release.notified().await;
+        }
         if self.control.pending_start.load(Ordering::Acquire) {
             self.control.entered.notify_one();
             std::future::pending::<()>().await;
@@ -896,6 +983,10 @@ impl Source for ControlledSource {
         settings: SourceSubscriptionSettings,
     ) -> anyhow::Result<SubscriptionResponse> {
         self.control.subscriptions.fetch_add(1, Ordering::AcqRel);
+        if self.control.pending_subscription.load(Ordering::Acquire) {
+            self.control.subscription_entered.notify_one();
+            self.control.subscription_release.notified().await;
+        }
         self.inner
             .subscribe_with_bootstrap(&settings, "Controlled")
             .await
@@ -1052,7 +1143,7 @@ fn config(id: &str, source: Option<&str>) -> QueryConfig {
         .auto_start(false)
         .enable_bootstrap(false);
     match source {
-        Some(source) => query.from_source(source).build(),
+        Some(source) => query.from_input(source).build(),
         None => query.build(),
     }
 }
@@ -1420,12 +1511,20 @@ async fn missing_dependencies_wait_and_are_created_when_available() {
         .unwrap();
     let query = component_handle(&core, "query", "query").await;
     assert_waiting_for(&query, "source");
-    assert!(!core.get_graph().await.contains("source"));
+    assert!(!core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("source"));
 
     let (reaction, _, _) = ControlledReaction::new("reaction", &["missing-query"]);
     let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
     assert_waiting_for(&reaction, "missing-query");
-    assert!(!core.get_graph().await.contains("missing-query"));
+    assert!(!core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains("missing-query"));
 
     let (source, _) = ControlledSource::new("source");
     core.add_source_with_handle(source)
@@ -1585,8 +1684,8 @@ async fn pending_initialization_does_not_block_addition_or_removal() {
         .unwrap();
     let invalid = crate::Query::cypher("invalid-dependency")
         .query("MATCH (n) RETURN n")
-        .from_source("pending")
-        .from_source("missing")
+        .from_input("pending")
+        .from_input("missing")
         .auto_start(false)
         .build();
     let invalid = core.add_query_with_handle(invalid).await.unwrap();
@@ -2583,6 +2682,68 @@ async fn a_plugin_failure_before_running_fails_the_start_wait_not_the_addition()
     core.shutdown().await.unwrap();
 }
 
+async fn verify_query_subscription_count_tracks_running_helpers() {
+    let (source, source_control) = ControlledSource::new("source");
+    source_control.auto_start.store(true, Ordering::Release);
+    source_control
+        .pending_subscription
+        .store(true, Ordering::Release);
+    let core = builder()
+        .with_source(source)
+        .with_query(config("query", Some("source")))
+        .build()
+        .await
+        .unwrap();
+    core.start().await.unwrap();
+    let query = core
+        .query_manager()
+        .get_query_instance("query")
+        .await
+        .unwrap();
+    let handle = component_handle(&core, "query", "query").await;
+    let mut start = Box::pin(query.start());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            result = &mut start => panic!("start finished before source subscription: {result:?}"),
+            _ = source_control.subscription_entered.notified() => {},
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        query.status().await,
+        ComponentStatus::Starting | ComponentStatus::Running
+    ));
+    assert_eq!(
+        query.subscription_count().await,
+        0,
+        "a configured source is not an active subscription"
+    );
+    source_control.subscription_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), &mut start)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), handle.wait_started())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(query.subscription_count().await, 1);
+    query.stop().await.unwrap();
+    assert_eq!(query.subscription_count().await, 0);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_subscription_count_uses_actual_helpers_current_thread() {
+    verify_query_subscription_count_tracks_running_helpers().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_subscription_count_uses_actual_helpers_multi_thread() {
+    verify_query_subscription_count_tracks_running_helpers().await;
+}
+
 #[tokio::test]
 async fn query_start_does_not_wait_for_the_instance_subscription_fence() {
     let (source, control) = ControlledSource::new("source");
@@ -2596,7 +2757,7 @@ async fn query_start_does_not_wait_for_the_instance_subscription_fence() {
         .await;
     let query = crate::Query::cypher("query")
         .query("MATCH (n:Person) RETURN n")
-        .from_source("source")
+        .from_input("source")
         .enable_bootstrap(true)
         .auto_start(true)
         .build();
@@ -2619,6 +2780,68 @@ async fn query_start_does_not_wait_for_the_instance_subscription_fence() {
     core.shutdown().await.unwrap();
 }
 
+async fn late_subscriptions_release_the_fence_once_when_actually_bound() {
+    let (source, control) = ControlledSource::new("source");
+    control.auto_start.store(true, Ordering::Release);
+    let mut fast = config("fast", Some("source"));
+    fast.auto_start = true;
+    let core = Arc::new(
+        builder()
+            .with_source(source)
+            .with_query(fast)
+            .build()
+            .await
+            .unwrap(),
+    );
+    core.start().await.unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 1);
+    control.pending_subscription.store(true, Ordering::Release);
+    let mut slow = config("slow", Some("source"));
+    slow.auto_start = true;
+    let adding = tokio::spawn({
+        let core = core.clone();
+        async move { core.add_query(slow).await }
+    });
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        control.subscription_entered.notified(),
+    )
+    .await
+    .unwrap();
+    core.source_manager()
+        .subscriptions_complete()
+        .await
+        .unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 1);
+    control.pending_subscription.store(false, Ordering::Release);
+    control.subscription_release.notify_one();
+    adding.await.unwrap().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        core.computation_component("slow").unwrap().wait_started(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 2);
+    core.source_manager()
+        .subscriptions_complete()
+        .await
+        .unwrap();
+    assert_eq!(control.subscription_fences.load(Ordering::Acquire), 2);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_subscription_fence_current_thread() {
+    late_subscriptions_release_the_fence_once_when_actually_bound().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_subscription_fence_multiple_threads() {
+    late_subscriptions_release_the_fence_once_when_actually_bound().await;
+}
+
 #[tokio::test]
 async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failure() {
     for fail in [false, true] {
@@ -2631,7 +2854,7 @@ async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failu
             .await;
         let query = crate::Query::cypher("query")
             .query("MATCH (n:Person) RETURN n")
-            .from_source("source")
+            .from_input("source")
             .enable_bootstrap(true)
             .auto_start(true)
             .build();
@@ -3792,7 +4015,14 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
         .build()
         .await
         .unwrap();
-    core.start().await.unwrap();
+    let error = core
+        .start()
+        .await
+        .expect_err("failed query activation is reported");
+    assert!(error
+        .downcast_ref::<crate::error::PartialStartError>()
+        .is_some());
+    assert!(core.is_running().await);
     let query = core
         .query_manager()
         .get_query_instance("query")
@@ -3810,7 +4040,13 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
     let first = handle.observed().unwrap();
     assert!(format!("{:#}", first.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));
     core.stop().await.unwrap();
-    core.start().await.unwrap();
+    let error = core
+        .start()
+        .await
+        .expect_err("retry still reports the incompatible source");
+    assert!(error
+        .downcast_ref::<crate::error::PartialStartError>()
+        .is_some());
     let second = handle.observed().unwrap();
     assert!(second.operation.0 > first.operation.0);
     assert!(format!("{:#}", second.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));

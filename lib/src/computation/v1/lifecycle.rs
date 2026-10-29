@@ -343,6 +343,7 @@ impl GraphError {
                 | super::ControlError::Poisoned => Terminal,
             },
             Self::StaleRevision { .. }
+            | Self::StalePreview { .. }
             | Self::OperationInProgress
             | Self::ObservationQueueFull
             | Self::ReconciliationTimeout
@@ -644,9 +645,10 @@ impl std::fmt::Display for LifecycleReportError {
         match self {
             Self::Start(report) => write!(f, "native activation failed: {:?}", report.components),
             Self::Stop(report) => write!(f, "native stop failed: {:?}", report.components),
-            Self::Reconciliation(_) => write!(
+            Self::Reconciliation(report) => write!(
                 f,
-                "one or more components failed; inspect graph observations"
+                "one or more components failed (committed={}, revision={:?}); inspect graph observations",
+                report.committed, report.revision,
             ),
         }
     }
@@ -669,7 +671,26 @@ impl std::error::Error for LifecycleReportError {
                     StopOutcome::StopFailed(failure) => Some(failure),
                     _ => None,
                 }),
-            Self::Reconciliation(report) => report.failures.first(),
+            Self::Reconciliation(report) => report
+                .failures
+                .first()
+                .or_else(|| {
+                    report.creation.values().find_map(|outcome| match outcome {
+                        CreationOutcome::CreationFailed(failure) => Some(failure),
+                        _ => None,
+                    })
+                })
+                .or_else(|| {
+                    report.startup.as_ref().and_then(|startup| {
+                        startup
+                            .components
+                            .values()
+                            .find_map(|outcome| match outcome {
+                                StartOutcome::StartFailed(failure) => Some(failure),
+                                _ => None,
+                            })
+                    })
+                }),
         };
         failure.map(|failure| failure.cause.as_ref() as &(dyn std::error::Error + 'static))
     }

@@ -101,7 +101,7 @@ async fn setup_drasi_for_mode(
 
     let query = Query::cypher("test-query")
         .query("MATCH (n:Item) RETURN n.id AS id, n.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();
@@ -338,7 +338,7 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
 
     let query = Query::cypher("agg-query")
         .query("MATCH (n:Item) RETURN n.category AS category, count(n) AS item_count")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();

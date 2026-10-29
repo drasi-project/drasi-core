@@ -29,13 +29,14 @@ pub struct InstanceConfigurationSnapshot {
 
 impl DrasiLib {
     /// Snapshot ordinary and native component configuration without pausing
-    /// processing. Concurrent reconfiguration is detected and retried; a busy
-    /// instance reports an error rather than returning a mixed configuration.
+    /// processing. Concurrent reconfiguration is detected and retried; ordinary
+    /// status updates do not invalidate the captured configuration. Unresolved
+    /// configuration changes report an error rather than returning mixed state.
     pub async fn snapshot_computation_configuration(
         &self,
     ) -> Result<InstanceConfigurationSnapshot> {
         use super::v1::GraphSelection;
-        use std::{collections::BTreeSet, sync::Arc};
+        use std::collections::BTreeSet;
 
         self.state_guard.require_initialized()?;
         let control = self.computation_control()?;
@@ -47,7 +48,7 @@ impl DrasiLib {
                 .await
             {
                 Ok(instance) => instance,
-                Err(error) if !Arc::ptr_eq(&root, &control.registry_snapshot()) => {
+                Err(error) if !root.same_configuration_as(&control.registry_snapshot()) => {
                     log::debug!(
                         "Retrying instance configuration after concurrent change: {error:#}"
                     );
@@ -133,7 +134,7 @@ impl DrasiLib {
                     .retain(|id, _| native_ids.contains(id));
                 Some(snapshot)
             };
-            if !Arc::ptr_eq(&root, &control.registry_snapshot()) {
+            if !root.same_configuration_as(&control.registry_snapshot()) {
                 continue;
             }
             return Ok(InstanceConfigurationSnapshot {
@@ -151,6 +152,12 @@ impl DrasiLib {
     pub fn computation_control(&self) -> Result<super::v1::GraphControl> {
         self.state_guard.require_initialized()?;
         self.computation_runtime.control().map_err(DrasiError::from)
+    }
+
+    /// Generic discovery and reading of the optional snapshot/replay providers
+    /// that source, query and transformer outputs actually registered.
+    pub fn output_catalogue(&self) -> Result<super::v1::OutputCatalogue> {
+        Ok(super::v1::OutputCatalogue::new(self.computation_control()?))
     }
 
     pub fn computation_component(&self, id: &str) -> Result<super::v1::ComponentHandle> {
@@ -204,10 +211,15 @@ impl DrasiLib {
         if !self.is_running().await {
             addition.bindings.defer_activation = true;
         }
-        control.add_component(addition).await.map_err(|error| {
+        let handle = control.add_component(addition).await.map_err(|error| {
             DrasiError::operation_failed("component", id.as_str(), "add", error.to_string())
                 .with_cause(error)
-        })
+        })?;
+        self.computation_runtime
+            .refresh_pending_query_inputs()
+            .await
+            .map_err(DrasiError::from)?;
+        Ok(handle)
     }
 
     pub async fn add_transformer_with_handle(
@@ -442,9 +454,25 @@ impl DrasiLib {
         match result {
             Ok(report) => {
                 if let Err(error) = pending.cleanup().await {
+                    if !report.committed || report.summary != super::v1::OperationSummary::Completed
+                    {
+                        return Err(super::instance::components_cleanup_error(
+                            pending,
+                            DrasiError::Internal(
+                                super::v1::LifecycleReportError::Reconciliation(report).into(),
+                            ),
+                            Some(error),
+                        ));
+                    }
                     return Err(super::instance::components_cleanup_error(
                         pending, error, None,
                     ));
+                }
+                if report.committed {
+                    self.computation_runtime
+                        .refresh_pending_query_inputs()
+                        .await
+                        .map_err(DrasiError::from)?;
                 }
                 Ok(report)
             }

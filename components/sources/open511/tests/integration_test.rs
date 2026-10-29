@@ -260,7 +260,7 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
                 RETURN e.id AS event_id, e.severity AS severity, r.name AS road_name
             "#,
             )
-            .from_source("road-events")
+            .from_input("road-events")
             .auto_start(true)
             .build();
 

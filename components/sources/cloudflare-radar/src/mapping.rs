@@ -112,12 +112,10 @@ fn build_node(
                 properties,
             },
         },
-        ChangeAction::Update => SourceChange::Update {
-            element: Element::Node {
-                metadata,
-                properties,
-            },
-        },
+        ChangeAction::Update => SourceChange::update(Element::Node {
+            metadata,
+            properties,
+        }),
         ChangeAction::Delete => SourceChange::Delete { metadata },
     }
 }
@@ -143,14 +141,12 @@ fn build_relation(
                 properties,
             },
         },
-        ChangeAction::Update => SourceChange::Update {
-            element: Element::Relation {
-                metadata,
-                in_node: element_reference(source_id, from_id),
-                out_node: element_reference(source_id, to_id),
-                properties,
-            },
-        },
+        ChangeAction::Update => SourceChange::update(Element::Relation {
+            metadata,
+            in_node: element_reference(source_id, from_id),
+            out_node: element_reference(source_id, to_id),
+            properties,
+        }),
         ChangeAction::Delete => SourceChange::Delete { metadata },
     }
 }

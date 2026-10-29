@@ -239,6 +239,7 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
     //update payment 2
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "p2"),
@@ -691,6 +692,7 @@ pub async fn optional_match_identity_and_join_key_changes(config: &(impl QueryTe
         },
     };
     let update = |id, properties| SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test", id),

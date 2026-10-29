@@ -190,7 +190,7 @@ sdk::export_computation_plugin!(sdk::PluginDefinition::new(
     .into_iter()
     .chain(native_consumer_progress::factories())
     .collect(),
-    vec![GraphChangeCodec::schema(), SourceTransactionCodec::schema()],
+    vec![GraphChangeCodec::schema()],
 )
 .and_then(|definition| definition.with_bootstrap_factories(vec![
     Arc::new(native_bootstrap::Factory { progress: false }),

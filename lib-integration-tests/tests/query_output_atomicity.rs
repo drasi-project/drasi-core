@@ -32,7 +32,7 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::BootstrapEventSender;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::computation::v1::{
-    EnvelopeCodec, QueryChangeCodec, QueryRowKind, Record, RecordImage,
+    EnvelopeCodec, GraphChangeCodec, QueryChangeCodec, Record, RecordImage, ResultNodeProjector,
 };
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
@@ -829,10 +829,17 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let mut outbox_source_ids = Vec::new();
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("storage limit"));
     codec.register_schema(QueryChangeCodec::schema())?;
+    let mut output_scope: Option<ResultNodeProjector> = None;
     for (_seq, data) in &raw_outbox {
         let envelope = codec
             .decode(data)
             .context("decode durable query envelope")?;
+        let projection =
+            QueryChangeCodec::projection(&envelope).context("durable query projection")?;
+        match &output_scope {
+            Some(scope) => assert_eq!(scope, projection.projector()),
+            None => output_scope = Some(projection.projector().clone()),
+        }
         let result = QueryChangeCodec::to_legacy_result(&envelope)
             .context("project the durable query envelope")?;
         if let Some(source_id) = result
@@ -857,12 +864,11 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let live_row_count = live_rows.len();
     let mut live_names = Vec::new();
     for (signature, data) in live_rows {
-        let identity = QueryChangeCodec::encode_row(
-            QUERY_ID,
-            signature,
-            &Default::default(),
-            QueryRowKind::Row,
-            RecordImage::Full,
+        let scope = output_scope
+            .as_ref()
+            .context("live rows require a durable output envelope that supplies their scope")?;
+        let identity = GraphChangeCodec::element_reference(
+            &scope.reference(&ResultNodeProjector::signature_identity(signature))?,
         )?
         .identity()
         .clone();
@@ -872,9 +878,10 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
             RecordImage::Full,
             bytes::Bytes::from(data),
         )?;
-        let row = QueryChangeCodec::decode_row(&record).context("decode durable live row")?;
-        assert_eq!(row.query_id, QUERY_ID);
-        assert_eq!(row.signature, signature);
+        let row =
+            QueryChangeCodec::decode_row_in(scope, &record).context("decode durable live row")?;
+        assert_eq!(row.dataset, scope.dataset());
+        assert_eq!(row.signature, Some(signature));
         if let Some(name) = row.values.get("name") {
             live_names.push(name.to_string());
         }
@@ -903,6 +910,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
 #[derive(Clone)]
 struct FixtureOpts {
     query_text: &'static str,
+    recovery: RecoveryPolicy,
     fault: Option<Arc<FaultInjector>>,
     include_reaction: bool,
     durable_reaction: bool,
@@ -937,12 +945,12 @@ async fn build_core(
         .with_query(
             Query::cypher(QUERY_ID)
                 .query(opts.query_text)
-                .from_source(SOURCE_ID)
+                .from_input(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(std::env::var(BOOTSTRAP_ENV).ok().as_deref() == Some("1"))
                 .with_outbox_capacity(32)
                 .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-                .with_recovery_policy(RecoveryPolicy::Strict)
+                .with_recovery_policy(opts.recovery)
                 .build(),
         )
         .with_wal_provider(wal);
@@ -986,7 +994,7 @@ async fn shutdown_and_release(core: DrasiLib, source: ApplicationSourceHandle) -
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let graph = core.get_graph().await;
+        let graph = core.get_graph().await.expect("graph snapshot");
         if graph
             .nodes
             .iter()
@@ -1352,6 +1360,7 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
             &paths,
             FixtureOpts {
                 query_text: QUERY_TEXT,
+                recovery: RecoveryPolicy::Strict,
                 fault: None,
                 include_reaction: true,
                 durable_reaction: false,
@@ -1472,6 +1481,7 @@ async fn run_bootstrap_idle_phase() -> Result<()> {
         &paths,
         FixtureOpts {
             query_text: QUERY_TEXT,
+            recovery: RecoveryPolicy::AutoReset,
             fault: None,
             include_reaction: false,
             durable_reaction: false,
@@ -1500,6 +1510,7 @@ async fn run_fault_phase() -> Result<()> {
         FixtureOpts {
             query_text,
             fault: Some(fault.clone()),
+            recovery: RecoveryPolicy::Strict,
             include_reaction: false,
             durable_reaction,
             captured: Arc::new(RwLock::new(Vec::new())),
@@ -1537,6 +1548,7 @@ async fn run_recover_phase() -> Result<()> {
         FixtureOpts {
             query_text,
             fault: None,
+            recovery: RecoveryPolicy::Strict,
             include_reaction: false,
             durable_reaction,
             captured: Arc::new(RwLock::new(Vec::new())),

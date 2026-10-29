@@ -91,7 +91,7 @@ fn change(value: u64) -> SourceChange {
     if value == 0 {
         SourceChange::Insert { element }
     } else {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     }
 }
 
@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
         .with_query(
             Query::cypher("projection")
                 .query("MATCH (n:Bench) RETURN n.value AS value")
-                .from_source("input")
+                .from_input("input")
                 .enable_bootstrap(false)
                 .build(),
         )

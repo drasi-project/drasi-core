@@ -14,28 +14,17 @@
 
 //! Explicit wire format for WAL records.
 //!
-//! Core domain types (`SourceChange`, `Element`, etc.) intentionally do NOT
-//! implement `serde::Serialize`/`Deserialize`. This crate owns the wire format
-//! for the redb WAL and converts between core types and DTOs on the boundary.
-//!
-//! This indirection:
-//! - Keeps core types free of serialization concerns
-//! - Makes the WAL binary format explicit and versionable
-//! - Allows the wire format to evolve independently from the core domain model
+//! The WAL owns its event envelope and rejects scheduled notifications. Property
+//! values reuse the model's lossless serde contract rather than a narrower mirror.
 
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Wire-format version. Incremented on breaking DTO changes.
-///
-/// A WAL record with a different version is treated as a decode failure; in
-/// practice the WAL is ephemeral and is expected to be pruned or cleared on
-/// version changes.
-pub(crate) const WAL_FORMAT_VERSION: u32 = 2;
+/// The current, unreleased v1 definition replaces the previous implementation.
+pub(crate) const WAL_FORMAT_VERSION: u32 = 1;
 
 /// Envelope around every persisted event — carries the format version.
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,9 +37,19 @@ pub(crate) struct WalRecord {
 /// contract rejects that variant at append time.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum SourceChangeDto {
-    Insert { element: ElementDto },
-    Update { element: ElementDto },
-    Delete { metadata: ElementMetadataDto },
+    Insert {
+        element: ElementDto,
+    },
+    Replace {
+        element: ElementDto,
+    },
+    Update {
+        element: ElementDto,
+        removed_properties: Vec<String>,
+    },
+    Delete {
+        metadata: ElementMetadataDto,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,17 +80,8 @@ pub(crate) struct ElementMetadataDto {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum ElementValueDto {
-    Null,
-    Bool(bool),
-    Float(f64),
-    Integer(i64),
-    String(String),
-    LocalDateTime(String),
-    ZonedDateTime(String),
-    List(Vec<ElementValueDto>),
-    Object(PropertyMapDto),
-}
+#[serde(transparent)]
+pub(crate) struct ElementValueDto(ElementValue);
 
 /// Property map is serialized as an ordered vec of (key, value) pairs to
 /// preserve the stable `BTreeMap` iteration order from the core type.
@@ -110,8 +100,15 @@ impl From<&SourceChange> for SourceChangeDto {
             SourceChange::Insert { element } => SourceChangeDto::Insert {
                 element: element.into(),
             },
-            SourceChange::Update { element } => SourceChangeDto::Update {
+            SourceChange::Replace { element } => SourceChangeDto::Replace {
                 element: element.into(),
+            },
+            SourceChange::Update {
+                element,
+                removed_properties,
+            } => SourceChangeDto::Update {
+                element: element.into(),
+                removed_properties: removed_properties.iter().cloned().collect(),
             },
             SourceChange::Delete { metadata } => SourceChangeDto::Delete {
                 metadata: metadata.into(),
@@ -171,21 +168,7 @@ impl From<&ElementReference> for ElementReferenceDto {
 
 impl From<&ElementValue> for ElementValueDto {
     fn from(v: &ElementValue) -> Self {
-        match v {
-            ElementValue::Null => ElementValueDto::Null,
-            ElementValue::Bool(b) => ElementValueDto::Bool(*b),
-            ElementValue::Float(f) => ElementValueDto::Float(f.into_inner()),
-            ElementValue::Integer(i) => ElementValueDto::Integer(*i),
-            ElementValue::String(s) => ElementValueDto::String(s.to_string()),
-            ElementValue::LocalDateTime(dt) => {
-                ElementValueDto::LocalDateTime(dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
-            }
-            ElementValue::ZonedDateTime(dt) => ElementValueDto::ZonedDateTime(dt.to_rfc3339()),
-            ElementValue::List(items) => {
-                ElementValueDto::List(items.iter().map(Into::into).collect())
-            }
-            ElementValue::Object(map) => ElementValueDto::Object(map.into()),
-        }
+        Self(v.clone())
     }
 }
 
@@ -207,8 +190,15 @@ impl From<SourceChangeDto> for SourceChange {
             SourceChangeDto::Insert { element } => SourceChange::Insert {
                 element: element.into(),
             },
-            SourceChangeDto::Update { element } => SourceChange::Update {
+            SourceChangeDto::Replace { element } => SourceChange::Replace {
                 element: element.into(),
+            },
+            SourceChangeDto::Update {
+                element,
+                removed_properties,
+            } => SourceChange::Update {
+                element: element.into(),
+                removed_properties: removed_properties.into_iter().collect(),
             },
             SourceChangeDto::Delete { metadata } => SourceChange::Delete {
                 metadata: metadata.into(),
@@ -261,25 +251,7 @@ impl From<ElementReferenceDto> for ElementReference {
 
 impl From<ElementValueDto> for ElementValue {
     fn from(dto: ElementValueDto) -> Self {
-        match dto {
-            ElementValueDto::Null => ElementValue::Null,
-            ElementValueDto::Bool(b) => ElementValue::Bool(b),
-            ElementValueDto::Float(f) => ElementValue::Float(OrderedFloat(f)),
-            ElementValueDto::Integer(i) => ElementValue::Integer(i),
-            ElementValueDto::String(s) => ElementValue::String(Arc::from(s)),
-            ElementValueDto::LocalDateTime(s) => s
-                .parse()
-                .map(ElementValue::LocalDateTime)
-                .unwrap_or_else(|_| ElementValue::String(Arc::from(s))),
-            ElementValueDto::ZonedDateTime(s) => s
-                .parse()
-                .map(ElementValue::ZonedDateTime)
-                .unwrap_or_else(|_| ElementValue::String(Arc::from(s))),
-            ElementValueDto::List(items) => {
-                ElementValue::List(items.into_iter().map(Into::into).collect())
-            }
-            ElementValueDto::Object(map) => ElementValue::Object(map.into()),
-        }
+        dto.0
     }
 }
 

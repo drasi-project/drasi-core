@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config::{
-    QueryConfig, QueryJoinConfig, SourceSubscriptionConfig, SourceSubscriptionSettings,
+    QueryConfig, QueryInputConfig, QueryJoinConfig, QueryResultConfig, SourceSubscriptionSettings,
 };
 use drasi_core::{
     middleware::MiddlewareTypeRegistry, models::SourceMiddlewareConfig, query::QueryBuilder,
@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 
 /// Native query execution settings, independent of the legacy QueryManager.
-/// The existing DTOs describe joins and middleware without owning runtime state.
+/// The existing DTOs describe inputs, result options, joins and middleware without
+/// owning runtime state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryExecutionSettings {
@@ -31,7 +32,9 @@ pub struct QueryExecutionSettings {
     #[serde(default)]
     pub middleware: Vec<SourceMiddlewareConfig>,
     #[serde(default)]
-    pub sources: Vec<SourceSubscriptionConfig>,
+    pub inputs: Vec<QueryInputConfig>,
+    #[serde(default, skip_serializing_if = "QueryResultConfig::is_default")]
+    pub result: QueryResultConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_transactions: Option<super::SourceTransactionLimits>,
 }
@@ -51,11 +54,11 @@ pub(crate) struct OrdinaryQueryDeclaration {
 impl QueryExecutionSettings {
     pub(super) fn fingerprint_settings(&self) -> Self {
         let mut settings = self.clone();
-        for source in &mut settings.sources {
-            source.nodes.sort();
-            source.nodes.dedup();
-            source.relations.sort();
-            source.relations.dedup();
+        for input in &mut settings.inputs {
+            input.nodes.sort();
+            input.nodes.dedup();
+            input.relations.sort();
+            input.relations.dedup();
         }
         settings.joins.sort_by(|left, right| left.id.cmp(&right.id));
         for join in &mut settings.joins {
@@ -81,7 +84,8 @@ impl QueryExecutionSettings {
             super::ComputationQueryLanguage::Cypher => crate::config::QueryLanguage::Cypher,
             super::ComputationQueryLanguage::Gql => crate::config::QueryLanguage::GQL,
         };
-        config.sources = self.sources.clone();
+        config.inputs = self.inputs.clone();
+        config.result = self.result.clone();
         config.middleware = self.middleware.clone();
         config.joins = (!self.joins.is_empty()).then(|| self.joins.clone());
         config.recovery_policy = Some(match recovery {
@@ -95,7 +99,8 @@ impl QueryExecutionSettings {
         Self {
             joins: config.joins.clone().unwrap_or_default(),
             middleware: config.middleware.clone(),
-            sources: config.sources.clone(),
+            inputs: config.inputs.clone(),
+            result: config.result.clone(),
             source_transactions: None,
         }
     }
@@ -113,7 +118,8 @@ impl QueryExecutionSettings {
     pub(super) fn is_empty(&self) -> bool {
         self.joins.is_empty()
             && self.middleware.is_empty()
-            && self.sources.is_empty()
+            && self.inputs.is_empty()
+            && self.result.is_default()
             && self.source_transactions.is_none()
     }
 
@@ -131,15 +137,16 @@ impl QueryExecutionSettings {
         }
         let middleware =
             super::middleware::validate_middleware_configs(&self.middleware, registry)?;
-        let mut sources = BTreeSet::new();
-        for source in &self.sources {
-            super::data::validate_identifier("source", &source.source_id)?;
-            if !sources.insert(&source.source_id) {
-                anyhow::bail!("duplicate source subscription");
+        self.result.validate()?;
+        let mut inputs = BTreeSet::new();
+        for input in &self.inputs {
+            input.validate()?;
+            if !inputs.insert(&input.component) {
+                anyhow::bail!("duplicate query input '{}'", input.component);
             }
-            for name in &source.pipeline {
+            for name in &input.pipeline {
                 if !middleware.contains(name.as_str()) {
-                    anyhow::bail!("source pipeline references undeclared middleware {name}");
+                    anyhow::bail!("input pipeline references undeclared middleware {name}");
                 }
             }
         }
@@ -160,8 +167,8 @@ impl QueryExecutionSettings {
         for config in &self.middleware {
             builder = builder.with_source_middleware(Arc::new(config.clone()));
         }
-        for source in &self.sources {
-            builder = builder.with_source_pipeline(&source.source_id, &source.pipeline);
+        for input in &self.inputs {
+            builder = builder.with_source_pipeline(&input.component, &input.pipeline);
         }
         Ok(builder.with_joins(self.joins.iter().cloned().map(Into::into).collect()))
     }

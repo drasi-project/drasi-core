@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
               e.payload      AS payload
             "#,
         )
-        .from_source("deepbook-mainnet")
+        .from_input("deepbook-mainnet")
         .auto_start(true)
         .build();
 
@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
               p.quote_asset AS quote_asset
             "#,
         )
-        .from_source("deepbook-mainnet")
+        .from_input("deepbook-mainnet")
         .auto_start(true)
         .build();
 

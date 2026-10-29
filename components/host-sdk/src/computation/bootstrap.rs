@@ -48,6 +48,7 @@ pub struct NativeBootstrapFactory {
     extension: PluginBootstrapV1,
     plugin: Arc<PluginOwner>,
     codec: Arc<BinaryEnvelopeCodec>,
+    coordination: Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
 }
 impl NativeBootstrapFactory {
     pub(super) fn new(
@@ -63,10 +64,25 @@ impl NativeBootstrapFactory {
             extension,
             plugin,
             codec,
+            coordination: None,
         }
     }
     pub fn metadata(&self) -> &BootstrapFactoryMetadata {
         &self.metadata
+    }
+    pub(super) fn with_coordination(
+        mut self,
+        extension: Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            extension.is_none() || self.metadata.source_progress,
+            "paired native bootstrap must declare query source progress"
+        );
+        self.coordination = extension;
+        Ok(self)
+    }
+    pub fn requires_source_bootstrap(&self) -> bool {
+        self.coordination.is_some()
     }
     pub fn create_provider(
         &self,
@@ -75,7 +91,7 @@ impl NativeBootstrapFactory {
         scope: Option<Scope>,
         progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
-        self.create_bound_provider(id, configuration, scope, progress, None)
+        self.create_bound_provider(id, configuration, scope, progress, None, None)
     }
     pub(crate) fn create_query_provider(
         &self,
@@ -85,8 +101,27 @@ impl NativeBootstrapFactory {
         progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
         let query_scope = Some((scope.clone(), id.clone()));
-        self.create_bound_provider(id, configuration, Some(scope), progress, query_scope)
+        self.create_bound_provider(id, configuration, Some(scope), progress, query_scope, None)
     }
+    pub fn create_paired_query_provider(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        progress: Arc<QuerySourceProgress>,
+        source: Arc<super::NativeSourceBootstrapResource>,
+    ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
+        let query_scope = Some((scope.clone(), id.clone()));
+        self.create_bound_provider(
+            id,
+            configuration,
+            Some(scope),
+            Some(progress),
+            query_scope,
+            Some(source),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
     fn create_bound_provider(
         &self,
         id: ComponentId,
@@ -94,8 +129,11 @@ impl NativeBootstrapFactory {
         scope: Option<Scope>,
         progress: Option<Arc<QuerySourceProgress>>,
         query_scope: Option<(Scope, ComponentId)>,
+        source: Option<Arc<super::NativeSourceBootstrapResource>>,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
         let request = CreateRequest {
+            inputs: Vec::new(),
+            activation_credentials_bound: false,
             id,
             configuration,
             scope,
@@ -103,6 +141,10 @@ impl NativeBootstrapFactory {
             configuration_version: self.metadata.configuration_version,
         };
         self.metadata.validate_request(&request)?;
+        anyhow::ensure!(
+            source.is_some() == self.coordination.is_some(),
+            "native bootstrap source coordinator binding mismatch"
+        );
         anyhow::ensure!(
             self.metadata.source_progress == progress.is_some(),
             "native bootstrap source progress binding mismatch"
@@ -117,18 +159,45 @@ impl NativeBootstrapFactory {
                 "bootstrap progress belongs to another graph"
             );
         }
-        let binding = progress.as_ref().map(ProgressBinding::new);
+        let binding = progress
+            .as_ref()
+            .filter(|_| source.is_none())
+            .map(ProgressBinding::new);
         let table = binding.as_ref().map(ProgressBinding::table);
         let bytes = wire::encode(&request)?;
         let mut raw = BootstrapHandle::null();
+        let pairing = source
+            .as_ref()
+            .map(|source| {
+                source.bind_query(
+                    &request.id,
+                    request.scope.as_ref().expect("paired scope"),
+                    progress.as_ref().expect("paired progress"),
+                )
+            })
+            .transpose()?;
         unsafe {
-            take_status(self.extension.create.expect("validated")(
-                self.plugin.state(),
-                self.index,
-                abi::BorrowedBytes::new(&bytes),
-                table.as_ref().map_or(std::ptr::null(), |table| table),
-                &mut raw,
-            ))?;
+            if let Some(pairing) = &pairing {
+                take_status(self
+                    .coordination
+                    .expect("paired")
+                    .create_bootstrap
+                    .expect("validated")(
+                    self.plugin.state(),
+                    self.index,
+                    abi::BorrowedBytes::new(&bytes),
+                    &pairing.table(),
+                    &mut raw,
+                ))?;
+            } else {
+                take_status(self.extension.create.expect("validated")(
+                    self.plugin.state(),
+                    self.index,
+                    abi::BorrowedBytes::new(&bytes),
+                    table.as_ref().map_or(std::ptr::null(), |table| table),
+                    &mut raw,
+                ))?;
+            }
         }
         let vtable = unsafe { checked_table(raw.vtable)? };
         anyhow::ensure!(
@@ -144,6 +213,7 @@ impl NativeBootstrapFactory {
                 _plugin: self.plugin.clone(),
                 progress,
                 _binding: binding,
+                pairing,
                 cleanup_required: AtomicBool::new(false),
                 current_snapshot: AtomicU64::new(0),
                 lifecycle: AtomicU8::new(IDLE),
@@ -152,6 +222,7 @@ impl NativeBootstrapFactory {
             codec: self.codec.clone(),
             pending: Mutex::new(None),
             completion: Mutex::new(None),
+            stopping: tokio::sync::Mutex::new(None),
             query_scope,
         }))
     }
@@ -162,6 +233,7 @@ struct Remote {
     _plugin: Arc<PluginOwner>,
     progress: Option<Arc<QuerySourceProgress>>,
     _binding: Option<ProgressBinding>,
+    pairing: Option<super::bootstrap_coordination::SourceBootstrapBinding>,
     cleanup_required: AtomicBool,
     current_snapshot: AtomicU64,
     lifecycle: AtomicU8,
@@ -172,6 +244,15 @@ struct Remote {
 unsafe impl Send for Remote {}
 unsafe impl Sync for Remote {}
 impl Remote {
+    fn revoke_bindings(&self) {
+        if let Some(binding) = &self._binding {
+            binding.revoke();
+        }
+        if let Some(pairing) = &self.pairing {
+            pairing.revoke();
+        }
+    }
+
     fn table(&self) -> &BootstrapVTable {
         unsafe { &*self.raw.vtable }
     }
@@ -327,9 +408,7 @@ impl Drop for Retirement {
             Ordering::Acquire,
         );
         if self.remote.lifecycle.load(Ordering::Acquire) == RETIRED {
-            if let Some(binding) = &self.remote._binding {
-                binding.revoke();
-            }
+            self.remote.revoke_bindings();
         }
     }
 }
@@ -362,14 +441,13 @@ pub struct NativeBootstrapProxy {
     codec: Arc<BinaryEnvelopeCodec>,
     pending: Mutex<Option<bool>>,
     completion: Mutex<Option<Option<Bytes>>>,
+    stopping: tokio::sync::Mutex<Option<(OperationFuture, CallGuard)>>,
     query_scope: Option<(Scope, ComponentId)>,
 }
 impl Drop for NativeBootstrapProxy {
     fn drop(&mut self) {
         self.inner.cancel();
-        if let Some(binding) = &self.inner._binding {
-            binding.revoke();
-        }
+        self.inner.revoke_bindings();
     }
 }
 impl NativeBootstrapProxy {
@@ -377,7 +455,19 @@ impl NativeBootstrapProxy {
         self.inner.progress.as_ref()
     }
     async fn stop_inner(&self, retire: bool) -> anyhow::Result<()> {
-        let ((), mut guard) = self.inner.call::<()>(STOP, None).await?;
+        let mut stopping = self.stopping.lock().await;
+        if stopping.is_none() {
+            let guard = self.inner.guard()?;
+            self.inner.current_snapshot.store(0, Ordering::Release);
+            let operation = self.inner.begin(STOP, 0, None)?;
+            *stopping = Some((operation, guard));
+        }
+        // A cancelled caller must not cancel the accepted provider cleanup.
+        // Keep both its operation and acquisition fence until a later waiter joins it.
+        let result = (&mut stopping.as_mut().expect("accepted stop").0).await;
+        let (_, mut guard) = stopping.take().expect("accepted stop");
+        let bytes = result.map_err(super::proxy::native_operation_cause)?;
+        wire::decode::<()>(&bytes)?;
         *self
             .pending
             .lock()
@@ -390,9 +480,7 @@ impl NativeBootstrapProxy {
         self.inner.stopped.store(true, Ordering::Release);
         if retire {
             self.inner.lifecycle.store(RETIRED, Ordering::Release);
-            if let Some(binding) = &self.inner._binding {
-                binding.revoke();
-            }
+            self.inner.revoke_bindings();
         }
         guard.completed = true;
         Ok(())
@@ -557,9 +645,7 @@ impl drasi_lib::computation::v1::ResourceCleanup for NativeBootstrapProxy {
             Ordering::Acquire,
         ) {
             Ok(_) | Err(RETIRED) => {
-                if let Some(binding) = &self.inner._binding {
-                    binding.revoke();
-                }
+                self.inner.revoke_bindings();
                 Ok(())
             }
             Err(_) => self.stop_inner(true).await,

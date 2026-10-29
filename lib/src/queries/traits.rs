@@ -32,7 +32,9 @@ pub trait Query: Send + Sync {
     /// Stop the query and release its active subscriptions and processing tasks.
     ///
     /// This must also clean up queries in `Error`, because failed starts and
-    /// processing errors can leave resources behind. Calling it on an already
+    /// processing errors can leave resources behind. A terminal configuration
+    /// error remains visible until the configuration is corrected, even after
+    /// all runtime work has stopped. Calling it on an already
     /// stopped query is a no-op, whereas [`crate::DrasiLib::stop_query`] rejects
     /// an already stopped query.
     async fn stop(&self) -> Result<()>;
@@ -40,7 +42,7 @@ pub trait Query: Send + Sync {
     fn get_config(&self) -> &QueryConfig;
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Number of active subscription forwarders, for diagnostics.
+    /// Number of actual active subscription forwarders, not configured sources.
     async fn subscription_count(&self) -> usize {
         0
     }

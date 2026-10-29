@@ -65,7 +65,7 @@ async fn test_spawn_blocking_works_on_multi_thread_runtime() {
 /// Wait for a component to reach Running status via event notification.
 async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
     let mut rx = drasi.subscribe_all_component_events();
-    let snapshot = drasi.get_graph().await;
+    let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()
@@ -114,7 +114,7 @@ async fn run_source_query_diff_cycle(instance_id: &str) {
 
     let query = Query::cypher("flavor-query")
         .query("MATCH (i:Item) RETURN i.name AS name")
-        .from_source("flavor-source")
+        .from_input("flavor-source")
         .auto_start(true)
         .enable_bootstrap(false)
         .build();
@@ -198,7 +198,7 @@ async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()
         let query = |id| {
             Query::cypher(id)
                 .query("MATCH (i:Item) RETURN i.name AS name")
-                .from_source("source")
+                .from_input("source")
                 .auto_start(true)
                 .enable_bootstrap(false)
                 .build()

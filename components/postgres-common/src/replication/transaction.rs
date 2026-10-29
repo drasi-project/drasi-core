@@ -157,7 +157,7 @@ impl Transactions {
                         return Ok(None);
                     }
                 }
-                self.push(SourceChange::Update { element })?;
+                self.push(SourceChange::update(element))?;
             }
             WalMessage::Delete {
                 relation_id,

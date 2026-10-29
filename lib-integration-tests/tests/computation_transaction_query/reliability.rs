@@ -10,7 +10,7 @@ async fn joined_query(
 ) -> Result<ContinuousQueryTransformer> {
     let config = drasi_lib::Query::cypher("query")
         .query("MATCH (o:Order)-[:CUSTOMER]->(c:Customer) RETURN c.region AS region, sum(o.amount) AS total")
-        .from_source("orders").from_source("customers")
+        .from_input("orders").from_input("customers")
         .with_joins(vec![QueryJoinConfig {
             id: "CUSTOMER".into(),
             keys: vec![
@@ -65,7 +65,7 @@ fn source_input(
             if insert {
                 SourceChange::Insert { element }
             } else {
-                SourceChange::Update { element }
+                SourceChange::update(element)
             },
             StreamId::try_new(format!("{source}/out"))?,
             sequence,

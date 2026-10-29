@@ -19,9 +19,9 @@ use std::{collections::BTreeMap, sync::Arc};
 pub use component::BridgeSink;
 pub use drasi_computation_bridge_common::{
     AcceptanceBoundary, BridgeConfig, BridgeControl, BridgeEgressControl, BridgeError,
-    EgressStatus, ErrorCode, Limits, LinkStatus, Namespace, PortableEnvelopeCodec, PortableSchema,
-    Profile, Receipt, TlsRecipeKind, TlsResource, TlsResourceRecipe, TlsRole, Transport,
-    SINK_FACTORY,
+    EgressStatus, ErrorCode, Limits, LinkStatus, Namespace, PortableDelivery,
+    PortableEnvelopeCodec, Profile, Receipt, TlsRecipeKind, TlsResource, TlsResourceRecipe,
+    TlsRole, Transport, SINK_FACTORY,
 };
 
 pub fn factory() -> Arc<dyn ComponentFactory> {

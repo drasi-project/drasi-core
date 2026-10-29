@@ -81,6 +81,7 @@ fn make_test_insert(id: &str) -> SourceChange {
 
 fn make_test_update(id: &str) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("test_source", id),
@@ -330,6 +331,15 @@ async fn test_prune_all() {
     assert_eq!(pruned, 5);
     assert_eq!(provider.event_count(TEST_SRC).await.unwrap(), 0);
     assert_eq!(provider.oldest_sequence(TEST_SRC).await.unwrap(), None);
+    assert_eq!(provider.head_sequence(TEST_SRC).await.unwrap(), 5);
+    assert!(matches!(
+        provider.read_from(TEST_SRC, 1).await,
+        Err(WalError::PositionUnavailable {
+            oldest_available: None,
+            ..
+        })
+    ));
+    assert!(provider.read_from(TEST_SRC, 6).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -834,6 +844,135 @@ async fn test_dto_roundtrip() {
     let events = provider.read_from(TEST_SRC, 1).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].1, insert);
+}
+
+#[tokio::test]
+async fn test_removals_and_replacements_survive_wal_reopen_in_order() {
+    let node = |time: u64, props: &[(&str, ElementValue)]| {
+        let mut properties = ElementPropertyMap::new();
+        for (name, value) in props {
+            properties.insert(name, value.clone());
+        }
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(TEST_SRC, "n"),
+                labels: Arc::from([Arc::from("Item")]),
+                effective_from: time,
+            },
+            properties,
+        }
+    };
+    let changes = vec![
+        SourceChange::Insert {
+            element: node(1, &[("keep", ElementValue::Integer(1))]),
+        },
+        SourceChange::update_with_removals(
+            node(2, &[("null", ElementValue::Null)]),
+            ["gone".to_string(), "keep".to_string()].into(),
+        )
+        .unwrap(),
+        SourceChange::replace(node(3, &[("only", ElementValue::Integer(3))])),
+        SourceChange::update(node(4, &[("only", ElementValue::Integer(4))])),
+    ];
+    let temporary = TempDir::new().unwrap();
+    {
+        let provider = new_provider(temporary.path());
+        register_default(&provider, TEST_SRC).await;
+        for change in &changes {
+            provider.append(TEST_SRC, change).await.unwrap();
+        }
+    }
+    let provider = new_provider(temporary.path());
+    register_default(&provider, TEST_SRC).await;
+    let events = provider.read_from(TEST_SRC, 1).await.unwrap();
+    assert_eq!(
+        events.iter().map(|(_, change)| change).collect::<Vec<_>>(),
+        changes.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
+}
+
+#[tokio::test]
+async fn test_update_that_sets_and_removes_one_property_is_not_persisted() {
+    let mut properties = ElementPropertyMap::new();
+    properties.insert("both", ElementValue::Null);
+    let conflicting = SourceChange::Update {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(TEST_SRC, "n"),
+                labels: Arc::from([Arc::from("Item")]),
+                effective_from: 1,
+            },
+            properties,
+        },
+        removed_properties: ["both".to_string()].into(),
+    };
+    let temporary = TempDir::new().unwrap();
+    let provider = new_provider(temporary.path());
+    register_default(&provider, TEST_SRC).await;
+    assert!(matches!(
+        provider.append(TEST_SRC, &conflicting).await,
+        Err(WalError::InvalidEvent(_))
+    ));
+    assert!(provider.read_from(TEST_SRC, 1).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_rich_property_values_survive_wal_reopen() {
+    use drasi_core::evaluation::variable_value::{
+        integer::Integer, zoned_datetime::ZonedDateTime, VariableValue,
+    };
+
+    let mut properties = ElementPropertyMap::new();
+    for (name, value) in [
+        ("huge", VariableValue::Integer(Integer::from(u64::MAX))),
+        ("day", VariableValue::Date("2026-01-02".parse().unwrap())),
+        (
+            "zone",
+            VariableValue::ZonedDateTime(ZonedDateTime::new(
+                "2026-01-02T03:04:05.123456789+01:00".parse().unwrap(),
+                Some("Etc/GMT-1".to_string()),
+            )),
+        ),
+    ] {
+        properties.insert(name, (&value).try_into().unwrap());
+    }
+    let change = SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(TEST_SRC, "rich"),
+                labels: Arc::from([Arc::from("Result")]),
+                effective_from: 10,
+            },
+            properties,
+        },
+    };
+    let temporary = TempDir::new().unwrap();
+    {
+        let provider = new_provider(temporary.path());
+        register_default(&provider, TEST_SRC).await;
+        provider.append(TEST_SRC, &change).await.unwrap();
+    }
+    let provider = new_provider(temporary.path());
+    register_default(&provider, TEST_SRC).await;
+    let events = provider.read_from(TEST_SRC, 1).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1, change);
+}
+
+#[test]
+fn test_dto_rejects_invalid_temporal_value_instead_of_changing_its_type() {
+    use crate::dto::ElementValueDto;
+
+    // LocalDateTime is variant 7 in the current ElementValue definition.
+    let bytes = bincode::serialize(&(7_u32, "not-a-datetime")).unwrap();
+    assert!(bincode::deserialize::<ElementValueDto>(&bytes).is_err());
 }
 
 // ---------------------------------------------------------------------------

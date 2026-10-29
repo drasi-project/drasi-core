@@ -48,12 +48,19 @@ use crate::context::SourceRuntimeContext;
 ///
 /// Sources return these errors (via `anyhow::Error`) from trait methods like `subscribe()`.
 /// The orchestration layer can downcast to check for specific error variants:
-/// ```ignore
+/// ```rust
+/// use drasi_lib::sources::SourceError;
+/// let err = anyhow::Error::new(SourceError::PositionUnavailable {
+///     source_id: "source".into(),
+///     requested: bytes::Bytes::from_static(b"last-position"),
+///     earliest_available: None,
+/// });
 /// if let Some(source_err) = err.downcast_ref::<SourceError>() {
 ///     match source_err {
 ///         SourceError::PositionUnavailable { .. } => { /* handle */ }
 ///     }
 /// }
+/// assert!(err.downcast_ref::<SourceError>().is_some());
 /// ```
 #[derive(Error, Debug)]
 pub enum SourceError {
@@ -115,10 +122,24 @@ impl PositionComparator for ByteLexPositionComparator {
 ///
 /// # Example Implementation
 ///
-/// ```ignore
+/// This compile-checked skeleton leaves connector-specific work to the implementer;
+/// the omitted lifecycle methods and `todo!` bodies are not a runnable source.
+///
+/// ```no_run
 /// use drasi_lib::Source;
 /// use drasi_lib::sources::{SourceBase, SourceBaseParams};
 /// use drasi_lib::context::SourceRuntimeContext;
+/// # use anyhow::Result;
+/// # use async_trait::async_trait;
+/// # use std::collections::HashMap;
+/// # use serde_json::Value;
+/// # use drasi_lib::channels::{ComponentStatus, DispatchMode, SubscriptionResponse};
+/// # use drasi_lib::config::SourceSubscriptionSettings;
+/// # pub struct MySourceConfig {
+/// #     id: String,
+/// #     dispatch_mode: DispatchMode,
+/// #     buffer_capacity: usize,
+/// # }
 ///
 /// pub struct MySource {
 ///     base: SourceBase,
@@ -148,7 +169,7 @@ impl PositionComparator for ByteLexPositionComparator {
 ///     }
 ///
 ///     fn properties(&self) -> HashMap<String, Value> {
-///         // Return plugin-specific properties
+///         todo!("Return every declared configuration property")
 ///     }
 ///
 ///     async fn initialize(&self, context: SourceRuntimeContext) {
@@ -156,6 +177,13 @@ impl PositionComparator for ByteLexPositionComparator {
 ///     }
 ///
 ///     // ... implement other methods
+/// #     async fn start(&self) -> Result<()> { todo!("Start owned connector work") }
+/// #     async fn stop(&self) -> Result<()> { todo!("Await connector cleanup") }
+/// #     async fn status(&self) -> ComponentStatus { self.base.get_status().await }
+/// #     async fn subscribe(&self, _: SourceSubscriptionSettings) -> Result<SubscriptionResponse> {
+/// #         todo!("Return the actual source subscription")
+/// #     }
+/// #     fn as_any(&self) -> &dyn std::any::Any { self }
 /// }
 /// ```
 #[async_trait]

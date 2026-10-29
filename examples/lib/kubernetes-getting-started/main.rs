@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
             RETURN c.name AS name, c.namespace AS namespace, c.data.color AS color
             "#,
         )
-        .from_source("k8s-source")
+        .from_input("k8s-source")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -83,7 +83,9 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("Kubernetes getting-started example running.");
-    println!("Use ./test-updates.sh in another shell to create/update/delete drasi-demo ConfigMap.");
+    println!(
+        "Use ./test-updates.sh in another shell to create/update/delete drasi-demo ConfigMap."
+    );
     println!("Press Ctrl+C to stop.");
 
     core.start().await?;

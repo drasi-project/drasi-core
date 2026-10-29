@@ -27,7 +27,7 @@ use super::{
     ComponentDescriptor, ComponentId, ComputationComponent, EnvelopeSink, InputEnvelope,
     OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId, QueryChangeCodec,
     QueryHistoryError, QueryIdentityError, QueryRecoveryIdentity, QueryRecoveryView, QueryResults,
-    SinkCompletion, StreamId, SystemMetadata, Transformer, WakeupSource,
+    SinkCompletion, SnapshotConsumer, StreamId, SystemMetadata, Transformer, WakeupSource,
 };
 
 #[async_trait]
@@ -531,12 +531,14 @@ impl QueryReplayTransformer {
             envelope: envelope.derive(
                 super::emission_id(&self.stream, sequence)?,
                 envelope.changes().clone(),
-                SystemMetadata::new(self.stream.clone(), sequence).with_timestamp(
-                    envelope
-                        .system()
-                        .timestamp()
-                        .unwrap_or_else(chrono::Utc::now),
-                ),
+                SystemMetadata::new(self.stream.clone(), sequence)
+                    .with_ordering(envelope.system().ordering())
+                    .with_timestamp(
+                        envelope
+                            .system()
+                            .timestamp()
+                            .unwrap_or_else(chrono::Utc::now),
+                    ),
             ),
         })
     }
@@ -592,6 +594,7 @@ impl QueryReplayTransformer {
             SystemMetadata::new(self.stream.clone(), sequence).with_timestamp(chrono::Utc::now());
         let mut envelope = match action {
             ConsumerRecoveryAction::ReplaceSnapshot => QueryChangeCodec::snapshot_envelope(
+                &view.snapshot.projector,
                 &self.query_id,
                 &view.snapshot,
                 self.descriptor.id(),
@@ -606,6 +609,7 @@ impl QueryReplayTransformer {
                     target_sequence
                 );
                 QueryChangeCodec::progress_envelope(
+                    &view.snapshot.projector,
                     &self.query_id,
                     target_sequence,
                     view.snapshot.generation,
@@ -873,6 +877,10 @@ impl CheckpointedSink {
         if inner.completion() != SinkCompletion::Handled {
             anyhow::bail!("handled checkpoints cannot wrap an acceptance-only sink");
         }
+        anyhow::ensure!(
+            inner.recovery_contract().delivery.is_none(),
+            "checkpointed sink cannot forward retirement proof that excludes its progress store"
+        );
         Ok(Self {
             inner,
             progress,
@@ -893,21 +901,84 @@ impl ComputationComponent for CheckpointedSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
+    fn recovery_contract(&self) -> super::ComponentRecovery {
+        self.inner.recovery_contract()
+    }
+    fn query_api(&self) -> Option<Arc<super::QueryApi>> {
+        self.inner.query_api()
+    }
+    fn source_schema_reader(&self) -> Option<Arc<dyn super::SourceSchemaReader>> {
+        self.inner.source_schema_reader()
+    }
+    fn output_readers(&self) -> super::OutputReaders {
+        self.inner.output_readers()
+    }
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "inner": self.inner.configuration()?,
+            "accept_skipped_resets": self.accept_skipped_resets,
+        }))
+    }
+    fn binds_inputs(&self) -> bool {
+        self.inner.binds_inputs()
+    }
+    async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
+        self.inner.bind_inputs(bindings).await
+    }
+    fn bind_control(&mut self, control: super::ComponentControl) {
+        self.inner.bind_control(control);
+    }
+    fn control_handler(&self) -> Option<Arc<dyn super::ControlHandler>> {
+        self.inner.control_handler()
+    }
+    fn requires_readiness_confirmation(&self) -> bool {
+        self.inner.requires_readiness_confirmation()
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.inner.start().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.inner.stop().await
     }
+    async fn reconfigure(&mut self, context: super::ConstructionContext) -> anyhow::Result<()> {
+        self.inner.reconfigure(context).await?;
+        anyhow::ensure!(
+            self.inner.recovery_contract().delivery.is_none(),
+            "checkpointed sink cannot forward retirement proof that excludes its progress store"
+        );
+        Ok(())
+    }
+    async fn deprovision(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("checkpointed sink cannot delete its inner state without scoped progress-store deletion")
+    }
 }
 
 #[async_trait]
 impl EnvelopeSink for CheckpointedSink {
+    fn batching(&self) -> anyhow::Result<Option<super::SinkBatching>> {
+        self.inner.batching()
+    }
+    async fn handle_batch(&mut self, inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
+        let limits = self
+            .batching()?
+            .ok_or_else(|| anyhow::anyhow!("inner sink does not support batching"))?;
+        limits.validate_inputs(&inputs)?;
+        for input in inputs {
+            self.handle(input).await?;
+        }
+        Ok(())
+    }
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
-    fn supports_snapshot(&self) -> bool {
-        self.inner.supports_snapshot()
+    /// Exposed only where the inner sink supports snapshots on `port`; the
+    /// wrapper itself runs the checkpointed replacement workflow.
+    fn snapshot_consumer(&mut self, port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        if self.inner.snapshot_consumer(port).is_some() {
+            Some(self)
+        } else {
+            None
+        }
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         let query = QueryChangeCodec::metadata(&input.envelope)?.query_id;
@@ -973,10 +1044,13 @@ impl EnvelopeSink for CheckpointedSink {
             }
             validate_commit(handled.as_ref(), &checkpoint, true)?;
             if decision.action == ConsumerRecoveryAction::ReplaceSnapshot {
-                if !self.inner.supports_snapshot() {
-                    anyhow::bail!("sink does not support explicit snapshot replacement");
-                }
-                self.inner.replace_snapshot(input).await?;
+                let port = input.port.clone();
+                let Some(consumer) = self.inner.snapshot_consumer(&port) else {
+                    anyhow::bail!(
+                        "sink input {port} does not support explicit snapshot replacement"
+                    );
+                };
+                consumer.replace_snapshot(input).await?;
             }
             self.progress
                 .commit_recovery(&query, handled, checkpoint)
@@ -998,6 +1072,21 @@ impl EnvelopeSink for CheckpointedSink {
             self.inner.handle(input).await?;
             self.progress.commit_handled(&query, checkpoint).await
         }
+    }
+}
+
+#[async_trait]
+impl SnapshotConsumer for CheckpointedSink {
+    /// Runs the full checkpointed workflow (decision, conflict and checkpoint
+    /// validation, the inner replacement, then recovery commit); a live or
+    /// progress-only envelope is never accepted as a snapshot.
+    async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            QueryChangeCodec::is_snapshot(&input.envelope)
+                && !QueryChangeCodec::is_progress_only(&input.envelope),
+            "snapshot replacement requires a snapshot envelope"
+        );
+        EnvelopeSink::handle(self, input).await
     }
 }
 
@@ -1143,5 +1232,109 @@ impl super::ComponentFactory for QueryReplayFactory {
             policy,
         );
         Ok(super::ConstructedComponent::transformer(Box::new(instance)))
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    struct Sink {
+        descriptor: ComponentDescriptor,
+        bound: bool,
+        control: Option<super::super::ComponentControl>,
+    }
+
+    #[async_trait]
+    impl ComputationComponent for Sink {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        fn binds_inputs(&self) -> bool {
+            true
+        }
+        async fn bind_inputs(&mut self, _: &[super::super::InputBinding]) -> anyhow::Result<()> {
+            self.bound = true;
+            Ok(())
+        }
+        fn requires_readiness_confirmation(&self) -> bool {
+            true
+        }
+        fn bind_control(&mut self, control: super::super::ComponentControl) {
+            self.control = Some(control);
+        }
+        fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({"kind": "capable"}))
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            anyhow::ensure!(self.bound, "input binding was lost");
+            self.control
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("control binding was lost"))?
+                .ready()?;
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl EnvelopeSink for Sink {
+        fn completion(&self) -> SinkCompletion {
+            SinkCompletion::Handled
+        }
+        fn batching(&self) -> anyhow::Result<Option<super::super::SinkBatching>> {
+            Ok(Some(super::super::SinkBatching {
+                max_inputs: 2,
+                max_operations: 8,
+                max_bytes: 4096,
+                max_delay_ms: 10,
+            }))
+        }
+        async fn handle(&mut self, _: InputEnvelope) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapper_preserves_input_control_readiness_configuration_and_batch_policy() {
+        let id = ComponentId::try_new("wrapped").unwrap();
+        let plane = super::super::ControlPlane::new(4).unwrap();
+        let generation = super::super::ComponentGeneration(1);
+        let (control, _receiver) = plane.attach(id.clone(), generation).unwrap();
+        let inner = Sink {
+            descriptor: ComponentDescriptor::try_new(
+                id.clone(),
+                vec![PortDescriptor::new(
+                    PortId::try_new("in").unwrap(),
+                    PortDirection::Input,
+                    QueryChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )],
+            )
+            .unwrap(),
+            bound: false,
+            control: None,
+        };
+        let mut wrapped =
+            CheckpointedSink::new(Box::new(inner), Arc::new(MemoryConsumerProgress::default()))
+                .unwrap();
+        assert!(wrapped.binds_inputs());
+        assert!(wrapped.requires_readiness_confirmation());
+        assert_eq!(wrapped.batching().unwrap().unwrap().max_inputs, 2);
+        assert_eq!(wrapped.configuration().unwrap()["inner"]["kind"], "capable");
+        wrapped.bind_inputs(&[]).await.unwrap();
+        wrapped.bind_control(control);
+        wrapped.start().await.unwrap();
+        assert!(plane.is_ready(&id, generation));
+        assert!(wrapped.handle_batch(Vec::new()).await.is_err());
+        assert!(wrapped
+            .deprovision()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("progress-store deletion"));
+        wrapped.stop().await.unwrap();
     }
 }

@@ -236,10 +236,14 @@ The Application Source processes three types of graph changes:
    SourceChange::Insert { element: Element }
    ```
 
-2. **Update**: Modify an existing node or relationship (full replacement)
+2. **Update**: Patch an existing node or relationship: the element's properties are
+   set (null is stored as a value) and every other property stays unchanged
    ```rust
-   SourceChange::Update { element: Element }
+   SourceChange::update(element)
    ```
+   Use `SourceChange::update_with_removals(element, removed_property_names)` to
+   delete properties, or `SourceChange::replace(element)` for a full replacement
+   that drops every omitted property.
 
 3. **Delete**: Remove a node or relationship
    ```rust
@@ -442,7 +446,7 @@ drasi.add_source(Arc::new(source)).await?;
 // Define a query that uses the source
 let query = drasi.create_query("high-temp-sensors")
     .cypher("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s")
-    .from_source("events")
+    .from_input("events")
     .build()
     .await?;
 

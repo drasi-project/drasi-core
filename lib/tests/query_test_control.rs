@@ -61,7 +61,7 @@ impl Input {
         let change = if revision == 0 {
             SourceChange::Insert { element }
         } else {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         };
         let event = Arc::new(SourceEventWrapper::new(
             "input".into(),
@@ -139,7 +139,7 @@ impl Source for Input {
 fn query(id: &str, text: &str) -> Query {
     Query::cypher(id)
         .query(text)
-        .from_source("input")
+        .from_input("input")
         .enable_bootstrap(false)
 }
 
@@ -793,6 +793,8 @@ datetime.realtime().epochMillis AS logicalTime";
                 "committed output not yet published"
             );
         }
+        // Interrupt committed-but-unpublished processing; shutdown otherwise drains it.
+        core.computation_control()?.cancel();
         {
             let shutdown = core.shutdown();
             tokio::pin!(shutdown);

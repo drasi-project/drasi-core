@@ -20,7 +20,7 @@ mod tests {
     use super::*;
     use crate::channels::DispatchMode;
     use crate::config::{QueryConfig, QueryJoinConfig, QueryLanguage};
-    use crate::config::{QueryJoinKeyConfig, SourceSubscriptionConfig};
+    use crate::config::{QueryInputConfig, QueryJoinKeyConfig};
     use crate::recovery::RecoveryPolicy;
     use drasi_core::models::SourceMiddlewareConfig;
     use serde_json::{Map, Value};
@@ -49,11 +49,12 @@ mod tests {
             query: "MATCH (n) RETURN n".into(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: vec![SourceSubscriptionConfig {
-                source_id: "s1".into(),
+            inputs: vec![QueryInputConfig {
+                component: "s1".into(),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             }],
             auto_start: true,
             joins: None,
@@ -65,6 +66,7 @@ mod tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -95,15 +97,35 @@ mod tests {
     fn different_source_id_different_hash() {
         let a = base();
         let mut b = base();
-        b.sources[0].source_id = "s2".into();
+        b.inputs[0].component = "s2".into();
         assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
+    }
+
+    #[test]
+    fn different_input_port_different_hash() {
+        let a = base();
+        let mut b = base();
+        b.inputs[0].port = Some("out".into());
+        assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
+    }
+
+    #[test]
+    fn result_label_is_part_of_the_hash() {
+        let a = base();
+        let mut b = base();
+        b.result.label = Some("RoomComfort".into());
+        let mut c = base();
+        c.result.label = Some("FloorComfort".into());
+        assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
+        assert_ne!(compute_config_hash(&b), compute_config_hash(&c));
+        assert_eq!(compute_config_hash(&b), compute_config_hash(&b.clone()));
     }
 
     #[test]
     fn different_source_labels_different_hash() {
         let a = base();
         let mut b = base();
-        b.sources[0].nodes = vec!["B".into()];
+        b.inputs[0].nodes = vec!["B".into()];
         assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
     }
 
@@ -234,34 +256,38 @@ mod tests {
     #[test]
     fn source_reorder_changes_hash() {
         let mut a = base();
-        a.sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "s1".into(),
+        a.inputs = vec![
+            QueryInputConfig {
+                component: "s1".into(),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
-            SourceSubscriptionConfig {
-                source_id: "s2".into(),
+            QueryInputConfig {
+                component: "s2".into(),
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
         ];
 
         let mut b = base();
-        b.sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "s2".into(),
+        b.inputs = vec![
+            QueryInputConfig {
+                component: "s2".into(),
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
-            SourceSubscriptionConfig {
-                source_id: "s1".into(),
+            QueryInputConfig {
+                component: "s1".into(),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
         ];
 
@@ -300,10 +326,10 @@ mod tests {
     #[test]
     fn nodes_reorder_same_hash() {
         let mut a = base();
-        a.sources[0].nodes = vec!["Order".into(), "Customer".into()];
+        a.inputs[0].nodes = vec!["Order".into(), "Customer".into()];
 
         let mut b = base();
-        b.sources[0].nodes = vec!["Customer".into(), "Order".into()];
+        b.inputs[0].nodes = vec!["Customer".into(), "Order".into()];
 
         assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
     }
@@ -311,10 +337,10 @@ mod tests {
     #[test]
     fn relations_reorder_same_hash() {
         let mut a = base();
-        a.sources[0].relations = vec!["PLACED_BY".into(), "CONTAINS".into()];
+        a.inputs[0].relations = vec!["PLACED_BY".into(), "CONTAINS".into()];
 
         let mut b = base();
-        b.sources[0].relations = vec!["CONTAINS".into(), "PLACED_BY".into()];
+        b.inputs[0].relations = vec!["CONTAINS".into(), "PLACED_BY".into()];
 
         assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
     }
@@ -322,10 +348,10 @@ mod tests {
     #[test]
     fn duplicate_nodes_same_hash_as_deduped() {
         let mut a = base();
-        a.sources[0].nodes = vec!["Order".into(), "Order".into(), "Customer".into()];
+        a.inputs[0].nodes = vec!["Order".into(), "Order".into(), "Customer".into()];
 
         let mut b = base();
-        b.sources[0].nodes = vec!["Order".into(), "Customer".into()];
+        b.inputs[0].nodes = vec!["Order".into(), "Customer".into()];
 
         assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
     }
@@ -333,10 +359,10 @@ mod tests {
     #[test]
     fn duplicate_relations_same_hash_as_deduped() {
         let mut a = base();
-        a.sources[0].relations = vec!["R".into(), "R".into()];
+        a.inputs[0].relations = vec!["R".into(), "R".into()];
 
         let mut b = base();
-        b.sources[0].relations = vec!["R".into()];
+        b.inputs[0].relations = vec!["R".into()];
 
         assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
     }
@@ -379,10 +405,10 @@ mod tests {
     #[test]
     fn pipeline_reorder_different_hash() {
         let mut a = base();
-        a.sources[0].pipeline = vec!["decode".into(), "map".into()];
+        a.inputs[0].pipeline = vec!["decode".into(), "map".into()];
 
         let mut b = base();
-        b.sources[0].pipeline = vec!["map".into(), "decode".into()];
+        b.inputs[0].pipeline = vec!["map".into(), "decode".into()];
 
         // Pipeline order within a source is semantically meaningful.
         assert_ne!(compute_config_hash(&a), compute_config_hash(&b));

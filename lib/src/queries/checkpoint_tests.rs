@@ -45,7 +45,7 @@ mod tests {
         query_reset_key, ComponentBatch, ComponentId, ComputationQueryLanguage,
         ContinuousQueryDefinition, QueryExecutionSettings, StreamId, QUERY_CONFIGURATION,
     };
-    use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::sources::base::{SourceBase, SourceBaseParams};
     use crate::sources::Source;
     use crate::test_helpers::wait_for_component_status;
@@ -202,13 +202,14 @@ mod tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: true,
@@ -221,6 +222,7 @@ mod tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -1609,13 +1611,14 @@ mod tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: true,
@@ -1628,6 +1631,7 @@ mod tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -1922,11 +1926,12 @@ mod tests {
                     query: "MATCH (n:Person) RETURN n.name, n.age".to_string(),
                     query_language: QueryLanguage::Cypher,
                     middleware: vec![],
-                    sources: vec![SourceSubscriptionConfig {
+                    inputs: vec![QueryInputConfig {
                         nodes: vec![],
                         relations: vec![],
-                        source_id: "mismatch-src".to_string(),
+                        component: "mismatch-src".to_string(),
                         pipeline: vec![],
+                        port: None,
                     }],
                     auto_start: true,
                     joins: None,
@@ -1940,6 +1945,7 @@ mod tests {
                     recovery_policy: None,
                     outbox_capacity: 1000,
                     bootstrap_timeout_secs: 300,
+                    result: Default::default(),
                 },
             )
             .await
@@ -3247,7 +3253,7 @@ mod orchestration_tests {
 
     use super::tests::MockPersistentPlugin;
     use crate::channels::*;
-    use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::recovery::RecoveryPolicy;
     use crate::sources::base::{SourceBase, SourceBaseParams};
     use crate::sources::Source;
@@ -3454,13 +3460,14 @@ mod orchestration_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: false,
@@ -3473,6 +3480,7 @@ mod orchestration_tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
@@ -3487,13 +3495,14 @@ mod orchestration_tests {
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources: sources
+            inputs: sources
                 .into_iter()
-                .map(|source_id| SourceSubscriptionConfig {
+                .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    source_id,
+                    component: source_id,
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect(),
             auto_start: false,
@@ -3506,6 +3515,7 @@ mod orchestration_tests {
             recovery_policy,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 

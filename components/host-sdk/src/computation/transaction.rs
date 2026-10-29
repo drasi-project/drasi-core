@@ -289,7 +289,12 @@ async fn apply(
             let request: wire::DeriveRequest = wire::decode(input)?;
             let input = codec.decode(&request.input)?;
             let output = codec.decode(&request.output)?;
-            wire::encode_buffer(&codec.encode(&context.derive(&input, output.changes().clone())?)?)
+            wire::encode_buffer(&codec.encode(&context.derive_with_ordering(
+                &input,
+                output.changes().clone(),
+                output.system().control().cloned(),
+                output.system().ordering(),
+            )?)?)
         }
         _ => anyhow::bail!("unsupported native transaction state operation"),
     }

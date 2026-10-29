@@ -248,9 +248,9 @@ pub use observability::get_or_init_global_registry;
 pub use config::snapshot::QueryConfigurationSnapshot;
 /// Configuration types
 pub use config::{
-    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
-    QueryRuntime, ReactionRuntime, ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot,
-    SourceSubscriptionSettings,
+    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryInputConfig,
+    QueryLanguage, QueryResultConfig, QueryRuntime, ReactionRuntime, ReactionSnapshot,
+    RuntimeConfig, SourceRuntime, SourceSnapshot, SourceSubscriptionSettings,
 };
 
 /// Schema discovery types.

@@ -317,8 +317,16 @@ impl Reaction for DashboardReaction {
                     result = priority_queue.dequeue() => result,
                 };
 
-                snapshot_store.apply(query_result.as_ref()).await;
-                websocket_hub.broadcast_query_result(query_result.as_ref());
+                if let Err(err) = snapshot_store
+                    .apply_and_broadcast(query_result.as_ref(), &websocket_hub)
+                    .await
+                {
+                    error!("[{reaction_id}] dashboard snapshot update failed: {err}");
+                    status_handle
+                        .set_status(ComponentStatus::Error, Some(err.to_string()))
+                        .await;
+                    break;
+                }
             }
 
             info!("[{reaction_id}] dashboard processing task ended");
@@ -353,6 +361,7 @@ impl Reaction for DashboardReaction {
             snapshot_fetcher,
         );
         let websocket_hub = self.websocket_hub.clone();
+        let websocket_snapshots = self.snapshot_store.clone();
         let query_ids = self.base.queries.clone();
         let server_status_handle = self.base.status_handle();
         // Reset the shutdown flag for this run (supports stop/start cycles) and
@@ -389,6 +398,7 @@ impl Reaction for DashboardReaction {
                         crate::websocket::ws_upgrade(
                             upgrade,
                             websocket_hub_for_route.clone(),
+                            websocket_snapshots.clone(),
                             query_ids_for_route.clone(),
                             ws_shutdown_for_route.clone(),
                         )

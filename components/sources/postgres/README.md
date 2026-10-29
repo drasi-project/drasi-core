@@ -33,8 +33,8 @@ hosting DrasiLib instance's single graph. They do **not** replace the
 legacy `PostgresReplicationSource` per-change contract or its plugin ABI. Use a native graph/pipeline,
 not the ordinary legacy source builder.
 
-It emits one `drasi.source-transaction` envelope for each committed PostgreSQL
-transaction. Repeated updates, key changes and deletions remain in that group.
+It emits one standard graph-change envelope, carrying a current
+complete-transaction marker, for each committed PostgreSQL transaction. Repeated updates, key changes and deletions remain in that group.
 A query configured with `QueryExecutionSettings::source_transactions` applies
 the group atomically and publishes only its final result changes.
 
@@ -180,6 +180,9 @@ streaming, coordinated initial loading and persistent restart. Tests inspect
 server-side encryption and session retirement, and reject unknown CAs, wrong
 hostnames, expired certificates and invalid certificate settings without advancing
 query progress. The existing TLS-refusal case also remains required.
+On Unix, fixture checks also use the `openssl` command-line tool to verify the
+generated certificate chain and reject an unrelated CA, independently of the
+platform TLS backend.
 
 ## Architecture
 

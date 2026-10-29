@@ -70,6 +70,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     // Add a temperator value below 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "temp_sensor_01_value"),
@@ -95,6 +96,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     // Add a door sensor value of "closed" (0).
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "door_sensor_01_value"),
@@ -120,6 +122,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     // Add a temperator value above 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "temp_sensor_01_value"),
@@ -145,6 +148,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     // Add a door sensor value of "open" (1).
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "door_sensor_01_value"),
@@ -180,6 +184,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     // Add a door sensor value of "closed" (0).
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "door_sensor_01_value"),
@@ -215,6 +220,7 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
     // Add a temperator value below 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "temp_sensor_01_value"),

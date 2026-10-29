@@ -56,7 +56,7 @@ pub(super) fn connect(
             "drasi.network/sse-sink",
             "notifications",
             serde_json::json!({
-                "queryStreams":{query_id:format!("{query_id}/out")},
+                "outputs":{query_id:{"component":query_id,"port":"out"}},
                 "host":"127.0.0.1", "port":sse_port, "ssePath":"/events",
                 "broadcastCapacity":32
             }),
@@ -86,26 +86,21 @@ pub(super) async fn add_webhook(
     let specification = factory.specification(
         ComponentId::try_new("webhook")?,
         serde_json::json!({
-            "queryId":"low-stock", "stream":"low-stock/out", "url":url,
+            "outputs":{"low-stock":{"component":"low-stock","port":"out"}},
+            "url":url,
             "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
         }),
     )?;
-    let component = core
-        .add_computation_component(
-            ComponentAddition::from_specification(specification, factory).auto_start(false),
-        )
-        .await?;
-    let report = core
-        .computation_control()?
+    let addition = ComponentBatch::builder()
+        .component(specification, factory)
         .connect(
             EdgeDefinition::new(endpoint("low-stock", "out")?, endpoint("webhook", "in")?),
             Box::new(BoundedPipeConfig { capacity: 8 }),
-            RelationshipPolicy::default(),
         )
-        .await?;
-    if report.summary != OperationSummary::Completed {
-        return Err(LifecycleReportError::Reconciliation(report).into());
-    }
+        .build()?
+        .auto_start(false);
+    core.add_components(addition).await?.ensure_committed()?;
+    let component = core.computation_component("webhook")?;
     tokio::time::timeout(Duration::from_secs(10), component.start())
         .await
         .context("wait for webhook readiness")??;

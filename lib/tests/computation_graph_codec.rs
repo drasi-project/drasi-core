@@ -191,6 +191,7 @@ fn graph_batches_preserve_operation_order_repeated_identities_and_empty_progress
             },
         },
         SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     effective_from: 2,
@@ -237,7 +238,12 @@ fn graph_batches_preserve_operation_order_repeated_identities_and_empty_progress
                 .iter()
                 .map(ChangeOperation::ordinal)
                 .collect::<Vec<_>>(),
-            (0..batch.len() as u64).collect::<Vec<_>>()
+            batch
+                .iter()
+                .enumerate()
+                .filter(|(_, change)| !matches!(change, SourceChange::Future { .. }))
+                .map(|(ordinal, _)| ordinal as u64)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             GraphChangeCodec::decode_changes(&decoded).expect("changes"),
@@ -264,7 +270,7 @@ fn graph_batches_preserve_operation_order_repeated_identities_and_empty_progress
 }
 
 #[test]
-fn graph_replacements_delete_the_previous_labels_at_the_new_effective_time() {
+fn graph_replacements_are_one_full_change_at_the_new_effective_time() {
     let previous = ElementMetadata {
         reference: ElementReference::new("source", "parent"),
         labels: Arc::from([Arc::from("Previous")]),
@@ -312,14 +318,6 @@ fn graph_replacements_delete_the_previous_labels_at_the_new_effective_time() {
     ];
 
     for before in before_images {
-        let expected_metadata = ElementMetadata {
-            effective_from: 200,
-            ..if before.is_some() {
-                previous.clone()
-            } else {
-                replacement.get_metadata().clone()
-            }
-        };
         let stream = StreamId::try_new("source/out").expect("stream");
         let changes = ChangeSet::try_new(
             ChangeSetId::try_new("replace", Bytes::from_static(b"parent")).expect("change ID"),
@@ -339,14 +337,9 @@ fn graph_replacements_delete_the_previous_labels_at_the_new_effective_time() {
         );
         assert_eq!(
             GraphChangeCodec::decode_changes(&envelope).expect("decode"),
-            [
-                SourceChange::Delete {
-                    metadata: expected_metadata,
-                },
-                SourceChange::Insert {
-                    element: replacement.clone(),
-                },
-            ]
+            [SourceChange::Replace {
+                element: replacement.clone(),
+            }]
         );
     }
 }

@@ -21,15 +21,20 @@
 
 pub mod config;
 pub mod connect;
-#[cfg(feature = "api")]
+#[cfg(feature = "native")]
+pub mod decoder;
 pub mod dto;
 pub mod keys;
+#[cfg(feature = "native")]
+#[doc(hidden)]
+pub mod native;
+#[cfg(feature = "storedproc")]
+pub mod storedproc;
 pub mod types;
 
 // Re-export main types
 pub use config::{is_valid_identifier, SslMode, TableKeyConfig};
 pub use connect::connect_with_ssl_mode;
-#[cfg(feature = "api")]
 pub use dto::SslModeDto;
 pub use keys::{escape_identifier, format_value_for_key, quote_identifier};
 pub use types::{

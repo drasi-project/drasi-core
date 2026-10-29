@@ -188,13 +188,13 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
         &directory,
         true,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     let mut sink_config = configuration(
         &directory,
         false,
         Profile::Volatile,
-        PortableSchema::GraphChange,
+        PortableDelivery::Events,
     );
     source_config.transport = transport.clone();
     sink_config.transport = transport;

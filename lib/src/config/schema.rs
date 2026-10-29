@@ -44,7 +44,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///   - id: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
 ///     queryLanguage: Cypher  # Optional, this is the default
-///     sources: [orders_db]
+///     inputs: [orders_db]
 /// ```
 ///
 /// ## Using GQL
@@ -61,7 +61,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///         }
 ///       }
 ///     queryLanguage: GQL
-///     sources: [users_db]
+///     inputs: [users_db]
 /// ```
 ///
 /// # Important Limitations
@@ -75,71 +75,204 @@ pub enum QueryLanguage {
     GQL,
 }
 
-/// Source subscription configuration for queries
+/// Input binding for a query
 ///
-/// `SourceSubscriptionConfig` defines how a query subscribes to a specific source,
-/// including any middleware pipeline to apply to changes from that source.
+/// `QueryInputConfig` names an upstream component (a source, another query or a
+/// transformer) and, optionally, one of its output ports. It also carries the
+/// label interests and middleware pipeline that apply to that input.
 ///
 /// # Fields
 ///
-/// - **source_id**: ID of the source to subscribe to
-/// - **nodes**: Optional list of node labels to subscribe to from this source
-/// - **relations**: Optional list of relation labels to subscribe to from this source
-/// - **pipeline**: Optional list of middleware IDs to apply to changes from this source
+/// - **component**: ID of the upstream component to consume
+/// - **port**: Optional output port. When omitted, the component's declared
+///   primary output (or its only output) is used. A multi-port component without
+///   a primary output requires an explicit port.
+/// - **nodes**: Optional list of node labels to subscribe to from this input
+/// - **relations**: Optional list of relation labels to subscribe to from this input
+/// - **pipeline**: Optional list of middleware IDs to apply to changes from this input
 ///
-/// # Examples
+/// # Serialized forms
 ///
-/// ## Simple Subscription (No Pipeline)
+/// A bare string is shorthand for an input with only a component. The expanded
+/// object accepts exactly `component`, `port`, `nodes`, `relations` and `pipeline`;
+/// any other field is rejected.
+///
+/// ## Shorthand
 ///
 /// ```yaml
-/// source_subscriptions:
-///   - source_id: orders_db
-///     pipeline: []
+/// inputs: [orders_db, room-comfort]
 /// ```
 ///
-/// ## Subscription with Middleware Pipeline
+/// ## Expanded
 ///
 /// ```yaml
-/// source_subscriptions:
-///   - source_id: raw_events
-///     pipeline: [decoder, mapper, validator]
-/// ```
-///
-/// ## Subscription with Label Filtering
-///
-/// ```yaml
-/// source_subscriptions:
-///   - source_id: orders_db
+/// inputs:
+///   - component: orders_db
+///     port: out
 ///     nodes: [Order, Customer]
 ///     relations: [PLACED_BY]
-///     pipeline: []
+///     pipeline: [decoder, mapper]
 /// ```
 ///
 /// ## Same-Timestamp Ordering
 ///
 /// Among events already buffered with the same timestamp, all events from an
-/// earlier source in the query's `sources` list are evaluated before those from
-/// a later source. Within each source, events are ordered by sequence. For
-/// sources listed as A then B, buffered arrivals `A, B, A, B` become `A, A, B, B`.
+/// earlier input in the query's `inputs` list are evaluated before those from
+/// a later input. Within each input, events are ordered by sequence. For
+/// inputs listed as A then B, buffered arrivals `A, B, A, B` become `A, A, B, B`.
 /// This is the query's merge policy, not arrival order, and can affect intermediate
-/// join results. The queue does not wait for other sources or reorder events
-/// already processed, so this does not guarantee a global cross-source order
+/// join results. The queue does not wait for other inputs or reorder events
+/// already processed, so this does not guarantee a global cross-input order
 /// independent of arrival timing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueryInputConfig {
+    pub component: String,
+    pub port: Option<String>,
+    pub nodes: Vec<String>,
+    pub relations: Vec<String>,
+    pub pipeline: Vec<String>,
+}
+
+impl QueryInputConfig {
+    /// An input that consumes the named component's primary output.
+    pub fn new(component: impl Into<String>) -> Self {
+        Self {
+            component: component.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_port(mut self, port: impl Into<String>) -> Self {
+        self.port = Some(port.into());
+        self
+    }
+
+    pub fn with_pipeline(mut self, pipeline: Vec<String>) -> Self {
+        self.pipeline = pipeline;
+        self
+    }
+
+    /// Reject malformed component and port names before any component is created.
+    pub fn validate(&self) -> Result<()> {
+        drasi_computation_contracts::validate_identifier("query input component", &self.component)?;
+        if let Some(port) = &self.port {
+            drasi_computation_contracts::validate_identifier("query input port", port)?;
+        }
+        for (kind, labels) in [("node", &self.nodes), ("relation", &self.relations)] {
+            if labels.iter().any(|label| label.is_empty()) {
+                anyhow::bail!("query input '{}' has an empty {kind} label", self.component);
+            }
+        }
+        if self.pipeline.iter().any(|name| name.is_empty()) {
+            anyhow::bail!(
+                "query input '{}' has an empty pipeline name",
+                self.component
+            );
+        }
+        Ok(())
+    }
+
+    fn is_shorthand(&self) -> bool {
+        self.port.is_none()
+            && self.nodes.is_empty()
+            && self.relations.is_empty()
+            && self.pipeline.is_empty()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpandedQueryInput {
+    component: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    port: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pipeline: Vec<String>,
+}
+
+impl Serialize for QueryInputConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.is_shorthand() {
+            return serializer.serialize_str(&self.component);
+        }
+        ExpandedQueryInput {
+            component: self.component.clone(),
+            port: self.port.clone(),
+            nodes: self.nodes.clone(),
+            relations: self.relations.clone(),
+            pipeline: self.pipeline.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for QueryInputConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct InputVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for InputVisitor {
+            type Value = QueryInputConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a component name or an input object")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(QueryInputConfig::new(value))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let expanded = ExpandedQueryInput::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(QueryInputConfig {
+                    component: expanded.component,
+                    port: expanded.port,
+                    nodes: expanded.nodes,
+                    relations: expanded.relations,
+                    pipeline: expanded.pipeline,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(InputVisitor)
+    }
+}
+
+/// Result publication options for a query.
+///
+/// The label names the graph node label of each published result row. It never
+/// changes the output port's schema, which is graph-change regardless.
 ///
 /// ```yaml
-/// sources:
-///   - source_id: orders_db  # evaluated first on a timestamp tie
-///   - source_id: audit_log
+/// result:
+///   label: RoomComfort
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceSubscriptionConfig {
-    pub source_id: String,
-    #[serde(default)]
-    pub nodes: Vec<String>,
-    #[serde(default)]
-    pub relations: Vec<String>,
-    #[serde(default)]
-    pub pipeline: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryResultConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl QueryResultConfig {
+    pub fn is_default(&self) -> bool {
+        self.label.is_none()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.label.as_deref().is_some_and(str::is_empty) {
+            anyhow::bail!("query result label must not be empty");
+        }
+        Ok(())
+    }
 }
 
 /// Settings passed to a source when subscribing
@@ -158,9 +291,8 @@ pub struct SourceSubscriptionConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
 /// use drasi_lib::config::SourceSubscriptionSettings;
-/// use std::collections::HashSet;
 ///
 /// let settings = SourceSubscriptionSettings {
 ///     source_id: "orders_db".to_string(),
@@ -263,7 +395,7 @@ pub struct SourceSubscriptionSettings {
 ///     .with_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n) RETURN n")
-///             .from_source("my-source")
+///             .from_input("my-source")
 ///             .build()
 ///     )
 ///     .build()
@@ -290,6 +422,9 @@ pub struct DrasiLibConfig {
     /// Default dispatch buffer capacity for sources and queries (default: 1000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_buffer_capacity: Option<usize>,
+    /// Per-component activation deadline in seconds (default: 300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_timeout_secs: Option<u64>,
     /// Global storage backend definitions that can be referenced by queries
     #[serde(default)]
     pub storage_backends: Vec<StorageBackendConfig>,
@@ -304,6 +439,7 @@ impl Default for DrasiLibConfig {
             id: default_id(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            activation_timeout_secs: None,
             storage_backends: Vec::new(),
             queries: Vec::new(),
         }
@@ -344,7 +480,8 @@ impl Default for DrasiLibConfig {
 /// - **id**: Unique identifier (referenced by reactions)
 /// - **query**: Query string in specified language
 /// - **queryLanguage**: Cypher or GQL (default: Cypher)
-/// - **sources**: Ordered subscription objects containing `source_id` and optional label/pipeline mappings
+/// - **inputs**: Ordered upstream components, each a name or an object with `component`, optional `port`, and optional label/pipeline mappings
+/// - **result**: Optional result options; `result.label` names published result nodes
 /// - **auto_start**: Start automatically (default: true)
 /// - **joins**: Optional synthetic join definitions
 /// - **enableBootstrap**: Process initial data (default: true)
@@ -361,8 +498,8 @@ impl Default for DrasiLibConfig {
 ///   - id: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
 ///     queryLanguage: Cypher  # Optional, this is default
-///     sources:
-///       - source_id: orders_db
+///     inputs:
+///       - orders_db
 ///     auto_start: true
 ///     enableBootstrap: true
 /// ```
@@ -376,9 +513,9 @@ impl Default for DrasiLibConfig {
 ///       MATCH (o:Order)-[:BELONGS_TO]->(c:Customer)
 ///       WHERE o.status = 'active'
 ///       RETURN o, c
-///     sources:
-///       - source_id: orders_db
-///       - source_id: customers_db
+///     inputs:
+///       - orders_db
+///       - customers_db
 /// ```
 ///
 /// ## Query with Synthetic Joins
@@ -389,9 +526,9 @@ impl Default for DrasiLibConfig {
 ///     query: |
 ///       MATCH (o:Order)-[:CUSTOMER]->(c:Customer)
 ///       RETURN o.id, c.name
-///     sources:
-///       - source_id: orders_db
-///       - source_id: customers_db
+///     inputs:
+///       - orders_db
+///       - customers_db
 ///     joins:
 ///       - id: CUSTOMER              # Relationship type in query
 ///         keys:
@@ -407,8 +544,8 @@ impl Default for DrasiLibConfig {
 /// queries:
 ///   - id: high_volume_processing
 ///     query: "MATCH (n:Event) WHERE n.timestamp > timestamp() - 60000 RETURN n"
-///     sources:
-///       - source_id: event_stream
+///     inputs:
+///       - event_stream
 ///     priority_queue_capacity: 100000  # Large queue for many out-of-order events
 ///     dispatch_buffer_capacity: 10000  # Large output buffer
 /// ```
@@ -423,8 +560,8 @@ impl Default for DrasiLibConfig {
 ///       WHERE u.status = 'active'
 ///       RETURN u.id, u.name, u.email
 ///     queryLanguage: GQL
-///     sources:
-///       - source_id: users_db
+///     inputs:
+///       - users_db
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -439,9 +576,12 @@ pub struct QueryConfig {
     /// Middleware configurations for this query
     #[serde(default)]
     pub middleware: Vec<SourceMiddlewareConfig>,
-    /// Source subscriptions with optional middleware pipelines
+    /// Upstream component inputs with optional ports, label interests and middleware pipelines
     #[serde(default)]
-    pub sources: Vec<SourceSubscriptionConfig>,
+    pub inputs: Vec<QueryInputConfig>,
+    /// Result publication options
+    #[serde(default, skip_serializing_if = "QueryResultConfig::is_default")]
+    pub result: QueryResultConfig,
     /// Whether to automatically start this query (default: true)
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
@@ -486,6 +626,35 @@ pub struct QueryConfig {
         rename = "bootstrapTimeoutSecs"
     )]
     pub bootstrap_timeout_secs: u64,
+}
+
+impl QueryConfig {
+    /// Reject malformed input and result declarations before any component is created.
+    pub fn validate_declarations(&self) -> Result<()> {
+        let mut components = HashSet::new();
+        for input in &self.inputs {
+            input
+                .validate()
+                .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))?;
+            if input.component == self.id {
+                anyhow::bail!(
+                    "Query '{}' cannot consume its own output as input '{}'",
+                    self.id,
+                    input.component
+                );
+            }
+            if !components.insert(input.component.as_str()) {
+                anyhow::bail!(
+                    "Query '{}' declares input '{}' more than once",
+                    self.id,
+                    input.component
+                );
+            }
+        }
+        self.result
+            .validate()
+            .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))
+    }
 }
 
 /// Synthetic join configuration for queries
@@ -574,12 +743,25 @@ impl DrasiLibConfig {
     ///
     /// Returns error if validation fails with a description of the problem.
     pub fn validate(&self) -> Result<()> {
+        if let Some(seconds) = self.activation_timeout_secs {
+            anyhow::ensure!(
+                seconds > 0
+                    && std::time::Instant::now()
+                        .checked_add(std::time::Duration::from_secs(seconds))
+                        .is_some(),
+                "activation_timeout_secs must be positive and representable"
+            );
+        }
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();
         for query in &self.queries {
             if !query_ids.insert(&query.id) {
                 return Err(anyhow::anyhow!("Duplicate query id: '{}'", query.id));
             }
+        }
+
+        for query in &self.queries {
+            query.validate_declarations()?;
         }
 
         // Validate unique storage backend ids

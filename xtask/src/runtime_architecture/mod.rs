@@ -22,6 +22,7 @@ const OUTPUT: &str = "lib/docs";
 struct Definition {
     name: String,
     module: String,
+    visibility: Visibility,
     file: String,
     line: usize,
     kind: String,
@@ -40,10 +41,57 @@ struct Field {
     condition: String,
 }
 
+#[derive(Clone, Default)]
+struct Visibility {
+    scope: Option<String>,
+}
+
+impl Visibility {
+    fn new(visibility: &syn::Visibility, module: &str) -> Self {
+        let scope = match visibility {
+            syn::Visibility::Public(_) => None,
+            syn::Visibility::Inherited => Some(module.to_owned()),
+            syn::Visibility::Restricted(restricted) => {
+                let mut scope = module.to_owned();
+                for segment in &restricted.path.segments {
+                    match segment.ident.to_string().as_str() {
+                        "crate" => scope = module.split("::").next().unwrap_or(module).into(),
+                        "self" => {}
+                        "super" => {
+                            scope = scope
+                                .rsplit_once("::")
+                                .map_or(scope.as_str(), |v| v.0)
+                                .into();
+                        }
+                        name => scope = format!("{scope}::{name}"),
+                    }
+                }
+                Some(scope)
+            }
+        };
+        Self { scope }
+    }
+
+    fn accessible_from(&self, module: &str) -> bool {
+        self.scope.as_ref().is_none_or(|scope| {
+            module == scope
+                || module
+                    .strip_prefix(scope)
+                    .is_some_and(|tail| tail.starts_with("::"))
+        })
+    }
+}
+
+struct Import {
+    target: String,
+    visibility: Visibility,
+}
+
 #[derive(Default)]
 struct Module {
-    uses: Vec<(String, String)>,
-    globs: Vec<String>,
+    visibility: Visibility,
+    uses: Vec<(String, Import)>,
+    globs: Vec<Import>,
 }
 
 #[derive(Default)]
@@ -209,9 +257,14 @@ fn attrs(item: &Item) -> &[Attribute] {
     }
 }
 
-fn imports(tree: &UseTree, prefix: &str, module: &mut Module) {
+fn imports(tree: &UseTree, prefix: &str, visibility: &Visibility, module: &mut Module) {
     match tree {
-        UseTree::Path(path) => imports(&path.tree, &format!("{prefix}{}::", path.ident), module),
+        UseTree::Path(path) => imports(
+            &path.tree,
+            &format!("{prefix}{}::", path.ident),
+            visibility,
+            module,
+        ),
         UseTree::Name(name) => {
             let target = if name.ident == "self" {
                 prefix.trim_end_matches("::").to_owned()
@@ -219,16 +272,28 @@ fn imports(tree: &UseTree, prefix: &str, module: &mut Module) {
                 format!("{prefix}{}", name.ident)
             };
             let local = target.rsplit("::").next().unwrap_or(&target).to_owned();
-            module.uses.push((local, target));
+            module.uses.push((
+                local,
+                Import {
+                    target,
+                    visibility: visibility.clone(),
+                },
+            ));
         }
         UseTree::Rename(rename) => module.uses.push((
             rename.rename.to_string(),
-            format!("{prefix}{}", rename.ident),
+            Import {
+                target: format!("{prefix}{}", rename.ident),
+                visibility: visibility.clone(),
+            },
         )),
-        UseTree::Glob(_) => module.globs.push(prefix.trim_end_matches("::").to_owned()),
+        UseTree::Glob(_) => module.globs.push(Import {
+            target: prefix.trim_end_matches("::").to_owned(),
+            visibility: visibility.clone(),
+        }),
         UseTree::Group(group) => {
             for item in &group.items {
-                imports(item, prefix, module);
+                imports(item, prefix, visibility, module);
             }
         }
     }
@@ -342,6 +407,10 @@ impl Model {
             match item {
                 Item::Mod(child) => {
                     let child_name = format!("{module}::{}", child.ident);
+                    self.modules
+                        .entry(child_name.clone())
+                        .or_default()
+                        .visibility = Visibility::new(&child.vis, module);
                     if let Some((_, content)) = &child.content {
                         for line in child.span().start().line..=child.span().end().line {
                             if let Some(owner) = owners.get_mut(line.saturating_sub(1)) {
@@ -399,6 +468,7 @@ impl Model {
                 Item::Use(value) => imports(
                     &value.tree,
                     "",
+                    &Visibility::new(&value.vis, module),
                     self.modules.entry(module.into()).or_default(),
                 ),
                 Item::Struct(_)
@@ -521,7 +591,10 @@ impl Model {
                     .entry(local_module.clone())
                     .or_default()
                     .globs
-                    .push(module.into());
+                    .push(Import {
+                        target: module.into(),
+                        visibility: Visibility::default(),
+                    });
                 self.definition(&local, &local_module, file, &condition, None)?;
             }
         }
@@ -536,13 +609,14 @@ impl Model {
         condition: &str,
         line: Option<usize>,
     ) -> Result<()> {
-        let (name, kind, fields, alias, generics) = match item {
+        let (name, kind, fields, alias, generics, visibility) = match item {
             Item::Struct(value) => (
                 &value.ident,
                 "struct",
                 declared_fields(&value.fields, "", condition),
                 None,
                 &value.generics,
+                &value.vis,
             ),
             Item::Union(value) => (
                 &value.ident,
@@ -550,6 +624,7 @@ impl Model {
                 declared_fields(&Fields::Named(value.fields.clone()), "<union>", condition),
                 None,
                 &value.generics,
+                &value.vis,
             ),
             Item::Enum(value) => {
                 let fields = value
@@ -564,16 +639,38 @@ impl Model {
                         )
                     })
                     .collect();
-                (&value.ident, "enum", fields, None, &value.generics)
+                (
+                    &value.ident,
+                    "enum",
+                    fields,
+                    None,
+                    &value.generics,
+                    &value.vis,
+                )
             }
-            Item::Trait(value) => (&value.ident, "trait", vec![], None, &value.generics),
-            Item::TraitAlias(value) => (&value.ident, "trait alias", vec![], None, &value.generics),
+            Item::Trait(value) => (
+                &value.ident,
+                "trait",
+                vec![],
+                None,
+                &value.generics,
+                &value.vis,
+            ),
+            Item::TraitAlias(value) => (
+                &value.ident,
+                "trait alias",
+                vec![],
+                None,
+                &value.generics,
+                &value.vis,
+            ),
             Item::Type(value) => (
                 &value.ident,
                 "type alias",
                 vec![],
                 Some(*value.ty.clone()),
                 &value.generics,
+                &value.vis,
             ),
             _ => return Ok(()),
         };
@@ -581,6 +678,7 @@ impl Model {
         let mut definition = Definition {
             name: full.clone(),
             module: module.into(),
+            visibility: Visibility::new(visibility, module),
             file: file.into(),
             line: line.unwrap_or_else(|| item.span().start().line),
             kind: kind.into(),
@@ -612,11 +710,22 @@ impl Model {
         path: &str,
         visiting: &mut BTreeSet<String>,
     ) -> BTreeSet<String> {
-        let key = format!("{module}|{path}");
+        self.resolve_from(module, path, module, true, visiting)
+    }
+
+    fn resolve_from(
+        &self,
+        module: &str,
+        path: &str,
+        from: &str,
+        lexical: bool,
+        visiting: &mut BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let key = format!("{module}|{path}|{from}|{lexical}");
         if !visiting.insert(key.clone()) {
             return BTreeSet::new();
         }
-        let result = self.resolve_inner(module, path, visiting);
+        let result = self.resolve_inner(module, path, from, lexical, visiting);
         visiting.remove(&key);
         result
     }
@@ -625,6 +734,8 @@ impl Model {
         &self,
         module: &str,
         path: &str,
+        from: &str,
+        lexical: bool,
         visiting: &mut BTreeSet<String>,
     ) -> BTreeSet<String> {
         let path = path.trim_start_matches("::");
@@ -637,7 +748,7 @@ impl Model {
                 module.rsplit_once("::").map_or(root, |v| v.0).to_owned(),
                 parts[1..].join("::"),
             )),
-            name if scoped(name) && parts.len() > 1 => {
+            name if lexical && scoped(name) && parts.len() > 1 => {
                 Some((parts[0].into(), parts[1..].join("::")))
             }
             _ => None,
@@ -646,46 +757,71 @@ impl Model {
             if tail.is_empty() {
                 return BTreeSet::from([scope]);
             }
-            return self.resolve(&scope, &tail, visiting);
+            return self.resolve_from(&scope, &tail, from, false, visiting);
         }
-        if matches!(parts[0], "std" | "core" | "alloc") || self.external_crates.contains(parts[0]) {
+        if lexical
+            && (matches!(parts[0], "std" | "core" | "alloc")
+                || self.external_crates.contains(parts[0]))
+        {
             return BTreeSet::from([path.into()]);
         }
         let local = format!("{module}::{}", parts[0]);
-        if self.definitions.contains_key(&local) {
+        if let Some(definition) = self.definitions.get(&local) {
+            if !definition.visibility.accessible_from(from) {
+                return BTreeSet::new();
+            }
             return BTreeSet::from([if parts.len() == 1 {
                 local
             } else {
                 format!("{local}::{}", parts[1..].join("::"))
             }]);
         }
-        if self.modules.contains_key(&local) {
+        if let Some(child) = self.modules.get(&local) {
+            if !child.visibility.accessible_from(from) {
+                return BTreeSet::new();
+            }
             if parts.len() == 1 {
                 return BTreeSet::from([local]);
             }
-            return self.resolve(&local, &parts[1..].join("::"), visiting);
+            return self.resolve_from(&local, &parts[1..].join("::"), from, false, visiting);
         }
         let Some(imports) = self.modules.get(module) else {
             return BTreeSet::new();
         };
         let mut found = BTreeSet::new();
-        for (_, target) in imports.uses.iter().filter(|(name, _)| name == parts[0]) {
+        let mut explicit_binding = false;
+        for (_, import) in imports.uses.iter().filter(|(name, _)| name == parts[0]) {
+            explicit_binding = true;
+            if !import.visibility.accessible_from(from) {
+                continue;
+            }
             let expanded = if parts.len() == 1 {
-                target.clone()
+                import.target.clone()
             } else {
-                format!("{target}::{}", parts[1..].join("::"))
+                format!("{}::{}", import.target, parts[1..].join("::"))
             };
             found.extend(self.resolve(module, &expanded, visiting));
         }
-        if !found.is_empty() {
+        if explicit_binding {
             return found;
         }
         for glob in &imports.globs {
-            for target in self.resolve(module, glob, visiting) {
-                found.extend(self.resolve(&target, path, visiting));
+            if !glob.visibility.accessible_from(from) {
+                continue;
+            }
+            for target in self.resolve(module, &glob.target, visiting) {
+                let imported = self.resolve_from(&target, path, module, false, visiting);
+                if from == module || imported.is_empty() {
+                    found.extend(imported);
+                } else {
+                    // A glob neither imports inaccessible bindings nor widens their
+                    // visibility when re-exporting them to another module.
+                    let visible = self.resolve_from(&target, path, from, false, visiting);
+                    found.extend(imported.intersection(&visible).cloned());
+                }
             }
         }
-        if found.is_empty() {
+        if lexical && found.is_empty() {
             let prelude = match path {
                 "Option" => Some("std::option::Option"),
                 "Result" => Some("std::result::Result"),
@@ -901,6 +1037,7 @@ fn dependencies(
     field: &Field,
     ty: &Type,
     module: &str,
+    qualified: &BTreeSet<String>,
     count: Cardinality,
     modes: &[String],
     aliases: &mut BTreeSet<String>,
@@ -914,7 +1051,7 @@ fn dependencies(
                    edges: &mut Vec<Edge>,
                    warnings: &mut BTreeSet<String>| {
         dependencies(
-            model, owner, field, ty, module, count, modes, aliases, edges, warnings,
+            model, owner, field, ty, module, qualified, count, modes, aliases, edges, warnings,
         );
     };
     match ty {
@@ -1054,7 +1191,11 @@ fn dependencies(
             ) {
                 return;
             }
-            let targets = model.resolve(module, &text, &mut BTreeSet::new());
+            let targets = if qualified.contains(&text) {
+                BTreeSet::from([text.clone()])
+            } else {
+                model.resolve(module, &text, &mut BTreeSet::new())
+            };
             if targets.len() != 1 {
                 warnings.insert(format!(
                     "{} field {}: {} target {text}: {:?}",
@@ -1096,6 +1237,7 @@ fn dependencies(
                         })
                         .collect();
                     let mut substitutions = BTreeMap::new();
+                    let mut qualified = qualified.clone();
                     for (index, (parameter, default)) in alias.parameters.iter().enumerate() {
                         if let Some(argument) = arguments.get(index).or(default.as_ref()) {
                             let mut argument = argument.clone();
@@ -1107,6 +1249,7 @@ fn dependencies(
                                     &alias.module
                                 },
                                 &mut argument,
+                                &mut qualified,
                             );
                             substitutions.insert(parameter.clone(), argument);
                         } else {
@@ -1141,6 +1284,7 @@ fn dependencies(
                         field,
                         &representation,
                         &alias.module,
+                        &qualified,
                         count,
                         &modes,
                         aliases,
@@ -1280,10 +1424,11 @@ fn edge(
     }
 }
 
-fn qualify_type(model: &Model, module: &str, ty: &mut Type) {
+fn qualify_type(model: &Model, module: &str, ty: &mut Type, qualified: &mut BTreeSet<String>) {
     struct Qualify<'a> {
         model: &'a Model,
         module: &'a str,
+        qualified: &'a mut BTreeSet<String>,
     }
     impl syn::visit_mut::VisitMut for Qualify<'_> {
         fn visit_type_path_mut(&mut self, path: &mut syn::TypePath) {
@@ -1295,6 +1440,9 @@ fn qualify_type(model: &Model, module: &str, ty: &mut Type) {
                 .map(|s| s.ident.to_string())
                 .collect::<Vec<_>>()
                 .join("::");
+            if self.qualified.contains(&name) {
+                return;
+            }
             let resolved = self.model.resolve(self.module, &name, &mut BTreeSet::new());
             if resolved.len() == 1 {
                 if let Ok(mut qualified) =
@@ -1306,11 +1454,21 @@ fn qualify_type(model: &Model, module: &str, ty: &mut Type) {
                         last.arguments = original.arguments.clone();
                     }
                     path.path = qualified;
+                    // This is a resolved identity, not a new source-level access
+                    // path: a public re-export can name a type in a private module.
+                    self.qualified.extend(resolved);
                 }
             }
         }
     }
-    syn::visit_mut::VisitMut::visit_type_mut(&mut Qualify { model, module }, ty);
+    syn::visit_mut::VisitMut::visit_type_mut(
+        &mut Qualify {
+            model,
+            module,
+            qualified,
+        },
+        ty,
+    );
 }
 
 fn fingerprint(sources: &BTreeMap<String, String>) -> String {
@@ -1424,6 +1582,7 @@ fn build(root: &Path) -> Result<Report> {
                 field,
                 &field.ty,
                 &definition.module,
+                &BTreeSet::new(),
                 count,
                 &[],
                 &mut BTreeSet::new(),
@@ -1633,25 +1792,7 @@ mod tests {
 
     #[test]
     fn follows_explicit_reexports_without_short_name_guessing() {
-        let mut model = Model::default();
-        model
-            .modules
-            .entry("drasi_lib".into())
-            .or_default()
-            .uses
-            .push(("Chosen".into(), "crate::inner::Node".into()));
-        model.modules.entry("drasi_lib::inner".into()).or_default();
-        model
-            .definition(
-                &syn::parse_quote!(
-                    struct Node;
-                ),
-                "drasi_lib::inner",
-                "fixture.rs",
-                "",
-                None,
-            )
-            .unwrap();
+        let model = fixture("mod inner { pub struct Node; } use crate::inner::Node as Chosen;");
         assert_eq!(
             model.resolve("drasi_lib", "Chosen", &mut BTreeSet::new()),
             BTreeSet::from(["drasi_lib::inner::Node".into()])
@@ -1735,6 +1876,7 @@ mod tests {
                 field,
                 &field.ty,
                 &owner.module,
+                &BTreeSet::new(),
                 if field.variant.is_empty() {
                     Cardinality::ONE
                 } else {
@@ -1778,6 +1920,46 @@ mod tests {
         assert_eq!(field("self_ref").to, "drasi_lib::Owner");
         assert_eq!(field("task").to, "tokio::task::JoinHandle");
         assert!(!edges.iter().any(|edge| edge.field == "callback"));
+    }
+
+    #[test]
+    fn alias_arguments_keep_resolved_identities_across_private_module_boundaries() {
+        let model = fixture(
+            r#"
+            mod shared {
+                mod internal { pub struct Node; }
+                pub use internal::Node;
+            }
+            mod aliases {
+                pub type Nodes<T = crate::shared::Node> = Vec<T>;
+                pub type Nested<T> = Nodes<Option<T>>;
+            }
+            mod consumer {
+                use crate::shared::Node;
+                use crate::aliases::{Nodes, Nested};
+                struct Local;
+                struct Owner {
+                    public: Nodes<Node>,
+                    default: Nodes,
+                    local: Nested<Local>,
+                }
+            }
+            "#,
+        );
+        let (edges, warnings) = fixture_edges(&model, "consumer::Owner");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(edges.len(), 3);
+        assert_eq!(edges[0].to, "drasi_lib::shared::internal::Node");
+        assert_eq!(edges[1].to, "drasi_lib::shared::internal::Node");
+        assert_eq!(edges[2].to, "drasi_lib::consumer::Local");
+        assert!(edges.iter().all(|edge| edge.cardinality == "0..*"));
+        assert!(model
+            .resolve(
+                "drasi_lib::aliases",
+                "crate::shared::internal::Node",
+                &mut BTreeSet::new()
+            )
+            .is_empty());
     }
 
     #[test]
@@ -1828,6 +2010,206 @@ mod tests {
     }
 
     #[test]
+    fn glob_reexports_do_not_leak_private_definitions_or_imports() {
+        let model = fixture(
+            r#"
+            mod graph { pub struct Node; }
+            mod codec {
+                struct Node;
+                pub struct Owner { node: Node }
+                mod hidden { pub struct Data; }
+                pub mod visible { pub struct Data; }
+            }
+            mod other { pub struct Node; }
+            mod imports {
+                use crate::other::Node;
+                pub struct Owner { node: Node }
+            }
+            mod private_glob {
+                use crate::other::*;
+                pub struct Owner { node: Node }
+            }
+            mod facade {
+                pub use crate::graph::*;
+                pub use crate::codec::*;
+                pub use crate::imports::*;
+                pub use crate::private_glob::*;
+            }
+            mod consumer {
+                use crate::facade::Node;
+                struct Owner {
+                    node: Node,
+                    qualified: super::facade::Node,
+                    data: super::facade::visible::Data,
+                }
+            }
+            "#,
+        );
+        let (edges, warnings) = fixture_edges(&model, "consumer::Owner");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(edges.len(), 3);
+        assert_eq!(edges[0].to, "drasi_lib::graph::Node");
+        assert_eq!(edges[1].to, "drasi_lib::graph::Node");
+        assert_eq!(edges[2].to, "drasi_lib::codec::visible::Data");
+        assert!(model
+            .resolve(
+                "drasi_lib::consumer",
+                "super::facade::hidden",
+                &mut BTreeSet::new()
+            )
+            .is_empty());
+        for (owner, target) in [
+            ("codec::Owner", "codec::Node"),
+            ("imports::Owner", "other::Node"),
+            ("private_glob::Owner", "other::Node"),
+        ] {
+            let (edges, warnings) = fixture_edges(&model, owner);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].to, format!("drasi_lib::{target}"));
+            assert!(model.definitions.contains_key(&edges[0].to));
+        }
+    }
+
+    #[test]
+    fn explicit_bindings_shadow_globs_even_when_not_reexported() {
+        let model = fixture(
+            r#"
+            mod a { pub struct Node; }
+            mod b { pub struct Node; }
+            mod public {
+                pub use crate::a::*;
+                pub use crate::b::Node;
+            }
+            mod private {
+                pub use crate::a::*;
+                use crate::b::Node;
+                struct Owner { node: Node }
+            }
+            struct Owner { node: public::Node }
+            "#,
+        );
+        for owner in ["Owner", "private::Owner"] {
+            let (edges, warnings) = fixture_edges(&model, owner);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].to, "drasi_lib::b::Node");
+        }
+        assert!(model
+            .resolve("drasi_lib", "private::Node", &mut BTreeSet::new())
+            .is_empty());
+    }
+
+    #[test]
+    fn glob_imports_do_not_reexport_the_source_modules_prelude() {
+        let model = fixture(
+            r#"
+            mod a { pub struct Option; }
+            mod b {}
+            use a::*;
+            use b::*;
+            struct Owner { node: Option }
+            "#,
+        );
+        let (edges, warnings) = fixture_edges(&model, "Owner");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to, "drasi_lib::a::Option");
+    }
+
+    #[test]
+    fn restricted_bindings_remain_visible_only_in_their_declared_scope() {
+        let model = fixture(
+            r#"
+            mod outer {
+                pub mod inner {
+                    pub struct Public;
+                    pub(crate) struct CrateOnly;
+                    pub(super) struct ParentOnly;
+                    pub(in crate::outer) struct AncestorOnly;
+                    struct Private;
+                    pub(self) struct SelfOnly;
+                    mod child {
+                        use super::*;
+                        struct Owner { private: Private, explicit: SelfOnly }
+                    }
+                }
+                mod consumer { use super::inner::*; }
+            }
+            pub mod facade { pub use crate::outer::inner::*; }
+            "#,
+        );
+        for name in ["Public", "CrateOnly", "ParentOnly", "AncestorOnly"] {
+            assert_eq!(
+                model.resolve("drasi_lib::outer::consumer", name, &mut BTreeSet::new()),
+                BTreeSet::from([format!("drasi_lib::outer::inner::{name}")])
+            );
+        }
+        for name in ["Private", "SelfOnly", "ParentOnly", "AncestorOnly"] {
+            assert!(
+                model
+                    .resolve(
+                        "drasi_lib",
+                        &format!("facade::{name}"),
+                        &mut BTreeSet::new()
+                    )
+                    .is_empty(),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            model.resolve("drasi_lib", "facade::CrateOnly", &mut BTreeSet::new()),
+            BTreeSet::from(["drasi_lib::outer::inner::CrateOnly".into()])
+        );
+        assert_eq!(
+            model.resolve(
+                "drasi_core",
+                "drasi_lib::facade::Public",
+                &mut BTreeSet::new()
+            ),
+            BTreeSet::from(["drasi_lib::outer::inner::Public".into()])
+        );
+        assert!(model
+            .resolve(
+                "drasi_core",
+                "drasi_lib::facade::CrateOnly",
+                &mut BTreeSet::new()
+            )
+            .is_empty());
+        assert!(model
+            .resolve(
+                "drasi_lib::outer_extra",
+                "crate::outer::inner::ParentOnly",
+                &mut BTreeSet::new()
+            )
+            .is_empty());
+        let (edges, warnings) = fixture_edges(&model, "outer::inner::child::Owner");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].to, "drasi_lib::outer::inner::Private");
+        assert_eq!(edges[1].to, "drasi_lib::outer::inner::SelfOnly");
+    }
+
+    #[test]
+    fn ambiguous_public_exports_still_report_all_candidates() {
+        let model = fixture(
+            r#"
+            mod a { pub struct Node; }
+            mod b { pub struct Node; }
+            mod facade { pub use crate::a::*; pub use crate::b::*; }
+            mod consumer { use crate::facade::*; struct Owner { node: Node } }
+            "#,
+        );
+        let (edges, warnings) = fixture_edges(&model, "consumer::Owner");
+        assert!(edges.is_empty());
+        assert_eq!(warnings.len(), 1);
+        let warning = warnings.first().unwrap();
+        assert!(warning.contains("ambiguous"), "{warning}");
+        assert!(warning.contains("drasi_lib::a::Node"), "{warning}");
+        assert!(warning.contains("drasi_lib::b::Node"), "{warning}");
+    }
+
+    #[test]
     fn lexical_line_count_excludes_comments_docs_and_test_items() {
         let source = "// comment\n/// doc\nstruct Node; // inline\n#[cfg(test)]\nmod tests {\n struct Test;\n}\n\n";
         let syntax = syn::parse_file(source).unwrap();
@@ -1871,6 +2253,24 @@ mod tests {
                 "0..1",
             ),
             (
+                "drasi_lib::computation::instance::Entry",
+                "control",
+                "drasi_lib::computation::v1::graph::GraphControl",
+                "0..1",
+            ),
+            (
+                "drasi_lib::computation::v1::lifecycle::DependencyWait",
+                "endpoint",
+                "drasi_lib::computation::v1::graph::Endpoint",
+                "0..1",
+            ),
+            (
+                "drasi_lib::computation::v1::pipeline::ComputationPipelineBuilder",
+                "native_sources",
+                "drasi_lib::computation::v1::graph::Endpoint",
+                "0..*",
+            ),
+            (
                 "drasi_lib::computation::v1::graph::ComputationGraph",
                 "components",
                 "drasi_lib::computation::v1::graph::controller::InstanceSlot",
@@ -1897,10 +2297,21 @@ mod tests {
                 "{from}.{field} -> {to}"
             );
         }
-        assert!(!report
-            .warnings
-            .iter()
-            .any(|w| w.contains("unresolved target") || w.contains("ambiguous")));
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("unresolved target") || w.contains("ambiguous")),
+            "unresolved architecture relationships: {:?}",
+            report.warnings
+        );
+        for name in [
+            "drasi_computation_contracts::graph_codec::GraphControl",
+            "drasi_lib::computation::v1::control::Endpoint",
+            "drasi_lib::computation::v1::qos_pipe::Endpoint",
+        ] {
+            assert!(report.types.iter().any(|node| node.name == name), "{name}");
+        }
         assert!(!report.types.iter().any(|node| {
             node.name == "drasi_lib::computation::runtime::query::QueryInstance"
                 || node.name == "drasi_lib::computation::scoped_graph::ScopedGraph"

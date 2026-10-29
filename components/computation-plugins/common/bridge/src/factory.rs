@@ -11,8 +11,8 @@ use drasi_lib::computation::v1::{
 };
 
 use crate::{
-    BridgeConfig, BridgeEgressControl, BridgeIngressControl, PortableSchema, Profile, TlsResource,
-    SINK_FACTORY, SOURCE_FACTORY,
+    BridgeConfig, BridgeEgressControl, BridgeIngressControl, PortableDelivery, Profile,
+    TlsResource, SINK_FACTORY, SOURCE_FACTORY,
 };
 
 pub struct BridgeFactoryDefinition {
@@ -31,7 +31,7 @@ impl BridgeFactoryDefinition {
             ("receiver_endpoint", String, true),
             ("stream", String, true),
             ("peer_stream", String, true),
-            ("schema", String, true),
+            ("delivery", String, true),
             ("profile", String, true),
             ("failure_scope", String, false),
             ("namespace", Object, true),
@@ -161,14 +161,7 @@ impl BridgeFactoryDefinition {
     }
 
     pub fn record_schemas(&self) -> Vec<Arc<Schema>> {
-        [
-            PortableSchema::GraphChange,
-            PortableSchema::QueryChange,
-            PortableSchema::SourceTransaction,
-        ]
-        .into_iter()
-        .map(PortableSchema::schema)
-        .collect()
+        vec![PortableDelivery::Events.schema()]
     }
 
     pub fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {

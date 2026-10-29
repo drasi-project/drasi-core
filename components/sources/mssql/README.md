@@ -2,6 +2,13 @@
 
 A Microsoft SQL Server Change Data Capture (CDC) source plugin for the Drasi platform.
 
+The separate [native SQL Server source](../../computation-plugins/sources/mssql/README.md)
+implements fixed-consumer CDC replay without this legacy adapter. Its
+[native bootstrap modes](../../computation-plugins/bootstrappers/mssql/README.md)
+separate read-only snapshots from explicit marker-coordinated snapshots.
+Real SQL Server qualification of that new family is currently blocked; do not
+treat static/dynamic loading as end-to-end migration completion.
+
 ## Quick Start
 
 ```rust
@@ -156,4 +163,3 @@ Apache License 2.0
 ## Authors
 
 Drasi Contributors
-

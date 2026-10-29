@@ -240,7 +240,7 @@ mod tests {
 
         let query_config = Query::cypher("test-query")
             .query("MATCH (n) RETURN n")
-            .from_source("q-src")
+            .from_input("q-src")
             .auto_start(false)
             .build();
 
@@ -343,7 +343,7 @@ mod tests {
             .with_query(
                 Query::cypher("r-query")
                     .query("MATCH (n) RETURN n")
-                    .from_source("r-src")
+                    .from_input("r-src")
                     .auto_start(false)
                     .build(),
             )
@@ -466,7 +466,7 @@ mod tests {
         // Add query (depends on source)
         let query_config = Query::cypher("mc-query")
             .query("MATCH (n) RETURN n")
-            .from_source("mc-src")
+            .from_input("mc-src")
             .auto_start(false)
             .build();
         core.add_query(query_config).await.unwrap();
@@ -664,14 +664,14 @@ mod tests {
 
         let config = Query::cypher("dup-q")
             .query("MATCH (n) RETURN n")
-            .from_source("dup-q-src")
+            .from_input("dup-q-src")
             .auto_start(false)
             .build();
         core.add_query(config.clone()).await.unwrap();
 
         let config2 = Query::cypher("dup-q")
             .query("MATCH (n) RETURN n")
-            .from_source("dup-q-src")
+            .from_input("dup-q-src")
             .auto_start(false)
             .build();
         let result = core.add_query(config2).await;
@@ -738,7 +738,7 @@ mod tests {
 
         let config = Query::cypher("dep-query")
             .query("MATCH (n) RETURN n")
-            .from_source("dep-src")
+            .from_input("dep-src")
             .auto_start(false)
             .build();
         core.add_query(config).await.unwrap();
@@ -760,7 +760,7 @@ mod tests {
             .with_query(
                 Query::cypher("dep2-query")
                     .query("MATCH (n) RETURN n")
-                    .from_source("dep2-src")
+                    .from_input("dep2-src")
                     .auto_start(false)
                     .build(),
             )

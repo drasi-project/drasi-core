@@ -143,7 +143,7 @@ fn person(name: &str, update: bool, time: u64) -> SourceChange {
         properties: ElementPropertyMap::from(serde_json::json!({ "name": name })),
     };
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }
@@ -158,6 +158,365 @@ fn definition(query: &str) -> ContinuousQueryDefinition {
         output_stream: stream("query/out"),
         outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
     }
+}
+
+async fn result_nodes_chain_into_another_query(second_time: u64) {
+    let mut first_definition = definition("MATCH (n:Room) RETURN sum(n.value) AS total");
+    first_definition.id = id("floor");
+    first_definition.output_stream = stream("floor/out");
+    let mut second_definition = definition("MATCH (n:Result) RETURN n.total AS total");
+    second_definition.id = id("building");
+    second_definition.output_stream = stream("building/out");
+    let mut first =
+        ContinuousQueryTransformer::new(first_definition, Arc::new(InMemoryComputationProvider))
+            .await
+            .unwrap();
+    let mut second =
+        ContinuousQueryTransformer::new(second_definition, Arc::new(InMemoryComputationProvider))
+            .await
+            .unwrap();
+    first.start().await.unwrap();
+    second.start().await.unwrap();
+    for (sequence, room, value, time, expected) in
+        [(1, "a", 20, 2000, 20.0), (2, "b", 10, second_time, 30.0)]
+    {
+        let output = first
+            .transform(InputEnvelope {
+                port: port("in"),
+                envelope: GraphChangeCodec::encode_change(
+                    SourceChange::Insert {
+                        element: Element::Node {
+                            metadata: ElementMetadata {
+                                reference: ElementReference::new("rooms", room),
+                                labels: Arc::from([Arc::from("Room")]),
+                                effective_from: time,
+                            },
+                            properties: ElementPropertyMap::from(
+                                serde_json::json!({"value":value}),
+                            ),
+                        },
+                    },
+                    stream("rooms/out"),
+                    sequence,
+                    Some(chrono::DateTime::from_timestamp_millis(time as i64).unwrap()),
+                )
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.len(), 1);
+        for event in output {
+            assert_eq!(
+                event.envelope.changes().schema(),
+                GraphChangeCodec::schema().descriptor()
+            );
+            assert!(!GraphChangeCodec::decode_changes(&event.envelope)
+                .unwrap()
+                .is_empty());
+            second
+                .transform(InputEnvelope {
+                    port: port("in"),
+                    envelope: event.envelope,
+                })
+                .await
+                .unwrap();
+        }
+        let snapshot = second.results().snapshot().unwrap();
+        let rows = QueryChangeCodec::legacy_snapshot_rows(&snapshot.projector, snapshot.rows)
+            .unwrap()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>();
+        assert_eq!(rows, [serde_json::json!({"total":expected})]);
+    }
+    second.stop().await.unwrap();
+    first.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_result_nodes_chain_without_a_format_adapter() {
+    result_nodes_chain_into_another_query(3000).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn derived_aggregate_correction_is_not_dropped_for_an_older_business_time() {
+    result_nodes_chain_into_another_query(1000).await;
+}
+
+struct OutputSeed {
+    cursor: OutputCursor,
+}
+
+#[async_trait]
+impl ComputationBootstrapProvider for OutputSeed {
+    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        let snapshot = GraphChangeCodec::encode_change(
+            person("Alice", false, 1),
+            self.cursor.producer().stream().clone(),
+            self.cursor.sequence(),
+            None,
+        )?;
+        Ok(ComputationBootstrapSnapshot {
+            changes: Box::pin(futures::stream::iter([Ok(snapshot)])),
+            watermarks: vec![BootstrapWatermark::from_output(&self.cursor)],
+        })
+    }
+}
+
+#[tokio::test]
+async fn generic_snapshot_watermark_binds_epoch_before_live_deduplication() {
+    for persistent in [false, true] {
+        let producer = GraphProducerIdentity::new(
+            "scope".into(),
+            "query-graph".into(),
+            id("source"),
+            stream("source/out"),
+            persistent,
+        )
+        .unwrap();
+        let mut query = ContinuousQueryTransformer::new(
+            definition("MATCH (n:Person) RETURN n.name AS name"),
+            Arc::new(InMemoryComputationProvider),
+        )
+        .await
+        .unwrap()
+        .with_bootstrap(Arc::new(OutputSeed {
+            cursor: OutputCursor::try_new(producer.clone(), 9).unwrap(),
+        }));
+        query.start().await.unwrap();
+        let live = |producer: &GraphProducerIdentity, sequence, name: &str| {
+            let mut envelope = GraphChangeCodec::encode_change(
+                person(name, true, sequence),
+                producer.stream().clone(),
+                sequence,
+                None,
+            )
+            .unwrap();
+            GraphProducerProgress::annotate(&mut envelope, producer, sequence).unwrap();
+            InputEnvelope {
+                port: port("in"),
+                envelope,
+            }
+        };
+        // Buffered events covered by the snapshot do not overwrite it.
+        assert!(query
+            .transform(live(&producer, 9, "stale"))
+            .await
+            .unwrap()
+            .is_empty());
+        query.transform(live(&producer, 10, "Bob")).await.unwrap();
+        let snapshot = query.results().snapshot().unwrap();
+        let rows: Vec<_> =
+            QueryChangeCodec::legacy_snapshot_rows(&snapshot.projector, snapshot.rows)
+                .unwrap()
+                .map(|(_, row)| row)
+                .collect();
+        assert_eq!(rows, [serde_json::json!({"name":"Bob"})]);
+
+        let replacement = GraphProducerIdentity::new(
+            "scope".into(),
+            "query-graph".into(),
+            id("source"),
+            stream("source/out"),
+            persistent,
+        )
+        .unwrap();
+        assert_ne!(producer.incarnation(), replacement.incarnation());
+        let error = query
+            .transform(live(&replacement, 1, "wrong epoch"))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("producer identity changed"));
+        query.stop().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_replacement_removes_omitted_properties_without_intermediate_results() {
+    let mut query = ContinuousQueryTransformer::new(
+        definition("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra"),
+        Arc::new(InMemoryComputationProvider),
+    )
+    .await
+    .unwrap();
+    query.start().await.unwrap();
+    let element = |time, properties| Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("people", "one"),
+            labels: Arc::from([Arc::from("Person")]),
+            effective_from: time,
+        },
+        properties: ElementPropertyMap::from(properties),
+    };
+    query
+        .transform(InputEnvelope {
+            port: port("in"),
+            envelope: GraphChangeCodec::encode_change(
+                SourceChange::Insert {
+                    element: element(1000, serde_json::json!({"name":"Alice","extra":"old"})),
+                },
+                stream("source/out"),
+                1,
+                None,
+            )
+            .unwrap(),
+        })
+        .await
+        .unwrap();
+    let after = GraphChangeCodec::element_record(
+        &ElementImage::try_from(element(2000, serde_json::json!({"name":"Bob"}))).unwrap(),
+    )
+    .unwrap();
+    let changes = ChangeSet::try_new(
+        ChangeSetId::try_new("source/out", bytes::Bytes::from_static(b"replace")).unwrap(),
+        GraphChangeCodec::schema().descriptor().clone(),
+        vec![ChangeOperation::Updated {
+            ordinal: 0,
+            before: None,
+            after,
+            semantics: UpdateSemantics::Replace,
+        }],
+    )
+    .unwrap();
+    let output = query
+        .transform(InputEnvelope {
+            port: port("in"),
+            envelope: ChangeEnvelope::new(
+                emission_id(&stream("source/out"), 2).unwrap(),
+                changes,
+                SystemMetadata::new(stream("source/out"), 2),
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(output.len(), 1);
+    let result = QueryChangeCodec::to_legacy_result(&output[0].envelope).unwrap();
+    assert_eq!(result.results.len(), 1);
+    let ResultDiff::Update { before, after, .. } = &result.results[0] else {
+        panic!("replacement must be one update, not independent delete/add results");
+    };
+    assert_eq!(before, &serde_json::json!({"name":"Alice","extra":"old"}));
+    assert_eq!(after, &serde_json::json!({"name":"Bob","extra":null}));
+    query.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn one_ordered_batch_applies_add_removal_null_and_replacement_in_order() {
+    let mut query = ContinuousQueryTransformer::new(
+        definition("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra"),
+        Arc::new(InMemoryComputationProvider),
+    )
+    .await
+    .unwrap();
+    query.start().await.unwrap();
+    let element = |time, properties| Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("people", "one"),
+            labels: Arc::from([Arc::from("Person")]),
+            effective_from: time,
+        },
+        properties: ElementPropertyMap::from(properties),
+    };
+    let image = |element: Element| ElementImage::try_from(element).unwrap();
+    let operations = vec![
+        ChangeOperation::Added {
+            ordinal: 0,
+            after: GraphChangeCodec::element_record(&image(element(
+                1000,
+                serde_json::json!({"name":"Alice","extra":"old"}),
+            )))
+            .unwrap(),
+        },
+        ChangeOperation::Updated {
+            ordinal: 1,
+            before: None,
+            after: GraphChangeCodec::patch_record(
+                &ElementPatch::try_new(
+                    image(element(2000, serde_json::json!({"name":"Bob"}))),
+                    ["extra".to_string()].into(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            semantics: UpdateSemantics::Patch,
+        },
+        ChangeOperation::Updated {
+            ordinal: 2,
+            before: None,
+            after: GraphChangeCodec::patch_record(
+                &ElementPatch::try_new(
+                    image(element(3000, serde_json::json!({"extra":null}))),
+                    Default::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            semantics: UpdateSemantics::Patch,
+        },
+        ChangeOperation::Updated {
+            ordinal: 3,
+            before: None,
+            after: GraphChangeCodec::element_record(&image(element(
+                4000,
+                serde_json::json!({"name":"Carol","extra":"new"}),
+            )))
+            .unwrap(),
+            semantics: UpdateSemantics::Replace,
+        },
+    ];
+    let output = query
+        .transform(InputEnvelope {
+            port: port("in"),
+            envelope: ChangeEnvelope::new(
+                emission_id(&stream("source/out"), 1).unwrap(),
+                ChangeSet::try_new(
+                    ChangeSetId::try_new("source/out", bytes::Bytes::from_static(b"batch"))
+                        .unwrap(),
+                    GraphChangeCodec::schema().descriptor().clone(),
+                    operations,
+                )
+                .unwrap(),
+                SystemMetadata::new(stream("source/out"), 1),
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(output.len(), 1);
+    let result = QueryChangeCodec::to_legacy_result(&output[0].envelope).unwrap();
+    let [ResultDiff::Add { data, .. }, ResultDiff::Update {
+        before: removed_before,
+        after: removed_after,
+        ..
+    }, ResultDiff::Update {
+        before: replaced_before,
+        after: replaced_after,
+        ..
+    }] = result.results.as_slice()
+    else {
+        panic!(
+            "the ordered batch is one add and two updates: {:?}",
+            result.results
+        );
+    };
+    assert_eq!(data, &serde_json::json!({"name":"Alice","extra":"old"}));
+    // Removing a property and then setting null leave the same null answer, so only
+    // the removal produces a row change; the null patch is a no-op for the query.
+    assert_eq!(
+        removed_before,
+        &serde_json::json!({"name":"Alice","extra":"old"})
+    );
+    assert_eq!(
+        removed_after,
+        &serde_json::json!({"name":"Bob","extra":null})
+    );
+    assert_eq!(
+        replaced_before,
+        &serde_json::json!({"name":"Bob","extra":null})
+    );
+    assert_eq!(
+        replaced_after,
+        &serde_json::json!({"name":"Carol","extra":"new"})
+    );
+    query.stop().await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -588,6 +947,7 @@ impl ComputationBootstrapProvider for SeedAtPosition {
                 )?,
             )])),
             watermarks: vec![BootstrapWatermark {
+                producer: None,
                 stream: stream("source/out"),
                 source_id: Some("source".into()),
                 sequence: self.logical,
@@ -770,8 +1130,9 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
         .expect("position-filtered fanout must drain")
         .unwrap();
     for (name, results, events) in observations {
+        let snapshot = results.snapshot().unwrap();
         let rows: Vec<_> =
-            QueryChangeCodec::legacy_snapshot_rows(name, results.snapshot().unwrap().rows)
+            QueryChangeCodec::legacy_snapshot_rows(&snapshot.projector, snapshot.rows)
                 .unwrap()
                 .map(|(_, row)| row)
                 .collect();
@@ -1155,4 +1516,113 @@ mod atomic_failure {
         ));
         reopened.stop().await.expect("cleanup");
     }
+}
+
+async fn labelled_room_total(label: Option<&str>) -> anyhow::Result<ContinuousQueryTransformer> {
+    let mut definition = definition("MATCH (n:Room) RETURN sum(n.value) AS total");
+    definition.id = id("floor");
+    definition.output_stream = stream("floor/out");
+    ContinuousQueryTransformer::new_configured(
+        definition,
+        Arc::new(InMemoryComputationProvider),
+        QueryOptions::default(),
+        QueryExecutionSettings {
+            result: drasi_lib::config::QueryResultConfig {
+                label: label.map(str::to_owned),
+            },
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+}
+
+fn room_input(time: u64) -> InputEnvelope {
+    InputEnvelope {
+        port: port("in"),
+        envelope: GraphChangeCodec::encode_change(
+            SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("rooms", "a"),
+                        labels: Arc::from([Arc::from("Room")]),
+                        effective_from: time,
+                    },
+                    properties: ElementPropertyMap::from(serde_json::json!({"value": 20})),
+                },
+            },
+            stream("rooms/out"),
+            1,
+            Some(chrono::DateTime::from_timestamp_millis(time as i64).unwrap()),
+        )
+        .unwrap(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn result_label_names_published_nodes_without_changing_the_output_schema() {
+    let mut node_labels = Vec::new();
+    for label in [None, Some("RoomTotal")] {
+        let mut query = labelled_room_total(label).await.unwrap();
+        query.start().await.unwrap();
+        let output = query.transform(room_input(2000)).await.unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0].envelope.changes().schema(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        let changes = GraphChangeCodec::decode_changes(&output[0].envelope).unwrap();
+        // An aggregate's first result is a canonical full replacement of its result node.
+        let [SourceChange::Replace {
+            element: Element::Node { metadata, .. },
+        }] = changes.as_slice()
+        else {
+            panic!("expected one result node replacement, got {changes:?}");
+        };
+        node_labels.push(
+            metadata
+                .labels
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>(),
+        );
+        query.stop().await.unwrap();
+    }
+    assert_eq!(node_labels, [vec!["Result"], vec!["RoomTotal"]]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn labelled_result_nodes_chain_into_a_query_matching_that_label() {
+    let mut first = labelled_room_total(Some("RoomTotal")).await.unwrap();
+    let mut second_definition = definition("MATCH (n:RoomTotal) RETURN n.total AS total");
+    second_definition.id = id("building");
+    second_definition.output_stream = stream("building/out");
+    let mut second =
+        ContinuousQueryTransformer::new(second_definition, Arc::new(InMemoryComputationProvider))
+            .await
+            .unwrap();
+    first.start().await.unwrap();
+    second.start().await.unwrap();
+    for event in first.transform(room_input(2000)).await.unwrap() {
+        second
+            .transform(InputEnvelope {
+                port: port("in"),
+                envelope: event.envelope,
+            })
+            .await
+            .unwrap();
+    }
+    let snapshot = second.results().snapshot().unwrap();
+    let rows = QueryChangeCodec::legacy_snapshot_rows(&snapshot.projector, snapshot.rows)
+        .unwrap()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
+    assert_eq!(rows, [serde_json::json!({"total": 20.0})]);
+    second.stop().await.unwrap();
+    first.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_result_label_is_rejected_before_construction() {
+    assert!(labelled_room_total(Some("")).await.is_err());
 }

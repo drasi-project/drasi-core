@@ -40,7 +40,7 @@ impl DrasiLib {
     /// core.add_query(
     ///     Query::cypher("new-query")
     ///         .query("MATCH (n) RETURN n")
-    ///         .from_source("source1")
+    ///         .from_input("source1")
     ///         .auto_start(true)
     ///         .build()
     /// ).await?;
@@ -70,6 +70,10 @@ impl DrasiLib {
         query: QueryConfig,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
+        query
+            .validate_declarations()
+            .map_err(|error| crate::error::DrasiError::validation(error.to_string()))?;
         let id = query.id.clone();
         self.computation_runtime
             .add_query(query, self.is_running().await)
@@ -198,7 +202,7 @@ impl DrasiLib {
     /// let query_info = core.get_query_info("my-query").await?;
     /// println!("Query: {}", query_info.query);
     /// println!("Status: {:?}", query_info.status);
-    /// println!("Source subscriptions: {:?}", query_info.source_subscriptions);
+    /// println!("Inputs: {:?}", query_info.inputs);
     /// # Ok(())
     /// # }
     /// ```
@@ -405,7 +409,7 @@ mod tests {
 
         let config = Query::cypher("q1")
             .query("MATCH (n:Test) RETURN n")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(false)
             .build();
 
@@ -422,7 +426,7 @@ mod tests {
 
         let config = Query::cypher("q-bad")
             .query("MATCH (n) RETURN n")
-            .from_source("nonexistent-source")
+            .from_input("nonexistent-source")
             .auto_start(false)
             .build();
 
@@ -451,7 +455,7 @@ mod tests {
 
         let config = Query::cypher("q-remove")
             .query("MATCH (n:Test) RETURN n")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(false)
             .build();
         core.add_query(config).await.unwrap();
@@ -501,12 +505,12 @@ mod tests {
         // Add two queries
         let config1 = Query::cypher("q-list-1")
             .query("MATCH (n) RETURN n")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(false)
             .build();
         let config2 = Query::cypher("q-list-2")
             .query("MATCH (n) RETURN n")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(false)
             .build();
         core.add_query(config1).await.unwrap();
@@ -529,7 +533,7 @@ mod tests {
 
         let config = Query::cypher("q-status")
             .query("MATCH (n:Test) RETURN n")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(false)
             .build();
         core.add_query(config).await.unwrap();
@@ -562,7 +566,7 @@ mod tests {
 
         let config = Query::cypher("q-lifecycle")
             .query("MATCH (n:Test) RETURN n")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(false)
             .build();
         core.add_query(config).await.unwrap();
@@ -607,7 +611,7 @@ mod tests {
 
         let config = Query::cypher("q-config")
             .query("MATCH (n:Person) RETURN n.name")
-            .from_source("test-source")
+            .from_input("test-source")
             .auto_start(false)
             .build();
         core.add_query(config).await.unwrap();
@@ -616,7 +620,7 @@ mod tests {
         assert_eq!(retrieved.id, "q-config");
         assert_eq!(retrieved.query, "MATCH (n:Person) RETURN n.name");
         assert!(!retrieved.auto_start);
-        assert_eq!(retrieved.sources.len(), 1);
-        assert_eq!(retrieved.sources[0].source_id, "test-source");
+        assert_eq!(retrieved.inputs.len(), 1);
+        assert_eq!(retrieved.inputs[0].component, "test-source");
     }
 }

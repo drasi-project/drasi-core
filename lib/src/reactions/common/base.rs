@@ -52,7 +52,7 @@ use crate::state_store::StateStoreProvider;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 ///
 /// let params = ReactionBaseParams::new("my-reaction", vec!["query1".to_string()])

@@ -85,6 +85,6 @@ mod tests {
         assert_eq!(size_of::<services::PluginServicesV1>(), 24 + 2 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(ABI_VERSION, "1.0.0");
-        assert_eq!(WIRE_VERSION, 2);
+        assert_eq!(WIRE_VERSION, 1);
     }
 }

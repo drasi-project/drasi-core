@@ -21,6 +21,7 @@ impl ComputationBootstrapProvider for RetainedInitialSnapshot {
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter(changes)),
             watermarks: vec![BootstrapWatermark {
+                producer: None,
                 stream: stream("changes"),
                 source_id: Some("source".into()),
                 sequence: 1,

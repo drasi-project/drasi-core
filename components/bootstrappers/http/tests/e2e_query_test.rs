@@ -196,7 +196,7 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
         .with_query(
             Query::cypher("user-query")
                 .query("MATCH (u:User) RETURN u.name AS name, u.age AS age")
-                .from_source("http-src")
+                .from_input("http-src")
                 .enable_bootstrap(true)
                 .build(),
         )
@@ -317,7 +317,7 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
         .with_query(
             Query::cypher("product-query")
                 .query("MATCH (p:Product) RETURN p.title AS title")
-                .from_source("product-src")
+                .from_input("product-src")
                 .enable_bootstrap(true)
                 .build(),
         )
@@ -452,7 +452,7 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
                     "MATCH (a:User)-[:KNOWS]->(b:User) \
                      RETURN a.name AS person, b.name AS friend",
                 )
-                .from_source("social-src")
+                .from_input("social-src")
                 .enable_bootstrap(true)
                 .build(),
         )

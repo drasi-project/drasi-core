@@ -190,7 +190,7 @@ pub(crate) mod manager_tests {
         assert!(result.is_ok());
 
         // Verify reaction was added
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
         assert_eq!(reactions[0].0, "test-reaction");
     }
@@ -243,7 +243,7 @@ pub(crate) mod manager_tests {
         assert!(result.is_ok());
 
         // Verify reaction was removed
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 0);
     }
 
@@ -284,7 +284,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction1).await.unwrap();
         add_reaction(&manager, &graph, reaction2).await.unwrap();
 
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 2);
 
         // Both should be in Added state initially
@@ -352,7 +352,7 @@ pub(crate) mod manager_tests {
         assert_eq!(failure_count, 9, "All other add_reaction calls should fail");
 
         // Verify only one reaction exists
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
         assert_eq!(reactions[0].0, "same-reaction");
     }
@@ -383,7 +383,7 @@ pub(crate) mod manager_tests {
         }
 
         // Verify all 10 reactions exist
-        let reactions = manager.list_reactions().await;
+        let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 10);
     }
 
@@ -576,7 +576,7 @@ pub(crate) mod manager_tests {
 
         // Subscribe to create the channel
         let result = manager.subscribe_logs("cleanup-logs-reaction").await;
-        assert!(result.is_some(), "Expected to subscribe to reaction logs");
+        assert!(result.is_ok(), "Expected to subscribe to reaction logs");
 
         // Delete the reaction
         delete_reaction(&manager, &graph, "cleanup-logs-reaction", false)
@@ -585,7 +585,10 @@ pub(crate) mod manager_tests {
 
         // Verify logs are cleaned up (subscribe should fail for non-existent reaction)
         let result = manager.subscribe_logs("cleanup-logs-reaction").await;
-        assert!(result.is_none(), "Expected None for deleted reaction logs");
+        assert!(
+            result.is_err(),
+            "Expected an error for deleted reaction logs"
+        );
     }
 
     // ========================================================================
@@ -966,7 +969,7 @@ pub(crate) mod manager_tests {
             .with_query(
                 crate::Query::cypher("e2e-query")
                     .query("MATCH (n:Person) RETURN n.name, n.age")
-                    .from_source("e2e-src")
+                    .from_input("e2e-src")
                     .build(),
             )
             .with_reaction(reaction)

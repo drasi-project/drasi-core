@@ -12,6 +12,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "native-runtime")]
+pub mod native;
+#[cfg(feature = "rest")]
+pub mod rest_api;
+pub mod schema;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableKeyConfig {

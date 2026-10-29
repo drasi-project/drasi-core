@@ -12,25 +12,109 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
+
 use crate::interface::FutureElementRef;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::{Element, ElementMetadata, ElementReference, ElementTimestamp};
 
+/// A property-level or whole-element mutation of one graph element.
+///
+/// - `Insert` and `Replace` carry the complete element. Both replace an existing
+///   version of the same identity; `Replace` preserves that the producer
+///   explicitly requested a full replacement rather than an addition.
+/// - `Update` sets every property of `element` (including `Null`), deletes only
+///   the names in `removed_properties`, and leaves every other property of the
+///   current element unchanged. Without a current element it creates the
+///   element from the properties it sets.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SourceChange {
-    Insert { element: Element },
-    Update { element: Element },
-    Delete { metadata: ElementMetadata },
-    Future { future_ref: FutureElementRef },
+    Insert {
+        element: Element,
+    },
+    Replace {
+        element: Element,
+    },
+    Update {
+        element: Element,
+        removed_properties: BTreeSet<String>,
+    },
+    Delete {
+        metadata: ElementMetadata,
+    },
+    Future {
+        future_ref: FutureElementRef,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Error)]
+pub enum SourceChangeError {
+    #[error("update of {element} both sets and removes property {property:?}")]
+    ConflictingProperty {
+        element: ElementReference,
+        property: String,
+    },
 }
 
 impl SourceChange {
+    /// An update that sets the element's properties and removes nothing.
+    pub fn update(element: Element) -> Self {
+        SourceChange::Update {
+            element,
+            removed_properties: BTreeSet::new(),
+        }
+    }
+
+    /// An update that also removes the named properties; a name may not also be set.
+    pub fn update_with_removals(
+        element: Element,
+        removed_properties: BTreeSet<String>,
+    ) -> Result<Self, SourceChangeError> {
+        let change = SourceChange::Update {
+            element,
+            removed_properties,
+        };
+        change.validate()?;
+        Ok(change)
+    }
+
+    /// An explicit full replacement of the element.
+    pub fn replace(element: Element) -> Self {
+        SourceChange::Replace { element }
+    }
+
+    /// Rejects an update that both sets and removes one property.
+    ///
+    /// Deserialization and public enum construction cannot enforce this, so every
+    /// admission boundary calls it.
+    pub fn validate(&self) -> Result<(), SourceChangeError> {
+        if let SourceChange::Update {
+            element,
+            removed_properties,
+        } = self
+        {
+            let properties = element.get_properties();
+            if let Some(property) = removed_properties
+                .iter()
+                .find(|name| properties.contains_key(name))
+            {
+                return Err(SourceChangeError::ConflictingProperty {
+                    element: element.get_reference().clone(),
+                    property: property.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_reference(&self) -> &ElementReference {
         match self {
-            SourceChange::Insert { element } => element.get_reference(),
-            SourceChange::Update { element } => element.get_reference(),
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => element.get_reference(),
             SourceChange::Delete { metadata } => &metadata.reference,
             SourceChange::Future { future_ref } => &future_ref.element_ref,
         }
@@ -38,8 +122,9 @@ impl SourceChange {
 
     pub fn get_transaction_time(&self) -> ElementTimestamp {
         match self {
-            SourceChange::Insert { element } => element.get_effective_from(),
-            SourceChange::Update { element } => element.get_effective_from(),
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => element.get_effective_from(),
             SourceChange::Delete { metadata } => metadata.effective_from,
             SourceChange::Future { future_ref } => future_ref.original_time,
         }
@@ -47,8 +132,9 @@ impl SourceChange {
 
     pub fn get_realtime(&self) -> ElementTimestamp {
         match self {
-            SourceChange::Insert { element } => element.get_effective_from(),
-            SourceChange::Update { element } => element.get_effective_from(),
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => element.get_effective_from(),
             SourceChange::Delete { metadata } => metadata.effective_from,
             SourceChange::Future { future_ref } => future_ref.due_time,
         }
@@ -165,19 +251,66 @@ mod serde_roundtrip_tests {
 
     #[test]
     fn relation_element_roundtrips() {
-        let change = SourceChange::Update {
-            element: Element::Relation {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("src-1", "rel:1"),
-                    labels: Arc::from(vec![Arc::from("OWNS")]),
-                    effective_from: 42,
-                },
-                in_node: ElementReference::new("src-1", "a"),
-                out_node: ElementReference::new("src-1", "b"),
-                properties: rich_properties(),
+        let change = SourceChange::update(Element::Relation {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("src-1", "rel:1"),
+                labels: Arc::from(vec![Arc::from("OWNS")]),
+                effective_from: 42,
             },
-        };
+            in_node: ElementReference::new("src-1", "a"),
+            out_node: ElementReference::new("src-1", "b"),
+            properties: rich_properties(),
+        });
         assert_eq!(roundtrip(&change), change);
+    }
+
+    #[test]
+    fn update_removals_and_replace_roundtrip_distinctly() {
+        let update = SourceChange::update_with_removals(
+            node(ElementPropertyMap::new()),
+            BTreeSet::from(["gone".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(roundtrip(&update), update);
+        assert_ne!(
+            update,
+            SourceChange::update(node(ElementPropertyMap::new()))
+        );
+
+        let replace = SourceChange::replace(node(rich_properties()));
+        assert_eq!(roundtrip(&replace), replace);
+        assert_ne!(
+            replace,
+            SourceChange::Insert {
+                element: node(rich_properties())
+            }
+        );
+        assert_eq!(replace.get_transaction_time(), 1_771_000_000_000);
+    }
+
+    #[test]
+    fn update_rejects_set_and_removed_property() {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("both", ElementValue::Null);
+        let error = SourceChange::update_with_removals(
+            node(properties.clone()),
+            BTreeSet::from(["both".to_string()]),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SourceChangeError::ConflictingProperty { ref property, .. } if property == "both"
+        ));
+
+        let decoded: SourceChange = rmp_serde::from_slice(
+            &rmp_serde::to_vec_named(&SourceChange::Update {
+                element: node(properties),
+                removed_properties: BTreeSet::from(["both".to_string()]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(decoded.validate().is_err());
     }
 
     #[test]

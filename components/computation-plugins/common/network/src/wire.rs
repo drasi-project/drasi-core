@@ -1,8 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Network-only conversion. Graph events stay typed until the transport boundary;
-//! no legacy SourceEventWrapper, QueryResult or adapter queue is constructed.
+//! Network-only conversion. Graph events stay typed until the transport boundary.
+//! Source, transformer and query output reach a network sink through the same
+//! standard graph-change decoding; only the configured output binding names
+//! the data, and no query annotation is read.
 
 #[cfg(feature = "grpc-source")]
 use crate::proto::source;
@@ -12,8 +14,7 @@ use anyhow::{ensure, Result};
 #[cfg(any(feature = "http-source", feature = "grpc-source"))]
 use drasi_computation_contracts::ComponentId;
 use drasi_computation_contracts::{
-    ChangeOperation, InputEnvelope, QueryChangeCodec, QueryRowKind, Record, RecordImage, StreamId,
-    UpdateSemantics,
+    BoundOutput, ChangeNotification, GraphChangeBatch, InputEnvelope, SinkOutputs,
 };
 #[cfg(any(feature = "http-source", feature = "grpc-source"))]
 use drasi_core_types::models::SourceChange;
@@ -23,9 +24,8 @@ use drasi_core_types::models::{
 };
 #[cfg(feature = "http-source")]
 pub use drasi_http_common::{HttpElement, HttpSourceChange};
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "grpc-source")]
 use serde_json::Value;
-use std::collections::BTreeMap;
 #[cfg(feature = "grpc-source")]
 use std::sync::Arc;
 
@@ -161,7 +161,7 @@ pub fn grpc_change(change: source::SourceChange, source_id: &str) -> Result<Sour
             Ok(if kind == source::ChangeType::Insert {
                 SourceChange::Insert { element }
             } else {
-                SourceChange::Update { element }
+                SourceChange::update(element)
             })
         }
         (source::ChangeType::Delete, Some(source::source_change::Change::Metadata(value))) => {
@@ -230,181 +230,29 @@ fn proto_json(value: prost_types::Value) -> Result<Value> {
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Operation {
-    Add,
-    Update,
-    Delete,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Notification {
-    pub operation: Operation,
-    pub query_id: String,
-    pub sequence_id: u64,
-    pub timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub before: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub after: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub metadata: Option<Value>,
-    #[serde(skip)]
-    pub row_signature: u64,
-}
-
-/// Reuse the published query-result projection only at the network serializer;
-/// this DTO owns no legacy execution, queues or checkpoint state.
-pub fn query_result(
+/// The configured output whose stream carried this sink input.
+///
+/// The output may be a source, transformer or query port: only the configured
+/// binding identifies it, never an annotation carried by the data.
+pub fn bound_output<'a>(
     input: &InputEnvelope,
-    query_id: &str,
-    stream: &StreamId,
-    query_streams: &BTreeMap<String, StreamId>,
-) -> Result<drasi_computation_contracts::exchange::QueryResult> {
-    let envelope = &input.envelope;
-    let metadata = QueryChangeCodec::result_metadata(envelope)?;
-    let expected = if query_streams.is_empty() {
-        (metadata.query_id == query_id).then_some(stream)
-    } else {
-        query_streams.get(&metadata.query_id)
-    };
-    ensure!(
-        input.port.as_str() == "in" && expected == Some(envelope.system().stream()),
-        "unexpected sink input query/port/stream"
-    );
-    ensure!(
-        envelope.changes().schema() == QueryChangeCodec::schema().descriptor()
-            && !QueryChangeCodec::is_snapshot(envelope)
-            && !QueryChangeCodec::is_progress_only(envelope),
-        "network sink expects query rows, not snapshot/recovery control"
-    );
-    if envelope.changes().operations().is_empty() {
-        return Ok(drasi_computation_contracts::exchange::QueryResult::new(
-            metadata.query_id,
-            QueryChangeCodec::query_sequence(envelope)?,
-            metadata.timestamp,
-            Vec::new(),
-            metadata.metadata,
-        ));
-    }
-    Ok(QueryChangeCodec::to_legacy_result(envelope)?)
+    outputs: &'a SinkOutputs,
+) -> Result<BoundOutput<'a>> {
+    ensure!(input.port.as_str() == "in", "unexpected sink input port");
+    Ok(outputs.output_for(input.envelope.system().stream())?)
 }
 
-fn row(record: &Record, query_id: &str) -> Result<drasi_computation_contracts::DecodedQueryRow> {
-    ensure!(
-        record.image() == RecordImage::Full,
-        "query output requires full row images"
-    );
-    let row = QueryChangeCodec::decode_row(record)?;
-    ensure!(
-        row.query_id == query_id
-            && record.identity().value().as_ref() == row.signature.to_be_bytes(),
-        "query row identity does not match configured queryId"
-    );
-    Ok(row)
-}
+/// The ordered changes of one standard graph-change input, each with its
+/// configured output binding.
+///
+/// Source, transformer and query output decode identically and no query
+/// annotation is read. Each notification states the real operation, the
+/// canonical element identity and only the images the record carries; a patch
+/// is delivered as a patch.
 pub fn notifications(
     input: &InputEnvelope,
-    query_id: &str,
-    stream: &StreamId,
-) -> Result<Vec<Notification>> {
-    let envelope = &input.envelope;
-    ensure!(
-        input.port.as_str() == "in" && envelope.system().stream() == stream,
-        "unexpected sink input port/stream"
-    );
-    ensure!(
-        envelope.changes().schema() == QueryChangeCodec::schema().descriptor(),
-        "expected query-row schema"
-    );
-    ensure!(
-        !QueryChangeCodec::is_snapshot(envelope) && !QueryChangeCodec::is_progress_only(envelope),
-        "native network sink does not implement snapshot/recovery control"
-    );
-    let metadata = QueryChangeCodec::result_metadata(envelope)?;
-    ensure!(
-        metadata.query_id == query_id,
-        "query output metadata does not match configured queryId"
-    );
-    let sequence = QueryChangeCodec::query_sequence(envelope)?;
-    let mut output = Vec::with_capacity(envelope.changes().operations().len());
-    for operation in envelope.changes().operations() {
-        let (kind, signature, before, after) = match operation {
-            ChangeOperation::Added { after, .. } => {
-                let row = row(after, query_id)?;
-                ensure!(
-                    row.kind == QueryRowKind::Row,
-                    "aggregation must be a query update"
-                );
-                (
-                    Operation::Add,
-                    row.signature,
-                    None,
-                    Some(QueryChangeCodec::row_values_to_json(&row.values)),
-                )
-            }
-            ChangeOperation::Updated {
-                before,
-                after,
-                semantics: UpdateSemantics::Replace,
-                ..
-            } => {
-                let after = row(after, query_id)?;
-                let before = before
-                    .as_ref()
-                    .map(|record| row(record, query_id))
-                    .transpose()?;
-                ensure!(
-                    before
-                        .as_ref()
-                        .is_none_or(|before| before.kind == after.kind
-                            && before.signature == after.signature),
-                    "inconsistent query before/after identity"
-                );
-                ensure!(
-                    before.is_some() || matches!(after.kind, QueryRowKind::Aggregation { .. }),
-                    "query update requires before image"
-                );
-                (
-                    Operation::Update,
-                    after.signature,
-                    before
-                        .as_ref()
-                        .map(|before| QueryChangeCodec::row_values_to_json(&before.values)),
-                    Some(QueryChangeCodec::row_values_to_json(&after.values)),
-                )
-            }
-            ChangeOperation::Deleted {
-                identity,
-                before: Some(before),
-                ..
-            } => {
-                ensure!(
-                    before.reference() == identity,
-                    "query delete identity mismatch"
-                );
-                let row = row(before, query_id)?;
-                (
-                    Operation::Delete,
-                    row.signature,
-                    Some(QueryChangeCodec::row_values_to_json(&row.values)),
-                    None,
-                )
-            }
-            _ => anyhow::bail!("unsupported query operation or missing before image"),
-        };
-        output.push(Notification {
-            operation: kind,
-            query_id: metadata.query_id.clone(),
-            sequence_id: sequence,
-            timestamp: metadata.timestamp.to_rfc3339(),
-            before,
-            after,
-            metadata: (!metadata.metadata.is_empty())
-                .then(|| Value::Object(metadata.metadata.clone().into_iter().collect())),
-            row_signature: signature,
-        });
-    }
-    Ok(output)
+    outputs: &SinkOutputs,
+) -> Result<Vec<ChangeNotification>> {
+    let output = bound_output(input, outputs)?;
+    Ok(GraphChangeBatch::from_envelope(&input.envelope)?.notifications(output))
 }

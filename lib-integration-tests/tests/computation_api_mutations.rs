@@ -32,12 +32,12 @@ async fn query_mutations(native: bool, strict_consumer: bool) -> Result<()> {
     }
     let config = Query::cypher("items")
         .query("MATCH (n:Item) RETURN n.value AS value")
-        .from_source("left")
+        .from_input("left")
         .enable_bootstrap(false)
         .build();
     let sibling = Query::cypher("sibling")
         .query("MATCH (n:Item) RETURN n.value AS value")
-        .from_source("left")
+        .from_input("left")
         .enable_bootstrap(false)
         .build();
     if native {
@@ -95,7 +95,7 @@ async fn query_mutations(native: bool, strict_consumer: bool) -> Result<()> {
 
     let replacement = Query::cypher("items")
         .query("MATCH (n:Item) RETURN n.value * 2 AS value")
-        .from_source("right")
+        .from_input("right")
         .enable_bootstrap(false)
         .build();
     if !strict_consumer {
@@ -241,7 +241,7 @@ async fn reaction_updates_accept_native_queries() -> Result<()> {
         core.computation_component("input")?.wait_created().await?;
         let ordinary = Query::cypher("ordinary")
             .query("MATCH (n:Item) RETURN n.value AS value")
-            .from_source("input")
+            .from_input("input")
             .enable_bootstrap(false)
             .build();
         core.add_query(ordinary.clone()).await?;
@@ -290,7 +290,7 @@ async fn native_query_removal_clears_persistent_state_before_same_id_recreation(
         for cycle in 0..2 {
             let config = Query::cypher("stored")
                 .query("MATCH (n:Item) RETURN n.value AS value")
-                .from_source("input")
+                .from_input("input")
                 .enable_bootstrap(false)
                 .with_storage_backend(drasi_lib::StorageBackendRef::Named("rocks".into()))
                 .build();
@@ -353,7 +353,7 @@ async fn source_replacement_rewires_native_query_subscriptions() -> Result<()> {
             .with_source(source).build().await?;
         core.computation_component("input")?.wait_created().await?;
         let config = Query::cypher("items").query("MATCH (n:Item) RETURN n.value AS value")
-            .from_source("input").enable_bootstrap(false).build();
+            .from_input("input").enable_bootstrap(false).build();
         let mut sibling_config = config.clone();
         sibling_config.id = "sibling".into();
         let batch = core.computation_pipeline()?
@@ -396,7 +396,7 @@ async fn native_query_replacement_preserves_scheduled_delivery_identity() -> Res
         core.computation_component("input")?.wait_created().await?;
         let mut config = Query::cypher("items")
             .query("MATCH (n:Item) WHERE drasi.trueFor(n.value > 0, duration({ milliseconds: 50 })) RETURN n.value AS value")
-            .from_source("input").enable_bootstrap(false).build();
+            .from_input("input").enable_bootstrap(false).build();
         let batch = core.computation_pipeline()?
             .source(core.borrow_computation_source("input").await?, SourceSubscriptionOptions::default())?
             .query(config.clone()).build()?;
@@ -427,7 +427,7 @@ async fn failed_native_query_declaration_can_be_removed_without_activation() -> 
         core.computation_component("input")?.wait_created().await?;
         let mut config = Query::cypher("invalid")
             .query("MATCH (n:Item) RETURN n.value AS value")
-            .from_source("input")
+            .from_input("input")
             .enable_bootstrap(false)
             .auto_start(false)
             .build();
@@ -494,7 +494,7 @@ async fn native_persistent_query_replacement_releases_storage_and_retains_new_ro
             .with_index_provider("rocks", provider).build().await?;
         core.computation_component("input")?.wait_created().await?;
         let mut config = Query::cypher("stored").query("MATCH (n:Item) RETURN n.value AS value")
-            .from_source("input").enable_bootstrap(false)
+            .from_input("input").enable_bootstrap(false)
             .with_storage_backend(drasi_lib::StorageBackendRef::Named("rocks".into())).build();
         let batch = core.computation_pipeline()?
             .source(core.borrow_computation_source("input").await?, SourceSubscriptionOptions { borrowed_recovery: true, ..Default::default() })?
@@ -567,7 +567,7 @@ async fn failed_native_query_cleanup_keeps_its_node_and_retries_explicitly() -> 
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let config = Query::cypher("cleanup")
             .query("MATCH (n) RETURN n")
-            .from_source("input")
+            .from_input("input")
             .enable_bootstrap(false)
             .auto_start(false)
             .build();

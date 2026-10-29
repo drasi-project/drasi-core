@@ -109,14 +109,7 @@ pub struct ContinuousQueryDefinition {
 
 impl ContinuousQueryDefinition {
     pub fn descriptor(&self) -> ComponentDescriptor {
-        query_descriptor(self.id.clone(), false)
-    }
-
-    pub fn descriptor_with_execution(
-        &self,
-        execution: &QueryExecutionSettings,
-    ) -> ComponentDescriptor {
-        query_descriptor(self.id.clone(), execution.source_transactions.is_some())
+        query_descriptor(self.id.clone())
     }
 
     pub(crate) fn configuration_bytes(
@@ -157,24 +150,20 @@ impl ContinuousQueryDefinition {
     }
 }
 
-fn query_descriptor(id: ComponentId, source_transactions: bool) -> ComponentDescriptor {
+fn query_descriptor(id: ComponentId) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
         id,
         vec![
             PortDescriptor::new(
                 PortId::try_new("in").expect("port"),
                 PortDirection::Input,
-                if source_transactions {
-                    super::SourceTransactionCodec::schema().descriptor().clone()
-                } else {
-                    GraphChangeCodec::schema().descriptor().clone()
-                },
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             ),
             PortDescriptor::new(
                 PortId::try_new("out").expect("port"),
                 PortDirection::Output,
-                QueryChangeCodec::schema().descriptor().clone(),
+                GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             ),
         ],
@@ -317,19 +306,26 @@ pub(crate) fn progress_identity(key: &str) -> anyhow::Result<SourceProgressKey> 
     }
 }
 
-fn validate_watermarks(watermarks: &[super::BootstrapWatermark]) -> anyhow::Result<()> {
+fn validate_watermarks(
+    watermarks: &[super::BootstrapWatermark],
+    persistent: bool,
+) -> anyhow::Result<()> {
     let mut sources = std::collections::BTreeSet::new();
     for watermark in watermarks {
+        watermark.validate()?;
+        anyhow::ensure!(
+            !persistent
+                || watermark
+                    .producer
+                    .as_ref()
+                    .map_or(true, super::GraphProducerIdentity::persistent),
+            "persistent query cannot bootstrap from a volatile output"
+        );
         if !sources.insert(progress_key(
             watermark.stream.as_str(),
             watermark.source_id.as_deref(),
         )) {
             anyhow::bail!("bootstrap contains duplicate source watermarks");
-        }
-        if watermark.position.as_ref().is_some_and(|position| {
-            position.len() > crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES
-        }) {
-            anyhow::bail!("bootstrap source position exceeds the supported checkpoint limit");
         }
     }
     Ok(())
@@ -337,17 +333,21 @@ fn validate_watermarks(watermarks: &[super::BootstrapWatermark]) -> anyhow::Resu
 
 pub struct ContinuousQueryTransformer {
     definition: ContinuousQueryDefinition,
+    projector: super::ResultNodeProjector,
     descriptor: ComponentDescriptor,
     provider: Arc<dyn ComputationIndexProvider>,
     query: Option<ComputationQuery>,
     recovery_contract: super::ComponentRecovery,
     results: QueryResults,
+    output_reader: Arc<super::query_output::QueryOutputProvider>,
     codec: EnvelopeCodec,
     failure: Arc<AtomicBool>,
     options: QueryOptions,
     bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
     bootstrap_complete: AtomicBool,
     watermarks: Mutex<HashMap<String, u64>>,
+    input_producers: Mutex<HashMap<String, super::GraphProducerIdentity>>,
+    input_scopes: Option<BTreeMap<(PortId, StreamId), Arc<str>>>,
     source_progress: Option<Arc<QuerySourceProgress>>,
     execution: QueryExecutionSettings,
     middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
@@ -372,6 +372,7 @@ pub struct ContinuousQueryTransformer {
     test_observer: Option<Arc<dyn super::PublicationObserver>>,
     delivery_tracking: bool,
     pending_output: VecDeque<super::ChangeEnvelope>,
+    pending_input_replay: VecDeque<super::ChangeEnvelope>,
     replay_pending: Arc<AtomicBool>,
     delivery_changed: Arc<tokio::sync::Notify>,
     delivery_sequence: Arc<AtomicU64>,
@@ -434,18 +435,33 @@ impl ContinuousQueryTransformer {
         let mut codec =
             EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("storage limit"));
         codec.register_schema(QueryChangeCodec::schema())?;
+        let projector = super::ResultNodeProjector::try_new(
+            &super::output_identity::dataset_namespace(
+                &definition.graph_id,
+                &definition.graph_id,
+                &definition.id,
+                &PortId::try_new("out")?,
+            )?,
+            execution.result.label.as_deref(),
+        )?;
         let results = QueryResults {
             state: Arc::new(RwLock::new(QueryOutputState::new(
                 definition.outbox_capacity,
+                projector.clone(),
             ))),
             notify: Arc::new(tokio::sync::Notify::new()),
         };
         let mut instance = Self {
-            descriptor: definition.descriptor_with_execution(&execution),
+            output_reader: super::query_output::QueryOutputProvider::new(
+                &results,
+                &definition.output_stream,
+            ),
+            descriptor: definition.descriptor(),
             recovery_scope: Arc::from(definition.graph_id.as_str()),
             default_dispatch_capacity: 1_000,
             declaration: None,
             definition,
+            projector,
             provider,
             query: None,
             recovery_contract: super::ComponentRecovery::default(),
@@ -456,6 +472,8 @@ impl ContinuousQueryTransformer {
             bootstrap: None,
             bootstrap_complete: AtomicBool::new(false),
             watermarks: Mutex::new(HashMap::new()),
+            input_producers: Mutex::new(HashMap::new()),
+            input_scopes: None,
             source_progress: None,
             execution,
             middleware,
@@ -477,6 +495,7 @@ impl ContinuousQueryTransformer {
             test_observer: None,
             delivery_tracking: false,
             pending_output: VecDeque::new(),
+            pending_input_replay: VecDeque::new(),
             replay_pending: Arc::new(AtomicBool::new(false)),
             delivery_changed: Arc::new(tokio::sync::Notify::new()),
             delivery_sequence: Arc::new(AtomicU64::new(0)),
@@ -518,11 +537,24 @@ impl ContinuousQueryTransformer {
             }
         }
         self.recovery_scope = scope;
-        self.results
+        self.projector = super::ResultNodeProjector::try_new(
+            &super::output_identity::dataset_namespace(
+                &self.recovery_scope,
+                &self.definition.graph_id,
+                &self.definition.id,
+                &PortId::try_new("out")?,
+            )?,
+            Some(self.projector.label()),
+        )?;
+        let identity = self.recovery_identity()?;
+        let mut state = self
+            .results
             .state
             .write()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .identity = Some(self.recovery_identity()?);
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+        state.projector = self.projector.clone();
+        state.identity = Some(identity);
+        drop(state);
         Ok(self)
     }
 
@@ -547,7 +579,7 @@ impl ContinuousQueryTransformer {
         }
         self.registration = Some(catalog.register(
             self.definition.id.clone(),
-            self.results.clone(),
+            self.output_reader.clone(),
             self.source_progress.clone(),
             hash,
             self.publication_identity.clone(),
@@ -808,6 +840,10 @@ impl ContinuousQueryTransformer {
             .ok_or(QueryHistoryError::MissingIdentity)?;
         QueryChangeCodec::set_generation(output, &self.definition.id, state.generation)?;
         identity.annotate(output, &self.definition.id)?;
+        let producer =
+            identity.output_producer(output.system().stream().clone(), state.generation)?;
+        let sequence = output.system().sequence();
+        super::GraphProducerProgress::annotate(output, &producer, sequence)?;
         Ok(())
     }
 
@@ -918,18 +954,12 @@ impl ContinuousQueryTransformer {
         }
         let mut rows = im::HashMap::new();
         for (signature, bytes) in live {
-            let namespace = format!(
-                "drasi.query-row/{}",
-                self.definition
-                    .id
-                    .as_str()
-                    .bytes()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            );
+            let reference = GraphChangeCodec::element_reference(
+                &self.projector.reference(&signature.to_be_bytes())?,
+            )?;
             let row = Record::try_new(
                 &QueryChangeCodec::schema(),
-                RecordId::try_new(namespace, Bytes::copy_from_slice(&signature.to_be_bytes()))?,
+                reference.identity().clone(),
                 RecordImage::Full,
                 Bytes::from(bytes),
             )
@@ -938,6 +968,7 @@ impl ContinuousQueryTransformer {
                     "failed to deserialize durable live row {signature}"
                 ))
             })?;
+            QueryChangeCodec::decode_row_in(&self.projector, &row)?;
             rows.insert(row.identity().clone(), row);
         }
         let mut recovered = Vec::new();
@@ -961,10 +992,12 @@ impl ContinuousQueryTransformer {
                     "invalid durable outbox metadata at {position}"
                 ))
             })?;
-            if envelope.system().sequence() != position
-                || envelope.system().stream() != &self.definition.output_stream
+            if envelope.system().stream() != &self.definition.output_stream
                 || metadata.query_id != self.definition.id.as_str()
             {
+                return Err(QueryRecoveryError::OwnershipMismatch.into());
+            }
+            if envelope.system().sequence() != position {
                 return Err(QueryRecoveryError::Inconsistent(
                     "retained output identity differs from the query".into(),
                 )
@@ -989,12 +1022,7 @@ impl ContinuousQueryTransformer {
                 },
             )? {
                 Some(stored) if stored == identity => {}
-                Some(_) => {
-                    return Err(QueryRecoveryError::Inconsistent(
-                        "retained output belongs to another producer identity".into(),
-                    )
-                    .into())
-                }
+                Some(_) => return Err(QueryRecoveryError::OwnershipMismatch.into()),
                 None => {
                     return Err(QueryRecoveryError::Inconsistent(
                         "retained output has no producer identity".into(),
@@ -1031,7 +1059,7 @@ impl ContinuousQueryTransformer {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .hydrate(rows, sequence, recovered, generation, identity);
+            .hydrate(rows, sequence, recovered, generation, identity)?;
         let saved = checkpoint.read_all_checkpoints().await?;
         *self
             .watermarks
@@ -1105,19 +1133,18 @@ impl ContinuousQueryTransformer {
         let query = self
             .query()
             .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+        let projection = QueryChangeCodec::projection(output).map_err(IndexError::other)?;
+        if projection.projector() != &self.projector {
+            return Err(IndexError::CorruptedData);
+        }
         let mutations = output
             .changes()
             .operations()
             .iter()
-            .map(|operation| {
-                let signature = u64::from_be_bytes(
-                    operation
-                        .identity()
-                        .value()
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| IndexError::CorruptedData)?,
-                );
+            .zip(projection.operations())
+            .map(|(operation, metadata)| {
+                let signature = QueryChangeCodec::row_signature(&metadata.row_identity)
+                    .ok_or(IndexError::CorruptedData)?;
                 let data = match operation {
                     super::ChangeOperation::Added { after, .. }
                     | super::ChangeOperation::Updated { after, .. } => {
@@ -1193,6 +1220,13 @@ impl ContinuousQueryTransformer {
             anyhow::bail!("query processing is fenced pending recovery");
         }
         let query = self.query()?;
+        let ordering = input.envelope.system().ordering();
+        if ordering == drasi_core::models::ChangeOrdering::ProducerSequence {
+            anyhow::ensure!(
+                super::GraphProducerProgress::from_envelope(&input.envelope)?.is_some(),
+                "producer-sequence ordering requires an explicit current output identity"
+            );
+        }
         let source_transaction = self
             .execution
             .source_transactions
@@ -1226,6 +1260,18 @@ impl ContinuousQueryTransformer {
                 )
                 .await?
         } else {
+            let watermarks = self
+                .watermarks
+                .lock()
+                .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?;
+            let producers = self
+                .input_producers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+            progress.graph.validate_owner(
+                watermarks.get(&progress.graph.key).copied(),
+                producers.get(&progress.graph.key),
+            )?;
             None
         };
         let positioned = self
@@ -1282,6 +1328,19 @@ impl ContinuousQueryTransformer {
             Some(changes) => changes,
             None => GraphChangeCodec::decode_changes(&input.envelope)?,
         };
+        let mut changes = drasi_core::computation::QueryInputBatch::new(changes, ordering);
+        if let Some(scopes) = &self.input_scopes {
+            let scope = scopes
+                .get(&(input.port.clone(), input.envelope.system().stream().clone()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "query input port '{}' stream '{}' has no declared middleware scope",
+                        input.port,
+                        input.envelope.system().stream(),
+                    )
+                })?;
+            changes = changes.with_input_scope(scope.clone());
+        }
         let reservations = if self.output_bindings.has_shared() {
             Some(Box::pin(self.output_bindings.reserve()).await?)
         } else {
@@ -1319,6 +1378,7 @@ impl ContinuousQueryTransformer {
                         .with_timestamp(
                             input.envelope.system().timestamp().unwrap_or_else(Utc::now),
                         ),
+                    &self.projector,
                     &results,
                     QueryOutputMetadata {
                         query_id: self.definition.id.to_string(),
@@ -1427,13 +1487,21 @@ impl ContinuousQueryTransformer {
         if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
             self.finish_non_atomic(output.as_ref()).await?;
         }
+        if query.resources().checkpoint_store().is_none() {
+            if let Some(producer) = &progress.graph.producer {
+                let mut owners = self
+                    .input_producers
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+                if !owners.contains_key(&progress.graph.key) {
+                    owners.insert(progress.graph.key.clone(), producer.clone());
+                }
+            }
+        }
         self.watermarks
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
             .insert(progress.graph.key.clone(), progress.sequence);
-        if let Some(confirmation) = &self.source_progress {
-            confirmation.confirm_input(&progress.graph);
-        }
         // Keep completion timings on the live branch, not in already committed outbox bytes.
         if let Some(output) = &mut output {
             QueryChangeCodec::append_post_commit_profiling(
@@ -1443,7 +1511,11 @@ impl ContinuousQueryTransformer {
                 timestamp_ns(),
             )?;
         }
-        self.publish(output)
+        let outputs = self.publish(output)?;
+        if let Some(confirmation) = &self.source_progress {
+            confirmation.confirm_input(&progress.graph);
+        }
+        Ok(outputs)
     }
 }
 
@@ -1476,6 +1548,46 @@ impl ComputationComponent for ContinuousQueryTransformer {
                 Some(control.observe_component(inspector, self.definition.id.clone(), generation));
         }
     }
+    fn binds_inputs(&self) -> bool {
+        self.execution
+            .inputs
+            .iter()
+            .any(|input| !input.pipeline.is_empty())
+    }
+
+    async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
+        let mut aliases = BTreeMap::new();
+        if let Some(configuration) = &self.api_configuration {
+            for input in &configuration.inputs {
+                aliases.insert(
+                    super::ComputationPipelineBuilder::source_component_id(
+                        self.definition.id.as_str(),
+                        &input.component,
+                    )?,
+                    Arc::<str>::from(input.component.as_str()),
+                );
+            }
+        }
+        let mut scopes = BTreeMap::new();
+        for binding in bindings {
+            let scope = aliases
+                .get(&binding.output.component)
+                .cloned()
+                .unwrap_or_else(|| Arc::from(binding.output.component.as_str()));
+            let key = (binding.input_port.clone(), binding.stream.clone());
+            if let Some(previous) = scopes.insert(key, scope.clone()) {
+                anyhow::ensure!(
+                    previous == scope,
+                    "query input port '{}' stream '{}' has ambiguous producer scopes",
+                    binding.input_port,
+                    binding.stream,
+                );
+            }
+        }
+        self.input_scopes = Some(scopes);
+        Ok(())
+    }
+
     fn recovery_contract(&self) -> super::ComponentRecovery {
         let contract = match &self.source_progress {
             Some(progress) => self
@@ -1510,6 +1622,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
                                 .configuration_hash(&self.execution)
                                 .expect("query configuration encoding"),
                             results: self.results.clone(),
+                            reader: self.output_reader.clone(),
                             progress: self.source_progress.clone(),
                             incarnation: self.publication_identity.clone(),
                             checkpoint: self.checkpoint_view.clone(),
@@ -1519,6 +1632,10 @@ impl ComputationComponent for ContinuousQueryTransformer {
                 })
                 .clone(),
         )
+    }
+
+    fn output_readers(&self) -> super::OutputReaders {
+        self.output_reader.readers()
     }
 
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
@@ -1612,6 +1729,10 @@ impl ComputationComponent for ContinuousQueryTransformer {
         }
         self.initialize_recovery().await?;
         self.prepare_delivery().await?;
+        self.pending_input_replay = match &self.bootstrap {
+            Some(provider) => provider.take_input_replay()?.into(),
+            None => VecDeque::new(),
+        };
         self.publish_source_progress(true).await?;
         guard.complete = true;
         self.failure.store(false, Ordering::Release);
@@ -1655,11 +1776,15 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if let Some(progress) = &self.source_progress {
             progress.pending();
         }
-        self.results
-            .state
-            .write()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .ready = false;
+        {
+            let mut state = self
+                .results
+                .state
+                .write()
+                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+            state.ready = false;
+            state.follow.retire()?;
+        }
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
         }
@@ -1772,7 +1897,9 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     fn has_pending_emissions(&self) -> bool {
-        self.draining_futures || !self.pending_output.is_empty()
+        self.draining_futures
+            || !self.pending_output.is_empty()
+            || !self.pending_input_replay.is_empty()
     }
 
     async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -1782,6 +1909,16 @@ impl Transformer for ContinuousQueryTransformer {
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
         if !self.pending_output.is_empty() {
             return self.replay_output().await;
+        }
+        if let Some(envelope) = self.pending_input_replay.front().cloned() {
+            let output = self
+                .transform(InputEnvelope {
+                    port: PortId::try_new("in")?,
+                    envelope,
+                })
+                .await?;
+            self.pending_input_replay.pop_front();
+            return Ok(output);
         }
         #[cfg(feature = "test-support")]
         if let Some(session) = &mut self.test_session {
@@ -1881,6 +2018,7 @@ impl Transformer for ContinuousQueryTransformer {
                     &owner.definition.id,
                     SystemMetadata::new(owner.definition.output_stream.clone(), sequence)
                         .with_timestamp(timestamp),
+                    &owner.projector,
                     &due.results,
                     QueryOutputMetadata {
                         query_id: owner.definition.id.to_string(),
@@ -2200,7 +2338,7 @@ impl ComponentFactory for ContinuousQueryFactory {
             .transpose()?
             .unwrap_or_default();
         Ok(ComponentSpecification {
-            descriptor: query_descriptor(id, execution.source_transactions.is_some()),
+            descriptor: query_descriptor(id),
             role: self.descriptor.role,
             completion: None,
             implementation: self.descriptor.implementation.clone(),
@@ -2324,15 +2462,8 @@ impl ComponentFactory for ContinuousQueryFactory {
         {
             anyhow::bail!("complete source transactions require atomic publication");
         }
-        if spec.descriptor
-            != query_descriptor(
-                spec.descriptor.id().clone(),
-                execution.source_transactions.is_some(),
-            )
-        {
-            anyhow::bail!(
-                "query input must match its configured graph-change or complete-transaction schema"
-            );
+        if spec.descriptor != query_descriptor(spec.descriptor.id().clone()) {
+            anyhow::bail!("query ports must use the standard graph-change schema");
         }
         let language_value = spec.configuration.get("language").and_then(|value| {
             if let ConfigurationValue::Literal(value) = value {

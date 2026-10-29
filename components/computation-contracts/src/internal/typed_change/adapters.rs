@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -21,11 +24,12 @@ use drasi_core_types::{
         context::{QueryPartEvaluationContext, QueryVariables},
         variable_value::VariableValue,
     },
-    models::SourceChange,
+    models::{SourceChange, SourceChangeError},
 };
 
 use crate::{
     exchange::{QueryResult, ResultDiff, SourceEvent, SourceEventParts, SourceEventWrapper},
+    graph_codec::result_change::{result_changes, ResultChange},
     profiling::ProfilingMetadata,
 };
 
@@ -47,6 +51,8 @@ pub(crate) enum ChangeAdapterError {
     WrongSchema { expected: &'static str },
     #[error("graph envelope must contain exactly one supported source change")]
     InvalidGraphEnvelope,
+    #[error(transparent)]
+    InvalidSourceChange(#[from] SourceChangeError),
     #[error("graph envelope is missing its source sequence")]
     MissingSourceSequence,
     #[error("query envelope is missing its query identity")]
@@ -155,6 +161,7 @@ pub(crate) fn source_change_to_envelope(
     source_position: Option<Bytes>,
     extensions: SystemMetadataExtensions,
 ) -> Result<ChangeEnvelope, ChangeAdapterError> {
+    change.validate()?;
     let encoded_change = encode_source_change(&change)?;
     let (added, updated, deleted) = match change {
         SourceChange::Insert { element } => (
@@ -166,7 +173,22 @@ pub(crate) fn source_change_to_envelope(
             vec![],
             vec![],
         ),
-        SourceChange::Update { element } => (
+        SourceChange::Replace { element } => (
+            vec![],
+            vec![UpdatedRecord::new(
+                0,
+                RecordIdentity::GraphElement(element.get_reference().clone()),
+                None,
+                RecordData::Graph(GraphRecord::Element(Arc::new(element))),
+                UpdateSemantics::Replace,
+                UpdateMetadata::None,
+            )],
+            vec![],
+        ),
+        SourceChange::Update {
+            element,
+            removed_properties,
+        } => (
             vec![],
             vec![UpdatedRecord::new(
                 0,
@@ -174,7 +196,9 @@ pub(crate) fn source_change_to_envelope(
                 None,
                 RecordData::Graph(GraphRecord::Element(Arc::new(element))),
                 UpdateSemantics::Patch,
-                UpdateMetadata::None,
+                UpdateMetadata::GraphPatch {
+                    removed_properties: Arc::new(removed_properties),
+                },
             )],
             vec![],
         ),
@@ -297,21 +321,36 @@ pub(crate) fn source_change_from_envelope_owned(
         (0, 1, 0) => {
             let updated = &change_set.updated()[0];
             let semantics = updated.semantics();
+            let metadata = updated.metadata().clone();
             let after = updated.after().clone();
             drop(change_set);
-            match (after, semantics) {
-                (RecordData::Graph(GraphRecord::Element(element)), UpdateSemantics::Patch) => {
-                    Ok(SourceChange::Update {
-                        element: unwrap_or_clone(element),
-                    })
-                }
-                (RecordData::Graph(GraphRecord::Future(future)), UpdateSemantics::Patch) => {
-                    Ok(SourceChange::Future {
-                        future_ref: unwrap_or_clone(future),
-                    })
-                }
-                _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
-            }
+            let change = match (after, semantics, metadata) {
+                (
+                    RecordData::Graph(GraphRecord::Element(element)),
+                    UpdateSemantics::Patch,
+                    UpdateMetadata::GraphPatch { removed_properties },
+                ) => SourceChange::Update {
+                    element: unwrap_or_clone(element),
+                    removed_properties: unwrap_or_clone(removed_properties),
+                },
+                (
+                    RecordData::Graph(GraphRecord::Element(element)),
+                    UpdateSemantics::Replace,
+                    UpdateMetadata::None,
+                ) => SourceChange::Replace {
+                    element: unwrap_or_clone(element),
+                },
+                (
+                    RecordData::Graph(GraphRecord::Future(future)),
+                    UpdateSemantics::Patch,
+                    UpdateMetadata::None,
+                ) => SourceChange::Future {
+                    future_ref: unwrap_or_clone(future),
+                },
+                _ => return Err(ChangeAdapterError::InvalidGraphEnvelope),
+            };
+            change.validate()?;
+            Ok(change)
         }
         (0, 0, 1) => {
             let before = change_set.deleted()[0].before().cloned();
@@ -356,23 +395,35 @@ fn source_change_from_change_set(
             }),
             _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
         },
-        (None, Some(updated), None, 1) => match updated.after() {
-            RecordData::Graph(GraphRecord::Element(element))
-                if updated.semantics() == UpdateSemantics::Patch =>
-            {
-                Ok(SourceChange::Update {
+        (None, Some(updated), None, 1) => {
+            let change = match (updated.after(), updated.semantics(), updated.metadata()) {
+                (
+                    RecordData::Graph(GraphRecord::Element(element)),
+                    UpdateSemantics::Patch,
+                    UpdateMetadata::GraphPatch { removed_properties },
+                ) => SourceChange::Update {
                     element: element.as_ref().clone(),
-                })
-            }
-            RecordData::Graph(GraphRecord::Future(future))
-                if updated.semantics() == UpdateSemantics::Patch =>
-            {
-                Ok(SourceChange::Future {
+                    removed_properties: removed_properties.as_ref().clone(),
+                },
+                (
+                    RecordData::Graph(GraphRecord::Element(element)),
+                    UpdateSemantics::Replace,
+                    UpdateMetadata::None,
+                ) => SourceChange::Replace {
+                    element: element.as_ref().clone(),
+                },
+                (
+                    RecordData::Graph(GraphRecord::Future(future)),
+                    UpdateSemantics::Patch,
+                    UpdateMetadata::None,
+                ) => SourceChange::Future {
                     future_ref: future.as_ref().clone(),
-                })
-            }
-            _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
-        },
+                },
+                _ => return Err(ChangeAdapterError::InvalidGraphEnvelope),
+            };
+            change.validate()?;
+            Ok(change)
+        }
         (None, None, Some(deleted), 1) => match deleted.before() {
             Some(RecordData::Graph(GraphRecord::Metadata(metadata))) => Ok(SourceChange::Delete {
                 metadata: metadata.as_ref().clone(),
@@ -402,43 +453,32 @@ pub(crate) fn query_evaluation_to_envelope(
     );
     identity.optional_u64("graph-epoch", metadata.extensions.graph_epoch());
     identity.optional_u64("config-epoch", metadata.extensions.config_epoch());
-    identity.u64(
-        "result-count",
-        results
-            .iter()
-            .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
-            .count() as u64,
-    );
+    identity.u64("result-count", result_changes(results).count() as u64);
 
-    for (ordinal, result) in results.iter().enumerate() {
+    for result in result_changes(results) {
+        let ordinal = result.ordinal();
+        let row_signature = result.row_signature();
         match result {
-            QueryPartEvaluationContext::Adding {
-                after,
-                row_signature,
-            } => {
+            ResultChange::Add { after, .. } => {
                 identity.u64("result-ordinal", ordinal as u64);
                 identity.string("result-kind", "add");
-                identity.u64("row-signature", *row_signature);
+                identity.u64("row-signature", row_signature);
                 hash_query_variables(&mut identity, "after", after)?;
                 added.push(AddedRecord::new(
                     ordinal,
-                    RecordIdentity::QueryRow(*row_signature),
+                    RecordIdentity::QueryRow(row_signature),
                     RecordData::QueryRow(Arc::new(after.clone())),
                 ));
             }
-            QueryPartEvaluationContext::Updating {
-                before,
-                after,
-                row_signature,
-            } => {
+            ResultChange::Update { before, after, .. } => {
                 identity.u64("result-ordinal", ordinal as u64);
                 identity.string("result-kind", "update");
-                identity.u64("row-signature", *row_signature);
+                identity.u64("row-signature", row_signature);
                 hash_query_variables(&mut identity, "before", before)?;
                 hash_query_variables(&mut identity, "after", after)?;
                 updated.push(UpdatedRecord::new(
                     ordinal,
-                    RecordIdentity::QueryRow(*row_signature),
+                    RecordIdentity::QueryRow(row_signature),
                     Some(RecordData::QueryRow(Arc::new(before.clone()))),
                     RecordData::QueryRow(Arc::new(after.clone())),
                     UpdateSemantics::Replace,
@@ -447,31 +487,28 @@ pub(crate) fn query_evaluation_to_envelope(
                     },
                 ));
             }
-            QueryPartEvaluationContext::Removing {
-                before,
-                row_signature,
-            } => {
+            ResultChange::Remove { before, .. } => {
                 identity.u64("result-ordinal", ordinal as u64);
                 identity.string("result-kind", "delete");
-                identity.u64("row-signature", *row_signature);
+                identity.u64("row-signature", row_signature);
                 hash_query_variables(&mut identity, "before", before)?;
                 deleted.push(DeletedRecord::new(
                     ordinal,
-                    RecordIdentity::QueryRow(*row_signature),
+                    RecordIdentity::QueryRow(row_signature),
                     Some(RecordData::QueryRow(Arc::new(before.clone()))),
                 ));
             }
-            QueryPartEvaluationContext::Aggregation {
+            ResultChange::Aggregate {
                 before,
                 after,
                 grouping_keys,
                 default_before,
                 default_after,
-                row_signature,
+                ..
             } => {
                 identity.u64("result-ordinal", ordinal as u64);
                 identity.string("result-kind", "aggregation");
-                identity.u64("row-signature", *row_signature);
+                identity.u64("row-signature", row_signature);
                 identity.bool("before-present", before.is_some());
                 if let Some(before) = before {
                     hash_query_variables(&mut identity, "before", before)?;
@@ -481,14 +518,12 @@ pub(crate) fn query_evaluation_to_envelope(
                 for grouping_key in grouping_keys {
                     identity.string("grouping-key", grouping_key);
                 }
-                identity.bool("default-before", *default_before);
-                identity.bool("default-after", *default_after);
+                identity.bool("default-before", default_before);
+                identity.bool("default-after", default_after);
                 updated.push(UpdatedRecord::new(
                     ordinal,
-                    RecordIdentity::QueryRow(*row_signature),
-                    before
-                        .as_ref()
-                        .map(|before| RecordData::QueryRow(Arc::new(before.clone()))),
+                    RecordIdentity::QueryRow(row_signature),
+                    before.map(|before| RecordData::QueryRow(Arc::new(before.clone()))),
                     RecordData::QueryRow(Arc::new(after.clone())),
                     UpdateSemantics::Replace,
                     UpdateMetadata::QueryAggregation {
@@ -497,12 +532,11 @@ pub(crate) fn query_evaluation_to_envelope(
                             .map(|key| Arc::from(key.as_str()))
                             .collect::<Vec<_>>()
                             .into(),
-                        default_before: *default_before,
-                        default_after: *default_after,
+                        default_before,
+                        default_after,
                     },
                 ));
             }
-            QueryPartEvaluationContext::Noop => {}
         }
     }
 
@@ -615,7 +649,7 @@ pub(crate) fn query_result_from_envelope(
                 after,
                 row_signature: *row_signature,
             },
-            UpdateMetadata::None => {
+            UpdateMetadata::None | UpdateMetadata::GraphPatch { .. } => {
                 return Err(ChangeAdapterError::IncompatibleRecord {
                     ordinal: updated.ordinal(),
                 });

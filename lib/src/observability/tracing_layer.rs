@@ -32,9 +32,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use tracing::Instrument;
 //!
+//! # async fn example(source_id: &str) {
 //! // Create a span for the component
 //! let span = tracing::info_span!(
 //!     "source",
@@ -47,6 +48,7 @@
 //!     tracing::info!("Starting source");
 //!     // or log::info!("Starting source"); - works via tracing-log bridge
 //! }.instrument(span).await;
+//! # }
 //! ```
 
 use std::sync::Arc;

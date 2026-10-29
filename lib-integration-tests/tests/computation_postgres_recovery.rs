@@ -143,7 +143,7 @@ async fn open(root: &Path, host: &str, port: u16) -> Result<(DrasiLib, Arc<Obser
         .with_query(
             Query::cypher(QUERY)
                 .query("MATCH (n:items) RETURN n.id AS id, n.name AS name")
-                .from_source(SOURCE)
+                .from_input(SOURCE)
                 .enable_bootstrap(false)
                 .with_outbox_capacity(32)
                 .with_storage_backend(StorageBackendRef::Named("rocks".into()))

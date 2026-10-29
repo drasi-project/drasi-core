@@ -87,6 +87,7 @@ impl DrasiLib {
         metadata: HashMap<String, String>,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         let id = source.id().to_owned();
         self.computation_runtime
             .add_source(Box::new(source), metadata, self.is_running().await)
@@ -351,7 +352,8 @@ impl DrasiLib {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
     /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
     ///
@@ -766,7 +768,7 @@ mod tests {
         core.add_query(
             Query::cypher("schema-query")
                 .query("MATCH (s:Sensor)-[r:CONNECTS_TO]->(c:Counter) RETURN s, r, c")
-                .from_source("schema-src")
+                .from_input("schema-src")
                 .build(),
         )
         .await

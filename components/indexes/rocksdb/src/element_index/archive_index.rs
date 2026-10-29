@@ -81,7 +81,9 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                         },
                         Err(e) => return Err(IndexError::other(e)),
                     };
-                Ok(Some(Arc::new(stored_element.into())))
+                Element::try_from(stored_element)
+                    .map(|element| Some(Arc::new(element)))
+                    .map_err(IndexError::other)
             }
             Ok(Ok(None)) => Ok(None),
             Ok(Err(e)) => Err(e),
@@ -184,15 +186,21 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                                 match StoredElementContainer::decode(data.as_ref()) {
                                     Ok(container) => match container.element {
                                         Some(element) => element,
-                                        None => continue,
+                                        None => {
+                                            results.push(Err(IndexError::CorruptedData));
+                                            break;
+                                        }
                                     },
                                     Err(e) => {
                                         results.push(Err(IndexError::other(e)));
                                         break;
                                     }
                                 };
-                            let element: Element = stored_element.into();
-                            results.push(Ok(Arc::new(element)));
+                            results.push(
+                                Element::try_from(stored_element)
+                                    .map(Arc::new)
+                                    .map_err(IndexError::other),
+                            );
                         }
                         Err(e) => results.push(Err(IndexError::other(e))),
                     }

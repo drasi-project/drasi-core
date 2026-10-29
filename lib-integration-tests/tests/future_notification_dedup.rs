@@ -11,6 +11,7 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
     if drasi
         .get_graph()
         .await
+        .unwrap()
         .nodes
         .iter()
         .any(|node| node.id == component_id && node.status == ComponentStatus::Running)
@@ -56,7 +57,7 @@ async fn future_notifications_ignore_data_checkpoints_with_colliding_source_id()
                      datetime({epochMillis: item.deadline})
                  ) THEN true ELSE false END AS due",
             )
-            .from_source(source_id)
+            .from_input(source_id)
             .auto_start(true)
             .enable_bootstrap(false)
             .build();

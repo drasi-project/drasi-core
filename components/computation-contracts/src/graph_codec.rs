@@ -14,15 +14,22 @@
 
 use std::sync::{Arc, OnceLock};
 
-use bincode::Options;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use drasi_core_types::models::{ElementMetadata, ElementReference, SourceChange};
+use drasi_core_types::{
+    interface::FutureElementRef,
+    models::{Element, ElementMetadata, ElementReference, SourceChange},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    exchange::SourceEventWrapper, internal::typed_change, profiling::ProfilingMetadata,
+    binary_codec::{decode_bounded_messagepack, encode_bounded_messagepack},
+    exchange::SourceEventWrapper,
+    internal::typed_change,
+    profiling::ProfilingMetadata,
     schema::SourceSchema,
+    BinaryEnvelopeCodecError, ControlMessage, ElementImage, ElementImageError, ElementPatch,
+    ElementPatchError,
 };
 
 use super::{
@@ -33,14 +40,28 @@ use super::{
 };
 
 const SOURCE_METADATA: &str = "drasi.legacy-source.v1";
-const GRAPH_IDENTITY: &str = "drasi.graph-element";
+pub(crate) const GRAPH_IDENTITY: &str = "drasi.graph-element";
+const GRAPH_CONTROL: &str = "drasi.graph-control.v1";
+
+pub(crate) mod result_change;
+mod result_node;
+#[cfg(test)]
+mod tests;
+
+pub use result_node::{
+    ResultNodeError, ResultNodeProjector, ResultOperationMetadata, ResultProjection,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphCodecError {
     #[error(transparent)]
     Contract(#[from] ContractError),
     #[error("invalid typed graph record: {0}")]
-    Encoding(#[from] Box<bincode::ErrorKind>),
+    Encoding(#[from] BinaryEnvelopeCodecError),
+    #[error(transparent)]
+    Image(#[from] ElementImageError),
+    #[error(transparent)]
+    Patch(Box<ElementPatchError>),
     #[error("invalid source metadata: {0}")]
     Metadata(#[from] serde_json::Error),
     #[error("legacy boundary conversion failed: {0}")]
@@ -49,6 +70,50 @@ pub enum GraphCodecError {
     Operation,
     #[error("identity-only graph deletion requires a nonnegative event timestamp")]
     MissingEventTime,
+    #[error("invalid graph stream control: {0}")]
+    Control(&'static str),
+}
+
+impl From<ElementPatchError> for GraphCodecError {
+    fn from(error: ElementPatchError) -> Self {
+        Self::Patch(Box::new(error))
+    }
+}
+
+/// Known data preceding a change. Metadata alone does not invent an element kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ElementBeforeImage {
+    Metadata(ElementMetadata),
+    Element(ElementImage),
+}
+
+impl ElementBeforeImage {
+    pub fn metadata(&self) -> &ElementMetadata {
+        match self {
+            Self::Metadata(metadata) => metadata,
+            Self::Element(image) => image.metadata(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ElementImageError> {
+        if let Self::Element(image) = self {
+            image.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrderedFuture {
+    ordinal: u64,
+    future_ref: FutureElementRef,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum GraphControl {
+    FuturesDue,
+    Reevaluate(Vec<OrderedFuture>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,17 +130,17 @@ pub struct LegacySourceMetadata {
 
 pub struct GraphChangeCodec;
 
-fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Box<bincode::ErrorKind>> {
-    bincode::options()
-        .with_fixint_encoding()
-        .with_limit(bytes.len() as u64)
-        .reject_trailing_bytes()
-        .deserialize(bytes)
+fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BinaryEnvelopeCodecError> {
+    decode_bounded_messagepack(bytes, bytes.len())
+}
+
+fn encode<T: Serialize>(value: &T) -> Result<Bytes, BinaryEnvelopeCodecError> {
+    // The enclosing transport applies the configured frame-size limit.
+    encode_bounded_messagepack(value, usize::MAX).map(Bytes::from)
 }
 
 impl GraphChangeCodec {
     pub fn encode_futures_due(
-        component: &ComponentId,
         stream: StreamId,
         sequence: u64,
         timestamp: DateTime<Utc>,
@@ -88,25 +153,32 @@ impl GraphChangeCodec {
             Self::schema().descriptor().clone(),
             Vec::new(),
         )?;
-        let mut envelope = ChangeEnvelope::new(
+        Ok(ChangeEnvelope::new(
             super::emission_id(&stream, sequence)?,
             changes,
-            super::SystemMetadata::new(stream, sequence).with_timestamp(timestamp),
-        );
-        envelope.append_annotation(ContextEntry::try_new(
-            component.clone(),
-            "drasi.query.futures-due",
-            ContextValue::Bool(true),
-        )?)?;
-        Ok(envelope)
+            super::SystemMetadata::new(stream, sequence)
+                .with_timestamp(timestamp)
+                .with_control(ControlMessage::try_new(
+                    GRAPH_CONTROL,
+                    encode(&GraphControl::FuturesDue)?,
+                )?),
+        ))
     }
 
     pub fn is_futures_due(envelope: &ChangeEnvelope) -> bool {
-        envelope.changes().operations().is_empty()
-            && envelope.annotations().entries().any(|entry| {
-                entry.key() == "drasi.query.futures-due"
-                    && matches!(entry.value(), ContextValue::Bool(true))
-            })
+        envelope.changes().schema() == Self::schema().descriptor()
+            && envelope.changes().operations().is_empty()
+            && matches!(Self::control(envelope), Ok(Some(GraphControl::FuturesDue)))
+    }
+
+    fn control(envelope: &ChangeEnvelope) -> Result<Option<GraphControl>, GraphCodecError> {
+        let Some(control) = envelope.system().control() else {
+            return Ok(None);
+        };
+        if control.kind() != GRAPH_CONTROL {
+            return Err(GraphCodecError::Control("unexpected control kind"));
+        }
+        Ok(Some(decode(control.payload())?))
     }
 
     pub fn schema() -> Arc<Schema> {
@@ -115,8 +187,8 @@ impl GraphChangeCodec {
             SchemaDescriptor::try_new(
                 SchemaId::try_new("drasi.graph-change").expect("constant schema id"),
                 SchemaVersion::try_new(1).expect("constant schema version"),
-                "drasi-source-change-bincode1",
-                Bytes::from_static(b"SourceChange-v1;ElementReference-key;insert/full;update/patch;delete/partial;future/patch"),
+                "drasi-element-msgpack-v1",
+                Bytes::from_static(b"ElementImage-v1;ElementReference-msgpack-key;add/full;replace/full;patch/ElementPatch;delete/ElementBeforeImage-or-identity;event-local-graph-controls-v1"),
             ).expect("constant graph schema"),
             Arc::new(GraphValidator),
         ))).clone()
@@ -168,8 +240,7 @@ impl GraphChangeCodec {
             &event.event,
             crate::exchange::SourceEvent::Control(crate::exchange::SourceControl::FuturesDue)
         ) {
-            let mut envelope =
-                Self::encode_futures_due(component, stream, sequence, metadata.timestamp)?;
+            let mut envelope = Self::encode_futures_due(stream, sequence, metadata.timestamp)?;
             envelope.append_annotation(ContextEntry::try_new(
                 component.clone(),
                 SOURCE_METADATA,
@@ -226,17 +297,20 @@ impl GraphChangeCodec {
         sequence: u64,
         timestamp: Option<DateTime<Utc>>,
     ) -> Result<ChangeEnvelope, GraphCodecError> {
-        let changes = Self::encode_change_set(changes, &stream, sequence)?;
+        let (changes, control) = Self::encode_change_set(changes, &stream, sequence)?;
         let id = super::emission_id(&stream, sequence)?;
         let mut system = SystemMetadata::new(stream, sequence);
         if let Some(timestamp) = timestamp {
             system = system.with_timestamp(timestamp);
         }
+        if let Some(control) = control {
+            system = system.with_control(control);
+        }
         Ok(ChangeEnvelope::new(id, changes, system))
     }
 
     /// Emit transformed graph changes while preserving the input's annotations,
-    /// timestamp, source position and lineage. The output has its own identity.
+    /// timestamp, ordering policy, source position and lineage. The output has its own identity.
     /// Inherited source metadata remains provenance; downstream graph progress
     /// uses the new stream's sequence, or an explicit immediate producer marker.
     pub fn derive_changes(
@@ -245,14 +319,35 @@ impl GraphChangeCodec {
         stream: StreamId,
         sequence: u64,
     ) -> Result<ChangeEnvelope, GraphCodecError> {
-        let changes = Self::encode_change_set(changes, &stream, sequence)?;
+        Self::derive_changes_with_ordering(
+            input,
+            changes,
+            stream,
+            sequence,
+            input.system().ordering(),
+        )
+    }
+
+    /// Choose the new producer's ordering explicitly. Producer-sequence output
+    /// must also carry that producer's own progress identity, not an ancestor's.
+    pub fn derive_changes_with_ordering(
+        input: &ChangeEnvelope,
+        changes: &[SourceChange],
+        stream: StreamId,
+        sequence: u64,
+        ordering: crate::ChangeOrdering,
+    ) -> Result<ChangeEnvelope, GraphCodecError> {
+        let (changes, control) = Self::encode_change_set(changes, &stream, sequence)?;
         let id = super::emission_id(&stream, sequence)?;
-        let mut system = SystemMetadata::new(stream, sequence);
+        let mut system = SystemMetadata::new(stream, sequence).with_ordering(ordering);
         if let Some(timestamp) = input.system().timestamp() {
             system = system.with_timestamp(timestamp);
         }
         if let Some(position) = input.system().source_position() {
             system = system.with_source_position(position.clone());
+        }
+        if let Some(control) = control {
+            system = system.with_control(control);
         }
         Ok(input.derive(id, changes, system))
     }
@@ -264,7 +359,8 @@ impl GraphChangeCodec {
         timestamp: Option<DateTime<Utc>>,
         position: Option<Bytes>,
     ) -> Result<ChangeEnvelope, GraphCodecError> {
-        let changes = Self::encode_change_set(std::slice::from_ref(&change), &stream, sequence)?;
+        let (changes, control) =
+            Self::encode_change_set(std::slice::from_ref(&change), &stream, sequence)?;
         let id = super::emission_id(&stream, sequence)?;
         let mut system = SystemMetadata::new(stream, sequence);
         if let Some(timestamp) = timestamp {
@@ -273,6 +369,9 @@ impl GraphChangeCodec {
         if let Some(position) = position {
             system = system.with_source_position(position);
         }
+        if let Some(control) = control {
+            system = system.with_control(control);
+        }
         Ok(ChangeEnvelope::new(id, changes, system))
     }
 
@@ -280,125 +379,279 @@ impl GraphChangeCodec {
         changes: &[SourceChange],
         stream: &StreamId,
         sequence: u64,
-    ) -> Result<ChangeSetRef, GraphCodecError> {
+    ) -> Result<(ChangeSetRef, Option<ControlMessage>), GraphCodecError> {
         let schema = Self::schema();
-        let operations = changes
-            .iter()
-            .enumerate()
-            .map(|(ordinal, change)| {
-                let ordinal = u64::try_from(ordinal).map_err(|_| GraphCodecError::Operation)?;
-                let identity = RecordId::try_new(
-                    GRAPH_IDENTITY,
-                    Bytes::from(bincode::serialize(change.get_reference())?),
-                )?;
-                let image = match change {
-                    SourceChange::Insert { .. } => RecordImage::Full,
-                    SourceChange::Update { .. } | SourceChange::Future { .. } => RecordImage::Patch,
-                    SourceChange::Delete { .. } => RecordImage::Partial,
-                };
-                let record = Record::try_new(
-                    &schema,
-                    identity,
-                    image,
-                    Bytes::from(bincode::serialize(change)?),
-                )?;
-                Ok(match change {
-                    SourceChange::Insert { .. } => ChangeOperation::Added {
-                        ordinal,
-                        after: record,
-                    },
-                    SourceChange::Update { .. } | SourceChange::Future { .. } => {
-                        ChangeOperation::Updated {
-                            ordinal,
-                            before: None,
-                            after: record,
-                            semantics: UpdateSemantics::Patch,
-                        }
-                    }
-                    SourceChange::Delete { .. } => ChangeOperation::Deleted {
-                        ordinal,
-                        identity: record.reference().clone(),
-                        before: Some(record),
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>, GraphCodecError>>()?;
-        Ok(ChangeSet::try_new(
+        let mut futures = Vec::new();
+        let mut operations = Vec::with_capacity(changes.len());
+        for (ordinal, change) in changes.iter().enumerate() {
+            let ordinal = u64::try_from(ordinal).map_err(|_| GraphCodecError::Operation)?;
+            if let SourceChange::Future { future_ref } = change {
+                futures.push(OrderedFuture {
+                    ordinal,
+                    future_ref: future_ref.clone(),
+                });
+            } else {
+                operations.push(Self::encode_operation(ordinal, change)?);
+            }
+        }
+        let changes = ChangeSet::try_new(
             ChangeSetId::try_new(
                 stream.as_str(),
                 Bytes::copy_from_slice(&sequence.to_be_bytes()),
             )?,
             schema.descriptor().clone(),
             operations,
+        )?;
+        let control = if futures.is_empty() {
+            None
+        } else {
+            Some(ControlMessage::try_new(
+                GRAPH_CONTROL,
+                encode(&GraphControl::Reevaluate(futures))?,
+            )?)
+        };
+        Ok((changes, control))
+    }
+
+    /// Encode one data change as its ordinary graph operation. Scheduled
+    /// notifications are event-local controls, never graph records.
+    pub(crate) fn encode_operation(
+        ordinal: u64,
+        change: &SourceChange,
+    ) -> Result<ChangeOperation, GraphCodecError> {
+        Ok(match change {
+            SourceChange::Insert { element } => ChangeOperation::Added {
+                ordinal,
+                after: Self::element_record(&ElementImage::try_from(element)?)?,
+            },
+            SourceChange::Replace { element } => ChangeOperation::Updated {
+                ordinal,
+                before: None,
+                after: Self::element_record(&ElementImage::try_from(element)?)?,
+                semantics: UpdateSemantics::Replace,
+            },
+            SourceChange::Update {
+                element,
+                removed_properties,
+            } => ChangeOperation::Updated {
+                ordinal,
+                before: None,
+                after: Self::patch_record(&ElementPatch::try_new(
+                    ElementImage::try_from(element)?,
+                    removed_properties.clone(),
+                )?)?,
+                semantics: UpdateSemantics::Patch,
+            },
+            SourceChange::Delete { metadata } => {
+                let record = Self::partial_record(&ElementBeforeImage::Metadata(metadata.clone()))?;
+                ChangeOperation::Deleted {
+                    ordinal,
+                    identity: record.reference().clone(),
+                    before: Some(record),
+                }
+            }
+            SourceChange::Future { .. } => return Err(GraphCodecError::Operation),
+        })
+    }
+
+    pub fn element_reference(
+        reference: &ElementReference,
+    ) -> Result<RecordReference, GraphCodecError> {
+        Ok(RecordReference::try_new(
+            &Self::schema(),
+            RecordId::try_new(GRAPH_IDENTITY, encode(reference)?)?,
         )?)
+    }
+
+    pub fn element_record(image: &ElementImage) -> Result<Record, GraphCodecError> {
+        image.validate()?;
+        Ok(Record::try_new(
+            &Self::schema(),
+            Self::element_reference(&image.metadata().reference)?
+                .identity()
+                .clone(),
+            RecordImage::Full,
+            encode(image)?,
+        )?)
+    }
+
+    pub fn patch_record(patch: &ElementPatch) -> Result<Record, GraphCodecError> {
+        patch.validate()?;
+        Ok(Record::try_new(
+            &Self::schema(),
+            Self::element_reference(patch.reference())?
+                .identity()
+                .clone(),
+            RecordImage::Patch,
+            encode(patch)?,
+        )?)
+    }
+
+    pub fn partial_record(image: &ElementBeforeImage) -> Result<Record, GraphCodecError> {
+        image.validate()?;
+        Ok(Record::try_new(
+            &Self::schema(),
+            Self::element_reference(&image.metadata().reference)?
+                .identity()
+                .clone(),
+            RecordImage::Partial,
+            encode(image)?,
+        )?)
+    }
+
+    pub fn decode_element(record: &Record) -> Result<ElementImage, GraphCodecError> {
+        if record.image() != RecordImage::Full {
+            return Err(GraphCodecError::Operation);
+        }
+        let image = ElementImage::decode(record.payload(), record.payload().len())?;
+        Self::validate_record_reference(record, &image.metadata().reference)?;
+        Ok(image)
+    }
+
+    pub fn decode_patch(record: &Record) -> Result<ElementPatch, GraphCodecError> {
+        if record.image() != RecordImage::Patch {
+            return Err(GraphCodecError::Operation);
+        }
+        let patch = ElementPatch::decode(record.payload(), record.payload().len())?;
+        Self::validate_record_reference(record, patch.reference())?;
+        Ok(patch)
+    }
+
+    pub fn decode_partial(record: &Record) -> Result<ElementBeforeImage, GraphCodecError> {
+        if record.image() != RecordImage::Partial {
+            return Err(GraphCodecError::Operation);
+        }
+        let image: ElementBeforeImage = decode(record.payload())?;
+        image.validate()?;
+        Self::validate_record_reference(record, &image.metadata().reference)?;
+        Ok(image)
+    }
+
+    fn validate_record_reference(
+        record: &Record,
+        reference: &ElementReference,
+    ) -> Result<(), GraphCodecError> {
+        let expected = Self::element_reference(reference)?;
+        if record.reference() != &expected {
+            return Err(GraphCodecError::Operation);
+        }
+        Ok(())
     }
 
     pub fn decode_changes(envelope: &ChangeEnvelope) -> Result<Vec<SourceChange>, GraphCodecError> {
         super::data::validate_schema(Self::schema().descriptor(), envelope.changes().schema())?;
-        let mut changes = Vec::new();
-        for operation in envelope.changes().operations() {
+        let mut changes = Self::decode_operations(envelope.changes().operations(), &|| {
+            Self::event_time(envelope)
+        })?;
+        match Self::control(envelope)? {
+            Some(GraphControl::FuturesDue) if !changes.is_empty() => {
+                return Err(GraphCodecError::Control("futures-due cannot carry data"));
+            }
+            Some(GraphControl::Reevaluate(futures)) => {
+                if futures.is_empty() {
+                    return Err(GraphCodecError::Control("empty reevaluation batch"));
+                }
+                if futures
+                    .windows(2)
+                    .any(|pair| pair[0].ordinal >= pair[1].ordinal)
+                {
+                    return Err(GraphCodecError::Control(
+                        "reevaluation ordinals must be increasing",
+                    ));
+                }
+                changes.extend(futures.into_iter().map(|future| {
+                    (
+                        future.ordinal,
+                        SourceChange::Future {
+                            future_ref: future.future_ref,
+                        },
+                    )
+                }));
+                changes.sort_by_key(|(ordinal, _)| *ordinal);
+                if changes
+                    .iter()
+                    .enumerate()
+                    .any(|(index, (ordinal, _))| u64::try_from(index).ok() != Some(*ordinal))
+                {
+                    return Err(GraphCodecError::Control(
+                        "reevaluation ordinals must form one complete ordered batch",
+                    ));
+                }
+            }
+            _ => {}
+        }
+        Ok(changes.into_iter().map(|(_, change)| change).collect())
+    }
+
+    /// Decode ordered data operations without control or envelope context. The
+    /// caller supplies the event time that identity-only deletions require.
+    pub(crate) fn decode_operations(
+        operations: &[ChangeOperation],
+        event_time: &dyn Fn() -> Result<u64, GraphCodecError>,
+    ) -> Result<Vec<(u64, SourceChange)>, GraphCodecError> {
+        let mut changes = Vec::with_capacity(operations.len());
+        for operation in operations {
+            let ordinal = operation.ordinal();
             match operation {
                 ChangeOperation::Added { after, .. } => {
-                    let change = decode(after.payload())?;
-                    if !matches!(change, SourceChange::Insert { .. }) {
-                        return Err(GraphCodecError::Operation);
-                    }
-                    changes.push(change);
+                    changes.push((
+                        ordinal,
+                        SourceChange::Insert {
+                            element: Element::try_from(Self::decode_element(after)?)?,
+                        },
+                    ));
                 }
                 ChangeOperation::Updated {
                     after,
                     semantics: UpdateSemantics::Patch,
                     ..
                 } => {
-                    let change = decode(after.payload())?;
-                    if !matches!(
-                        change,
-                        SourceChange::Update { .. } | SourceChange::Future { .. }
-                    ) {
-                        return Err(GraphCodecError::Operation);
-                    }
-                    changes.push(change);
+                    let patch = Self::decode_patch(after)?;
+                    changes.push((
+                        ordinal,
+                        SourceChange::Update {
+                            element: Element::try_from(patch.image())?,
+                            removed_properties: patch.removed_properties().clone(),
+                        },
+                    ));
                 }
                 ChangeOperation::Updated {
-                    before,
                     after,
                     semantics: UpdateSemantics::Replace,
                     ..
                 } => {
-                    let SourceChange::Insert { element } = decode(after.payload())? else {
-                        return Err(GraphCodecError::Operation);
-                    };
-                    let mut metadata = match before {
-                        Some(before) => match decode(before.payload())? {
-                            SourceChange::Insert { element } => element.get_metadata().clone(),
-                            SourceChange::Delete { metadata } => metadata,
-                            _ => return Err(GraphCodecError::Operation),
+                    changes.push((
+                        ordinal,
+                        SourceChange::Replace {
+                            element: Element::try_from(Self::decode_element(after)?)?,
                         },
-                        None => element.get_metadata().clone(),
-                    };
-                    metadata.effective_from = element.get_metadata().effective_from;
-                    changes.push(SourceChange::Delete { metadata });
-                    changes.push(SourceChange::Insert { element });
+                    ));
                 }
                 ChangeOperation::Deleted {
                     identity, before, ..
                 } => {
                     let metadata = match before {
-                        Some(before) => match decode(before.payload())? {
-                            SourceChange::Delete { metadata } => metadata,
-                            SourceChange::Insert { element } => ElementMetadata {
-                                effective_from: Self::event_time(envelope)?,
-                                ..element.get_metadata().clone()
+                        Some(before) => match before.image() {
+                            RecordImage::Full => ElementMetadata {
+                                effective_from: event_time()?,
+                                ..Self::decode_element(before)?.metadata().clone()
                             },
-                            _ => return Err(GraphCodecError::Operation),
+                            RecordImage::Partial => match Self::decode_partial(before)? {
+                                ElementBeforeImage::Metadata(metadata) => metadata,
+                                ElementBeforeImage::Element(image) => ElementMetadata {
+                                    effective_from: event_time()?,
+                                    ..image.metadata().clone()
+                                },
+                            },
+                            RecordImage::Patch => return Err(GraphCodecError::Operation),
                         },
                         None => ElementMetadata {
                             reference: decode(identity.identity().value())?,
                             labels: Arc::from([]),
-                            effective_from: Self::event_time(envelope)?,
+                            effective_from: event_time()?,
                         },
                     };
-                    changes.push(SourceChange::Delete { metadata });
+                    changes.push((ordinal, SourceChange::Delete { metadata }));
                 }
             }
         }
@@ -430,8 +683,16 @@ impl RecordValidator for GraphValidator {
                 "expected graph-change identity",
             ));
         }
-        decode::<ElementReference>(identity.value())
+        let reference = decode::<ElementReference>(identity.value())
             .map_err(|error| RecordValidationError::new("identity", error.to_string()))?;
+        let canonical = encode(&reference)
+            .map_err(|error| RecordValidationError::new("identity", error.to_string()))?;
+        if canonical != identity.value() {
+            return Err(RecordValidationError::new(
+                "identity",
+                "graph element key must use canonical named MessagePack",
+            ));
+        }
         Ok(())
     }
 
@@ -445,14 +706,22 @@ impl RecordValidator for GraphValidator {
         self.validate_identity(schema, identity)?;
         let reference: ElementReference = decode(identity.value())
             .map_err(|error| RecordValidationError::new("identity", error.to_string()))?;
-        let change: SourceChange = decode(payload)
-            .map_err(|error| RecordValidationError::new("record", error.to_string()))?;
-        let expected = match &change {
-            SourceChange::Insert { .. } => RecordImage::Full,
-            SourceChange::Update { .. } | SourceChange::Future { .. } => RecordImage::Patch,
-            SourceChange::Delete { .. } => RecordImage::Partial,
-        };
-        if change.get_reference() != &reference || expected != image {
+        let payload_reference = match image {
+            RecordImage::Full => ElementImage::decode(payload, payload.len())
+                .map(|image| image.metadata().reference.clone())
+                .map_err(|error| error.to_string()),
+            RecordImage::Patch => ElementPatch::decode(payload, payload.len())
+                .map(|patch| patch.reference().clone())
+                .map_err(|error| error.to_string()),
+            RecordImage::Partial => decode::<ElementBeforeImage>(payload)
+                .map_err(|error| error.to_string())
+                .and_then(|image| {
+                    image.validate().map_err(|error| error.to_string())?;
+                    Ok(image.metadata().reference.clone())
+                }),
+        }
+        .map_err(|error| RecordValidationError::new("record", error))?;
+        if payload_reference != reference {
             return Err(RecordValidationError::new(
                 "image",
                 "graph identity/image does not match its typed payload",

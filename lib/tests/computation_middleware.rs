@@ -98,7 +98,10 @@ impl SourceMiddleware for FixtureMiddleware {
         if matches!(self.0, FixtureOperation::Filter) {
             return Ok(Vec::new());
         }
-        if let SourceChange::Insert { element } | SourceChange::Update { element } = &mut change {
+        if let SourceChange::Insert { element }
+        | SourceChange::Replace { element }
+        | SourceChange::Update { element, .. } = &mut change
+        {
             let properties = match element {
                 Element::Node { properties, .. } | Element::Relation { properties, .. } => {
                     properties
@@ -196,7 +199,7 @@ fn node(source: &str, id: &str, label: &str, time: u64, properties: Value) -> El
 
 fn mutation(element: Element, update: bool) -> SourceChange {
     if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     }
@@ -357,13 +360,8 @@ async fn assert_future_passthrough(subject: &mut MiddlewareTransformer) {
     };
     let output = transform_one(subject, &event("producer", 900, future.clone())).await;
     assert_eq!(decoded(&output), [future]);
-    assert!(matches!(
-        output.changes().operations(),
-        [ChangeOperation::Updated {
-            semantics: UpdateSemantics::Patch,
-            ..
-        }]
-    ));
+    assert!(output.changes().operations().is_empty());
+    assert!(output.system().control().is_some());
 }
 
 async fn assert_element_mutations(
@@ -648,6 +646,7 @@ async fn metadata_ancestry_and_input_are_preserved_across_clean_restart() {
         "producer",
         50,
         SourceChange::Update {
+            removed_properties: Default::default(),
             element: node("database", "item", "Raw", 200, json!({"value": 8})),
         },
     );
@@ -657,6 +656,7 @@ async fn metadata_ancestry_and_input_are_preserved_across_clean_restart() {
     assert_eq!(
         decoded(&second),
         [SourceChange::Update {
+            removed_properties: Default::default(),
             element: node("database", "item", "Raw", 200, json!({"value": 10})),
         }]
     );
@@ -664,9 +664,17 @@ async fn metadata_ancestry_and_input_are_preserved_across_clean_restart() {
 }
 
 #[tokio::test]
-async fn empty_pipeline_preserves_batch_order_and_decodes_replace_as_delete_insert() {
+async fn empty_pipeline_preserves_batch_order_with_one_full_replacement() {
     let replacement = node("database", "item", "Raw", 100, json!({"value": 4}));
-    let patch = node("database", "item", "Raw", 200, json!({"value": 5}));
+    let patch = node(
+        "database",
+        "item",
+        "Raw",
+        200,
+        json!({"value": 5, "nothing": null}),
+    );
+    let patch_change =
+        SourceChange::update_with_removals(patch, ["gone".to_string()].into()).unwrap();
     let deletion = metadata("database", "item", "Raw", 300);
     let root = event(
         "producer",
@@ -686,17 +694,13 @@ async fn empty_pipeline_preserves_batch_order_and_decodes_replace_as_delete_inse
             ChangeOperation::Updated {
                 ordinal: 10,
                 before: None,
-                after: record(SourceChange::Insert {
-                    element: replacement.clone(),
-                }),
+                after: record(SourceChange::replace(replacement.clone())),
                 semantics: UpdateSemantics::Replace,
             },
             ChangeOperation::Updated {
                 ordinal: 20,
                 before: None,
-                after: record(SourceChange::Update {
-                    element: patch.clone(),
-                }),
+                after: record(patch_change.clone()),
                 semantics: UpdateSemantics::Patch,
             },
             ChangeOperation::Deleted {
@@ -708,28 +712,127 @@ async fn empty_pipeline_preserves_batch_order_and_decodes_replace_as_delete_inse
     );
     let mut subject = running(Vec::new(), &[]).await;
     let output = transform_one(&mut subject, &input).await;
-    assert_eq!(output.changes().operations().len(), 4);
+    assert_eq!(output.changes().operations().len(), 3);
     assert_eq!(
         decoded(&output),
         [
-            SourceChange::Delete {
-                metadata: replacement.get_metadata().clone(),
-            },
-            SourceChange::Insert {
-                element: replacement,
-            },
-            SourceChange::Update { element: patch },
+            SourceChange::replace(replacement),
+            patch_change,
             SourceChange::Delete { metadata: deletion },
         ]
     );
+    // A full replacement and a patch with removals keep their canonical semantics.
     assert!(matches!(
-        &output.changes().operations()[2],
+        &output.changes().operations()[0],
+        ChangeOperation::Updated {
+            semantics: UpdateSemantics::Replace,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &output.changes().operations()[1],
         ChangeOperation::Updated {
             semantics: UpdateSemantics::Patch,
             ..
         }
     ));
     assert_future_passthrough(&mut subject).await;
+    subject.stop().await.expect("stop");
+}
+
+#[tokio::test]
+async fn removals_nulls_and_replacements_pass_through_in_place_transforms() {
+    let mut subject = running(
+        vec![config("fixture", "add", json!({"operation": "add", "operand": 1}))],
+        &["add"],
+    )
+    .await;
+    let inserted = transform_one(
+        &mut subject,
+        &event(
+            "producer",
+            40,
+            SourceChange::Insert {
+                element: node(
+                    "database",
+                    "item",
+                    "Raw",
+                    100,
+                    json!({"value": 1, "other": "x"}),
+                ),
+            },
+        ),
+    )
+    .await;
+    assert_eq!(
+        decoded(&inserted),
+        [SourceChange::Insert {
+            element: node(
+                "database",
+                "item",
+                "Raw",
+                100,
+                json!({"value": 2, "other": "x"})
+            ),
+        }]
+    );
+
+    let removal = SourceChange::update_with_removals(
+        node(
+            "database",
+            "item",
+            "Raw",
+            200,
+            json!({"value": 5, "nothing": null}),
+        ),
+        ["other".to_string()].into(),
+    )
+    .unwrap();
+    let updated = transform_one(&mut subject, &event("producer", 41, removal)).await;
+    assert_eq!(
+        decoded(&updated),
+        [SourceChange::update_with_removals(
+            node(
+                "database",
+                "item",
+                "Raw",
+                200,
+                json!({"value": 6, "nothing": null})
+            ),
+            ["other".to_string()].into(),
+        )
+        .unwrap()]
+    );
+    assert!(matches!(
+        updated.changes().operations(),
+        [ChangeOperation::Updated {
+            semantics: UpdateSemantics::Patch,
+            ..
+        }]
+    ));
+
+    let replaced = transform_one(
+        &mut subject,
+        &event(
+            "producer",
+            42,
+            SourceChange::replace(node("database", "item", "Raw", 300, json!({"value": 7}))),
+        ),
+    )
+    .await;
+    assert_eq!(
+        decoded(&replaced),
+        [SourceChange::replace(node("database", "item", "Raw", 300, json!({"value": 8})))]
+    );
+    assert!(matches!(
+        replaced.changes().operations(),
+        [ChangeOperation::Updated {
+            semantics: UpdateSemantics::Replace,
+            ..
+        }]
+    ));
+    assert!(replaced.system().sequence() > updated.system().sequence());
+    assert!(updated.system().sequence() > inserted.system().sequence());
     subject.stop().await.expect("stop");
 }
 
@@ -966,7 +1069,7 @@ async fn two_producer_graph(
         assert_derived(output, input);
         let (element, update) = match &original[0] {
             SourceChange::Insert { element } => (element, false),
-            SourceChange::Update { element } => (element, true),
+            SourceChange::Update { element, .. } => (element, true),
             _ => panic!("node mutation"),
         };
         let ElementValue::Integer(value) = element.get_property("value") else {
@@ -1123,6 +1226,7 @@ mod decoder {
             "producer",
             50,
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node(
                     "database",
                     "item",
@@ -1137,6 +1241,7 @@ mod decoder {
         assert_eq!(
             decoded(&output),
             [SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node(
                     "database",
                     "item",
@@ -1246,6 +1351,7 @@ mod parse_json {
             "producer",
             50,
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node("database", "item", "Raw", 200, json!({"decoded": "[1,2]"})),
             },
         );
@@ -1254,6 +1360,7 @@ mod parse_json {
         assert_eq!(
             decoded(&output),
             [SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node(
                     "database",
                     "item",
@@ -1409,6 +1516,7 @@ mod promote {
             "producer",
             50,
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node(
                     "database",
                     "item",
@@ -1423,6 +1531,7 @@ mod promote {
         assert_eq!(
             decoded(&output),
             [SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node(
                     "database",
                     "item",
@@ -1545,6 +1654,7 @@ mod map {
                     element: node("database", "first", "Mapped", 100, json!({"value": 3})),
                 },
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: node("database", "second", "Patched", 100, json!({"value": 9})),
                 },
                 SourceChange::Insert {
@@ -1561,6 +1671,7 @@ mod map {
             "producer",
             50,
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node("database", "item", "Reading", 200, json!({"value": 11})),
             },
         );
@@ -1568,6 +1679,7 @@ mod map {
         assert_eq!(
             decoded(&output),
             [SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node("database", "item", "Mapped", 200, json!({"value": 11})),
             }]
         );
@@ -1678,6 +1790,7 @@ mod jq {
             "producer",
             50,
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node("database", "item", "Reading", 200, json!({"value": 4})),
             },
         );
@@ -1685,6 +1798,7 @@ mod jq {
         assert_eq!(
             decoded(&output),
             [SourceChange::Update {
+                removed_properties: Default::default(),
                 element: node("database", "item", "Mapped", 200, json!({"value": 5})),
             }]
         );
@@ -1865,6 +1979,7 @@ mod unwind {
             "producer",
             50,
             SourceChange::Update {
+                removed_properties: Default::default(),
                 element: smaller.clone(),
             },
         );
@@ -1879,12 +1994,14 @@ mod unwind {
                     metadata: relation("a", 200).get_metadata().clone(),
                 },
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: child("b", 200, 21),
                 },
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: relation("b", 200),
                 },
-                SourceChange::Update { element: smaller },
+                SourceChange::update(smaller),
             ],
         );
         assert!(updated.system().sequence() > inserted.system().sequence());
@@ -1951,6 +2068,7 @@ mod unwind {
             ),
         };
         let update = SourceChange::Update {
+            removed_properties: Default::default(),
             element: node(
                 "database",
                 "parent",
@@ -1998,9 +2116,11 @@ mod unwind {
                     metadata: relation("a", 200).get_metadata().clone(),
                 },
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: child("b", 200, 21),
                 },
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: relation("b", 200),
                 },
                 update,
@@ -2096,14 +2216,9 @@ mod unwind {
                 SourceChange::Delete {
                     metadata: relation("a", 200).get_metadata().clone(),
                 },
-                SourceChange::Delete {
-                    metadata: metadata("database", "parent", "Parent", 200),
-                },
-                SourceChange::Insert {
-                    element: replacement,
-                },
+                SourceChange::replace(replacement),
             ],
-            "the before-record's Parent label must drive cleanup at the replacement time"
+            "the old label's mapping drives child cleanup, and the replacement stays one full replacement"
         );
         assert!(replaced.system().sequence() > inserted.system().sequence());
 
@@ -2113,6 +2228,46 @@ mod unwind {
         let deleted = transform_one(&mut subject, &event("producer", 60, deletion.clone())).await;
         assert_eq!(decoded(&deleted), [deletion]);
         assert!(deleted.system().sequence() > replaced.system().sequence());
+        subject.stop().await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn unwind_update_removing_the_array_deletes_children_and_forwards_the_removal() {
+        let insert = SourceChange::Insert {
+            element: node(
+                "database",
+                "parent",
+                "Parent",
+                100,
+                json!({"items": [{"id": "a", "value": 10}], "status": "original"}),
+            ),
+        };
+        let removal = SourceChange::update_with_removals(
+            node(
+                "database",
+                "parent",
+                "Parent",
+                200,
+                json!({"status": "changed"}),
+            ),
+            ["items".to_string()].into(),
+        )
+        .unwrap();
+        let mut subject = running(vec![settings()], &["children"]).await;
+        transform_one(&mut subject, &event("producer", 40, insert)).await;
+        let updated = transform_one(&mut subject, &event("producer", 50, removal.clone())).await;
+        assert_changes(
+            &decoded(&updated),
+            vec![
+                SourceChange::Delete {
+                    metadata: child("a", 200, 0).get_metadata().clone(),
+                },
+                SourceChange::Delete {
+                    metadata: relation("a", 200).get_metadata().clone(),
+                },
+                removal,
+            ],
+        );
         subject.stop().await.expect("stop");
     }
 
@@ -2128,6 +2283,7 @@ mod unwind {
             ),
         };
         let update = SourceChange::Update {
+            removed_properties: Default::default(),
             element: node(
                 "database",
                 "parent",

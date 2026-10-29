@@ -271,7 +271,7 @@ impl ApplicationSourceHandle {
             properties,
         };
 
-        self.send(SourceChange::Update { element }).await
+        self.send(SourceChange::update(element)).await
     }
 
     /// Delete a node or relationship from the graph

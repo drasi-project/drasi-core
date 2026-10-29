@@ -4,26 +4,37 @@ export class DashboardSocket {
     this.socket = null;
     this.subscriptions = new Set();
     this.queryHandlers = [];
+    this.snapshotHandlers = [];
     this.statusHandlers = [];
+    this.pendingSnapshots = new Set();
     this.reconnectDelayMs = 1000;
-    this.stopped = false;
+    this.reconnectTimer = null;
+    this.stopped = true;
   }
 
   start() {
+    if (!this.stopped && this.socket) return;
     this.stopped = false;
     this.connect();
   }
 
   stop() {
     this.stopped = true;
-    if (this.socket) {
-      this.socket.close();
-      this.socket = null;
-    }
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const socket = this.socket;
+    this.socket = null;
+    this.pendingSnapshots.clear();
+    if (socket) socket.close();
+    this.notifyStatus("Disconnected");
   }
 
   onQueryResult(handler) {
     this.queryHandlers.push(handler);
+  }
+
+  onQuerySnapshot(handler) {
+    this.snapshotHandlers.push(handler);
   }
 
   onStatus(handler) {
@@ -31,48 +42,61 @@ export class DashboardSocket {
   }
 
   subscribe(queryIds) {
+    const requested = new Set();
     for (const queryId of queryIds) {
       if (queryId && queryId.trim().length > 0) {
         this.subscriptions.add(queryId);
+        requested.add(queryId);
       }
     }
 
-    this.send({
-      type: "subscribe",
-      query_ids: Array.from(this.subscriptions),
-    });
+    if (this.socket?.readyState === WebSocket.OPEN && requested.size > 0) {
+      for (const queryId of requested) this.pendingSnapshots.add(queryId);
+      this.notifyStatus("Synchronizing");
+      this.send({ type: "subscribe", query_ids: Array.from(requested) });
+    }
   }
 
   unsubscribe(queryIds) {
     for (const queryId of queryIds) {
       this.subscriptions.delete(queryId);
+      this.pendingSnapshots.delete(queryId);
     }
 
     this.send({
       type: "unsubscribe",
       query_ids: queryIds,
     });
+    if (this.socket?.readyState === WebSocket.OPEN && this.pendingSnapshots.size === 0) {
+      this.notifyStatus("Connected");
+    }
   }
 
   connect() {
+    if (this.stopped) return;
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const url = `${protocol}://${window.location.host}${this.path}`;
 
-    this.socket = new WebSocket(url);
+    const socket = new WebSocket(url);
+    this.socket = socket;
+    const isCurrent = () => !this.stopped && this.socket === socket;
     this.notifyStatus("Connecting");
 
-    this.socket.onopen = () => {
+    socket.onopen = () => {
+      if (!isCurrent()) return;
       this.reconnectDelayMs = 1000;
-      this.notifyStatus("Connected");
+      this.pendingSnapshots.clear();
       if (this.subscriptions.size > 0) {
-        this.send({
-          type: "subscribe",
-          query_ids: Array.from(this.subscriptions),
-        });
+        this.subscribe(Array.from(this.subscriptions));
+      } else {
+        this.notifyStatus("Connected");
       }
     };
 
-    this.socket.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (!isCurrent()) return;
       let payload = null;
       try {
         payload = JSON.parse(event.data);
@@ -81,22 +105,32 @@ export class DashboardSocket {
         return;
       }
 
-      if (payload.type === "query_result") {
+      if (payload.type === "query_snapshot") {
+        for (const handler of this.snapshotHandlers) handler(payload);
+        this.pendingSnapshots.delete(payload.query_id);
+        if (this.pendingSnapshots.size === 0) this.notifyStatus("Connected");
+      } else if (payload.type === "query_result") {
         for (const handler of this.queryHandlers) {
           handler(payload);
         }
       }
     };
 
-    this.socket.onclose = () => {
+    socket.onclose = () => {
+      if (!isCurrent()) return;
+      this.socket = null;
       this.notifyStatus("Disconnected");
-      if (!this.stopped) {
-        window.setTimeout(() => this.connect(), this.reconnectDelayMs);
-        this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30000);
-      }
+      const timer = window.setTimeout(() => {
+        if (this.reconnectTimer !== timer || this.stopped || this.socket) return;
+        this.reconnectTimer = null;
+        this.connect();
+      }, this.reconnectDelayMs);
+      this.reconnectTimer = timer;
+      this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30000);
     };
 
-    this.socket.onerror = () => {
+    socket.onerror = () => {
+      if (!isCurrent()) return;
       this.notifyStatus("Error");
     };
   }

@@ -30,7 +30,7 @@ pub use boundary::{
 };
 pub use client::BridgeControl;
 pub use codec::PortableEnvelopeCodec;
-pub use config::{BridgeConfig, Limits, Namespace, PortableSchema, Profile, Transport};
+pub use config::{BridgeConfig, Limits, Namespace, PortableDelivery, Profile, Transport};
 pub use endpoint_control::BridgeEndpointControl;
 pub use error::{BridgeError, ErrorCode, Result};
 pub use protocol::{AcceptanceBoundary, LinkStatus, Receipt, PROTOCOL_VERSION};

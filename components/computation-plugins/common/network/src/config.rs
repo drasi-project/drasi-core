@@ -4,7 +4,7 @@
 //! Protocol-independent settings and validation shared by network components.
 
 use anyhow::{ensure, Result};
-#[cfg(any(feature = "ingress", feature = "http-sink", feature = "grpc-sink"))]
+#[cfg(feature = "ingress")]
 use drasi_computation_contracts::{ComponentId, StreamId};
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 use serde::{Deserialize, Serialize};
@@ -96,65 +96,26 @@ impl FailurePolicy {
         self,
         result: Result<()>,
         component: &str,
-        query: &str,
+        output: &str,
         sequence: u64,
     ) -> Result<()> {
         match (self, result) {
             (_, Ok(())) => Ok(()),
             (Self::Strict, Err(error)) => Err(error),
             (Self::Skip, Err(error)) => {
-                eprintln!("drasi.network deliberate delivery skip: component={component} query={query} sequence={sequence} error={error:#}");
+                eprintln!("drasi.network deliberate delivery skip: component={component} output={output} sequence={sequence} error={error:#}");
                 Ok(())
             }
         }
     }
 }
 
+/// Header and gRPC metadata names carrying the real component and output port
+/// that produced each request's data.
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
-pub fn input_stream(value: &mut Value) -> Result<()> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("sink configuration must be an object"))?;
-    let bindings = object
-        .get("queryStreams")
-        .map(|bindings| {
-            let bindings: BTreeMap<String, StreamId> = serde_json::from_value(bindings.clone())?;
-            ensure!(!bindings.is_empty(), "queryStreams must not be empty");
-            for query in bindings.keys() {
-                ComponentId::try_new(query.as_str())?;
-            }
-            Ok::<_, anyhow::Error>(bindings)
-        })
-        .transpose()?;
-    if !object.contains_key("queryId") {
-        if let Some(bindings) = &bindings {
-            object.insert(
-                "queryId".into(),
-                Value::String(bindings.keys().next().expect("nonempty").clone()),
-            );
-        }
-    }
-    let query_id = object
-        .get("queryId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("queryId is required"))?;
-    ComponentId::try_new(query_id)?;
-    let stream = match &bindings {
-        Some(bindings) => bindings
-            .get(query_id)
-            .ok_or_else(|| anyhow::anyhow!("queryStreams must include queryId"))?
-            .to_string(),
-        None => format!("{query_id}/out"),
-    };
-    if let Some(existing) = object.get("stream") {
-        ensure!(
-            bindings.is_none() || existing.as_str() == Some(stream.as_str()),
-            "stream must match queryStreams for queryId"
-        );
-    }
-    object.entry("stream").or_insert(Value::String(stream));
-    Ok(())
-}
+pub const COMPONENT_HEADER: &str = "x-drasi-component";
+#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
+pub const PORT_HEADER: &str = "x-drasi-port";
 
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 pub fn validate_output_templates(value: &Value, extensions: &[&str]) -> Result<()> {
@@ -202,23 +163,20 @@ pub fn validate_output_templates(value: &Value, extensions: &[&str]) -> Result<(
 }
 
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
-pub fn normalized_headers(
-    headers: &BTreeMap<String, String>,
-    query: &str,
-) -> Result<BTreeMap<String, String>> {
+pub fn normalized_headers(headers: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
     let mut result = BTreeMap::new();
     for (key, value) in headers {
         let name: reqwest::header::HeaderName = key.parse()?;
         let _: reqwest::header::HeaderValue = value.parse()?;
         ensure!(
+            name.as_str() != COMPONENT_HEADER && name.as_str() != PORT_HEADER,
+            "{name} identifies the producing output and is supplied automatically"
+        );
+        ensure!(
             result.insert(name.to_string(), value.clone()).is_none(),
             "duplicate header name ignoring case"
         );
     }
-    if let Some(value) = result.get("x-query-sequence") {
-        ensure!(value == query, "x-query-sequence must match queryId");
-    }
-    result.insert("x-query-sequence".into(), query.into());
     Ok(result)
 }
 

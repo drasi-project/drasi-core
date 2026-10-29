@@ -154,42 +154,7 @@ impl MsSqlExecutor {
             // Build parameterized query
             let mut query = Query::new(command.clone());
 
-            // Bind parameters - tiberius requires explicit type binding.
-            for param in params.iter() {
-                match param {
-                    Value::Null => {
-                        query.bind(None::<&str>);
-                    }
-                    Value::Bool(b) => {
-                        query.bind(*b);
-                    }
-                    Value::Number(n) => {
-                        // Bind integers as BIGINT and reals as FLOAT
-                        // consistently, so a parameter's SQL type does not
-                        // depend on the magnitude of a particular row's value.
-                        if let Some(i) = n.as_i64() {
-                            query.bind(i);
-                        } else if let Some(u) = n.as_u64() {
-                            // A u64 that does not fit in i64 (> i64::MAX) cannot
-                            // be represented by SQL BIGINT. Bind its exact decimal
-                            // form as a string rather than falling through to f64,
-                            // which would silently lose integer precision.
-                            query.bind(u.to_string());
-                        } else if let Some(f) = n.as_f64() {
-                            query.bind(f);
-                        } else {
-                            query.bind(n.to_string());
-                        }
-                    }
-                    Value::String(s) => {
-                        query.bind(s.as_str());
-                    }
-                    Value::Array(_) | Value::Object(_) => {
-                        // Complex values are bound as their JSON string form.
-                        query.bind(param.to_string());
-                    }
-                }
-            }
+            drasi_mssql_common::sql::bind_parameters(&mut query, &params);
 
             // Execute the command
             timeout(cmd_timeout, query.execute(&mut *client))

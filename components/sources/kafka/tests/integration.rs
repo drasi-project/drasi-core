@@ -106,7 +106,7 @@ async fn test_kafka_source_detects_changes() {
     // Create query
     let query = Query::cypher("q1")
         .query("MATCH (o:Order) WHERE o.total > 50 RETURN o.id AS id, o.customer AS customer, o.total AS total")
-        .from_source("orders_kafka")
+        .from_input("orders_kafka")
         .build();
 
     // Create reaction
@@ -292,7 +292,7 @@ async fn test_kafka_source_custom_mapping() {
 
     let query = Query::cypher("q1")
         .query("MATCH (i:Item) RETURN i.id AS id, i.name AS name, i.price AS price")
-        .from_source("items_kafka")
+        .from_input("items_kafka")
         .build();
 
     let (reaction, handle) = ApplicationReactionBuilder::new("r1")

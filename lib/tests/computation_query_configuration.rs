@@ -101,8 +101,8 @@ fn config() -> drasi_lib::config::QueryConfig {
         .query(
             "MATCH (o:Order)-[:PLACED_BY]->(c:Customer) RETURN o.name AS item, c.name AS customer",
         )
-        .from_source_with_pipeline("orders", vec!["normalize".into()])
-        .from_source("customers")
+        .from_input_with_pipeline("orders", vec!["normalize".into()])
+        .from_input("customers")
         .with_middleware(SourceMiddlewareConfig::new(
             "prefix",
             "normalize",
@@ -183,6 +183,7 @@ async fn disconnected_native_context_lifecycle(language: ComputationQueryLanguag
     .expect("query");
     query.start().await.expect("start");
     let plan_update = SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("plan", "plan"),
@@ -291,6 +292,7 @@ async fn optional_list_comprehension_preserves_unknown_and_empty_contexts() {
             change_input(
                 "plan",
                 SourceChange::Update {
+                    removed_properties: Default::default(),
                     element: Element::Node {
                         metadata: metadata.clone(),
                         properties: ElementPropertyMap::from(serde_json::json!({"assignments":[]})),
@@ -403,7 +405,7 @@ async fn native_aggregate_count_equals_integer_list_size() {
         let change = if sequence == 1 {
             SourceChange::Insert { element }
         } else {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         };
         let output = query
             .transform(change_input("workload", change, sequence))
@@ -434,7 +436,7 @@ async fn native_aggregate_count_equals_integer_list_size() {
 async fn optional_native_join_replaces_the_unmatched_snapshot_row() {
     let config = drasi_lib::Query::cypher("decision")
         .query("MATCH (d:DecisionExplanation) OPTIONAL MATCH (d)-[:DECISION_WRITE]->(w:PlanWriteOutcome) RETURN d.decision_id AS decision_id, w.outcome AS outcome")
-        .from_source("decisions").from_source("writes")
+        .from_input("decisions").from_input("writes")
         .with_joins(vec![QueryJoinConfig {
             id: "DECISION_WRITE".into(),
             keys: ["DecisionExplanation", "PlanWriteOutcome"].into_iter()

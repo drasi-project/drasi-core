@@ -284,6 +284,7 @@ impl NativeBootstrapProvider for PostgresSharedSnapshot {
             .clone()
             .context("shared PostgreSQL snapshot was not exhausted")?;
         Ok(vec![BootstrapWatermark {
+            producer: None,
             stream: self.stream.clone(),
             source_id: Some(self.source.to_string()),
             sequence: position.sequence(),

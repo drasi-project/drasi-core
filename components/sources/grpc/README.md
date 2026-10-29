@@ -1,5 +1,13 @@
 # gRPC Source
 
+**Restart retention:** automatic WAL cleanup waits for the hosting lifecycle's
+initial subscription-completion signal before using the minimum acknowledged
+position. This prevents a fast restored query from deleting input still needed
+by a later subscriber. Direct source hosts must call
+`on_subscriptions_complete()` after establishing all required subscriptions;
+there is no timer-based release. Missing retained history is an error, not a
+successful empty replay.
+
 The gRPC Source provides a high-performance gRPC service endpoint for submitting data change events to Drasi. It exposes a Protocol Buffer-based API that supports both single event submission and streaming for high-throughput scenarios.
 
 ## Overview
@@ -988,7 +996,7 @@ SubmitEventResponse { success: false, error: "Validation error: Node element mis
 ```rust
 let query = Query::cypher("my-query")
     .query("MATCH (n) RETURN n")
-    .from_source("my-grpc-source")
+    .from_input("my-grpc-source")
     .build();
 
 drasi.add_query(query).await?;

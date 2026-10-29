@@ -1573,10 +1573,11 @@ async fn shared_graph_output_encoding_failure_rolls_back_producer_and_all_journa
     let (group, mut channels) =
         shared_group(directory.path(), Arc::new(AtomicBool::new(false)), None).await?;
     channels[1].shutdown().await?;
-    let mut incomplete = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).expect("limit"));
-    incomplete.register_schema(GraphChangeCodec::schema())?;
+    let output_limit = 1;
+    let mut bounded = EnvelopeCodec::new(NonZeroUsize::new(output_limit).expect("limit"));
+    bounded.register_schema(GraphChangeCodec::schema())?;
     channels[1] = group
-        .channel(shared_definition()?, "right", incomplete, options())
+        .channel(shared_definition()?, "right", bounded, options())
         .await?;
     let seen = Arc::new(BindingObservations::default());
     let mut graph = shared_graph(&group, &channels, 1, false, None, None, seen.clone())?;
@@ -1588,6 +1589,25 @@ async fn shared_graph_output_encoding_failure_rolls_back_producer_and_all_journa
             loop {
                 if let Some(failure) = &control.observed().components[&query].failure {
                     assert_eq!(failure.phase, FailurePhase::Processing);
+                    let mut cause: &(dyn std::error::Error + 'static) = failure.cause.as_ref();
+                    loop {
+                        let codec_error =
+                            cause
+                                .downcast_ref::<EnvelopeCodecError>()
+                                .or_else(|| match cause.downcast_ref::<PipeError>() {
+                                    Some(PipeError::Backend(error)) => error.downcast_ref(),
+                                    _ => None,
+                                });
+                        if matches!(
+                            codec_error,
+                            Some(EnvelopeCodecError::SizeLimit { limit }) if *limit == output_limit
+                        ) {
+                            break;
+                        }
+                        cause = cause.source().unwrap_or_else(|| {
+                            panic!("expected output encoding size failure: {failure:?}")
+                        });
+                    }
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;

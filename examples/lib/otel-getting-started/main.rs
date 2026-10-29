@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
             "MATCH (s:Service)-[:REPORTS]->(m:Metric) \
              RETURN s.name AS service, m.value AS latencyMs",
         )
-        .from_source("otel")
+        .from_input("otel")
         .auto_start(true)
         .build();
 

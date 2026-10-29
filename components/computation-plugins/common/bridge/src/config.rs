@@ -7,29 +7,26 @@ use drasi_core::interface::FailureMode;
 use drasi_lib::computation::v1::{
     ComponentDescriptor, ComponentId, ComponentRole, ComponentSpecification, ConfigurationValue,
     GraphChangeCodec, ImplementationIdentity, PipeCapability, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, QueryChangeCodec, Schema, SchemaDescriptor, SinkCompletion,
-    SourceTransactionCodec,
+    PortDirection, PortId, Schema, SchemaDescriptor, SinkCompletion,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{BridgeError, ErrorCode, Result, SINK_FACTORY, SOURCE_FACTORY};
 
+/// All bridge data is the standard graph schema. The delivery mode says whether
+/// every frame must additionally carry a current complete-source-transaction
+/// marker; the schema alone never selects atomic handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PortableSchema {
-    GraphChange,
-    QueryChange,
-    SourceTransaction,
+pub enum PortableDelivery {
+    Events,
+    CompleteTransactions,
 }
 
-impl PortableSchema {
+impl PortableDelivery {
     pub fn schema(self) -> Arc<Schema> {
-        match self {
-            Self::GraphChange => GraphChangeCodec::schema(),
-            Self::QueryChange => QueryChangeCodec::schema(),
-            Self::SourceTransaction => SourceTransactionCodec::schema(),
-        }
+        GraphChangeCodec::schema()
     }
 }
 
@@ -40,49 +37,46 @@ pub enum Profile {
     Durable,
 }
 
-/// Version one deliberately uses an identity mapping. Prefixes are explicit
-/// authority declarations, not instructions to modify a source's business IDs.
+/// Version one deliberately uses an identity mapping. The list is an explicit
+/// authority declaration over graph element namespaces
+/// (`ElementReference::source_id`), not an instruction to modify a business ID.
+///
+/// Source, query and transformer outputs are the same graph data, so one list
+/// covers physical source namespaces and derived output dataset namespaces
+/// (`drasi.output/<hash>`). An entry ending in `/` is a prefix that needs at
+/// least one more character; any other entry is one exact namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Namespace {
     pub version: u32,
     pub source_prefixes: Vec<String>,
-    pub query_prefixes: Vec<String>,
 }
 
 impl Namespace {
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.version != 1 || self.source_prefixes.len() > 16 || self.query_prefixes.len() > 16 {
+        if self.version != 1 || self.source_prefixes.len() > 16 {
             return Err(BridgeError::invalid(
-                "unsupported namespace version or prefix count",
+                "unsupported namespace version or entry count",
             ));
         }
-        for prefix in self.source_prefixes.iter().chain(&self.query_prefixes) {
-            identifier(prefix)?;
-            if !prefix.ends_with('/') {
-                return Err(BridgeError::invalid("namespace prefixes must end in '/'"));
-            }
+        for entry in &self.source_prefixes {
+            identifier(entry)?;
         }
         Ok(())
     }
 
     pub(crate) fn source(&self, id: &str) -> Result<()> {
-        self.allowed(id, &self.source_prefixes, "source")
-    }
-
-    pub(crate) fn query(&self, id: &str) -> Result<()> {
-        self.allowed(id, &self.query_prefixes, "query")
-    }
-
-    fn allowed(&self, id: &str, prefixes: &[String], kind: &str) -> Result<()> {
         identifier(id)?;
-        if !prefixes
-            .iter()
-            .any(|prefix| id.starts_with(prefix) && id.len() > prefix.len())
-        {
-            return Err(BridgeError::invalid(format!(
-                "{kind} identity is outside the declared namespace"
-            )));
+        if !self.source_prefixes.iter().any(|entry| {
+            if entry.ends_with('/') {
+                id.starts_with(entry.as_str()) && id.len() > entry.len()
+            } else {
+                id == entry
+            }
+        }) {
+            return Err(BridgeError::invalid(
+                "element namespace is outside the declared namespace",
+            ));
         }
         Ok(())
     }
@@ -249,7 +243,7 @@ pub struct BridgeConfig {
     /// This component's local output/input binding.
     pub stream: String,
     pub peer_stream: String,
-    pub schema: PortableSchema,
+    pub delivery: PortableDelivery,
     pub profile: Profile,
     #[serde(default = "failure_scope")]
     pub failure_scope: FailureMode,
@@ -275,10 +269,7 @@ impl BridgeConfig {
         self.namespace.validate()?;
         self.transport.validate()?;
         self.limits.validate()?;
-        if self.schema == PortableSchema::QueryChange && self.namespace.query_prefixes.is_empty()
-            || self.schema != PortableSchema::QueryChange
-                && self.namespace.source_prefixes.is_empty()
-        {
+        if self.namespace.source_prefixes.is_empty() {
             return Err(BridgeError::invalid(
                 "the selected schema has no namespace authority",
             ));
@@ -318,7 +309,7 @@ impl BridgeConfig {
                 } else {
                     PortDirection::Input
                 },
-                self.schema.schema().descriptor().clone(),
+                self.delivery.schema().descriptor().clone(),
                 PipeRequirements::new(requirements),
             )],
         )?)
@@ -377,8 +368,8 @@ impl BridgeConfig {
                 &self.peer_stream
             }
             .clone(),
-            schema: self.schema,
-            schema_descriptor: self.schema.schema().descriptor().clone(),
+            delivery: self.delivery,
+            schema_descriptor: self.delivery.schema().descriptor().clone(),
             profile: self.profile,
             failure_scope: self.failure_scope,
             namespace: self.namespace.clone(),
@@ -399,7 +390,7 @@ pub struct LinkContract {
     pub receiver_endpoint: String,
     pub sender_stream: String,
     pub receiver_stream: String,
-    pub schema: PortableSchema,
+    pub delivery: PortableDelivery,
     pub schema_descriptor: SchemaDescriptor,
     pub profile: Profile,
     pub failure_scope: FailureMode,

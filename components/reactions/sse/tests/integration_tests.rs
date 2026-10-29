@@ -44,7 +44,7 @@ async fn test_sse_basic_integration() -> Result<()> {
             RETURN p.name AS name, p.age AS age
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -145,7 +145,7 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
             RETURN p.name AS name, p.age AS age
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -244,7 +244,7 @@ async fn test_sse_aggregation_default_format() -> Result<()> {
             RETURN count(s) AS sensor_count
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -333,7 +333,7 @@ async fn test_sse_aggregation_custom_template() -> Result<()> {
             RETURN count(s) AS sensor_count
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -434,7 +434,7 @@ async fn test_sse_aggregation_before_after() -> Result<()> {
             RETURN count(s) AS sensor_count
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -566,7 +566,7 @@ async fn test_sse_multi_path_integration() -> Result<()> {
             RETURN p.name AS name
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -577,7 +577,7 @@ async fn test_sse_multi_path_integration() -> Result<()> {
             RETURN c.name AS name
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -720,7 +720,7 @@ async fn test_sse_snapshot_endpoint() -> Result<()> {
             RETURN p.name AS name, p.age AS age
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -810,7 +810,7 @@ async fn test_sse_snapshot_empty_result() -> Result<()> {
             RETURN p.name AS name
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -864,7 +864,7 @@ async fn test_sse_snapshot_large_result() -> Result<()> {
             RETURN p.name AS name, p.age AS age
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 
@@ -1072,7 +1072,7 @@ async fn test_sse_snapshot_recovery_after_restart() -> Result<()> {
             RETURN p.name AS name, p.age AS age
         "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();

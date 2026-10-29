@@ -3,7 +3,7 @@
 
 mod component;
 
-use drasi_computation_contracts::QueryChangeCodec;
+use drasi_computation_contracts::GraphChangeCodec;
 use drasi_computation_network_common::config;
 use drasi_computation_plugin_sdk::PluginDefinition;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
         vec![Arc::new(SseFactory)],
-        vec![QueryChangeCodec::schema()],
+        vec![GraphChangeCodec::schema()],
     )
 }
 

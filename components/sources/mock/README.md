@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
     // Add a query that filters high temperature readings
     let query = Query::cypher("high-temp")
         .query("MATCH (s:SensorReading) WHERE s.temperature > 25.0 RETURN s")
-        .from_source("sensors")
+        .from_input("sensors")
         .build();
 
     drasi.add_query(query).await?;

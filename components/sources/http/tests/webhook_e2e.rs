@@ -97,7 +97,7 @@ async fn test_webhook_event_flows_to_reaction() {
     // Create query that matches our webhook events
     let query = Query::cypher("test-query")
         .query("MATCH (e:TestEvent) RETURN e.name AS name, e.value AS value")
-        .from_source("webhook-source")
+        .from_input("webhook-source")
         .auto_start(true)
         .build();
 
@@ -220,7 +220,7 @@ async fn test_webhook_path_params_flow_to_reaction() {
 
     let query = Query::cypher("path-query")
         .query("MATCH (e:UserEvent) RETURN e.user_id AS user_id, e.event_type AS event_type")
-        .from_source("path-param-source")
+        .from_input("path-param-source")
         .auto_start(true)
         .build();
 
@@ -331,7 +331,7 @@ async fn test_webhook_hmac_auth_flows_correctly() {
 
     let query = Query::cypher("hmac-query")
         .query("MATCH (e:SecureEvent) RETURN e.data AS data")
-        .from_source("hmac-source")
+        .from_input("hmac-source")
         .auto_start(true)
         .build();
 
@@ -454,7 +454,7 @@ async fn test_webhook_bearer_auth_flows_correctly() {
 
     let query = Query::cypher("bearer-query")
         .query("MATCH (d:ApiData) RETURN d.content AS content")
-        .from_source("bearer-source")
+        .from_input("bearer-source")
         .auto_start(true)
         .build();
 
@@ -613,7 +613,7 @@ async fn test_webhook_condition_routing_flows_correctly() {
     // Query that returns Commits (simpler query without labels() function)
     let query = Query::cypher("cond-query")
         .query("MATCH (c:Commit) RETURN c.message AS content, 'Commit' AS type")
-        .from_source("cond-source")
+        .from_input("cond-source")
         .auto_start(true)
         .build();
 
@@ -725,7 +725,7 @@ async fn test_webhook_yaml_content_flows_correctly() {
 
     let query = Query::cypher("yaml-query")
         .query("MATCH (e:YamlEvent) RETURN e.name AS name, e.count AS count")
-        .from_source("yaml-source")
+        .from_input("yaml-source")
         .auto_start(true)
         .build();
 
@@ -861,7 +861,7 @@ async fn test_webhook_update_operation_flows_correctly() {
 
     let query = Query::cypher("update-query")
         .query("MATCH (i:Item) RETURN i.status AS status")
-        .from_source("update-source")
+        .from_input("update-source")
         .auto_start(true)
         .build();
 
@@ -964,7 +964,7 @@ async fn test_standard_mode_flows_to_reaction() {
 
     let query = Query::cypher("standard-query")
         .query("MATCH (t:TestNode) RETURN t.value AS value")
-        .from_source("standard-source")
+        .from_input("standard-source")
         .auto_start(true)
         .build();
 
@@ -1083,7 +1083,7 @@ async fn test_webhook_relation_accepted_successfully() {
     // Simple query - we're mainly testing the webhook processing
     let query = Query::cypher("relation-query")
         .query("MATCH (n) RETURN n")
-        .from_source("relation-source")
+        .from_input("relation-source")
         .auto_start(true)
         .build();
 
@@ -1179,7 +1179,7 @@ async fn test_webhook_payload_spread_as_properties() {
         .query(
             "MATCH (e:SpreadEvent) RETURN e.id AS id, e.name AS name, e.status AS status, e.count AS count",
         )
-        .from_source("spread-source")
+        .from_input("spread-source")
         .auto_start(true)
         .build();
 

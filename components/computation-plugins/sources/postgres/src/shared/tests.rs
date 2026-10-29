@@ -435,7 +435,7 @@ fn transaction_binding_is_constructor_safe_and_has_no_single_owner_or_row_option
     );
     assert_eq!(
         metadata.ports[0].schema(),
-        drasi_computation_contracts::SourceTransactionCodec::schema().descriptor()
+        drasi_computation_contracts::GraphChangeCodec::schema().descriptor()
     );
     assert_eq!(
         metadata

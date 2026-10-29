@@ -126,6 +126,7 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
     //Increment lower value
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "t3"),
@@ -161,6 +162,7 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
     //Increment higher value
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "t1"),

@@ -581,9 +581,7 @@ impl ReplicationStream {
             properties: after_properties,
         };
 
-        Ok(Some(SourceChange::Update {
-            element: after_element,
-        }))
+        Ok(Some(SourceChange::update(after_element)))
     }
 
     async fn convert_delete(

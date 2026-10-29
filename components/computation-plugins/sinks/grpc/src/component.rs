@@ -8,37 +8,45 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, InputEnvelope, SinkBatching, SinkCompletion,
+    ComponentDescriptor, InputEnvelope, SinkBatching, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_network_common::{
     batching::{AdaptiveBatchConfig, AdaptivePolicy},
-    config::normalized_headers,
+    config::{normalized_headers, COMPONENT_HEADER, PORT_HEADER},
     wire,
 };
 use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
 use drasi_grpc_common::output::{
-    batch::{item_wire_size, merge_metadata, request_overhead, BatchKey, PendingBatch},
+    batch::merge_metadata,
+    changes::{
+        build_proto_change, change_wire_size, latest_change_timestamp, request_overhead,
+        ChangeBatchKey, PendingChanges,
+    },
     config::GrpcReactionConfig,
-    send::{categorize_error, latest_item_timestamp},
-    templates::{build_proto_item, QueryEmissionContext, TemplateEngine},
+    send::categorize_error,
+    templates::TemplateEngine,
 };
 use std::{collections::BTreeMap, time::Duration};
 use tonic::Request;
 
-type ReactionClient =
-    reaction::reaction_service_client::ReactionServiceClient<tonic::transport::Channel>;
+type ChangeClient = reaction::change_service_client::ChangeServiceClient<tonic::transport::Channel>;
 
 pub(crate) struct GrpcSink {
     descriptor: ComponentDescriptor,
     config: GrpcSinkConfig,
+    outputs: SinkOutputs,
     output: GrpcReactionConfig,
     renderer: Option<TemplateEngine>,
     adaptive: Option<AdaptivePolicy>,
-    client: Option<ReactionClient>,
+    client: Option<ChangeClient>,
 }
 
 impl GrpcSink {
-    pub fn new(descriptor: ComponentDescriptor, config: GrpcSinkConfig) -> Result<Self> {
+    pub fn new(
+        descriptor: ComponentDescriptor,
+        config: GrpcSinkConfig,
+        outputs: SinkOutputs,
+    ) -> Result<Self> {
         let output = config.reaction_config();
         let renderer = output
             .output_templates
@@ -68,6 +76,7 @@ impl GrpcSink {
         Ok(Self {
             descriptor,
             config,
+            outputs,
             output,
             renderer,
             adaptive,
@@ -75,7 +84,7 @@ impl GrpcSink {
         })
     }
 
-    async fn connect(&self) -> Result<ReactionClient> {
+    async fn connect(&self) -> Result<ChangeClient> {
         let endpoint = tonic::transport::Endpoint::from_shared(self.config.connection_uri())?
             .connect_timeout(duration(
                 self.config.initial_connection_timeout_ms,
@@ -88,19 +97,19 @@ impl GrpcSink {
         )
         .await
         .context("gRPC connection timeout")??;
-        Ok(ReactionClient::new(channel)
+        Ok(ChangeClient::new(channel)
             .max_encoding_message_size(self.config.max_request_bytes)
             .max_decoding_message_size(self.config.max_request_bytes))
     }
 
-    async fn deliver(&mut self, batch: &PendingBatch) -> Result<()> {
+    async fn deliver(&mut self, batch: &PendingChanges) -> Result<()> {
         let metadata = batch.key.metadata_map();
-        let expected = u32::try_from(batch.items.len())?;
-        let message = reaction::ProcessResultsRequest {
-            results: Some(reaction::QueryResult {
-                query_id: batch.key.query_id.clone(),
-                timestamp: latest_item_timestamp(&batch.items),
-                results: batch.items.clone(),
+        let expected = u32::try_from(batch.changes.len())?;
+        let message = reaction::ProcessChangesRequest {
+            changes: Some(reaction::ChangeBatch {
+                output: Some(batch.key.output_identity()),
+                timestamp: latest_change_timestamp(&batch.changes),
+                changes: batch.changes.clone(),
             }),
             metadata: metadata.clone(),
         };
@@ -116,7 +125,7 @@ impl GrpcSink {
             let client = self.client.as_mut().context("gRPC sink has not started")?;
             let result = tokio::time::timeout(
                 Duration::from_millis(self.config.timeout_ms),
-                client.process_results(request),
+                client.process_changes(request),
             )
             .await;
             let (error, kind) = match result {
@@ -146,9 +155,9 @@ impl GrpcSink {
                 return Err(error);
             }
             eprintln!(
-                "drasi.network gRPC retry: query={} sequence={} attempt={} error={error:#}",
-                batch.key.query_id,
-                batch.seen_seq,
+                "drasi.network gRPC retry: output={} sequence={} attempt={} error={error:#}",
+                batch.key.endpoint(),
+                batch.seen_sequence,
                 attempt + 1
             );
             if matches!(
@@ -169,13 +178,13 @@ impl GrpcSink {
         unreachable!("retry loop always returns")
     }
 
-    async fn flush(&mut self, batch: PendingBatch) -> Result<()> {
+    async fn flush(&mut self, batch: PendingChanges) -> Result<()> {
         let result = self.deliver(&batch).await;
         self.config.failure_policy.delivery(
             result,
             self.descriptor.id().as_str(),
-            &batch.key.query_id,
-            batch.seen_seq,
+            &batch.key.endpoint(),
+            batch.seen_sequence,
         )
     }
 
@@ -191,95 +200,82 @@ impl GrpcSink {
 
     async fn process(&mut self, inputs: Vec<InputEnvelope>) -> Result<()> {
         ensure!(self.client.is_some(), "gRPC sink has not started");
-        let results = inputs
+        let notifications = inputs
             .iter()
-            .map(|input| {
-                wire::query_result(
-                    input,
-                    &self.config.query_id,
-                    &self.config.stream,
-                    &self.config.query_streams,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|input| wire::notifications(input, &self.outputs))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let item_limit = self.item_limit();
-        let mut pending: Option<PendingBatch> = None;
+        let mut pending: Option<PendingChanges> = None;
         let mut pending_bytes = 0usize;
         let mut count = 0;
-        for result in results {
-            let emission = QueryEmissionContext {
-                query_id: &result.query_id,
-                sequence: result.sequence,
-                timestamp: result.timestamp,
-                metadata: &result.metadata,
-            };
-            let mut base = self.output.metadata.clone();
-            base.insert("x-query-sequence".into(), result.query_id.clone());
-            for (index, diff) in result.results.iter().enumerate() {
-                let Some(built) =
-                    build_proto_item(&self.output, self.renderer.as_ref(), &emission, diff)
-                else {
-                    continue;
-                };
-                let metadata = merge_metadata(&base, &built.request_metadata);
-                let metadata = (|| -> Result<_> {
-                    for (key, value) in &metadata {
-                        let _: tonic::metadata::MetadataKey<tonic::metadata::Ascii> =
-                            key.parse()?;
-                        let _: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
-                            value.parse()?;
-                    }
-                    Ok(normalized_headers(
-                        &metadata.into_iter().collect::<BTreeMap<_, _>>(),
-                        &result.query_id,
-                    )?
-                    .into_iter()
-                    .collect())
-                })();
-                let metadata = match metadata {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        self.config.failure_policy.delivery(
-                            Err(error),
-                            self.descriptor.id().as_str(),
-                            &result.query_id,
-                            result.sequence,
-                        )?;
-                        continue;
-                    }
-                };
-                let key = BatchKey::new(&result.query_id, metadata);
-                let item_bytes = item_wire_size(&built.item);
-                let overhead = request_overhead(&key);
-                if overhead.saturating_add(item_bytes) > self.config.max_request_bytes {
+        for notification in notifications {
+            let label = notification.output().endpoint().to_string();
+            let sequence = notification.sequence();
+            let built = build_proto_change(&self.output, self.renderer.as_ref(), &notification)?;
+            let metadata = merge_metadata(&self.output.metadata, &built.request_metadata);
+            let metadata = (|| -> Result<_> {
+                for (key, value) in &metadata {
+                    let _: tonic::metadata::MetadataKey<tonic::metadata::Ascii> = key.parse()?;
+                    let _: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
+                        value.parse()?;
+                }
+                let mut checked =
+                    normalized_headers(&metadata.into_iter().collect::<BTreeMap<_, _>>())?;
+                checked.insert(
+                    COMPONENT_HEADER.into(),
+                    notification.output().component.as_str().to_owned(),
+                );
+                checked.insert(
+                    PORT_HEADER.into(),
+                    notification.output().port.as_str().to_owned(),
+                );
+                Ok(checked.into_iter().collect())
+            })();
+            let metadata = match metadata {
+                Ok(metadata) => metadata,
+                Err(error) => {
                     self.config.failure_policy.delivery(
-                        Err(anyhow::anyhow!("gRPC item exceeds maxRequestBytes")),
+                        Err(error),
                         self.descriptor.id().as_str(),
-                        &result.query_id,
-                        result.sequence,
+                        &label,
+                        sequence,
                     )?;
                     continue;
                 }
-                if pending.as_ref().is_some_and(|batch| {
-                    !batch.can_accept(&key)
-                        || batch.items.len() >= item_limit
-                        || pending_bytes.saturating_add(item_bytes) > self.config.max_request_bytes
-                }) {
-                    self.flush(pending.take().expect("pending batch")).await?;
-                }
-                let terminal = index + 1 == result.results.len();
-                match &mut pending {
-                    Some(batch) => {
-                        batch.push(built.item, terminal);
-                        pending_bytes += item_bytes;
-                    }
-                    None => {
-                        pending_bytes = overhead + item_bytes;
-                        pending = Some(PendingBatch::new(key, built.item, terminal));
-                    }
-                }
-                count += 1;
+            };
+            let key = ChangeBatchKey::new(&notification, metadata);
+            let item_bytes = change_wire_size(&built.change);
+            let overhead = request_overhead(&key);
+            if overhead.saturating_add(item_bytes) > self.config.max_request_bytes {
+                self.config.failure_policy.delivery(
+                    Err(anyhow::anyhow!("gRPC change exceeds maxRequestBytes")),
+                    self.descriptor.id().as_str(),
+                    &label,
+                    sequence,
+                )?;
+                continue;
             }
+            if pending.as_ref().is_some_and(|batch| {
+                !batch.can_accept(&key)
+                    || batch.changes.len() >= item_limit
+                    || pending_bytes.saturating_add(item_bytes) > self.config.max_request_bytes
+            }) {
+                self.flush(pending.take().expect("pending batch")).await?;
+            }
+            match &mut pending {
+                Some(batch) => {
+                    batch.push(built.change);
+                    pending_bytes += item_bytes;
+                }
+                None => {
+                    pending_bytes = overhead + item_bytes;
+                    pending = Some(PendingChanges::new(key, built.change));
+                }
+            }
+            count += 1;
         }
         if let Some(batch) = pending {
             self.flush(batch).await?;

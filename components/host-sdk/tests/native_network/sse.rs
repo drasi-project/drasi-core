@@ -2,19 +2,21 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use drasi_computation_contracts::GraphChangeBatch;
 use drasi_computation_sink_sse::SSE_SINK;
+use drasi_host_sdk::computation::{NativeOutputSnapshotsResource, OutputSelector};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 async fn roundtrip(statically_linked: bool) -> Result<()> {
     let port = free_port()?;
     let config = json!({
-        "queryStreams": {"q": "q/out"},
+        "outputs":{"q":{"component":"q","port":"out"}},
         "host": "127.0.0.1", "port": port,
         "ssePath": "/events", "heartbeatIntervalMs": 25,
     });
     let mut sink = if statically_linked {
         let plugin = NativePlugin::from_definition(drasi_computation_sink_sse::plugin()?)?;
-        plugin.factories()[0].create_component(ComponentId::try_new("ui")?, config)?
+        crate::sink_inputs::create(&plugin.factories()[0], ComponentId::try_new("ui")?, config)?
     } else {
         component(SSE_SINK, "ui", config)?
     };
@@ -29,7 +31,7 @@ async fn roundtrip(statically_linked: bool) -> Result<()> {
             .send()
             .await?
             .status(),
-        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::NOT_IMPLEMENTED,
     );
     assert_eq!(
         client
@@ -67,7 +69,9 @@ async fn roundtrip(statically_linked: bool) -> Result<()> {
                     frames.push(serde_json::from_str::<Value>(data.trim())?);
                 }
             }
-            if frames.iter().any(|frame| frame["queryId"] == "q")
+            if frames
+                .iter()
+                .any(|frame| frame["output"]["component"] == "q")
                 && frames.iter().any(|frame| frame["type"] == "heartbeat")
             {
                 return Ok::<_, anyhow::Error>(());
@@ -75,14 +79,28 @@ async fn roundtrip(statically_linked: bool) -> Result<()> {
         }
     })
     .await??;
-    let expected = QueryChangeCodec::to_legacy_result(&result_input(42)?.envelope)?;
+    let expected = GraphChangeBatch::from_envelope(&result_input(42)?.envelope)?
+        .changes()
+        .iter()
+        .map(|change| change.to_json())
+        .collect::<Result<Vec<_>, _>>()?;
+    let frame = frames
+        .iter()
+        .find(|frame| frame["output"]["component"] == "q")
+        .context("output frame")?;
+    assert_eq!(frame["changes"], json!(expected));
     assert_eq!(
-        frames
-            .iter()
-            .find(|frame| frame["queryId"] == "q")
-            .context("query event")?["results"],
-        serde_json::to_value(expected.results)?
+        frame["output"],
+        json!({"alias": "q", "component": "q", "port": "out"})
     );
+    assert!(frame.get("producer").is_none() && frame.get("timestamp").is_none());
+    assert!(
+        frame["publishedAt"].as_i64().is_some(),
+        "sink publication time"
+    );
+    assert_eq!(frame["sequence"], 42);
+    assert_eq!(frame["changes"][0]["operation"], "ADD");
+    assert_eq!(frame["changes"][0]["after"], json!({"value": 42}));
     assert_eq!(sink.configuration()?, original);
     sink.stop().await?;
     tokio::time::timeout(DEADLINE, async {
@@ -119,15 +137,19 @@ async fn native_sse_dynamic_routes_are_bounded_and_recreated_only_after_cleanup(
     for linked in [false, true] {
         let port = free_port()?;
         let config = json!({
-            "queryStreams": {"q": "q/out"}, "host": "127.0.0.1", "port": port,
+            "outputs":{"q":{"component":"q","port":"out"}}, "host": "127.0.0.1", "port": port,
             "heartbeatIntervalMs": 20, "maxPaths": 2,
             "defaultTemplate": {
                 "added": {"template": "{\"value\":{{after.value}}}", "path": "values/{{after.value}}"}
             },
         });
         let mut sink = if linked {
-            NativePlugin::from_definition(drasi_computation_sink_sse::plugin()?)?.factories()[0]
-                .create_component(ComponentId::try_new("ui")?, config)?
+            crate::sink_inputs::create(
+                &NativePlugin::from_definition(drasi_computation_sink_sse::plugin()?)?.factories()
+                    [0],
+                ComponentId::try_new("ui")?,
+                config,
+            )?
         } else {
             component(SSE_SINK, "ui", config)?
         };
@@ -180,28 +202,28 @@ async fn native_sse_dynamic_routes_are_bounded_and_recreated_only_after_cleanup(
 }
 
 #[test]
-fn native_sse_snapshot_binding_rejects_a_foreign_graph_before_construction() -> Result<()> {
-    let snapshots = Arc::new(
-        drasi_host_sdk::computation::NativeQuerySnapshotsResource::new(
-            QueryResultsCatalog::new("foreign")?,
-            ["q".into()],
+fn native_sse_output_snapshot_policy_rejects_invalid_limits_and_duplicates() -> Result<()> {
+    let output = |component: &str, port: Option<&str>| -> Result<OutputSelector> {
+        Ok(OutputSelector::new(
+            ComponentId::try_new(component)?,
+            port.map(PortId::try_new).transpose()?,
+        ))
+    };
+    let second_port = [output("q", Some("out"))?, output("q", Some("errors"))?];
+    assert!(NativeOutputSnapshotsResource::new(second_port, Duration::from_secs(1), 1).is_ok());
+    for (outputs, timeout, readers) in [
+        (vec![], Duration::from_secs(1), 1),
+        (
+            vec![output("q", None)?, output("q", None)?],
             Duration::from_secs(1),
             1,
-        )?,
-    );
-    let plugin = NativePlugin::from_definition(drasi_computation_sink_sse::plugin()?)?;
-    assert!(plugin.factories()[0]
-        .create_component_with_query_snapshots(
-            ComponentId::try_new("ui")?,
-            json!({"queryStreams": {"q": "q/out"}, "host": "127.0.0.1", "port": 0}),
-            drasi_computation_plugin_sdk::Scope {
-                instance_id: "owner".into(),
-                graph_id: "owner".into(),
-                generation: 1,
-            },
-            snapshots,
-        )
-        .is_err());
+        ),
+        (vec![output("q", None)?], Duration::ZERO, 1),
+        (vec![output("q", None)?], Duration::from_secs(1), 0),
+        (vec![output("q", None)?], Duration::from_secs(1), 1025),
+    ] {
+        assert!(NativeOutputSnapshotsResource::new(outputs, timeout, readers).is_err());
+    }
     Ok(())
 }
 
@@ -268,14 +290,14 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
         let catalog_id = ResourceId::try_new("catalog")?;
         let snapshots_id = ResourceId::try_new("snapshots")?;
         let catalog = QueryResultsCatalog::new(graph_id.clone())?;
-        let snapshots = Arc::new(
-            drasi_host_sdk::computation::NativeQuerySnapshotsResource::new(
-                catalog.clone(),
-                [QUERY.into()],
-                Duration::from_millis(250),
-                4,
-            )?,
-        );
+        let snapshots = Arc::new(NativeOutputSnapshotsResource::new(
+            [OutputSelector::new(
+                ComponentId::try_new(QUERY)?,
+                Some(PortId::try_new("out")?),
+            )],
+            Duration::from_millis(250),
+            4,
+        )?);
         let query = ContinuousQueryDefinition {
             graph_id: graph_id.clone(),
             id: ComponentId::try_new(QUERY)?,
@@ -308,7 +330,7 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
         let mut sink_spec = sink.specification(
             ComponentId::try_new("ui")?,
             json!({
-                "queryStreams": {QUERY: "scope.q/out"},
+                "outputs": {QUERY: {"component": QUERY, "port": "out"}},
                 "host": "127.0.0.1", "port": sse_port, "heartbeatIntervalMs": 25,
                 "routes": {"q": {
                     "added": {"template": "", "path": "items"},
@@ -319,7 +341,7 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
         )?;
         sink_spec
             .dependencies
-            .insert("query_snapshots".into(), vec![snapshots_id.clone()]);
+            .insert("output_snapshots".into(), vec![snapshots_id.clone()]);
         let endpoint = |component: &str, port: &str| -> Result<Endpoint> {
             Ok(Endpoint::new(
                 ComponentId::try_new(component)?,
@@ -345,8 +367,8 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
             ),
             (
                 snapshots_id,
-                ResourceRole::QueryCatalog,
-                ResourceHandle::new(ResourceRole::QueryCatalog, snapshots),
+                ResourceRole::OutputCatalogue,
+                ResourceHandle::new(ResourceRole::OutputCatalogue, snapshots),
             ),
         ] {
             builder = builder
@@ -403,6 +425,12 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
             pending: String::new(),
         };
         let initial = client.get(&snapshots).send().await?.error_for_status()?;
+        assert_eq!(
+            initial.headers()["x-drasi-output-epoch"].len(),
+            36,
+            "epoch UUID"
+        );
+        assert!(initial.headers().get("x-drasi-query-sequence").is_none());
         assert_eq!(initial.json::<Value>().await?, json!([]));
         let ingress = format!("http://127.0.0.1:{source_port}/sources/facilities-db/events");
         client
@@ -412,14 +440,24 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
             .await?
             .error_for_status()?;
         let added = events.next().await?;
-        assert_eq!(added["queryId"], QUERY);
-        assert_eq!(added["result"]["data"], json!({"value": 1}));
+        assert_eq!(added["output"]["component"], QUERY);
+        assert_eq!(added["output"]["port"], "out");
+        assert_eq!(added["change"]["operation"], "ADD");
+        assert_eq!(added["change"]["after"], json!({"value": 1}));
         let snapshot = client.get(&snapshots).send().await?.error_for_status()?;
-        let sequence: u64 = snapshot.headers()["x-drasi-query-sequence"]
+        let position: u64 = snapshot.headers()["x-drasi-output-position"]
             .to_str()?
             .parse()?;
-        assert!(sequence > 0);
-        assert_eq!(snapshot.json::<Value>().await?, json!([{"value": 1}]));
+        assert!(position > 0);
+        let rows = snapshot.json::<Value>().await?;
+        let changes = rows.as_array().context("snapshot array")?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["operation"], "ADD");
+        assert_eq!(changes[0]["after"], json!({"value": 1}));
+        assert!(changes[0]["identity"]["id"].as_str().is_some());
+        for stale in ["row_signature", "rowSignature", "queryId"] {
+            assert!(changes[0].get(stale).is_none(), "{stale}");
+        }
         let mut update = http_event(2);
         update["operation"] = json!("update");
         update["timestamp"] = json!(1234568890000u64);
@@ -431,16 +469,16 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
             .await?
             .error_for_status()?;
         assert_eq!(events.next().await?, json!({"value": 2}));
-        assert_eq!(
-            client
-                .get(&snapshots)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?,
-            json!([{"value": 2}]),
-        );
+        let updated = client
+            .get(&snapshots)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        let updated = updated.as_array().context("snapshot array")?;
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0]["after"], json!({"value": 2}));
         client
             .post(&ingress)
             .json(&json!({
@@ -484,6 +522,219 @@ async fn native_sse_snapshots_and_templates_share_the_instance_query_on_multi_th
 {
     for statically_linked in [false, true] {
         instance_snapshots_and_routes(statically_linked).await?;
+    }
+    Ok(())
+}
+
+async fn open_events(client: &reqwest::Client, port: u16) -> Result<EventReader> {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            if let Ok(response) = client
+                .get(format!("http://127.0.0.1:{port}/events"))
+                .send()
+                .await
+            {
+                if response.status().is_success() {
+                    return EventReader {
+                        response,
+                        pending: String::new(),
+                    };
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("SSE listener did not accept a subscriber")
+}
+
+async fn post_event(
+    client: &reqwest::Client,
+    source_port: u16,
+    source: &str,
+    value: i64,
+) -> Result<()> {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let sent = client
+                .post(format!(
+                    "http://127.0.0.1:{source_port}/sources/{source}/events"
+                ))
+                .json(&http_event(value))
+                .send()
+                .await;
+            if sent.is_ok_and(|response| response.status().is_success()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("source did not accept the event")
+}
+
+/// One real loaded SSE sink is constructed from the host-declared incoming edge,
+/// then a managed graph rebind removes that edge and declares another producer.
+/// The sink must be reconstructed (a new generation) with the new mapping, while
+/// an untouched sink on the old producer keeps its instance.
+async fn declared_inputs_follow_a_live_rebind(statically_linked: bool) -> Result<()> {
+    let core = drasi_lib::DrasiLib::builder()
+        .with_id(format!("sse-rebind-{statically_linked}"))
+        .build()
+        .await?;
+    let result = async {
+        core.start().await?;
+        let graph_id = core
+            .computation_control()?
+            .desired_snapshot()
+            .id
+            .to_string();
+        let (facilities_port, rooms_port, ui_port, mirror_port) =
+            (free_port()?, free_port()?, free_port()?, free_port()?);
+        let source_plugin = if statically_linked {
+            NativePlugin::from_definition(drasi_computation_source_http::plugin()?)?
+        } else {
+            plugin(HTTP_SOURCE)?
+        };
+        let sink_plugin = if statically_linked {
+            NativePlugin::from_definition(drasi_computation_sink_sse::plugin()?)?
+        } else {
+            plugin(SSE_SINK)?
+        };
+        let source = source_plugin.factories()[0].clone();
+        let sink = sink_plugin.factories()[0].clone();
+        let id = |name: &str| ComponentId::try_new(name);
+        let endpoint = |component: &str, port: &str| -> Result<Endpoint> {
+            Ok(Endpoint::new(id(component)?, PortId::try_new(port)?))
+        };
+        let source_spec = |name: &str, port: u16| {
+            source.specification(
+                id(name)?,
+                json!({"sourceId": name, "stream": name, "host": "127.0.0.1", "port": port}),
+            )
+        };
+        let sink_spec = |name: &str, port: u16| {
+            sink.specification(
+                id(name)?,
+                json!({"host": "127.0.0.1", "port": port, "heartbeatIntervalMs": 25}),
+            )
+        };
+        let batch = ComputationGraph::builder(graph_id.as_str())
+            .component(
+                source_spec("facilities-db", facilities_port)?,
+                source.clone(),
+            )
+            .component(sink_spec("ui", ui_port)?, sink.clone())
+            .component(sink_spec("mirror", mirror_port)?, sink.clone())
+            .connect(
+                EdgeDefinition::new(endpoint("facilities-db", "out")?, endpoint("ui", "in")?),
+                Box::new(BoundedPipeConfig { capacity: 16 }),
+            )
+            .connect(
+                EdgeDefinition::new(endpoint("facilities-db", "out")?, endpoint("mirror", "in")?),
+                Box::new(BoundedPipeConfig { capacity: 16 }),
+            )
+            .bind_stream(endpoint("facilities-db", "out")?, stream("facilities-db"))
+            .build_components()?;
+        let report = core.add_components(batch).await?;
+        assert!(report.committed, "{report:?}");
+        let client = reqwest::Client::new();
+
+        // The sink was built from the declared edge, not from configuration.
+        let mut ui = open_events(&client, ui_port).await?;
+        let mut mirror = open_events(&client, mirror_port).await?;
+        post_event(&client, facilities_port, "facilities-db", 1).await?;
+        for events in [&mut ui, &mut mirror] {
+            let frame = events.next().await?;
+            assert_eq!(frame["output"]["alias"], "facilities-db");
+            assert_eq!(frame["output"]["component"], "facilities-db");
+            assert_eq!(frame["output"]["port"], "out");
+            assert_eq!(frame["changes"][0]["operation"], "ADD");
+        }
+        drop(ui);
+
+        // Rebind: ui now takes a different producer's output instead.
+        let control = core.computation_control()?;
+        let snapshot = control.desired_snapshot();
+        let generation = |name: &str| -> Result<ComponentGeneration> {
+            Ok(control.observed().components[&id(name)?].generation)
+        };
+        let (ui_generation, mirror_generation) = (generation("ui")?, generation("mirror")?);
+        let rooms = source_spec("rooms-db", rooms_port)?;
+        let rooms_definition = DesiredComponent {
+            descriptor: rooms.descriptor.clone(),
+            role: ComponentRole::Source,
+            completion: rooms.completion,
+            streams: BTreeMap::from([(PortId::try_new("out")?, stream("rooms-db"))]),
+            lifecycle: snapshot.lifecycle_policies[&id("facilities-db")?].clone(),
+            input_merge: InputMergePolicy::Arrival,
+            construction: ComponentConstruction::Factory(rooms),
+        };
+        let preview = control
+            .preview(
+                snapshot.revision,
+                vec![
+                    DesiredMutation::Unbind {
+                        edge: EdgeDefinition::new(
+                            endpoint("facilities-db", "out")?,
+                            endpoint("ui", "in")?,
+                        ),
+                        policy: RemovalPolicy::Reject,
+                    },
+                    DesiredMutation::PutComponent(rooms_definition),
+                    DesiredMutation::Bind(DesiredRelationship {
+                        definition: EdgeDefinition::new(
+                            endpoint("rooms-db", "out")?,
+                            endpoint("ui", "in")?,
+                        ),
+                        policy: RelationshipPolicy::default(),
+                        pipe: DesiredPipe::Bounded { capacity: 16 },
+                    }),
+                ],
+            )
+            .await?;
+        assert!(preview.replaced().contains(&id("ui")?));
+        assert!(!preview.replaced().contains(&id("mirror")?));
+        let report = control
+            .reconcile(preview, TopologyBindings::default())
+            .await?;
+        assert!(report.failures.is_empty() && report.committed, "{report:?}");
+        assert_ne!(generation("ui")?, ui_generation, "ui was not reconstructed");
+        assert_eq!(generation("mirror")?, mirror_generation);
+
+        // The old mapping is gone and the new one is live: only the new
+        // producer's data reaches ui, labelled with its real component and port.
+        let mut ui = open_events(&client, ui_port).await?;
+        post_event(&client, facilities_port, "facilities-db", 2).await?;
+        let frame = mirror.next().await?;
+        assert_eq!(frame["output"]["component"], "facilities-db");
+        post_event(&client, rooms_port, "rooms-db", 3).await?;
+        let frame = ui.next().await?;
+        assert_eq!(frame["output"]["alias"], "rooms-db");
+        assert_eq!(frame["output"]["component"], "rooms-db");
+        assert_eq!(frame["output"]["port"], "out");
+        assert_eq!(frame["changes"][0]["operation"], "ADD");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let shutdown = core.shutdown().await;
+    result?;
+    shutdown?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_sse_declared_inputs_follow_a_live_rebind_on_current_thread() -> Result<()> {
+    for statically_linked in [false, true] {
+        declared_inputs_follow_a_live_rebind(statically_linked).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_sse_declared_inputs_follow_a_live_rebind_on_multi_thread() -> Result<()> {
+    for statically_linked in [false, true] {
+        declared_inputs_follow_a_live_rebind(statically_linked).await?;
     }
     Ok(())
 }

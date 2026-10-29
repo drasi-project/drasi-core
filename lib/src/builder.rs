@@ -49,7 +49,7 @@
 //!     .with_query(
 //!         Query::cypher("my-query")
 //!             .query("MATCH (n:Person) RETURN n")
-//!             .from_source("events")
+//!             .from_input("events")
 //!             .build()
 //!     )
 //!     .build()
@@ -65,7 +65,8 @@ use std::sync::Arc;
 
 use crate::channels::DispatchMode;
 use crate::config::{
-    DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
+    DrasiLibConfig, QueryConfig, QueryInputConfig, QueryJoinConfig, QueryLanguage,
+    QueryResultConfig,
 };
 use crate::error::{DrasiError, Result};
 use crate::identity::IdentityProvider;
@@ -111,7 +112,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///     .with_query(
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n) RETURN n")
-///             .from_source("my-source")
+///             .from_input("my-source")
 ///             .build()
 ///     )
 ///     .build()
@@ -124,6 +125,7 @@ pub struct DrasiLibBuilder {
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
+    activation_timeout_secs: Option<u64>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
     #[cfg(feature = "test-support")]
@@ -206,6 +208,7 @@ impl DrasiLibBuilder {
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
+            activation_timeout_secs: None,
             storage_backends: Vec::new(),
             query_configs: Vec::new(),
             #[cfg(feature = "test-support")]
@@ -261,15 +264,20 @@ impl DrasiLibBuilder {
     /// storage backends can be used.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
     /// use drasi_index_rocksdb::RocksDbIndexProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
+    /// # async fn example() -> anyhow::Result<()> {
     /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
     /// let core = DrasiLib::builder()
     ///     .with_index_provider("rocks", Arc::new(provider))
     ///     .build()
     ///     .await?;
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_index_provider(
         mut self,
@@ -292,16 +300,21 @@ impl DrasiLibBuilder {
     /// Calling this more than once replaces the default with the most recent name.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
     /// use drasi_index_rocksdb::RocksDbIndexProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
+    /// # async fn example() -> anyhow::Result<()> {
     /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
     /// let core = DrasiLib::builder()
     ///     .with_default_index_provider("rocks", Arc::new(provider))
     ///     .build()
     ///     .await?;
     /// // All queries without an explicit storage_backend now persist to RocksDB.
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_default_index_provider(
         mut self,
@@ -323,15 +336,20 @@ impl DrasiLibBuilder {
     /// The in-memory provider does not persist state across restarts.
     ///
     /// # Example
-    /// ```ignore
-    /// use drasi_state_store_json::JsonStateStoreProvider;
+    /// ```no_run
+    /// use drasi_state_store_redb::RedbStateStoreProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
-    /// let state_store = JsonStateStoreProvider::new("/data/state");
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
     /// let core = DrasiLib::builder()
     ///     .with_state_store_provider(Arc::new(state_store))
     ///     .build()
     ///     .await?;
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_state_store_provider(mut self, provider: Arc<dyn StateStoreProvider>) -> Self {
         self.state_store_provider = Some(provider);
@@ -348,15 +366,17 @@ impl DrasiLibBuilder {
     /// for `context.identity_provider`.
     ///
     /// # Example
-    /// ```ignore
-    /// use drasi_identity_azure::AzureIdentityProvider;
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, identity::IdentityProvider};
     /// use std::sync::Arc;
     ///
-    /// let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")?;
+    /// async fn build_with_identity(provider: Arc<dyn IdentityProvider>) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
-    ///     .with_identity_provider(Arc::new(provider))
+    ///     .with_identity_provider(provider)
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
         self.identity_provider = Some(provider);
@@ -373,15 +393,20 @@ impl DrasiLibBuilder {
     /// will operate in their default fire-and-forget mode.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
     /// use drasi_wal_redb::RedbWalProvider;
+    /// use drasi_lib::DrasiLib;
     /// use std::sync::Arc;
     ///
+    /// # async fn example() -> anyhow::Result<()> {
     /// let wal = RedbWalProvider::new("/data/wal");
     /// let core = DrasiLib::builder()
     ///     .with_wal_provider(Arc::new(wal))
     ///     .build()
     ///     .await?;
+    /// # core.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_wal_provider(mut self, provider: Arc<dyn WalProvider>) -> Self {
         self.wal_provider = Some(provider);
@@ -402,15 +427,17 @@ impl DrasiLibBuilder {
     /// with a "not implemented" error.
     ///
     /// # Example
-    /// ```ignore
-    /// use drasi_secret_store_file::FileSecretStoreProvider;
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, SecretStoreProvider};
     /// use std::sync::Arc;
     ///
-    /// let secrets = FileSecretStoreProvider::new("/etc/drasi/secrets.json").await?;
+    /// async fn build_with_secrets(secrets: Arc<dyn SecretStoreProvider>) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
-    ///     .with_secret_store_provider(Arc::new(secrets))
+    ///     .with_secret_store_provider(secrets)
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_secret_store_provider(mut self, provider: Arc<dyn SecretStoreProvider>) -> Self {
         self.secret_store_provider = Some(provider);
@@ -426,18 +453,29 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Bound each component's activation, including input/start/output binding.
+    /// Defaults to 300 seconds; zero or an unrepresentable deadline fails build.
+    pub fn with_activation_timeout_secs(mut self, seconds: u64) -> Self {
+        self.activation_timeout_secs = Some(seconds);
+        self
+    }
+
     /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
     /// drasi-lib only knows about the `Source` trait - it has no knowledge of which plugins exist.
     ///
     /// # Example
-    /// ```ignore
-    /// let source = MySource::new("my-source", config)?;
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, Source};
+    ///
+    /// async fn build_with_source(source: impl Source + 'static) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
     ///     .with_source(source)  // Ownership transferred
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_source(mut self, source: impl SourceTrait + 'static) -> Self {
         self.source_instances
@@ -478,10 +516,16 @@ impl DrasiLibBuilder {
     ///   ConfigValue envelopes intact for lossless roundtripping)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, DrasiLibBuilder, Source};
+    /// use std::collections::HashMap;
+    ///
+    /// fn configure(my_source: impl Source + 'static, config_properties: HashMap<String, serde_json::Value>) -> DrasiLibBuilder {
     /// let builder = DrasiLib::builder()
     ///     .with_source(my_source)
     ///     .with_bootstrap_for_source("my-source", "http", config_properties);
+    /// builder
+    /// }
     /// ```
     pub fn with_bootstrap_for_source(
         mut self,
@@ -500,12 +544,16 @@ impl DrasiLibBuilder {
     /// drasi-lib only knows about the `Reaction` trait - it has no knowledge of which plugins exist.
     ///
     /// # Example
-    /// ```ignore
-    /// let reaction = MyReaction::new("my-reaction", vec!["query1".into()]);
+    /// ```no_run
+    /// use drasi_lib::{DrasiLib, Reaction};
+    ///
+    /// async fn build_with_reaction(reaction: impl Reaction + 'static) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
     ///     .with_reaction(reaction)  // Ownership transferred
     ///     .build()
     ///     .await?;
+    /// Ok(core)
+    /// }
     /// ```
     pub fn with_reaction(mut self, reaction: impl ReactionTrait + 'static) -> Self {
         self.reaction_instances
@@ -619,6 +667,7 @@ impl DrasiLibBuilder {
             id: self.server_id.unwrap_or_else(|| "drasi-lib".to_string()),
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            activation_timeout_secs: self.activation_timeout_secs,
             storage_backends: self.storage_backends,
             queries: self.query_configs.clone(),
         };
@@ -712,7 +761,7 @@ impl DrasiLibBuilder {
 ///
 /// let query_config = Query::cypher("my-query")
 ///     .query("MATCH (n:Person) RETURN n.name, n.age")
-///     .from_source("my-source")
+///     .from_input("my-source")
 ///     .auto_start(true)
 ///     .build();
 /// ```
@@ -720,7 +769,8 @@ pub struct Query {
     id: String,
     query: String,
     query_language: QueryLanguage,
-    sources: Vec<SourceSubscriptionConfig>,
+    inputs: Vec<QueryInputConfig>,
+    result: QueryResultConfig,
     middleware: Vec<SourceMiddlewareConfig>,
     auto_start: bool,
     joins: Option<Vec<QueryJoinConfig>>,
@@ -741,7 +791,8 @@ impl Query {
             id: id.into(),
             query: String::new(),
             query_language: QueryLanguage::Cypher,
-            sources: Vec::new(),
+            inputs: Vec::new(),
+            result: QueryResultConfig::default(),
             middleware: Vec::new(),
             auto_start: true,
             joins: None,
@@ -762,7 +813,8 @@ impl Query {
             id: id.into(),
             query: String::new(),
             query_language: QueryLanguage::GQL,
-            sources: Vec::new(),
+            inputs: Vec::new(),
+            result: QueryResultConfig::default(),
             middleware: Vec::new(),
             auto_start: true,
             joins: None,
@@ -783,38 +835,53 @@ impl Query {
         self
     }
 
-    /// Subscribe to a source.
+    /// Consume an upstream component's primary output.
     ///
-    /// Buffered same-timestamp events are grouped by the order sources are added,
-    /// then ordered by sequence within each source. This merge policy can affect
+    /// The component may be a source, another query or a transformer. Buffered
+    /// same-timestamp events are grouped by the order inputs are added, then
+    /// ordered by sequence within each input. This merge policy can affect
     /// intermediate join results; it is not arrival ordering. The queue does not
-    /// wait for other sources or reorder events already processed.
-    pub fn from_source(mut self, source_id: impl Into<String>) -> Self {
-        self.sources.push(SourceSubscriptionConfig {
-            source_id: source_id.into(),
-            nodes: Vec::new(),
-            relations: Vec::new(),
-            pipeline: Vec::new(),
-        });
+    /// wait for other inputs or reorder events already processed.
+    pub fn from_input(mut self, component: impl Into<String>) -> Self {
+        self.inputs.push(QueryInputConfig::new(component));
         self
     }
 
-    /// Subscribe to a source with a middleware pipeline.
+    /// Consume a named output port of an upstream component.
+    pub fn from_input_port(
+        mut self,
+        component: impl Into<String>,
+        port: impl Into<String>,
+    ) -> Self {
+        self.inputs
+            .push(QueryInputConfig::new(component).with_port(port));
+        self
+    }
+
+    /// Consume an upstream component with a middleware pipeline.
     ///
     /// The pipeline is a list of middleware names (strings) that will be applied to
-    /// data from this source before it reaches the query.
-    /// Source ordering follows the same merge policy as [`Self::from_source`].
-    pub fn from_source_with_pipeline(
+    /// data from this input before it reaches the query.
+    /// Input ordering follows the same merge policy as [`Self::from_input`].
+    pub fn from_input_with_pipeline(
         mut self,
-        source_id: impl Into<String>,
+        component: impl Into<String>,
         pipeline: Vec<String>,
     ) -> Self {
-        self.sources.push(SourceSubscriptionConfig {
-            source_id: source_id.into(),
-            nodes: Vec::new(),
-            relations: Vec::new(),
-            pipeline,
-        });
+        self.inputs
+            .push(QueryInputConfig::new(component).with_pipeline(pipeline));
+        self
+    }
+
+    /// Consume a fully specified input binding.
+    pub fn with_input(mut self, input: QueryInputConfig) -> Self {
+        self.inputs.push(input);
+        self
+    }
+
+    /// Set the label of published result nodes. The output schema is unchanged.
+    pub fn with_result_label(mut self, label: impl Into<String>) -> Self {
+        self.result.label = Some(label.into());
         self
     }
 
@@ -895,7 +962,8 @@ impl Query {
             id: self.id,
             query: self.query,
             query_language: self.query_language,
-            sources: self.sources,
+            inputs: self.inputs,
+            result: self.result,
             middleware: self.middleware,
             auto_start: self.auto_start,
             joins: self.joins,
@@ -928,7 +996,7 @@ mod tests {
     fn test_query_builder_cypher() {
         let config = Query::cypher("test-query")
             .query("MATCH (n) RETURN n")
-            .from_source("source1")
+            .from_input("source1")
             .auto_start(false)
             .build();
 
@@ -936,15 +1004,15 @@ mod tests {
         assert_eq!(config.query, "MATCH (n) RETURN n");
         assert_eq!(config.query_language, QueryLanguage::Cypher);
         assert!(!config.auto_start);
-        assert_eq!(config.sources.len(), 1);
-        assert_eq!(config.sources[0].source_id, "source1");
+        assert_eq!(config.inputs.len(), 1);
+        assert_eq!(config.inputs[0].component, "source1");
     }
 
     #[test]
     fn test_query_builder_gql() {
         let config = Query::gql("test-query")
             .query("MATCH (n:Person) RETURN n.name")
-            .from_source("source1")
+            .from_input("source1")
             .build();
 
         assert_eq!(config.query_language, QueryLanguage::GQL);
@@ -954,11 +1022,11 @@ mod tests {
     fn test_query_builder_multiple_sources() {
         let config = Query::cypher("test-query")
             .query("MATCH (n) RETURN n")
-            .from_source("source1")
-            .from_source("source2")
+            .from_input("source1")
+            .from_input("source2")
             .build();
 
-        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.inputs.len(), 2);
     }
 
     #[tokio::test]
@@ -988,7 +1056,7 @@ mod tests {
             .with_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
-                    // No from_source() call - query has no source subscriptions
+                    // No from_input() call - query has no source subscriptions
                     .auto_start(false)
                     .build(),
             )
@@ -1028,7 +1096,7 @@ mod tests {
             .with_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
-                    .from_source("source1")
+                    .from_input("source1")
                     .build(),
             )
             .build()
@@ -1514,21 +1582,21 @@ mod tests {
 
     #[test]
     fn test_query_from_source_adds_source() {
-        let q = Query::cypher("q").from_source("src1");
-        assert_eq!(q.sources.len(), 1);
-        assert_eq!(q.sources[0].source_id, "src1");
+        let q = Query::cypher("q").from_input("src1");
+        assert_eq!(q.inputs.len(), 1);
+        assert_eq!(q.inputs[0].component, "src1");
     }
 
     #[test]
     fn test_query_from_source_chaining() {
         let q = Query::cypher("q")
-            .from_source("src1")
-            .from_source("src2")
-            .from_source("src3");
-        assert_eq!(q.sources.len(), 3);
-        assert_eq!(q.sources[0].source_id, "src1");
-        assert_eq!(q.sources[1].source_id, "src2");
-        assert_eq!(q.sources[2].source_id, "src3");
+            .from_input("src1")
+            .from_input("src2")
+            .from_input("src3");
+        assert_eq!(q.inputs.len(), 3);
+        assert_eq!(q.inputs[0].component, "src1");
+        assert_eq!(q.inputs[1].component, "src2");
+        assert_eq!(q.inputs[2].component, "src3");
     }
 
     #[test]
@@ -1601,8 +1669,8 @@ mod tests {
     fn test_query_build_propagates_all_fields() {
         let config = Query::cypher("full-query")
             .query("MATCH (n:Person) RETURN n.name")
-            .from_source("source-a")
-            .from_source("source-b")
+            .from_input("source-a")
+            .from_input("source-b")
             .auto_start(false)
             .enable_bootstrap(false)
             .with_priority_queue_capacity(50000)
@@ -1613,9 +1681,9 @@ mod tests {
         assert_eq!(config.id, "full-query");
         assert_eq!(config.query, "MATCH (n:Person) RETURN n.name");
         assert_eq!(config.query_language, QueryLanguage::Cypher);
-        assert_eq!(config.sources.len(), 2);
-        assert_eq!(config.sources[0].source_id, "source-a");
-        assert_eq!(config.sources[1].source_id, "source-b");
+        assert_eq!(config.inputs.len(), 2);
+        assert_eq!(config.inputs[0].component, "source-a");
+        assert_eq!(config.inputs[1].component, "source-b");
         assert!(!config.auto_start);
         assert!(!config.enable_bootstrap);
         assert_eq!(config.priority_queue_capacity, Some(50000));
@@ -1630,13 +1698,13 @@ mod tests {
     fn test_query_build_gql_propagates_language() {
         let config = Query::gql("gql-full")
             .query("MATCH (n) RETURN n")
-            .from_source("src")
+            .from_input("src")
             .build();
 
         assert_eq!(config.id, "gql-full");
         assert_eq!(config.query_language, QueryLanguage::GQL);
         assert_eq!(config.query, "MATCH (n) RETURN n");
-        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.inputs.len(), 1);
         // Verify defaults are preserved through build
         assert!(config.auto_start);
         assert!(config.enable_bootstrap);
@@ -1649,7 +1717,7 @@ mod tests {
         assert_eq!(config.id, "defaults-only");
         assert_eq!(config.query, "");
         assert_eq!(config.query_language, QueryLanguage::Cypher);
-        assert!(config.sources.is_empty());
+        assert!(config.inputs.is_empty());
         assert!(config.middleware.is_empty());
         assert!(config.auto_start);
         assert!(config.joins.is_none());

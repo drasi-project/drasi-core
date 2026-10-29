@@ -10,9 +10,9 @@ To browse the table of contents, refer to the [contributing docs](./../CONTRIBUT
 
 ## Runtime architecture
 
-The [opt-in resilience and recovery plan](../lib/docs/computation-graph-reliability-plan.md)
-maps the nine reliability issues to phased implementation work, shared plugin
-services, pipe/storage settings, and a fast path without added recovery machinery.
+The [ComputationGraph maintainer's guide](../lib/docs/computation-graph-maintainers-guide.md)
+explains runtime ownership, lifecycle, opt-in recovery, plugin services and
+the corresponding implementation and qualification entry points.
 
 The [schemas, ports, and pipes guide](../lib/docs/computation-graph-schemas-ports-pipes.md)
 explains how data contracts and connections fit together, what each pipe family
@@ -23,8 +23,9 @@ includes DrasiLib and graph ownership diagrams, an alphabetical production-type
 inventory, a runtime cardinality matrix, and a namespace LOC heatmap. It also
 documents how to regenerate and compare the artifacts during architecture review.
 
-The [ComputationGraph backlog](../lib/docs/computation-graph-backlog.md) explains
-the known issues, incomplete capabilities, and remaining qualification work,
-including suggested priorities, implementation complexity, and disruption risk.
+The [ComputationGraph remaining-work document](../lib/docs/computation-graph-remaining-work.md)
+is the single active list of known issues, investigations, qualification gaps
+and suggested improvements across Core and its consumers, with priorities,
+scope and completion criteria.
 
 Release operators: [repairing signatures on existing plugin releases](./contributing/plugin-signature-repair.md).

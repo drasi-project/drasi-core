@@ -77,11 +77,8 @@ impl ReactionManager {
         self.runtime.update_reaction(&id, Box::new(reaction)).await
     }
 
-    pub async fn list_reactions(&self) -> Vec<(String, ComponentStatus)> {
-        self.runtime
-            .list_components("reaction")
-            .await
-            .expect("initialized computation registry")
+    pub async fn list_reactions(&self) -> crate::error::Result<Vec<(String, ComponentStatus)>> {
+        Ok(self.runtime.list_components("reaction").await?)
     }
 
     pub async fn start_all(&self) -> Result<()> {
@@ -114,20 +111,20 @@ impl ReactionManager {
     pub async fn subscribe_logs(
         &self,
         id: &str,
-    ) -> Option<(
+    ) -> crate::error::Result<(
         Vec<LogMessage>,
         tokio::sync::broadcast::Receiver<LogMessage>,
     )> {
-        self.runtime.subscribe_logs(id, "reaction").await.ok()
+        Ok(self.runtime.subscribe_logs(id, "reaction").await?)
     }
 
     pub async fn subscribe_events(
         &self,
         id: &str,
-    ) -> Option<(
+    ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.runtime.subscribe_events(id, "reaction").await.ok()
+        Ok(self.runtime.subscribe_events(id, "reaction").await?)
     }
 }

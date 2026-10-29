@@ -74,6 +74,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
     // Add an initial sensor value below 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -99,6 +100,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
     // Add first sensor value above 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -124,6 +126,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
     // Add sensor value below 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -149,6 +152,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
     // Add second sensor value above 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -174,6 +178,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
     // Add sensor value below 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -199,6 +204,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
     // Add third sensor value above 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),
@@ -235,6 +241,7 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
     // Add fourth sensor value above 32.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("Reflex.FACILITIES", "equip_01_sensor_01"),

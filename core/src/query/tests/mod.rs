@@ -17,6 +17,7 @@ mod aggregate_update_tests;
 mod mutation_integrity;
 mod optional_context_work;
 mod retained_multi_source_tests;
+mod rich_property_tests;
 mod row_signature_tests;
 
 use std::sync::Arc;

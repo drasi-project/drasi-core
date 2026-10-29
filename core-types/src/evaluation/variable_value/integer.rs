@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::evaluation::variable_value::float::Float;
+use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display};
 use core::hash::{Hash, Hasher};
 use serde::de::{self, Deserialize, Deserializer, Visitor};
@@ -121,6 +122,29 @@ impl From<Integer> for Number {
 }
 
 impl Eq for Integer {}
+
+impl Ord for Integer {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.n, other.n) {
+            (N::PosInt(left), N::PosInt(right)) => left.cmp(&right),
+            (N::NegInt(left), N::NegInt(right)) => left.cmp(&right),
+            (N::NegInt(_), N::PosInt(_)) => Ordering::Less,
+            (N::PosInt(_), N::NegInt(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for Integer {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialOrd<Float> for Integer {
+    fn partial_cmp(&self, other: &Float) -> Option<Ordering> {
+        other.partial_cmp(self).map(Ordering::reverse)
+    }
+}
 
 impl Display for Integer {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

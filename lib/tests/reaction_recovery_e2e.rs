@@ -423,7 +423,7 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -506,7 +506,7 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -574,7 +574,7 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
     // Small outbox capacity so it overflows
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(2)
         .auto_start(true)
         .build();
@@ -653,7 +653,7 @@ async fn test_reaction_outbox_gap_auto_reset() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(2)
         .auto_start(true)
         .build();
@@ -721,7 +721,7 @@ async fn test_reaction_live_delivery_after_restart() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -791,7 +791,7 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     // Use broadcast mode with a very small buffer to induce lag.
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_dispatch_mode(DispatchMode::Broadcast)
         .with_dispatch_buffer_capacity(2)
         .with_outbox_capacity(100)
@@ -870,7 +870,7 @@ async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
 
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_dispatch_mode(DispatchMode::Broadcast)
         .with_dispatch_buffer_capacity(2)
         .with_outbox_capacity(100)
@@ -942,7 +942,7 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_dispatch_mode(DispatchMode::Broadcast)
         .with_dispatch_buffer_capacity(2)
         .with_outbox_capacity(2)
@@ -1003,7 +1003,7 @@ async fn test_fresh_trigger_does_not_replay_retained_history() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -1058,7 +1058,7 @@ async fn test_fresh_state_sync_bootstraps_snapshot_and_dedupes_live() -> Result<
     let (mock_source, handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .with_outbox_capacity(100)
         .auto_start(true)
         .build();
@@ -1128,7 +1128,7 @@ async fn test_trigger_autoreset_is_rejected() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let core = Arc::new(
@@ -1173,7 +1173,7 @@ async fn test_durable_reaction_rejects_volatile_query() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     let query = Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
@@ -1230,7 +1230,7 @@ async fn test_durable_reaction_rejects_volatile_query() -> Result<()> {
 fn volatile_person_query(id: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(id)
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build()
 }
@@ -1238,7 +1238,7 @@ fn volatile_person_query(id: &str) -> drasi_lib::config::QueryConfig {
 fn persistent_person_query(id: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher(id)
         .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
         .build()

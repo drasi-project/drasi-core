@@ -116,7 +116,11 @@ impl ContinuousQueryTransformer {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .reset_to_sequence(0, generation);
+            .reset_to_sequence(0, generation)?;
+        self.input_producers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?
+            .clear();
         Ok(())
     }
 
@@ -166,6 +170,12 @@ impl ContinuousQueryTransformer {
         if volatile_failed {
             self.reset_for_bootstrap().await?;
         } else if let Err(error) = self.recover().await {
+            if matches!(
+                error.downcast_ref::<QueryRecoveryError>(),
+                Some(QueryRecoveryError::OwnershipMismatch)
+            ) {
+                return Err(error);
+            }
             let explicit_configuration_reset = self.reset_configuration
                 && matches!(
                     error.downcast_ref::<QueryRecoveryError>(),
@@ -183,30 +193,68 @@ impl ContinuousQueryTransformer {
         if let Some(provider) = self.bootstrap.clone() {
             let preparation = provider
                 .prepare_with_state(&QueryBootstrapState(self.query()?))
-                .await?;
+                .await;
+            let preparation = match preparation {
+                Ok(preparation) => preparation,
+                Err(error)
+                    if self.options.recovery == QueryRecoveryPolicy::AutoReset
+                        && matches!(
+                            error.downcast_ref::<super::super::OutputReadError>(),
+                            Some(
+                                super::super::OutputReadError::Gap { .. }
+                                    | super::super::OutputReadError::EpochChanged { .. }
+                            )
+                        ) =>
+                {
+                    log::warn!(
+                        "Resetting query '{}' under AutoReset after output replay failed: {error:#}",
+                        self.definition.id
+                    );
+                    super::super::BootstrapPreparation::ResetRequired
+                }
+                Err(error) => return Err(error),
+            };
             if preparation != super::super::BootstrapPreparation::Ready {
                 if preparation == super::super::BootstrapPreparation::RefreshVolatile
                     && self.provider.is_volatile()
                     || self.options.recovery == QueryRecoveryPolicy::AutoReset
                 {
-                    self.reset_for_bootstrap().await?;
-                    self.publish_source_progress(false).await?;
-                    if provider
-                        .prepare_with_state(&QueryBootstrapState(self.query()?))
-                        .await?
-                        != super::super::BootstrapPreparation::Ready
-                    {
-                        return Err(QueryRecoveryError::SourceResetRequired.into());
-                    }
+                    self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
                 } else {
                     return Err(QueryRecoveryError::SourceResetRequired.into());
                 }
+            }
+            if self.bootstrap_complete.load(Ordering::Acquire) && provider.has_pending_snapshot()? {
+                if self.options.recovery != QueryRecoveryPolicy::AutoReset
+                    && !self.provider.is_volatile()
+                {
+                    return Err(QueryRecoveryError::SourceResetRequired.into());
+                }
+                // The prepared cut initializes a new output incarnation. It must
+                // never overwrite an existing projection at an unchanged cursor.
+                self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
             }
         }
         if let Some(progress) = &self.source_progress {
             progress.admit();
         }
         self.run_bootstrap().await
+    }
+
+    async fn reset_and_prepare_bootstrap(
+        &mut self,
+        provider: &dyn super::super::ComputationBootstrapProvider,
+    ) -> anyhow::Result<()> {
+        self.reset_for_bootstrap().await?;
+        self.publish_source_progress(false).await?;
+        if provider
+            .prepare_with_state(&QueryBootstrapState(self.query()?))
+            .await?
+            != super::super::BootstrapPreparation::Ready
+        {
+            return Err(QueryRecoveryError::SourceResetRequired.into());
+        }
+        Ok(())
     }
 
     async fn reset_for_bootstrap(&mut self) -> anyhow::Result<()> {
@@ -224,6 +272,41 @@ impl ContinuousQueryTransformer {
                 .is_empty()
         {
             return Err(super::super::OutputBindingError::ResetRequiresUnboundDestinations.into());
+        }
+        if self.output_persistent {
+            let expected = self.recovery_identity()?;
+            let outbox = self
+                .query()?
+                .resources()
+                .outbox_writer()
+                .ok_or_else(|| anyhow::anyhow!("persistent reset requires an output store"))?;
+            for (sequence, bytes) in outbox.read_from(self.definition.id.as_str(), 0).await? {
+                let identity = self
+                    .codec
+                    .decode(&bytes)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|output| {
+                        super::super::QueryRecoveryIdentity::optional_from_envelope(&output)
+                            .map_err(anyhow::Error::from)
+                    });
+                match identity {
+                    Ok(Some(owner))
+                        if owner.construction_scope() != expected.construction_scope()
+                            || owner.graph_id() != expected.graph_id()
+                            || owner.query_id() != expected.query_id()
+                            || owner.incarnation() != expected.incarnation() =>
+                    {
+                        return Err(QueryRecoveryError::OwnershipMismatch.into());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "Authorized reset of query '{}' encountered corrupt output {sequence}: {error:#}",
+                            self.definition.id,
+                        );
+                    }
+                }
+            }
         }
         let query = self.query()?;
         let resources = query.resources();
@@ -247,10 +330,14 @@ impl ContinuousQueryTransformer {
                 .state
                 .write()
                 .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-                .reset_to_sequence(highwater, generation);
+                .reset_to_sequence(highwater, generation)?;
             self.watermarks
                 .lock()
                 .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                .clear();
+            self.input_producers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?
                 .clear();
             self.bootstrap_complete.store(false, Ordering::Release);
             return Ok(());
@@ -352,10 +439,14 @@ impl ContinuousQueryTransformer {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .reset_to_sequence(highwater, generation);
+            .reset_to_sequence(highwater, generation)?;
         self.watermarks
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+            .clear();
+        self.input_producers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?
             .clear();
         self.bootstrap_complete.store(false, Ordering::Release);
         Ok(())
@@ -365,13 +456,14 @@ impl ContinuousQueryTransformer {
         let Some(provider) = &self.bootstrap else {
             return Ok(());
         };
-        // Ordinary Source subscriptions can request a new snapshot when no
-        // source checkpoint exists. Consume the receivers chosen for this start
-        // without resetting previously committed output or its generation.
         let requested_snapshot = provider.has_pending_snapshot()?;
         if self.bootstrap_complete.load(Ordering::Acquire) && !requested_snapshot {
             return Ok(());
         }
+        anyhow::ensure!(
+            !self.bootstrap_complete.load(Ordering::Acquire),
+            QueryRecoveryError::SourceResetRequired
+        );
         let query = self.query()?;
         if let Some(checkpoint) = query.resources().checkpoint_store() {
             if checkpoint
@@ -392,7 +484,7 @@ impl ContinuousQueryTransformer {
         let mut snapshot = provider
             .snapshot_with_state(&QueryBootstrapState(query))
             .await?;
-        validate_watermarks(&snapshot.watermarks)?;
+        validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
         let bootstrap_stream = StreamId::try_new(format!(
             "{}/bootstrap/{}",
             self.definition.id,
@@ -404,7 +496,13 @@ impl ContinuousQueryTransformer {
             ordinal = ordinal
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("bootstrap ordinal exhausted"))?;
-            let changes = GraphChangeCodec::decode_changes(&input)?;
+            let mut changes = drasi_core::computation::QueryInputBatch::new(
+                GraphChangeCodec::decode_changes(&input)?,
+                input.system().ordering(),
+            );
+            if let Some(origin) = provider.input_origin(input.system().stream())? {
+                changes = changes.with_input_scope(origin.component.as_str());
+            }
             let prepared = Mutex::new(None);
             let hook =
                 |results: Arc<[drasi_core::evaluation::context::QueryPartEvaluationContext]>| {
@@ -416,6 +514,7 @@ impl ContinuousQueryTransformer {
                             Some(input),
                             &self.definition.id,
                             SystemMetadata::new(stream, ordinal),
+                            &self.projector,
                             &results,
                             QueryOutputMetadata {
                                 query_id: self.definition.id.to_string(),
@@ -475,7 +574,7 @@ impl ContinuousQueryTransformer {
         snapshot
             .watermarks
             .extend(provider.complete_snapshot().await?);
-        validate_watermarks(&snapshot.watermarks)?;
+        validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
         let completion_state = provider.completion_state()?;
         if let Some(state) = &completion_state {
             validate_bootstrap_state(state)?;
@@ -493,6 +592,7 @@ impl ContinuousQueryTransformer {
                     progress_key(watermark.stream.as_str(), watermark.source_id.as_deref()),
                     watermark.sequence,
                     watermark.position,
+                    watermark.producer,
                 )
             })
             .collect();
@@ -506,7 +606,21 @@ impl ContinuousQueryTransformer {
             })?;
             query
                 .resource_transaction(|| async {
-                    for (key, sequence, position) in &watermarks {
+                    for (key, sequence, position, producer) in &watermarks {
+                        if let Some(producer) = producer {
+                            let owner = Bytes::from(
+                                serde_json::to_vec(producer).map_err(IndexError::other)?,
+                            );
+                            checkpoint
+                                .stage_checkpoint(
+                                    &super::super::producer_progress::producer_owner_key(
+                                        producer.stream(),
+                                    ),
+                                    1,
+                                    Some(&owner),
+                                )
+                                .await?;
+                        }
                         checkpoint
                             .stage_checkpoint(key, *sequence, position.as_ref())
                             .await?;
@@ -533,11 +647,22 @@ impl ContinuousQueryTransformer {
                 .await?;
         }
         if let Some(progress) = &self.source_progress {
-            for (key, sequence, position) in &watermarks {
+            for (key, sequence, position, _) in &watermarks {
                 progress.confirm(
                     progress_identity(key)?,
                     SourceCheckpoint::new(*sequence, position.clone()),
                 );
+            }
+        }
+        {
+            let mut owners = self
+                .input_producers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+            for (key, _, _, producer) in &watermarks {
+                if let Some(producer) = producer {
+                    owners.insert(key.clone(), producer.clone());
+                }
             }
         }
         self.watermarks
@@ -546,7 +671,7 @@ impl ContinuousQueryTransformer {
             .extend(
                 watermarks
                     .into_iter()
-                    .map(|(key, sequence, _)| (key, sequence)),
+                    .map(|(key, sequence, _, _)| (key, sequence)),
             );
         self.bootstrap_complete.store(true, Ordering::Release);
         Ok(())

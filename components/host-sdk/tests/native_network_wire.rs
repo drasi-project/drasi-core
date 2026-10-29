@@ -3,11 +3,9 @@
 
 use anyhow::{Context, Result};
 use chrono::TimeZone;
-use drasi_computation_network_common::{
-    proto::{reaction, source},
-    wire,
-};
-use drasi_computation_sink_grpc::{proto_item, GrpcSinkConfig, OutputFormat};
+use drasi_computation_contracts::{SinkOutput, SinkOutputs};
+use drasi_computation_network_common::{proto::source, wire};
+use drasi_computation_sink_grpc::GrpcSinkConfig;
 use drasi_computation_sink_http::HttpSinkConfig;
 use drasi_computation_source_grpc::GrpcSourceConfig;
 use drasi_computation_source_http::HttpSourceConfig;
@@ -194,6 +192,7 @@ fn input() -> Result<InputEnvelope> {
             None,
             &ComponentId::try_new("q")?,
             SystemMetadata::new(StreamId::try_new("q/out")?, 42),
+            &ResultNodeProjector::try_new("test/native-network-wire/q/out", None)?,
             &results,
             QueryOutputMetadata {
                 query_id: "q".into(),
@@ -207,93 +206,316 @@ fn input() -> Result<InputEnvelope> {
     })
 }
 
-#[test]
-fn query_output_matches_legacy_http_dtos_and_grpc_canonical_fields() -> Result<()> {
-    let input = input()?;
-    let notifications = wire::notifications(&input, "q", &StreamId::try_new("q/out")?)?;
-    assert_eq!(notifications.len(), 5, "Noop produces no outbound item");
-    // Legacy projection is an oracle in this test only, never the native sink's execution path.
-    let legacy = QueryChangeCodec::to_legacy_result(&input.envelope)?;
-    let expected: Vec<_> = legacy
-        .results
-        .iter()
-        .filter_map(|diff| {
-            drasi_reaction_http::output::DefaultChangeNotification::from_diff(&legacy, diff)
-        })
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<_, _>>()?;
-    let actual: Vec<_> = notifications
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<_, _>>()?;
-    assert_eq!(actual, expected);
-    assert_eq!(actual[3]["operation"], "UPDATE");
-    assert!(actual[3].get("before").is_none());
-    assert_eq!(actual[4]["before"], json!({"value":2}));
-    for notification in &notifications {
-        let item = proto_item(notification, OutputFormat::CanonicalJson)?;
-        assert_eq!(item.sequence, 42);
-        assert_eq!(item.row_signature, notification.row_signature);
-        assert_eq!(
-            item.timestamp.as_ref().context("timestamp")?.seconds,
-            legacy.timestamp.timestamp()
-        );
-        assert!(item.metadata.is_some());
-        let expected_before = notification
-            .before
-            .as_ref()
-            .map(drasi_reaction_grpc::helpers::convert_json_to_proto_struct);
-        assert_eq!(item.before, expected_before);
-        assert_eq!(
-            item.after,
-            notification
-                .after
-                .as_ref()
-                .map(drasi_reaction_grpc::helpers::convert_json_to_proto_struct)
-        );
-        let mut expected_payload = serde_json::to_value(notification)?;
-        expected_payload["rowSignature"] = notification.row_signature.into();
-        assert_eq!(
-            item.payload,
-            Some(drasi_reaction_grpc::helpers::convert_json_to_proto_struct(
-                &expected_payload
-            ))
-        );
-        assert!(proto_item(notification, OutputFormat::Proto)?
-            .payload
-            .is_none());
+/// The same records and system metadata with no query annotation at all.
+fn unannotated(input: &InputEnvelope) -> InputEnvelope {
+    InputEnvelope {
+        port: input.port.clone(),
+        envelope: ChangeEnvelope::new(
+            input.envelope.id().clone(),
+            input.envelope.changes().clone(),
+            (**input.envelope.system()).clone(),
+        ),
     }
+}
 
+fn source_input(changes: &[SourceChange]) -> Result<InputEnvelope> {
+    source_input_on("facilities-db/out", changes)
+}
+
+fn source_input_on(stream: &str, changes: &[SourceChange]) -> Result<InputEnvelope> {
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: GraphChangeCodec::encode_changes(
+            changes,
+            StreamId::try_new(stream)?,
+            7,
+            chrono::Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).single(),
+        )?,
+    })
+}
+
+fn source_input_untimed(changes: &[SourceChange]) -> Result<InputEnvelope> {
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: GraphChangeCodec::encode_changes(
+            changes,
+            StreamId::try_new("facilities-db/out")?,
+            7,
+            None,
+        )?,
+    })
+}
+
+fn room(id: &str, name: &str) -> Element {
+    let mut properties = drasi_core::models::ElementPropertyMap::new();
+    properties.insert("name", ElementValue::String(name.into()));
+    Element::Node {
+        metadata: drasi_core::models::ElementMetadata {
+            reference: drasi_core::models::ElementReference::new("facilities-db", id),
+            labels: Arc::from([Arc::from("Room")]),
+            effective_from: 1_000,
+        },
+        properties,
+    }
+}
+
+fn outputs(bindings: &[(&str, &str, &str, &str)]) -> Result<SinkOutputs> {
+    Ok(SinkOutputs::new(
+        bindings
+            .iter()
+            .map(|(alias, component, port, stream)| {
+                Ok((
+                    (*alias).to_owned(),
+                    SinkOutput {
+                        component: ComponentId::try_new(*component)?,
+                        port: PortId::try_new(*port)?,
+                        stream: StreamId::try_new(*stream)?,
+                    },
+                ))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>>>()?,
+    )?)
+}
+
+fn bodies(input: &InputEnvelope, bindings: &SinkOutputs) -> Result<Vec<Value>> {
+    wire::notifications(input, bindings)?
+        .iter()
+        .map(|notification| Ok(notification.to_json()?))
+        .collect()
+}
+
+#[test]
+fn query_output_is_ordinary_graph_data_without_query_annotations() -> Result<()> {
+    let input = input()?;
+    let q = outputs(&[("q", "q", "out", "q/out")])?;
+    let results = bodies(&input, &q)?;
+    assert_eq!(results.len(), 5, "Noop produces no outbound change");
+    // Query output is ordinary graph data: no annotation changes the projection.
+    assert_eq!(results, bodies(&unannotated(&input), &q)?);
+    let operations: Vec<_> = results
+        .iter()
+        .map(|body| body["operation"].clone())
+        .collect();
     assert_eq!(
-        proto_item(&notifications[2], OutputFormat::Proto)?.item_type,
-        reaction::QueryResultItemType::Delete as i32
+        operations,
+        ["ADD", "REPLACE", "DELETE", "REPLACE", "REPLACE"]
     );
-    assert!(wire::notifications(&input, "wrong", &StreamId::try_new("q/out")?).is_err());
-    assert!(wire::notifications(&input, "q", &StreamId::try_new("wrong/out")?).is_err());
+    for body in &results {
+        assert_eq!(
+            body["output"],
+            json!({"alias":"q","component":"q","port":"out"})
+        );
+        assert!(body.get("producer").is_none());
+        assert_eq!(body["sequence"], 42);
+        assert_eq!(body["element"], json!({"kind":"node","labels":["Result"]}));
+        assert_eq!(
+            body["identity"]["namespace"],
+            "test/native-network-wire/q/out"
+        );
+        for stale in [
+            "queryId",
+            "query_id",
+            "row_signature",
+            "rowSignature",
+            "metadata",
+        ] {
+            assert!(body.get(stale).is_none(), "{stale}");
+        }
+    }
+    // Row identities are the evaluator's opaque keys, hex encoded, not hashes.
+    let ids: Vec<_> = results
+        .iter()
+        .map(|body| body["identity"]["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "000000000000000b",
+            "000000000000000c",
+            "000000000000000d",
+            "000000000000000e",
+            "000000000000000f"
+        ]
+    );
+    // A replacement with no before image has none, not a null row.
+    assert!(results[3].get("before").is_none());
+    assert_eq!(results[4]["before"], json!({"value":2}));
+    assert_eq!(results[0]["after"]["value"], 3);
+
+    let other = outputs(&[("other", "other", "out", "other/out")])?;
+    assert!(wire::notifications(&input, &other).is_err());
+    let mut wrong_port = input.clone();
+    wrong_port.port = PortId::try_new("wrong")?;
+    assert!(wire::notifications(&wrong_port, &q).is_err());
     Ok(())
 }
 
 #[test]
-fn native_sse_preserves_the_browser_protocol_and_query_identity() -> Result<()> {
+fn source_changes_reach_network_projection_with_full_patch_and_removal_semantics() -> Result<()> {
+    let input = source_input(&[
+        SourceChange::Insert {
+            element: room("r1", "one"),
+        },
+        SourceChange::Replace {
+            element: room("r1", "two"),
+        },
+        SourceChange::Update {
+            element: room("r1", "three"),
+            removed_properties: ["colour".to_owned()].into(),
+        },
+        SourceChange::Delete {
+            metadata: drasi_core::models::ElementMetadata {
+                reference: drasi_core::models::ElementReference::new("facilities-db", "r1"),
+                labels: Arc::from([Arc::from("Room")]),
+                effective_from: 2_000,
+            },
+        },
+    ])?;
+    let facilities = outputs(&[("facilities-db", "facilities-db", "out", "facilities-db/out")])?;
+    let bodies_ = bodies(&input, &facilities)?;
+    assert_eq!(bodies_.len(), 4);
+    // No query identity is invented: the output is the configured binding.
+    assert!(bodies_.iter().all(|body| body["output"]
+        == json!({"alias":"facilities-db","component":"facilities-db","port":"out"})
+        && body["sequence"] == 7));
+    let operations: Vec<_> = bodies_
+        .iter()
+        .map(|body| body["operation"].clone())
+        .collect();
+    assert_eq!(operations, ["ADD", "REPLACE", "PATCH", "DELETE"]);
+    assert_eq!(bodies_[2]["removedProperties"], json!(["colour"]));
+    assert!(bodies_[0].get("removedProperties").is_none());
+    for body in &bodies_ {
+        assert_eq!(
+            body["identity"],
+            json!({"namespace":"facilities-db","id":"r1"})
+        );
+        assert!(body.get("before").is_none(), "no before image is known");
+    }
+    assert_eq!(bodies_[0]["after"]["name"], "one");
+    assert!(bodies_[3].get("after").is_none() && bodies_[3].get("before").is_none());
+    // Configured bindings alone identify the data; several outputs, including
+    // two ports of one component, share one sink and stay distinguishable.
+    let shared = outputs(&[
+        ("facilities-db", "facilities-db", "out", "facilities-db/out"),
+        (
+            "facilities-errors",
+            "facilities-db",
+            "errors",
+            "facilities-db/errors",
+        ),
+        ("q", "q", "out", "q/out"),
+    ])?;
+    assert_eq!(
+        bodies(&input, &shared)?[0]["output"],
+        json!({"alias":"facilities-db","component":"facilities-db","port":"out"})
+    );
+    let errors = source_input_on(
+        "facilities-db/errors",
+        &[SourceChange::Insert {
+            element: room("r9", "bad"),
+        }],
+    )?;
+    assert_eq!(
+        bodies(&errors, &shared)?[0]["output"],
+        json!({"alias":"facilities-errors","component":"facilities-db","port":"errors"})
+    );
+    Ok(())
+}
+
+#[test]
+fn untimed_identity_only_deletion_is_accepted_without_invented_metadata() -> Result<()> {
+    let metadata = drasi_core::models::ElementMetadata {
+        reference: drasi_core::models::ElementReference::new("facilities-db", "gone"),
+        labels: Arc::from([Arc::from("Room")]),
+        effective_from: 2_000,
+    };
+    let input = source_input_untimed(&[SourceChange::Delete { metadata }])?;
+    assert!(input.envelope.system().timestamp().is_none());
+    let facilities = outputs(&[("facilities-db", "facilities-db", "out", "facilities-db/out")])?;
+    let body = &bodies(&input, &facilities)?[0];
+    assert_eq!(body["operation"], "DELETE");
+    assert_eq!(body["sequence"], 7);
+    assert_eq!(
+        body["identity"],
+        json!({"namespace":"facilities-db","id":"gone"})
+    );
+    assert!(body.get("timestamp").is_none(), "no event time is invented");
+    assert!(body.get("before").is_none() && body.get("after").is_none());
+    // The browser frame names its own publication time, not an event time.
+    let payload = drasi_computation_sink_sse::sse_payload(&input, &facilities)?;
+    assert!(payload["publishedAt"].as_i64().is_some());
+    assert!(payload["changes"][0].get("timestamp").is_none());
+    Ok(())
+}
+
+#[test]
+fn native_sse_sends_truthful_changes_for_every_producer_kind() -> Result<()> {
     let input = input()?;
-    let queries = std::collections::BTreeMap::from([("q".into(), StreamId::try_new("q/out")?)]);
+    let queries = outputs(&[("q", "q", "out", "q/out")])?;
     let payload = drasi_computation_sink_sse::sse_payload(&input, &queries)?;
-    let expected = QueryChangeCodec::to_legacy_result(&input.envelope)?;
-    assert_eq!(payload["queryId"], expected.query_id);
-    assert_eq!(payload["results"], serde_json::to_value(expected.results)?);
-    assert!(payload["timestamp"].as_i64().is_some());
-    let wrong_query =
-        std::collections::BTreeMap::from([("other".into(), StreamId::try_new("q/out")?)]);
+    assert_eq!(
+        payload["output"],
+        json!({"alias":"q","component":"q","port":"out"})
+    );
+    assert_eq!(payload["sequence"], 42);
+    assert!(payload.get("queryId").is_none() && payload.get("results").is_none());
+    let changes = payload["changes"].as_array().context("changes")?;
+    assert_eq!(changes.len(), 5);
+    assert_eq!(changes[0]["operation"], "ADD");
+    assert_eq!(changes[0]["after"]["value"], 3);
+    assert_eq!(changes[1]["operation"], "REPLACE");
+    assert_eq!(changes[1]["before"], json!({"value":2}));
+    assert_eq!(changes[2]["operation"], "DELETE");
+    assert!(changes[3].get("before").is_none());
+    assert!(payload["publishedAt"].as_i64().is_some());
+    assert!(payload.get("timestamp").is_none() && payload.get("producer").is_none());
+    assert_eq!(
+        drasi_computation_sink_sse::sse_payload(&unannotated(&input), &queries)?["changes"],
+        payload["changes"]
+    );
+
+    // A source is bound and decoded the same way, and a patch or an
+    // identity-only delete is sent as such for the browser's row state to apply.
+    let source = source_input(&[
+        SourceChange::Insert {
+            element: room("r1", "one"),
+        },
+        SourceChange::Update {
+            element: room("r1", "two"),
+            removed_properties: ["colour".to_owned()].into(),
+        },
+        SourceChange::Delete {
+            metadata: drasi_core::models::ElementMetadata {
+                reference: drasi_core::models::ElementReference::new("facilities-db", "r1"),
+                labels: Arc::from([Arc::from("Room")]),
+                effective_from: 2_000,
+            },
+        },
+    ])?;
+    let sources = outputs(&[("facilities-db", "facilities-db", "out", "facilities-db/out")])?;
+    let payload = drasi_computation_sink_sse::sse_payload(&source, &sources)?;
+    assert_eq!(payload["output"]["component"], "facilities-db");
+    let changes = payload["changes"].as_array().context("changes")?;
+    assert_eq!(changes[0]["after"]["name"], "one");
+    assert_eq!(changes[1]["operation"], "PATCH");
+    assert_eq!(changes[1]["removedProperties"], json!(["colour"]));
+    assert_eq!(changes[2]["operation"], "DELETE");
+    assert_eq!(
+        changes[2]["identity"],
+        json!({"namespace":"facilities-db","id":"r1"})
+    );
+    assert!(changes[2].get("before").is_none());
+
+    let wrong_query = outputs(&[("other", "other", "out", "other/out")])?;
     assert!(drasi_computation_sink_sse::sse_payload(&input, &wrong_query).is_err());
-    let wrong_stream =
-        std::collections::BTreeMap::from([("q".into(), StreamId::try_new("other/out")?)]);
-    assert!(drasi_computation_sink_sse::sse_payload(&input, &wrong_stream).is_err());
     let mut wrong_port = input.clone();
     wrong_port.port = PortId::try_new("wrong")?;
     assert!(drasi_computation_sink_sse::sse_payload(&wrong_port, &queries).is_err());
     let progress = InputEnvelope {
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::progress_envelope(
+            &ResultNodeProjector::try_new("test/native-network-wire/q/out", None)?,
             "q",
             42,
             1,
@@ -302,6 +524,15 @@ fn native_sse_preserves_the_browser_protocol_and_query_identity() -> Result<()> 
         )?,
     };
     assert!(drasi_computation_sink_sse::sse_payload(&progress, &queries).is_err());
+    let due = InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: GraphChangeCodec::encode_futures_due(
+            StreamId::try_new("q/out")?,
+            44,
+            chrono::Utc::now(),
+        )?,
+    };
+    assert!(drasi_computation_sink_sse::sse_payload(&due, &queries).is_err());
     Ok(())
 }
 
@@ -324,34 +555,47 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
     ] {
         assert!(HttpSourceConfig::from_value(config).is_err());
     }
-    let http =
-        HttpSinkConfig::parse(json!({"queryId":"q","url":"http://localhost:9001/reaction"}))?;
-    assert_eq!(http.stream.as_str(), "q/out");
-    assert_eq!(http.headers["x-query-sequence"], "q");
+    let http = HttpSinkConfig::parse(
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost:9001/reaction"}),
+    )?;
+    assert_eq!(
+        http.outputs
+            .iter()
+            .map(|(alias, _)| alias)
+            .collect::<Vec<_>>(),
+        ["q"]
+    );
+    assert!(!http.headers.contains_key("x-drasi-component"));
     assert!(HttpSinkConfig::parse(
-        json!({"queryId":"q","url":"http://localhost","outputTemplates":{}})
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","outputTemplates":{}})
     )
     .is_ok());
     for config in [
-        json!({"queryId":"q","url":"http://localhost","outputTemplates":{"defaultTemplte":{}}}),
-        json!({"queryId":"q","url":"http://localhost","headers":{"x-query-sequence":"other"}}),
-        json!({"queryId":"q","url":"http://localhost","headers":{"x-bad":"line\nbreak"}}),
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","outputTemplates":{"defaultTemplte":{}}}),
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","headers":{"x-drasi-component":"other"}}),
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","headers":{"x-bad":"line\nbreak"}}),
     ] {
         assert!(HttpSinkConfig::parse(config).is_err());
     }
-    let grpc = GrpcSinkConfig::parse(json!({"queryId":"q"}))?;
-    assert_eq!(grpc.metadata["x-query-sequence"], "q");
+    let grpc = GrpcSinkConfig::parse(json!({"outputs":{"q":{"component":"q","port":"out"}}}))?;
+    assert!(grpc.metadata.is_empty());
     assert_eq!(grpc.max_retries, 5);
     assert_eq!(
-        GrpcSinkConfig::parse(json!({"queryId":"q","batchSize":2}))?.batch_size,
+        GrpcSinkConfig::parse(
+            json!({"outputs":{"q":{"component":"q","port":"out"}},"batchSize":2})
+        )?
+        .batch_size,
         2
     );
-    assert!(GrpcSinkConfig::parse(json!({"queryId":"q","batching":{"mode":"adaptive"}})).is_ok());
+    assert!(GrpcSinkConfig::parse(
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"batching":{"mode":"adaptive"}})
+    )
+    .is_ok());
     for config in [
-        json!({"queryId":"q","batchSize":0}),
-        json!({"queryId":"q","batching":{"mode":"adaptive","adaptiveMinBatchSize":0}}),
-        json!({"queryId":"q","metadata":{"x-query-sequence":"wrong"}}),
-        json!({"queryId":"q","connectionRetryAttempts":0}),
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"batchSize":0}),
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"batching":{"mode":"adaptive","adaptiveMinBatchSize":0}}),
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"metadata":{"x-drasi-port":"wrong"}}),
+        json!({"outputs":{"q":{"component":"q","port":"out"}},"connectionRetryAttempts":0}),
     ] {
         assert!(GrpcSinkConfig::parse(config).is_err());
     }

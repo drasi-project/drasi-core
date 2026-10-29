@@ -104,11 +104,35 @@ impl<'a> TransactionContext<'a> {
     }
 
     /// Assign an intermediate event identity owned by this step and transaction,
-    /// retaining the input's annotations, time, position and lineage.
+    /// retaining the input's annotations, time, ordering policy, position and
+    /// lineage, not its control.
     pub fn derive(
         &self,
         input: &ChangeEnvelope,
         changes: ChangeSetRef,
+    ) -> anyhow::Result<ChangeEnvelope> {
+        self.derive_with_control(input, changes, None)
+    }
+
+    /// Emit the selected control with new data; inherited controls are not forwarded
+    /// implicitly. The input's ordering policy is retained.
+    pub fn derive_with_control(
+        &self,
+        input: &ChangeEnvelope,
+        changes: ChangeSetRef,
+        control: Option<super::ControlMessage>,
+    ) -> anyhow::Result<ChangeEnvelope> {
+        self.derive_with_ordering(input, changes, control, input.system().ordering())
+    }
+
+    /// Emit new data with an explicitly chosen ordering policy. `ProducerSequence`
+    /// must only be chosen when the receiver has validated the producer's order.
+    pub fn derive_with_ordering(
+        &self,
+        input: &ChangeEnvelope,
+        changes: ChangeSetRef,
+        control: Option<super::ControlMessage>,
+        ordering: super::ChangeOrdering,
     ) -> anyhow::Result<ChangeEnvelope> {
         let changes = ChangeSet::try_new(
             ChangeSetId::try_new(
@@ -118,12 +142,16 @@ impl<'a> TransactionContext<'a> {
             changes.schema().clone(),
             changes.operations().to_vec(),
         )?;
-        let mut system = SystemMetadata::new(self.stream.clone(), self.sequence);
+        let mut system =
+            SystemMetadata::new(self.stream.clone(), self.sequence).with_ordering(ordering);
         if let Some(timestamp) = input.system().timestamp() {
             system = system.with_timestamp(timestamp);
         }
         if let Some(position) = input.system().source_position() {
             system = system.with_source_position(position.clone());
+        }
+        if let Some(control) = control {
+            system = system.with_control(control);
         }
         Ok(input.derive(emission_id(&self.stream, self.sequence)?, changes, system))
     }
@@ -135,7 +163,12 @@ impl<'a> TransactionContext<'a> {
         {
             Ok(output)
         } else {
-            self.derive(&output, output.changes().clone())
+            self.derive_with_ordering(
+                &output,
+                output.changes().clone(),
+                output.system().control().cloned(),
+                output.system().ordering(),
+            )
         }
     }
 
@@ -510,6 +543,60 @@ mod tests {
     }
 
     #[test]
+    fn derive_retains_input_ordering_unless_explicit_and_finish_preserves_output_ordering() {
+        use super::super::{ChangeOrdering, GraphChangeCodec};
+        use drasi_core::models::SourceChange;
+
+        let index = InMemoryElementIndex::new();
+        let step = ComponentId::try_new("step").unwrap();
+        let stream = StreamId::try_new("transaction/step/out").unwrap();
+        let context = TransactionContext::new(&step, &index, stream, 41);
+        let source = |ordering| {
+            let encoded = GraphChangeCodec::encode_change(
+                SourceChange::Insert {
+                    element: node("source", "one", 9),
+                },
+                StreamId::try_new("source/out").unwrap(),
+                7,
+                chrono::DateTime::from_timestamp_millis(1_000),
+            )
+            .unwrap();
+            ChangeEnvelope::new(
+                encoded.id().clone(),
+                encoded.changes().clone(),
+                encoded.system().as_ref().clone().with_ordering(ordering),
+            )
+        };
+        for ordering in [ChangeOrdering::EventTime, ChangeOrdering::ProducerSequence] {
+            let input = source(ordering);
+            let output = context.derive(&input, input.changes().clone()).unwrap();
+            assert_eq!(output.system().ordering(), ordering);
+            assert_eq!(output.lineage().unwrap().system().ordering(), ordering);
+            let finished = context.finish(input.clone()).unwrap();
+            assert_eq!(finished.system().ordering(), ordering);
+        }
+        let input = source(ChangeOrdering::EventTime);
+        let chosen = context
+            .derive_with_ordering(
+                &input,
+                input.changes().clone(),
+                None,
+                ChangeOrdering::ProducerSequence,
+            )
+            .unwrap();
+        assert_eq!(chosen.system().ordering(), ChangeOrdering::ProducerSequence);
+        assert_eq!(
+            chosen.lineage().unwrap().system().ordering(),
+            ChangeOrdering::EventTime
+        );
+        let finished = context.finish(chosen.clone()).unwrap();
+        assert_eq!(
+            finished.system().ordering(),
+            ChangeOrdering::ProducerSequence
+        );
+    }
+
+    #[test]
     fn corrupt_or_foreign_element_namespaces_are_not_exposed_as_valid_step_state() {
         let index = InMemoryElementIndex::new();
         let step = ComponentId::try_new("step").unwrap();
@@ -555,7 +642,14 @@ mod tests {
                 .system()
                 .as_ref()
                 .clone()
-                .with_source_position(bytes::Bytes::from_static(b"\0position")),
+                .with_source_position(bytes::Bytes::from_static(b"\0position"))
+                .with_control(
+                    super::super::ControlMessage::try_new(
+                        "test.control",
+                        bytes::Bytes::from_static(b"control"),
+                    )
+                    .unwrap(),
+                ),
         );
         let annotation = ContextEntry::try_new(
             ComponentId::try_new("source").unwrap(),
@@ -565,6 +659,21 @@ mod tests {
         .unwrap();
         input.append_annotation(annotation.clone()).unwrap();
         let output = context.derive(&input, input.changes().clone()).unwrap();
+        assert!(output.system().control().is_none());
+        assert_eq!(
+            output.lineage().unwrap().system().control(),
+            input.system().control()
+        );
+        let forwarded = context.finish(input.clone()).unwrap();
+        assert_eq!(forwarded.system().control(), input.system().control());
+        let explicit = context
+            .derive_with_control(
+                &input,
+                input.changes().clone(),
+                input.system().control().cloned(),
+            )
+            .unwrap();
+        assert_eq!(explicit.system().control(), input.system().control());
         assert_eq!(output.id(), &emission_id(&stream, 41).unwrap());
         assert_eq!(output.system().sequence(), 41);
         assert_eq!(output.system().timestamp(), Some(timestamp));

@@ -4,9 +4,299 @@
 use super::*;
 use crate::computation::v1::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 fn id(value: &str) -> ComponentId {
     ComponentId::try_new(value).unwrap()
+}
+
+struct DrainingProgressProducer {
+    descriptor: ComponentDescriptor,
+    progress: Arc<ConsumerProgressSet>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+    stops: Arc<AtomicUsize>,
+    fail_once: bool,
+}
+
+#[async_trait::async_trait]
+impl ComputationComponent for DrainingProgressProducer {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn recovery_contract(&self) -> ComponentRecovery {
+        ComponentRecovery::default().with_consumer_progress(self.progress.clone())
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        self.progress.read_only().wait_ready().await?;
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        if self.fail_once {
+            self.fail_once = false;
+            anyhow::bail!("producer cleanup remains pending");
+        }
+        let permit = self.release.acquire().await?;
+        permit.forget();
+        anyhow::ensure!(
+            self.progress
+                .read_only()
+                .snapshot()?
+                .consumers
+                .values()
+                .all(|owner| owner.ready && owner.admitting),
+            "actual progress owner retired before producer cleanup"
+        );
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl EnvelopeSource for DrainingProgressProducer {
+    async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        std::future::pending().await
+    }
+}
+
+struct ProgressResultsSink(ComponentDescriptor);
+#[async_trait::async_trait]
+impl ComputationComponent for ProgressResultsSink {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+#[async_trait::async_trait]
+impl EnvelopeSink for ProgressResultsSink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, _: InputEnvelope) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use drasi_core::computation::InMemoryComputationProvider;
+
+    for mode in ["cancelled", "failed", "timed-out", "normal-failed"] {
+        let graph_id = "cleanup-progress-owners";
+        let owners = ["first", "second"]
+            .map(|name| Arc::new(QuerySourceProgress::new(graph_id, id(name)).unwrap()));
+        let progress = Arc::new(ConsumerProgressSet::new(
+            graph_id,
+            id("producer"),
+            owners.iter().cloned(),
+        )?);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let mut builder =
+            ComputationGraph::builder(graph_id).cleanup_timeout(if mode == "timed-out" {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(2)
+            });
+        for owner in &owners {
+            let query = ContinuousQueryTransformer::new(
+                ContinuousQueryDefinition {
+                    graph_id: graph_id.into(),
+                    id: owner.component_id().clone(),
+                    query: "MATCH (n:Item) RETURN n.value AS value".into(),
+                    language: ComputationQueryLanguage::Cypher,
+                    output_stream: StreamId::try_new(format!("{}/out", owner.component_id()))?,
+                    outbox_capacity: std::num::NonZeroUsize::new(8).unwrap(),
+                },
+                Arc::new(InMemoryComputationProvider),
+            )
+            .await?
+            .with_source_progress(owner.clone())?;
+            builder = builder
+                .query(Box::new(query))
+                .bind_stream(
+                    Endpoint::new(owner.component_id().clone(), PortId::try_new("out")?),
+                    StreamId::try_new(format!("{}/out", owner.component_id()))?,
+                )
+                .connect(
+                    EdgeDefinition::new(
+                        Endpoint::new(id("producer"), PortId::try_new("out")?),
+                        Endpoint::new(owner.component_id().clone(), PortId::try_new("in")?),
+                    ),
+                    Box::new(BoundedPipeConfig { capacity: 4 }),
+                )
+                .connect(
+                    EdgeDefinition::new(
+                        Endpoint::new(owner.component_id().clone(), PortId::try_new("out")?),
+                        Endpoint::new(id("results"), PortId::try_new("in")?),
+                    ),
+                    Box::new(BoundedPipeConfig { capacity: 4 }),
+                );
+        }
+        let mut graph = builder
+            .sink(Box::new(ProgressResultsSink(ComponentDescriptor::try_new(
+                id("results"),
+                vec![PortDescriptor::new(
+                    PortId::try_new("in")?,
+                    PortDirection::Input,
+                    QueryChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )],
+            )?)))
+            .source(Box::new(DrainingProgressProducer {
+                descriptor: ComponentDescriptor::try_new(
+                    id("producer"),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out")?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                progress,
+                entered: entered.clone(),
+                release: release.clone(),
+                stops: stops.clone(),
+                fail_once: mode.ends_with("failed"),
+            }))
+            .bind_stream(
+                Endpoint::new(id("producer"), PortId::try_new("out")?),
+                StreamId::try_new("input")?,
+            )
+            .build()?;
+        let mut run = Box::pin(graph.start()?);
+        let control = run.control();
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if control
+                    .observed()
+                    .components
+                    .values()
+                    .all(|node| node.lifecycle == ComponentLifecycle::Running)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        tokio::select! {
+            result = &mut run => anyhow::bail!("graph ended before ready: {result:?}"),
+            result = ready => { result.with_context(|| format!("{mode}: startup {:?}",control.observed()))?; }
+        }
+        if mode == "normal-failed" {
+            let stop = control.stop_components(GraphRevision(1), GraphSelection::All);
+            tokio::pin!(stop);
+            let report = tokio::select! {
+                result = &mut run => anyhow::bail!("graph ended during stop: {result:?}"),
+                result = tokio::time::timeout(Duration::from_secs(2), &mut stop) => result??,
+            };
+            assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+            assert_eq!(stops.load(Ordering::SeqCst), 1);
+            entered.notified().await;
+            for owner in &owners {
+                assert!(owner.snapshot().ready && owner.snapshot().admitting);
+                assert!(matches!(
+                    report.components[owner.component_id()],
+                    StopOutcome::StopFailed(_)
+                ));
+            }
+            let retry = control.stop_components(GraphRevision(1), GraphSelection::All);
+            tokio::pin!(retry);
+            tokio::select! {
+                result = &mut run => anyhow::bail!("graph ended during stop retry: {result:?}"),
+                result = &mut retry => anyhow::bail!("stop retry completed before drain: {result:?}"),
+                result = tokio::time::timeout(Duration::from_secs(1), entered.notified()) => result?,
+            }
+            for owner in &owners {
+                assert!(owner.snapshot().ready && owner.snapshot().admitting);
+            }
+            release.add_permits(1);
+            let mut completed_run = false;
+            let report = tokio::select! {
+                result = &mut run => {
+                    result?;
+                    completed_run = true;
+                    tokio::time::timeout(Duration::from_secs(2), &mut retry).await??
+                },
+                result = tokio::time::timeout(Duration::from_secs(2), &mut retry) => result??,
+            };
+            assert_eq!(report.summary, OperationSummary::Completed);
+            assert_eq!(stops.load(Ordering::SeqCst), 2);
+            for owner in &owners {
+                assert!(!owner.snapshot().ready && !owner.snapshot().admitting);
+            }
+            if !completed_run {
+                control.cancel();
+                let stopped = tokio::time::timeout(Duration::from_secs(2), &mut run).await?;
+                assert!(matches!(stopped, Ok(()) | Err(GraphError::Cancelled)));
+            }
+            drop(run);
+            graph.shutdown().await?;
+            continue;
+        }
+        control.cancel();
+        if mode == "cancelled" {
+            tokio::select! {
+                result = &mut run => anyhow::bail!("cleanup completed before its gate: {result:?}"),
+                result = tokio::time::timeout(Duration::from_secs(1),entered.notified()) => { result.context("producer entered cancelled cleanup")?; }
+            }
+        } else {
+            anyhow::ensure!(
+                tokio::time::timeout(Duration::from_secs(3), &mut run)
+                    .await?
+                    .is_err(),
+                "failed/timed-out cleanup must be reported"
+            );
+            entered.notified().await;
+        }
+        drop(run);
+        for owner in &owners {
+            anyhow::ensure!(
+                owner.snapshot().ready && owner.snapshot().admitting,
+                "{mode}: required owner was retired while producer cleanup was pending"
+            );
+        }
+        let mut retry = Box::pin(graph.shutdown());
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+        if mode != "cancelled" {
+            tokio::select! {
+                result = &mut retry => anyhow::bail!("retry completed before its gate: {result:?}"),
+                result = tokio::time::timeout(Duration::from_secs(1),entered.notified()) => { result.context("producer entered cleanup retry")?; }
+            }
+        }
+        for owner in &owners {
+            assert!(owner.snapshot().ready && owner.snapshot().admitting);
+        }
+        release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(2), retry)
+            .await
+            .context("producer cleanup completed")??;
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            if mode == "cancelled" { 1 } else { 2 }
+        );
+        for owner in &owners {
+            assert!(!owner.snapshot().ready && !owner.snapshot().admitting);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cleanup_preserves_actual_progress_owners_current_thread() -> anyhow::Result<()> {
+    cleanup_preserves_actual_progress_owners().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleanup_preserves_actual_progress_owners_multi_thread() -> anyhow::Result<()> {
+    cleanup_preserves_actual_progress_owners().await
 }
 
 struct RetiredMetadata {

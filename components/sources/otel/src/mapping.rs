@@ -440,7 +440,8 @@ fn push_service(
     observed: u64,
     group: u32,
 ) {
-    if elements.iter().any(|e| e.id == service.id) {
+    let previous = elements.iter().rev().find(|e| e.id == service.id);
+    if previous.is_some() && resource.is_none() {
         return;
     }
     let mut props = ElementPropertyMap::new();
@@ -460,6 +461,18 @@ fn push_service(
         }
     }
     insert_string(&mut props, "lastSeen", &millis_iso(observed));
+    if let Some(previous) = previous {
+        let metadata_changed = props
+            .map_iter(|name, value| {
+                name.as_ref() != "lastSeen" && previous.properties.get(name.as_ref()) != Some(value)
+            })
+            .any(|changed| changed);
+        if !metadata_changed {
+            return;
+        }
+    }
+    // Enrich a peer placeholder in the authoritative resource's own group,
+    // preserving its timestamp and all-or-nothing capacity admission.
     elements.push(ProjectedElement {
         id: service.id.clone(),
         labels: vec!["Service".to_string()],
@@ -707,6 +720,7 @@ fn parse_min_severity(name: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::LifecycleState;
     use crate::otlp::proto::collector::metrics::v1::ExportMetricsServiceRequest;
     use crate::otlp::proto::common::v1::KeyValue;
     use crate::otlp::proto::metrics::v1::{
@@ -714,6 +728,7 @@ mod tests {
     };
     use crate::otlp::proto::resource::v1::Resource;
     use crate::otlp::proto::trace::v1::{ResourceSpans, ScopeSpans, Span};
+    use drasi_core::models::{Element, SourceChange};
     use drasi_lib::sources::{SOURCE_ORIGIN_ATTRIBUTE, SOURCE_ORIGIN_DERIVED};
 
     fn kv(key: &str, value: &str) -> KeyValue {
@@ -740,6 +755,174 @@ mod tests {
             metric_allowlist: vec!["latency_p99_ms".to_string()],
             ..OtelSourceConfig::default()
         }
+    }
+
+    fn service_trace(name: &str, version: &str, peer: &str, millis: u64) -> ResourceSpans {
+        ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![kv("service.name", name), kv("service.version", version)],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                spans: vec![Span {
+                    kind: span::SpanKind::Client as i32,
+                    start_time_unix_nano: millis * 1_000_000,
+                    attributes: vec![kv("peer.service", peer)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn materialize_checkout(batches: Vec<Vec<ResourceSpans>>) -> Element {
+        let config = OtelSourceConfig::default();
+        let mut lifecycle = LifecycleState::default();
+        let mut indexed: Option<Element> = None;
+        for resource_spans in batches {
+            let mapped = map_traces(
+                &ExportTraceServiceRequest { resource_spans },
+                &config,
+                5_000,
+            );
+            let (changes, dropped, _) = lifecycle.apply("otel", &config, mapped.elements, 5_000);
+            assert_eq!(dropped, 0);
+            for change in changes {
+                if change.get_reference().element_id.as_ref() != "svc:checkout" {
+                    continue;
+                }
+                match change {
+                    SourceChange::Insert { element } => indexed = Some(element),
+                    SourceChange::Update {
+                        mut element,
+                        removed_properties,
+                    } => {
+                        assert!(removed_properties.is_empty());
+                        if let Some(previous) = &indexed {
+                            element.merge_missing_properties_except(previous, &removed_properties);
+                        }
+                        indexed = Some(element);
+                    }
+                    other => panic!("unexpected service mutation: {other:?}"),
+                }
+            }
+        }
+        indexed.expect("checkout service was not emitted")
+    }
+
+    #[test]
+    fn peer_first_batch_preserves_authoritative_service_version() {
+        let checkout = materialize_checkout(vec![vec![
+            service_trace("frontend", "v1", "checkout", 1_000),
+            service_trace("checkout", "v42", "payments", 2_000),
+        ]]);
+        assert_eq!(
+            checkout.get_property("version"),
+            &ElementValue::String("v42".into())
+        );
+        assert_eq!(checkout.get_effective_from(), 2_000);
+    }
+
+    #[test]
+    fn resource_first_batch_preserves_authoritative_service_version() {
+        let checkout = materialize_checkout(vec![vec![
+            service_trace("checkout", "v42", "payments", 1_000),
+            service_trace("frontend", "v1", "checkout", 2_000),
+        ]]);
+        assert_eq!(
+            checkout.get_property("version"),
+            &ElementValue::String("v42".into())
+        );
+        assert_eq!(checkout.get_effective_from(), 1_000);
+    }
+
+    #[test]
+    fn successive_peer_and_resource_requests_preserve_patch_semantics() {
+        let checkout = materialize_checkout(vec![
+            vec![service_trace("frontend", "v1", "checkout", 1_000)],
+            vec![service_trace("checkout", "v42", "payments", 2_000)],
+            vec![service_trace("frontend", "v1", "checkout", 3_000)],
+        ]);
+        assert_eq!(
+            checkout.get_property("version"),
+            &ElementValue::String("v42".into())
+        );
+        assert_eq!(checkout.get_effective_from(), 3_000);
+    }
+
+    #[test]
+    fn service_enrichment_preserves_groups_capacity_and_rollback() {
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![
+                service_trace("frontend", "v1", "checkout", 1_000),
+                service_trace("checkout", "v42", "payments", 2_000),
+            ],
+        };
+        let config = OtelSourceConfig::default();
+        let mapped = map_traces(&request, &config, 5_000);
+        let checkout_events: Vec<_> = mapped
+            .elements
+            .iter()
+            .filter(|item| item.id == "svc:checkout")
+            .map(|item| (item.group, item.effective_from))
+            .collect();
+        assert_eq!(checkout_events, vec![(0, 1_000), (1, 2_000)]);
+
+        let mut lifecycle = LifecycleState::default();
+        let (changes, dropped, undo) =
+            lifecycle.apply("otel", &config, mapped.elements.clone(), 5_000);
+        assert_eq!(dropped, 0);
+        lifecycle.revert_apply(undo);
+        let (retried, dropped, _) =
+            lifecycle.apply("otel", &config, mapped.elements.clone(), 5_000);
+        assert_eq!(dropped, 0);
+        assert_eq!(changes, retried);
+
+        let limited = OtelSourceConfig {
+            max_services: 2,
+            ..config
+        };
+        let (admitted, dropped, _) =
+            LifecycleState::default().apply("otel", &limited, mapped.elements, 5_000);
+        assert_eq!(dropped, 1);
+        let checkout = admitted
+            .iter()
+            .find(|change| change.get_reference().element_id.as_ref() == "svc:checkout")
+            .expect("first group should admit the peer placeholder");
+        match checkout {
+            SourceChange::Insert { element } => {
+                assert_eq!(element.get_property("version"), &ElementValue::Null);
+                assert_eq!(element.get_effective_from(), 1_000);
+            }
+            other => panic!("unexpected service mutation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_service_metadata_and_self_dependencies_stay_deduplicated() {
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![
+                service_trace("checkout", "v42", "checkout", 1_000),
+                service_trace("checkout", "v42", "checkout", 2_000),
+            ],
+        };
+        let config = OtelSourceConfig {
+            max_services: 1,
+            ..OtelSourceConfig::default()
+        };
+        let mapped = map_traces(&request, &config, 5_000);
+        assert_eq!(
+            mapped
+                .elements
+                .iter()
+                .filter(|item| item.id == "svc:checkout")
+                .count(),
+            1
+        );
+        let (_, dropped, _) =
+            LifecycleState::default().apply("otel", &config, mapped.elements, 5_000);
+        assert_eq!(dropped, 0);
     }
 
     #[test]

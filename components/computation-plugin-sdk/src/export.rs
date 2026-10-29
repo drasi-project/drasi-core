@@ -17,6 +17,12 @@ use std::{
     },
 };
 
+mod activation_credentials;
+mod bootstrap_coordination;
+mod output_follow;
+mod output_reads;
+mod source_schema;
+
 use crate::{
     abi::{self, BorrowedBytes, Header, Reply, Status},
     metadata::{FactoryMetadata, PluginMetadata, TARGET},
@@ -30,18 +36,38 @@ use crate::{
 /// standalone and transactional construction use this same immutable contract.
 pub trait Factory: Send + Sync + 'static {
     fn metadata(&self) -> FactoryMetadata;
-    fn supports_query_snapshots(&self) -> bool {
+    fn supports_activation_credentials(&self) -> bool {
         false
     }
-    fn create_with_query_snapshots(
+    /// Pure configuration inspection: no provider lookup or network I/O.
+    fn activation_credential_context(
+        &self,
+        _request: &CreateRequest,
+    ) -> anyhow::Result<crate::ActivationCredentialContext> {
+        anyhow::bail!("factory does not implement activation credentials")
+    }
+    fn supports_bootstrap_coordination(&self) -> bool {
+        false
+    }
+    fn create_bootstrap_coordinator(
+        &self,
+        _request: &CreateRequest,
+        _progress: crate::SourceBootstrapProgress,
+    ) -> anyhow::Result<Arc<dyn crate::NativeSourceBootstrapCoordinator>> {
+        anyhow::bail!("factory does not implement source/bootstrap coordination")
+    }
+    fn supports_output_snapshots(&self) -> bool {
+        false
+    }
+    fn create_with_output_snapshots(
         &self,
         request: &CreateRequest,
         control: ControlSender,
-        snapshots: Option<crate::NativeQuerySnapshots>,
+        snapshots: Option<crate::NativeOutputSnapshots>,
     ) -> anyhow::Result<CreatedComponent> {
         anyhow::ensure!(
             snapshots.is_none(),
-            "factory does not implement query snapshot reads"
+            "factory does not implement output snapshot reads"
         );
         self.create(request, control)
     }
@@ -225,6 +251,13 @@ impl PluginDefinition {
         metadata.validate()?;
         for (factory, metadata) in factories.iter().zip(&metadata.factories) {
             anyhow::ensure!(
+                !factory.supports_bootstrap_coordination()
+                    || (metadata.role == drasi_computation_contracts::ComponentRole::Source
+                        && (factory.supports_source_progress()
+                            ^ factory.supports_consumer_progress())),
+                "bootstrap coordination requires a source with one negotiated progress mode"
+            );
+            anyhow::ensure!(
                 !factory.supports_sink_batching()
                     || (metadata.role == drasi_computation_contracts::ComponentRole::Sink
                         && factory.consumer_mode().is_none()),
@@ -280,6 +313,10 @@ impl PluginDefinition {
                 );
                 metadata.implementation.plugin = Some(self.metadata.plugin.clone());
                 metadata.validate(&self.metadata.plugin)?;
+                anyhow::ensure!(
+                    !factory.requires_source_bootstrap() || metadata.source_progress,
+                    "paired bootstrap requires actual query progress"
+                );
                 anyhow::ensure!(
                     identities.insert((
                         metadata.implementation.name.clone(),
@@ -359,14 +396,33 @@ impl ExportedPlugin {
     pub fn batching(&self) -> *const abi::batching::PluginBatchingV1 {
         &PLUGIN_BATCHING
     }
-    pub fn query_snapshots(&self) -> *const abi::query_snapshots::PluginQuerySnapshotsV1 {
-        &PLUGIN_QUERY_SNAPSHOTS
+    pub fn output_snapshots(&self) -> *const abi::output_snapshots::PluginOutputSnapshotsV1 {
+        &PLUGIN_OUTPUT_SNAPSHOTS
     }
     pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
         &PLUGIN_RECOVERY
     }
     pub fn consumer_progress(&self) -> *const abi::consumer_progress::PluginConsumerProgressV1 {
         &PLUGIN_CONSUMER_PROGRESS
+    }
+    pub fn source_schema(&self) -> *const abi::source_schema::PluginSourceSchemaV1 {
+        &source_schema::EXTENSION
+    }
+    pub fn output_reads(&self) -> *const abi::output_reads::PluginOutputReadsV1 {
+        &output_reads::EXTENSION
+    }
+    pub fn output_follow(&self) -> *const abi::output_follow::PluginOutputFollowV1 {
+        &output_follow::EXTENSION
+    }
+    pub fn activation_credentials(
+        &self,
+    ) -> *const abi::activation_credentials::PluginActivationCredentialsV1 {
+        &activation_credentials::EXTENSION
+    }
+    pub fn bootstrap_coordination(
+        &self,
+    ) -> *const abi::bootstrap_coordination::PluginBootstrapCoordinationV1 {
+        &bootstrap_coordination::EXTENSION
     }
     pub fn bootstrap(&self) -> *const abi::bootstrap::PluginBootstrapV1 {
         &PLUGIN_BOOTSTRAP
@@ -432,24 +488,24 @@ static PLUGIN_BATCHING: abi::batching::PluginBatchingV1 = abi::batching::PluginB
     policy: Some(batching_policy),
 };
 
-static PLUGIN_QUERY_SNAPSHOTS: abi::query_snapshots::PluginQuerySnapshotsV1 =
-    abi::query_snapshots::PluginQuerySnapshotsV1 {
-        header: Header::new::<abi::query_snapshots::PluginQuerySnapshotsV1>(),
-        version: abi::query_snapshots::VERSION,
+static PLUGIN_OUTPUT_SNAPSHOTS: abi::output_snapshots::PluginOutputSnapshotsV1 =
+    abi::output_snapshots::PluginOutputSnapshotsV1 {
+        header: Header::new::<abi::output_snapshots::PluginOutputSnapshotsV1>(),
+        version: abi::output_snapshots::VERSION,
         reserved: 0,
-        factory: Some(factory_query_snapshots),
-        create: Some(create_component_with_query_snapshots),
+        factory: Some(factory_output_snapshots),
+        create: Some(create_component_with_output_snapshots),
     };
 
-unsafe extern "C" fn factory_query_snapshots(state: *mut c_void, index: u32) -> Reply {
+unsafe extern "C" fn factory_output_snapshots(state: *mut c_void, index: u32) -> Reply {
     transport::reply_boundary(|| {
         let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
         let factory = plugin
             .definition
             .factories
             .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown query-snapshot factory"))?;
-        wire::encode(&factory.supports_query_snapshots()).map_err(Failure::from)
+            .ok_or_else(|| Failure::protocol("unknown output-snapshot factory"))?;
+        wire::encode(&factory.supports_output_snapshots()).map_err(Failure::from)
     })
 }
 
@@ -701,6 +757,11 @@ unsafe extern "C" fn create_bootstrap(
         })
         .map_err(Failure::from)?;
         metadata.validate_request(&request).map_err(Failure::from)?;
+        if state.definition.bootstrap_factories[index as usize].requires_source_bootstrap() {
+            return Err(Failure::protocol(
+                "bootstrap factory requires its actual source pairing",
+            ));
+        }
         if metadata.source_progress == progress.is_null() {
             return Err(Failure::protocol(
                 "native bootstrap source progress binding mismatch",
@@ -826,6 +887,32 @@ struct FactoryState {
     plugin: Arc<PluginState>,
     index: usize,
 }
+
+fn validate_create_request(state: &FactoryState, request: &CreateRequest) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !request.activation_credentials_bound
+            || state.plugin.definition.factories[state.index].supports_activation_credentials(),
+        "native factory does not support activation credentials"
+    );
+    let metadata = &state.plugin.definition.metadata.factories[state.index];
+    anyhow::ensure!(
+        request.implementation == metadata.implementation
+            && request.configuration_version == metadata.configuration_version,
+        "native implementation/configuration version mismatch"
+    );
+    metadata.configuration.validate(&request.configuration)?;
+    if let Some(configuration) = state
+        .plugin
+        .definition
+        .configurations
+        .factories
+        .iter()
+        .find(|configuration| configuration.implementation == metadata.implementation)
+    {
+        configuration.details.validate(&request.configuration)?;
+    }
+    Ok(())
+}
 unsafe extern "C" fn get_factory(
     state: *mut c_void,
     index: u32,
@@ -917,6 +1004,10 @@ struct Instance {
     wakeup: Option<Arc<dyn WakeupSource>>,
     busy: AtomicBool,
     running: AtomicBool,
+    activation_credentials_bound: bool,
+    source_schema: Option<Arc<source_schema::SchemaState>>,
+    output_reads: Option<Arc<output_reads::ReadBinding>>,
+    coordinator: Option<bootstrap_coordination::SourceLease>,
     damaged: Arc<transport::PanicState>,
     admission: bool,
     batching: bool,
@@ -1005,6 +1096,32 @@ fn validate_position_policy(
     Ok(())
 }
 
+/// The declared snapshot inputs must be exactly the input ports for which the
+/// constructed sink registered a handler. Reading a handler performs no I/O.
+fn validate_snapshot_inputs(
+    metadata: &FactoryMetadata,
+    sink: &mut dyn EnvelopeSink,
+) -> anyhow::Result<()> {
+    let mut declared = std::collections::BTreeSet::new();
+    for port in &metadata.capabilities.snapshot_inputs {
+        anyhow::ensure!(
+            declared.insert(port),
+            "native sink declares snapshot input {port} more than once"
+        );
+    }
+    let mut actual = std::collections::BTreeSet::new();
+    for port in &metadata.ports {
+        if port.direction() == PortDirection::Input && sink.snapshot_consumer(port.id()).is_some() {
+            actual.insert(port.id());
+        }
+    }
+    anyhow::ensure!(
+        declared == actual,
+        "native sink snapshot handlers do not match its declared snapshot inputs"
+    );
+    Ok(())
+}
+
 unsafe extern "C" fn create_component(
     state: *mut c_void,
     input: BorrowedBytes,
@@ -1019,6 +1136,7 @@ unsafe extern "C" fn create_component(
             std::ptr::null(),
             std::ptr::null(),
             false,
+            std::ptr::null(),
             out,
         )
     }
@@ -1039,6 +1157,7 @@ unsafe extern "C" fn create_component_with_admission(
             std::ptr::null(),
             std::ptr::null(),
             false,
+            std::ptr::null(),
             out,
         )
     }
@@ -1062,6 +1181,7 @@ unsafe extern "C" fn create_component_with_progress(
             std::ptr::null(),
             std::ptr::null(),
             false,
+            std::ptr::null(),
             out,
         )
     }
@@ -1085,19 +1205,20 @@ unsafe extern "C" fn create_component_with_consumer_progress(
             progress,
             std::ptr::null(),
             false,
+            std::ptr::null(),
             out,
         )
     }
 }
 
-unsafe extern "C" fn create_component_with_query_snapshots(
+unsafe extern "C" fn create_component_with_output_snapshots(
     state: *mut c_void,
     input: BorrowedBytes,
-    snapshots: *const abi::query_snapshots::QuerySnapshotsV1,
+    snapshots: *const abi::output_snapshots::OutputSnapshotsV1,
     out: *mut abi::ComponentHandle,
 ) -> Status {
     if snapshots.is_null() {
-        return transport::status_result(Err(Failure::protocol("missing query-snapshot service")));
+        return transport::status_result(Err(Failure::protocol("missing output-snapshot service")));
     }
     unsafe {
         create_component_with_services(
@@ -1108,6 +1229,7 @@ unsafe extern "C" fn create_component_with_query_snapshots(
             std::ptr::null(),
             snapshots,
             false,
+            std::ptr::null(),
             out,
         )
     }
@@ -1127,6 +1249,7 @@ unsafe extern "C" fn create_component_with_consumer(
             std::ptr::null(),
             std::ptr::null(),
             true,
+            std::ptr::null(),
             out,
         )
     }
@@ -1139,36 +1262,38 @@ unsafe fn create_component_with_services(
     admission: *const abi::services::SourceAdmissionV1,
     progress: *const abi::recovery::SourceProgressV1,
     consumer_progress: *const abi::consumer_progress::ConsumerProgressV1,
-    snapshots: *const abi::query_snapshots::QuerySnapshotsV1,
+    snapshots: *const abi::output_snapshots::OutputSnapshotsV1,
     consumer_bound: bool,
+    coordinator: *const abi::bootstrap_coordination::BootstrapCoordinatorHandle,
     out: *mut abi::ComponentHandle,
 ) -> Status {
     transport::status_boundary(|| {
         require_output(out)?;
         let state = unsafe { state_ref::<FactoryState>(state)? };
-        let request: CreateRequest =
-            wire::decode(unsafe { transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)? })
-                .map_err(Failure::from)?;
+        let request: CreateRequest = crate::activation_credentials::decode_create_request(unsafe {
+            transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)?
+        })
+        .map_err(Failure::from)?;
         let metadata = &state.plugin.definition.metadata.factories[state.index];
         let create = || -> anyhow::Result<Arc<Instance>> {
-            anyhow::ensure!(
-                request.implementation == metadata.implementation
-                    && request.configuration_version == metadata.configuration_version,
-                "native implementation/configuration version mismatch"
-            );
-            metadata.configuration.validate(&request.configuration)?;
-            if let Some(configuration) = state
-                .plugin
-                .definition
-                .configurations
-                .factories
-                .iter()
-                .find(|configuration| configuration.implementation == metadata.implementation)
-            {
-                configuration.details.validate(&request.configuration)?;
-            }
+            validate_create_request(state, &request)?;
+            let resolved = metadata.for_configuration(&request.configuration)?;
+            let metadata = &resolved;
             let control = ControlSender::default();
             let factory = &state.plugin.definition.factories[state.index];
+            let coordinator = if coordinator.is_null() {
+                None
+            } else {
+                anyhow::ensure!(
+                    factory.supports_bootstrap_coordination()
+                        && metadata.role == drasi_computation_contracts::ComponentRole::Source
+                        && admission.is_null()
+                        && snapshots.is_null()
+                        && !consumer_bound,
+                    "unsupported or conflicting source/bootstrap coordination"
+                );
+                Some(unsafe { bootstrap_coordination::source_lease(coordinator, state, &request)? })
+            };
             anyhow::ensure!(
                 factory.supports_consumer_progress() != consumer_progress.is_null(),
                 "native producer requires its negotiated consumer progress binding"
@@ -1216,6 +1341,9 @@ unsafe fn create_component_with_services(
                 );
                 let capability =
                     unsafe { crate::NativeConsumerProgress::from_borrowed(consumer_progress)? };
+                if let Some(coordinator) = &coordinator {
+                    coordinator.validate_consumers(capability.consumer_ids())?;
+                }
                 let reader = capability.reader();
                 anyhow::ensure!(
                     request
@@ -1225,23 +1353,31 @@ unsafe fn create_component_with_services(
                         && &request.id == reader.producer_id(),
                     "native consumer progress belongs to a different graph or producer"
                 );
-                (
-                    factory.create_with_consumer_progress(&request, control.clone(), capability)?,
-                    None,
-                    Some(reader),
-                )
+                let created = match &coordinator {
+                    Some(coordinator) => coordinator.create_source(
+                        &request,
+                        control.clone(),
+                        crate::SourceBootstrapLiveProgress::Shared(reader.clone()),
+                    )?,
+                    None => factory.create_with_consumer_progress(
+                        &request,
+                        control.clone(),
+                        capability,
+                    )?,
+                };
+                (created, None, Some(reader))
             } else if !snapshots.is_null() {
                 anyhow::ensure!(
                     admission.is_null()
                         && progress.is_null()
                         && !consumer_bound
-                        && factory.supports_query_snapshots()
+                        && factory.supports_output_snapshots()
                         && metadata.role == drasi_computation_contracts::ComponentRole::Sink,
-                    "unsupported native query-snapshot binding"
+                    "unsupported native output-snapshot binding"
                 );
-                let snapshots = unsafe { crate::NativeQuerySnapshots::from_borrowed(snapshots)? };
+                let snapshots = unsafe { crate::NativeOutputSnapshots::from_borrowed(snapshots)? };
                 (
-                    factory.create_with_query_snapshots(
+                    factory.create_with_output_snapshots(
                         &request,
                         control.clone(),
                         Some(snapshots),
@@ -1250,6 +1386,10 @@ unsafe fn create_component_with_services(
                     None,
                 )
             } else if progress.is_null() {
+                anyhow::ensure!(
+                    coordinator.is_none(),
+                    "source/bootstrap coordination requires actual live progress"
+                );
                 (
                     factory.create_with_admission(&request, control.clone(), service)?,
                     None,
@@ -1272,13 +1412,17 @@ unsafe fn create_component_with_services(
                         && &request.id != reader.component_id(),
                     "native progress belongs to a different graph or to the source itself"
                 );
-                (
-                    factory.create_with_progress(&request, control.clone(), capability)?,
-                    Some(reader),
-                    None,
-                )
+                let created = match &coordinator {
+                    Some(coordinator) => coordinator.create_source(
+                        &request,
+                        control.clone(),
+                        crate::SourceBootstrapLiveProgress::Single(reader.clone()),
+                    )?,
+                    None => factory.create_with_progress(&request, control.clone(), capability)?,
+                };
+                (created, Some(reader), None)
             };
-            let component = created.component;
+            let mut component = created.component;
             anyhow::ensure!(
                 consumer_progress.is_some()
                     || (component.base().consumer_progress_reader().is_none()
@@ -1287,7 +1431,7 @@ unsafe fn create_component_with_services(
                 "native consumer progress requires its negotiated service"
             );
             metadata.validate_instance(component.base().descriptor(), &request.id)?;
-            let role = match &component {
+            let role = match &mut component {
                 Component::Source(source) => {
                     anyhow::ensure!(
                         progress.is_some() || source.recovery_reader().is_none(),
@@ -1300,10 +1444,10 @@ unsafe fn create_component_with_services(
                 }
                 Component::Sink(sink) => {
                     anyhow::ensure!(
-                        metadata.completion == Some(sink.completion())
-                            && metadata.capabilities.snapshot == sink.supports_snapshot(),
-                        "native sink completion/snapshot capability mismatch"
+                        metadata.completion == Some(sink.completion()),
+                        "native sink completion mismatch"
                     );
+                    validate_snapshot_inputs(metadata, sink.as_mut())?;
                     let batching = sink.batching()?;
                     anyhow::ensure!(
                         factory.supports_sink_batching() || batching.is_none(),
@@ -1409,10 +1553,23 @@ unsafe fn create_component_with_services(
                     .map(Box::new)
                 })
                 .transpose()?;
+            let output_reads = output_reads::capture(
+                metadata,
+                component.base().descriptor(),
+                component.base().output_readers(),
+                state.plugin.codec.clone(),
+                damaged.clone(),
+            )?;
+            let source_schema = match &component {
+                Component::Source(source) => source
+                    .source_schema_reader()
+                    .map(source_schema::SchemaState::new),
+                _ => None,
+            };
             Ok(Arc::new(Instance {
                 metadata: InstanceMetadata {
                     descriptor: metadata.descriptor(request.id)?,
-                    capabilities: metadata.capabilities,
+                    capabilities: metadata.capabilities.clone(),
                 },
                 component: tokio::sync::Mutex::new(component),
                 factory: metadata.clone(),
@@ -1422,6 +1579,10 @@ unsafe fn create_component_with_services(
                 wakeup,
                 busy: AtomicBool::new(false),
                 running: AtomicBool::new(false),
+                activation_credentials_bound: request.activation_credentials_bound,
+                source_schema,
+                output_reads,
+                coordinator,
                 damaged,
                 admission: !admission.is_null(),
                 batching: factory.supports_sink_batching(),
@@ -1455,7 +1616,16 @@ static COMPONENT_VTABLE: abi::ComponentVTable = abi::ComponentVTable {
     begin: Some(begin),
 };
 unsafe extern "C" fn release_component(state: *mut c_void) {
-    transport::drop_boundary(|| unsafe { drop(Box::from_raw(state.cast::<Arc<Instance>>())) });
+    transport::drop_boundary(|| {
+        let instance = unsafe { Box::from_raw(state.cast::<Arc<Instance>>()) };
+        if let Some(schema) = &instance.source_schema {
+            schema.deactivate();
+        }
+        if let Some(reads) = &instance.output_reads {
+            reads.retire();
+        }
+        drop(instance);
+    });
 }
 unsafe extern "C" fn inspect_component(state: *mut c_void) -> Reply {
     transport::reply_boundary(|| {
@@ -1592,6 +1762,13 @@ unsafe extern "C" fn begin(
     transport::status_boundary(|| {
         require_output(out)?;
         let instance = unsafe { state_ref::<Arc<Instance>>(state)? }.clone();
+        if code == abi::operation::START
+            && input.len > crate::activation_credentials::MAX_CREDENTIAL_PAYLOAD_BYTES
+        {
+            return Err(Failure::protocol(
+                "activation credential payload exceeds the supported size",
+            ));
+        }
         let input = unsafe { copy_input(input)? };
         if (code == abi::operation::TRANSACT) == transaction.is_null() {
             return Err(Failure::protocol(
@@ -1603,7 +1780,7 @@ unsafe extern "C" fn begin(
         } else {
             Some(unsafe { RetainedTransaction::new(transaction)? })
         };
-        let c = instance.factory.capabilities;
+        let c = &instance.factory.capabilities;
         use abi::operation::*;
         if code != STOP && instance.damaged.is_damaged() {
             return Err(Failure::panicked());
@@ -1624,7 +1801,7 @@ unsafe extern "C" fn begin(
             }
             CONTINUE => c.continuations,
             WAKE_WAIT | WAKE_PENDING | ON_WAKEUP => c.wakeups,
-            SNAPSHOT => c.snapshot,
+            SNAPSHOT => !c.snapshot_inputs.is_empty(),
             CONTROL => c.control,
             TRANSACT => c.transactional,
             _ => false,
@@ -1650,6 +1827,14 @@ unsafe extern "C" fn begin(
             Some(BusyGuard(instance.clone()))
         };
         let runtime = io_runtime()?;
+        if code == STOP {
+            if let Some(schema) = &instance.source_schema {
+                schema.deactivate();
+            }
+            if let Some(reads) = &instance.output_reads {
+                reads.deactivate();
+            }
+        }
         let damaged = instance.damaged.clone();
         // Select before boxing so ordinary operations retain no consumer future.
         let operation = if instance.consumer.is_some() {
@@ -1693,6 +1878,11 @@ async fn execute(
     transaction: Option<RetainedTransaction>,
 ) -> anyhow::Result<Vec<u8>> {
     use abi::operation::*;
+    if code != STOP {
+        if let Some(coordinator) = &instance.coordinator {
+            coordinator.check_active()?;
+        }
+    }
     if code == CONTROL {
         instance
             .control_handler
@@ -1749,7 +1939,25 @@ async fn execute(
                 );
                 validate_position_policy(&component, &instance.input_position_policy)?;
             }
-            component.base_mut().start().await?;
+            if let Some(coordinator) = &instance.coordinator {
+                coordinator.starting()?;
+            }
+            if instance.activation_credentials_bound {
+                let credentials: crate::ActivationCredentials = wire::decode(&input)
+                    .map_err(|_| anyhow::anyhow!("invalid activation credential payload"))?;
+                credentials.validate()?;
+                component
+                    .base_mut()
+                    .start_with_credentials(credentials)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("native activation with credentials failed"))?;
+            } else {
+                anyhow::ensure!(
+                    input.is_empty(),
+                    "unbound native START requires an empty payload"
+                );
+                component.base_mut().start().await?;
+            }
             instance.running.store(true, Ordering::Release);
             if let Some(progress) = &instance.progress {
                 anyhow::ensure!(
@@ -1768,12 +1976,24 @@ async fn execute(
                 );
                 validate_position_policy(&component, &instance.input_position_policy)?;
             }
+            if let Some(schema) = &instance.source_schema {
+                schema.activate()?;
+            }
+            if let Some(reads) = &instance.output_reads {
+                reads.activate()?;
+            }
         }
         STOP => {
             instance.running.store(false, Ordering::Release);
+            if let Some(coordinator) = &instance.coordinator {
+                coordinator.stopping();
+            }
             component.base_mut().stop().await?;
             if let Some(consumer) = &instance.consumer {
                 consumer.clear()?;
+            }
+            if let Some(coordinator) = &instance.coordinator {
+                coordinator.stopped();
             }
         }
         NEXT => {
@@ -1781,6 +2001,9 @@ async fn execute(
                 unreachable!("validated role")
             };
             let output = source.next().await?;
+            if let Some(coordinator) = &instance.coordinator {
+                coordinator.check_active()?;
+            }
             if let Some(output) = &output {
                 wire::check_port(
                     &instance.metadata.descriptor,
@@ -1894,7 +2117,19 @@ async fn execute(
                 PortDirection::Input,
             )?;
             if code == SNAPSHOT {
-                sink.replace_snapshot(input).await?;
+                let port = input.port.clone();
+                anyhow::ensure!(
+                    instance
+                        .factory
+                        .capabilities
+                        .snapshot_inputs
+                        .contains(&port),
+                    "native sink input {port} has no registered snapshot capability"
+                );
+                let Some(consumer) = sink.snapshot_consumer(&port) else {
+                    anyhow::bail!("native sink input {port} does not support snapshot replacement");
+                };
+                consumer.replace_snapshot(input).await?;
             } else {
                 sink.handle(input).await?;
             }

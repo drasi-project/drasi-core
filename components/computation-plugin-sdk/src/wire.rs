@@ -7,8 +7,8 @@
 use crate::{abi, metadata::Capabilities};
 use drasi_computation_contracts::{
     decode_bounded_messagepack, encode_bounded_messagepack, BinaryEnvelopeCodec, ChangeEnvelope,
-    ComponentDescriptor, ComponentId, ImplementationIdentity, InputEnvelope, OutputEnvelope,
-    PortId, RecordId, Schema, SchemaDescriptor,
+    ComponentDescriptor, ComponentId, ImplementationIdentity, InputBinding, InputEnvelope,
+    OutputEnvelope, PortId, RecordId, Schema, SchemaDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, num::NonZeroUsize, sync::Arc};
@@ -48,6 +48,15 @@ pub struct CreateRequest {
     pub configuration_version: u32,
     pub configuration: serde_json::Value,
     pub scope: Option<Scope>,
+    /// The graph's declared incoming edges, supplied only to factories whose
+    /// capabilities set `binds_inputs`. Each names the receiving input port, the
+    /// producer's actual output port and that output's stream.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<InputBinding>,
+    /// Local SDK annotation set only by the negotiated activation-credentials
+    /// creation envelope. Not a new field in the frozen base wire request.
+    #[serde(skip)]
+    pub activation_credentials_bound: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

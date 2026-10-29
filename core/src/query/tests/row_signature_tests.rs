@@ -95,6 +95,7 @@ fn make_node(source: &str, id: &str, label: &str, props: serde_json::Value) -> S
 
 fn make_update(source: &str, id: &str, label: &str, props: serde_json::Value) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new(source, id),

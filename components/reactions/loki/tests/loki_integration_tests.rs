@@ -34,7 +34,7 @@ async fn test_loki_reaction_insert_update_delete() {
             RETURN s.id AS id, s.temperature AS temperature
             "#,
         )
-        .from_source("test-source")
+        .from_input("test-source")
         .auto_start(true)
         .build();
 

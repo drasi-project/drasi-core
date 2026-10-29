@@ -168,18 +168,13 @@ impl FactoryRegistry {
         &self,
         max_bytes: NonZeroUsize,
     ) -> GraphResult<crate::computation::v1::EnvelopeCodec> {
-        use crate::computation::v1::{
-            EnvelopeCodec, GraphChangeCodec, QueryChangeCodec, Schema, SchemaId,
-        };
+        use crate::computation::v1::{EnvelopeCodec, GraphChangeCodec, Schema, SchemaId};
         let mut schemas: BTreeMap<(SchemaId, u32), Arc<Schema>> = BTreeMap::new();
-        for schema in [GraphChangeCodec::schema(), QueryChangeCodec::schema()]
-            .into_iter()
-            .chain(
-                self.factories
-                    .values()
-                    .flat_map(|factory| factory.record_schemas()),
-            )
-        {
+        for schema in [GraphChangeCodec::schema()].into_iter().chain(
+            self.factories
+                .values()
+                .flat_map(|factory| factory.record_schemas()),
+        ) {
             let descriptor = schema.descriptor();
             let key = (descriptor.id().clone(), descriptor.version().value());
             if let Some(existing) = schemas.get(&key) {
@@ -465,6 +460,7 @@ impl DesiredTopology {
     }
 
     fn build_resolved(&self, mut bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
+        super::controller::reconcile::validate_definition(self)?;
         if self.version != 1 {
             return Err(topology("unsupported desired topology version"));
         }
@@ -553,7 +549,17 @@ impl DesiredTopology {
                 .connect(relationship.definition.clone(), pipe)
                 .relationship_policy(relationship.definition.clone(), relationship.policy.clone());
         }
+        if !bindings.components.is_empty()
+            || !bindings.pipes.is_empty()
+            || !bindings.resources.is_empty()
+        {
+            return Err(topology(
+                "unused external component, pipe or resource binding",
+            ));
+        }
         let mut graph = builder.build()?;
+        graph.order =
+            super::dependency_order(&graph.ids, &graph.snapshot.edges, &self.subscriptions)?;
         if self.control_connections.iter().any(|(from, to)| {
             from == to || !graph.ids.contains_key(from) || !graph.ids.contains_key(to)
         }) || self

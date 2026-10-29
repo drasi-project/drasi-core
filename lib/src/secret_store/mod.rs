@@ -37,20 +37,25 @@
 //! # Usage
 //!
 //! ## With a file-based secret store plugin
-//! ```ignore
-//! use drasi_secret_store_file::FileSecretStoreProvider;
+//! ```no_run
+//! use drasi_lib::{DrasiLib, SecretStoreProvider};
+//! use std::sync::Arc;
 //!
-//! let secret_store = FileSecretStoreProvider::new("/path/to/secrets.json").await?;
+//! async fn build_with_secrets(secret_store: Arc<dyn SecretStoreProvider>) -> anyhow::Result<DrasiLib> {
 //! let drasi = DrasiLib::builder()
-//!     .with_secret_store_provider(Arc::new(secret_store))
+//!     .with_secret_store_provider(secret_store)
 //!     .build()
 //!     .await?;
+//! Ok(drasi)
+//! }
 //! ```
 //!
 //! ## With the in-memory provider (testing)
-//! ```ignore
-//! use drasi_lib::secret_store::MemorySecretStoreProvider;
+//! ```no_run
+//! use drasi_lib::{DrasiLib, MemorySecretStoreProvider};
+//! use std::sync::Arc;
 //!
+//! # async fn example() -> anyhow::Result<()> {
 //! let store = MemorySecretStoreProvider::new()
 //!     .with_secret("DB_PASSWORD", "hunter2")
 //!     .with_secret("API_KEY", "abc123");
@@ -59,6 +64,9 @@
 //!     .with_secret_store_provider(Arc::new(store))
 //!     .build()
 //!     .await?;
+//! # drasi.shutdown().await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::Result;

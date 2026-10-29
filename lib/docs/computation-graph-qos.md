@@ -606,6 +606,16 @@ An acceptance-only reaction queue cannot masquerade as a handled sink.
 `CheckpointedSink` wraps actual handling and persists its logical query progress
 after the side effect. Arbitrary external effects remain at-least-once unless the
 destination supplies idempotency or an appropriate transaction.
+The wrapper preserves input/control binding, readiness, inspection and batching.
+Batch handling advances checkpoints one input at a time; it does not delegate a
+whole batch past the checkpoint boundary. It rejects inner delivery-retirement
+proof that excludes the wrapper's progress store. Permanent deprovisioning is
+unsupported without scoped deletion of that store: deleting only inner state
+would leave stale checkpoints capable of suppressing replay.
+
+For retained pipes, a generation revoked before commit rolls back staged data
+and permits rebinding after confirmed rollback. Cancellation, rollback failure
+or an ambiguous commit still fences the owner until cleanup/reconstruction.
 
 On persistent reopen, compatible channel-definition changes preserve existing
 consumer progress. New consumers start at the retained beginning, current head,

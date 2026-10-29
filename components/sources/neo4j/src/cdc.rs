@@ -167,7 +167,7 @@ pub fn parse_source_change(
         if operation == "c" || operation == "create" {
             Ok(Some(SourceChange::Insert { element }))
         } else {
-            Ok(Some(SourceChange::Update { element }))
+            Ok(Some(SourceChange::update(element)))
         }
     } else if event_type == "r" || event_type == "relationship" {
         if is_delete {
@@ -193,7 +193,7 @@ pub fn parse_source_change(
         if operation == "c" || operation == "create" {
             Ok(Some(SourceChange::Insert { element }))
         } else {
-            Ok(Some(SourceChange::Update { element }))
+            Ok(Some(SourceChange::update(element)))
         }
     } else {
         Ok(None)

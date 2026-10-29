@@ -2,6 +2,12 @@
 
 A Drasi reaction plugin that invokes MS SQL Server stored procedures when continuous query results change.
 
+The independent [native stored-procedure sink](../../computation-plugins/sinks/storedproc-mssql/README.md)
+reuses this reaction's extracted renderer/routing/binding logic, but awaits
+execution and propagates failures rather than enqueueing legacy work. Its
+README documents unsafe-retry removal, timeout limits and the still-blocked
+real SQL Server qualification gate.
+
 ## Overview
 
 The MS SQL Server Stored Procedure reaction enables you to:
@@ -10,6 +16,11 @@ The MS SQL Server Stored Procedure reaction enables you to:
 - Handle multiple queries with a single reaction
 - Automatically retry failed procedure calls with exponential backoff
 - Configure connection parameters and timeouts
+
+SQL rendering, route selection and Tiberius parameter binding are shared through
+`drasi-mssql-common`'s `sql` feature. The legacy reaction retains its existing
+credential resolution, retry and delivery behavior; sharing these helpers does
+not change its completion guarantees.
 
 ## Installation
 

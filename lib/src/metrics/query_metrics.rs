@@ -16,6 +16,25 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+/// Progress read from a running query's actual input and output publications.
+///
+/// Input sequences describe committed logical input, not transport receipts.
+/// Output is at least as recent as the reported input, but may have advanced
+/// further. Neither sequence proves destination delivery or that future
+/// scheduled work is finished. Missing/unready queries must not be represented
+/// as zero progress.
+#[derive(Debug, Clone)]
+pub struct QueryProgressMetricsSnapshot {
+    pub query_id: String,
+    pub component_generation: u64,
+    pub component_operation: u64,
+    pub output_generation: u64,
+    pub config_hash: u64,
+    pub persistent: bool,
+    pub input_sequences: std::collections::BTreeMap<crate::computation::v1::SourceProgressKey, u64>,
+    pub output_sequence: u64,
+}
+
 /// Lock-free metrics for a single query's output state.
 ///
 /// Tracks outbox size/bounds, sequence advance rate, live result cardinality,

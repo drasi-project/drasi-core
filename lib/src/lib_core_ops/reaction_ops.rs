@@ -80,6 +80,7 @@ impl DrasiLib {
         metadata: HashMap<String, String>,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         let id = reaction.id().to_owned();
         self.computation_runtime
             .add_reaction(Box::new(reaction), metadata, self.is_running().await)
@@ -498,7 +499,7 @@ mod tests {
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
-                    .from_source("test-source")
+                    .from_input("test-source")
                     .auto_start(false)
                     .build(),
             )

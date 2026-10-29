@@ -128,12 +128,16 @@ impl EnvelopeSink for Sink {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
-    fn supports_snapshot(&self) -> bool {
-        true
+    fn snapshot_consumer(&mut self, _port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        Some(self)
     }
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
         self.applied.apply(&input.envelope, false)
     }
+}
+
+#[async_trait]
+impl SnapshotConsumer for Sink {
     async fn replace_snapshot(&mut self, input: InputEnvelope) -> Result<()> {
         self.applied.apply(&input.envelope, true)
     }

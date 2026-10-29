@@ -24,7 +24,7 @@ component factory.
 These remain statically linked native `ComponentFactory` implementations. The
 endpoint crates do **not** export a C plugin ABI or imply that arbitrary host-owned
 index/TLS resources can cross that ABI. The independently versioned bridge wire
-is **1**, containing standard binary computation envelopes **2**.
+is **1**, containing standard binary computation envelopes **1**.
 
 ## Configuration and registration
 
@@ -40,13 +40,15 @@ shows all configuration keys:
   "receiver_endpoint": "from-plant",
   "stream": "analysis/ingress",
   "peer_stream": "plant/changes",
-  "schema": "graph-change",
+  "delivery": "events",
   "profile": "durable",
   "failure_scope": "processRestart",
   "namespace": {
     "version": 1,
-    "source_prefixes": ["plant/"],
-    "query_prefixes": ["plant/"]
+    "source_prefixes": [
+      "plant/",
+      "drasi.output/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ]
   },
   "transport": {
     "kind": "unix",
@@ -71,9 +73,19 @@ shows all configuration keys:
 The sender exchanges `stream` and `peer_stream`; the rest of its semantic
 configuration is identical. `stream` must equal the local graph binding.
 `failure_scope` and `limits` are optional, with defaults shown. All other fields
-are required. `profile` is explicitly `volatile` or `durable`. Supported schemas
-are `graph-change`, `query-change`, and `source-transaction`, with the **exact**
-standard schema descriptor, not just matching names or fingerprints.
+are required. `profile` is explicitly `volatile` or `durable`. Every link uses
+the **exact** standard graph schema descriptor, not just matching names or
+fingerprints. `delivery` is `events` or `complete-transactions`: it selects
+behavior, never a data schema. Source, query, transformer and source-transaction
+data are all ordinary graph data; there is no separate query or transaction
+schema (`query-change`, `graph-change`, `source-transaction`, the old `schema`
+field and `query_prefixes` reject as unknown values or fields, with no alias or
+compatibility mode). `complete-transactions` requires every frame to carry its
+own current, valid completion marker (scoped to that frame's change set, with
+the operation count and commit position) and enforces the transaction limits and
+source namespace; `events` accepts ordinary batches and validates any marker
+that is present, so an unchanged relay keeps its completeness. A marker
+inherited by a different change set is history, not completeness.
 
 `BridgeConfig::specification(ComponentRole::Source/Sink)` builds the normal
 component specification, descriptor and port requirements. Add these dependencies:
@@ -175,30 +187,65 @@ and logical progress remain in inherited context/lineage; a bounded
 `drasi.bridge.origin.v1` annotation identifies the admission.
 
 Namespace version one is an **explicit identity mapping**, not automatic
-rewriting. Source IDs, relation endpoints and element references must start with
-one of `source_prefixes`; query IDs must start with `query_prefixes`. Prefixes
-end with `/`, are limited to 256 bytes, and contain at most 16 entries each.
-Hosts must assign disjoint authority prefixes when independent producers could
+rewriting. Every element namespace (`ElementReference::source_id`) — of a record
+key, relation endpoint, or reference embedded in a value — must match an entry of
+`source_prefixes`. That single list covers physical source namespaces and derived
+output dataset namespaces alike, because both are graph element namespaces. An
+entry ending in `/` is a prefix requiring at least one more character; any other
+entry is one exact namespace. Entries are limited to 256 bytes, with at most 16.
+
+A query, transformer or other derived output publishes elements in the dataset
+namespace `drasi.output/<SHA256(scope, graph, component, port)>`
+(`output_identity::dataset_namespace`), not its query ID. Callers compute the
+actual namespace for each exported output and list it **exactly**, next to the
+physical source prefixes, for example
+`["plant/", "drasi.output/<64 hex digits>"]`. Do not list `drasi.output/` as a
+prefix unless every present and future output of every graph is intended to
+cross. Older `query_prefixes` configurations reject; translate query IDs into
+exact dataset namespaces rather than copying the IDs. Prefix checks still apply
+recursively to embedded references.
+Hosts must assign disjoint authority entries when independent producers could
 otherwise collide. IDs already carry their namespace on both sides. Overlap
 resolution, arbitrary renaming and non-identity namespace mappings are not
 implemented; do not deploy overlapping IDs and assume the bridge fixes them.
 Both peers negotiate and persist the exact namespace contract.
 
-Portable graph records, ordinary query rows (including nested scalar/container,
-temporal, element/reference and aggregation values), and complete source
-transactions are supported. Query executable-expression/awaiting values,
-scheduled notifications, query snapshot/progress control frames and custom
-plugin schemas reject. Decoding never discovers a plugin or calls a
-child-supplied executable validator.
+Portable graph records (canonical full element images, element patches including
+property removals, and partial before-images) from sources, queries and
+transformers, and complete source transactions, are supported. Query output
+needs no query metadata to cross: a result node is an ordinary node of its
+dataset namespace, and the same canonical record validation applies to it as to
+any source record. Graph records carry shared values,
+including expressions and awaiting values, as inert data: they are walked for
+limits and embedded references, never executed. Event-local graph controls such
+as scheduled notifications or `FuturesDue` on the current envelope reject; a
+control kept only as lineage provenance is not a command, so ordinary data derived
+from such an input crosses normally. Query snapshot and progress-only frames are
+explicit recovery controls: they are recognized from the current envelope's own
+scoped query projection, never from the schema or an inherited annotation, and
+reject, as do custom plugin schemas. A complete source transaction passes the
+same record guards and shared-value limits as any other graph data.
+Decoding never discovers a plugin or calls a child-supplied executable validator.
 
-Before standard validation, allocation-free bincode preflight checks nested
-record values and references. An iterative MessagePack preflight bounds framing
-and collection counts before serde allocations. Limits cover operations,
-complete-transaction changes, total values, identifiers, opaque fields,
-annotations and lineage; nesting is at most 32 for typed values and 24 for the
-wire. Excess depth rejects **before constructing recursively dropped objects**.
-Standard executable validators still run; they are not relaxed or replaced.
-The wire/probe and typed payload versions are deliberately pinned together.
+Graph records are canonical MessagePack (`ElementImage`, `ElementPatch`,
+`ElementBeforeImage`, MessagePack element-reference keys). Before standard
+validation, an iterative MessagePack preflight bounds each record's framing,
+collection counts, node budget (four times `max_values`) and container nesting
+(`8 + 6 × max_depth`, which covers the wrapper variants around at most
+`max_depth` value levels) before serde allocates. Only then are the shared
+`ElementImage`, `ElementPatch` (including its set/remove overlap check) and
+`ElementBeforeImage` codecs used to decode the record, which is walked for value,
+depth, string and namespace limits, including element references nested in rich
+values and expressions; its key must name the same element. An iterative envelope
+preflight bounds framing and collection counts; record payloads are opaque to it
+and are scanned separately. Limits cover operations, complete-transaction
+changes, total values, identifiers, opaque fields, annotations and lineage;
+control payloads and historical controls are bounded only by the configured
+frame byte budget. Nested values are at most 32 levels and the envelope wire 24
+containers. Excess depth rejects **before constructing recursively dropped
+objects**. Standard executable validators still run; they are not relaxed or
+replaced. The wire/probe and typed payload versions are deliberately pinned
+together.
 
 ## Transports and independently serviceable control
 
@@ -376,8 +423,16 @@ protocol::tests::exact_encoder_limit_is_enforced_before_writing
 codec::portable_standard_schemas_preserve_exact_binary_context_and_transactions
 codec::namespace_and_wire_versions_do_not_load_or_substitute_a_validator
 codec::hostile_messagepack_is_rejected_iteratively_before_deserialization
-codec::opaque_bincode_depth_and_lineage_are_checked_before_recursive_construction_or_drop
+codec::opaque_messagepack_depth_and_lineage_are_checked_before_recursive_construction_or_drop
+codec::hostile_fixture_is_the_canonical_node_encoding_and_depth_limits_are_semantic
 codec::exact_envelope_byte_limit_and_annotation_limits_reject_next_unit
+codec::rich_canonical_patch_partial_and_removal_records_cross_exactly
+codec::rich_graph_values_keep_namespaces_and_value_limits
+codec::expressions_and_awaiting_values_are_inert_graph_data_with_limits
+codec::current_graph_controls_are_rejected_not_silently_ignored
+codec::historical_controls_are_provenance_bounded_only_by_the_frame_budget
+codec::rich_source_transaction_values_keep_validation_and_namespaces
+codec::complete_transaction_markers_are_scoped_to_their_own_change_set
 integration::factories_exchange_each_portable_schema_between_two_normal_instances
 integration::durable_factories_use_real_acknowledged_pipes_and_preserve_complete_transactions
 integration::full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo

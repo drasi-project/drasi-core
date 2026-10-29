@@ -121,6 +121,7 @@ async fn query_retains_bootstrap_cleanup_across_cancelled_and_timed_out_stop() {
 impl ComputationBootstrapProvider for InvalidWatermarks {
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
         let watermark = || BootstrapWatermark {
+            producer: None,
             stream: StreamId::try_new("source/out").expect("stream"),
             source_id: None,
             sequence: 1,
@@ -184,7 +185,7 @@ fn envelope(sequence: u64, name: &str, update: bool) -> ChangeEnvelope {
     };
     GraphChangeCodec::encode_change(
         if update {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         } else {
             SourceChange::Insert { element }
         },
@@ -206,6 +207,7 @@ impl ComputationBootstrapProvider for Bootstrap {
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter(changes)),
             watermarks: vec![BootstrapWatermark {
+                producer: None,
                 stream: StreamId::try_new("source/out").expect("stream"),
                 source_id: None,
                 sequence: 1,
@@ -301,11 +303,13 @@ struct ConsumerState {
     rows: std::sync::Mutex<std::collections::HashMap<RecordId, Record>>,
     snapshots: AtomicUsize,
     fail_snapshot: std::sync::atomic::AtomicBool,
+    handled: AtomicUsize,
 }
 
 struct RecoverySink {
     descriptor: ComponentDescriptor,
     state: Arc<ConsumerState>,
+    batching: bool,
 }
 
 impl RecoverySink {
@@ -322,6 +326,7 @@ impl RecoverySink {
             )
             .expect("descriptor"),
             state,
+            batching: false,
         }
     }
     fn apply(&self, input: &ChangeEnvelope, reset: bool) {
@@ -357,16 +362,74 @@ impl ComputationComponent for RecoverySink {
 
 #[async_trait]
 impl EnvelopeSink for RecoverySink {
+    fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {
+        Ok(self.batching.then_some(SinkBatching {
+            max_inputs: 4,
+            max_operations: 16,
+            max_bytes: 65536,
+            max_delay_ms: 10,
+        }))
+    }
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
-    fn supports_snapshot(&self) -> bool {
-        true
+    fn snapshot_consumer(&mut self, _port: &PortId) -> Option<&mut dyn SnapshotConsumer> {
+        Some(self)
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        self.state.handled.fetch_add(1, Ordering::SeqCst);
         self.apply(&input.envelope, false);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn checkpointed_batches_record_each_handled_prefix_and_deduplicate_replay() {
+    let mut producer = query(
+        Arc::new(InMemoryComputationProvider),
+        "MATCH (n:Person) RETURN n.name AS name",
+        QueryRecoveryPolicy::Strict,
+        false,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    producer.start().await.unwrap();
+    let mut inputs = Vec::new();
+    for (sequence, name) in [(2, "Alicia"), (3, "Carol")] {
+        let outputs = producer
+            .transform(InputEnvelope {
+                port: PortId::try_new("in").unwrap(),
+                envelope: envelope(sequence, name, true),
+            })
+            .await
+            .unwrap();
+        inputs.extend(outputs.into_iter().map(|output| InputEnvelope {
+            port: PortId::try_new("in").unwrap(),
+            envelope: output.envelope,
+        }));
+    }
+    assert_eq!(inputs.len(), 2);
+    let state = Arc::new(ConsumerState::default());
+    let mut inner = RecoverySink::new(state.clone());
+    inner.batching = true;
+    let progress = Arc::new(MemoryConsumerProgress::default());
+    let mut sink = CheckpointedSink::new(Box::new(inner), progress.clone()).unwrap();
+    let retry = inputs
+        .iter()
+        .map(|input| InputEnvelope {
+            port: input.port.clone(),
+            envelope: input.envelope.clone(),
+        })
+        .collect();
+    sink.handle_batch(inputs).await.unwrap();
+    assert_eq!(progress.load("query").await.unwrap().unwrap().sequence, 2);
+    sink.handle_batch(retry).await.unwrap();
+    assert_eq!(state.handled.load(Ordering::SeqCst), 2);
+    producer.stop().await.unwrap();
+}
+
+#[async_trait]
+impl SnapshotConsumer for RecoverySink {
     async fn replace_snapshot(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         if self.state.fail_snapshot.swap(false, Ordering::SeqCst) {
             anyhow::bail!("snapshot handler failed");
@@ -931,6 +994,207 @@ mod persistent {
         calls: AtomicUsize,
     }
 
+    struct PendingSnapshot {
+        rows: std::sync::Mutex<Vec<(&'static str, &'static str)>>,
+        pending: std::sync::atomic::AtomicBool,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ComputationBootstrapProvider for PendingSnapshot {
+        fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
+            Ok(self.pending.load(Ordering::Acquire))
+        }
+        async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+            self.pending.store(false, Ordering::Release);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let rows = self.rows.lock().unwrap().clone();
+            let changes = rows
+                .into_iter()
+                .enumerate()
+                .map(|(index, (id, name))| {
+                    GraphChangeCodec::encode_change(
+                        SourceChange::Insert {
+                            element: Element::Node {
+                                metadata: ElementMetadata {
+                                    reference: ElementReference::new("people", id),
+                                    labels: Arc::from([Arc::from("Person")]),
+                                    effective_from: 1000,
+                                },
+                                properties: ElementPropertyMap::from(
+                                    serde_json::json!({"name": name}),
+                                ),
+                            },
+                        },
+                        StreamId::try_new("source/out").unwrap(),
+                        index as u64 + 1,
+                        None,
+                    )
+                    .map_err(anyhow::Error::from)
+                })
+                .collect::<Vec<_>>();
+            Ok(ComputationBootstrapSnapshot {
+                changes: Box::pin(futures::stream::iter(changes)),
+                watermarks: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_durable_snapshot_requires_reset_and_removes_offline_deleted_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let indexes = provider(directory.path());
+        let bootstrap = Arc::new(PendingSnapshot {
+            rows: std::sync::Mutex::new(vec![("one", "Alice"), ("two", "Bob")]),
+            pending: std::sync::atomic::AtomicBool::new(true),
+            calls: AtomicUsize::new(0),
+        });
+        let make = |recovery| {
+            let indexes = indexes.clone();
+            let bootstrap = bootstrap.clone();
+            async move {
+                ContinuousQueryTransformer::new_with_options(
+                    definition("MATCH (n:Person) RETURN n.name AS name"),
+                    indexes,
+                    QueryOptions {
+                        recovery,
+                        publication: QueryPublicationMode::Atomic,
+                    },
+                )
+                .await
+                .unwrap()
+                .with_bootstrap(bootstrap)
+            }
+        };
+        let mut first = make(QueryRecoveryPolicy::Strict).await;
+        first.start().await.unwrap();
+        assert_eq!(first.results().snapshot().unwrap().rows.len(), 2);
+        first
+            .transform(InputEnvelope {
+                port: PortId::try_new("in").unwrap(),
+                envelope: envelope(3, "Alicia", true),
+            })
+            .await
+            .unwrap();
+        let before = first.results().snapshot().unwrap();
+        first.stop().await.unwrap();
+        drop(first);
+        *bootstrap.rows.lock().unwrap() = vec![("one", "Carol")];
+        bootstrap.pending.store(true, Ordering::Release);
+        let mut strict = make(QueryRecoveryPolicy::Strict).await;
+        let error = strict.start().await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<QueryRecoveryError>(),
+            Some(QueryRecoveryError::SourceResetRequired)
+        ));
+        assert_eq!(bootstrap.calls.load(Ordering::SeqCst), 1);
+        strict.stop().await.unwrap();
+        drop(strict);
+        let mut reset = make(QueryRecoveryPolicy::AutoReset).await;
+        reset.start().await.unwrap();
+        let after = reset.results().snapshot().unwrap();
+        assert!(after.generation > before.generation);
+        assert_eq!(after.as_of_sequence, before.as_of_sequence);
+        assert_eq!(after.rows.len(), 1);
+        assert_eq!(
+            QueryChangeCodec::decode_row(after.rows.values().next().unwrap())
+                .unwrap()
+                .values
+                .get("name"),
+            Some(&drasi_core::evaluation::variable_value::VariableValue::from("Carol")),
+        );
+        reset.stop().await.unwrap();
+        drop(reset);
+        let mut reopened = make(QueryRecoveryPolicy::Strict).await;
+        reopened.start().await.unwrap();
+        let restored = reopened.results().snapshot().unwrap();
+        assert_eq!(restored.generation, after.generation);
+        assert_eq!(restored.rows, after.rows);
+        assert_eq!(bootstrap.calls.load(Ordering::SeqCst), 2);
+        reopened.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreign_output_ownership_is_not_reset_even_with_auto_reset() {
+        let directory = tempfile::tempdir().unwrap();
+        let indexes = provider(directory.path());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let text = "MATCH (n:Person) RETURN n.name AS name";
+        let mut first = query(
+            indexes.clone(),
+            text,
+            QueryRecoveryPolicy::Strict,
+            false,
+            calls.clone(),
+        )
+        .await;
+        first.start().await.unwrap();
+        first
+            .transform(InputEnvelope {
+                port: PortId::try_new("in").unwrap(),
+                envelope: envelope(2, "Alicia", true),
+            })
+            .await
+            .unwrap();
+        first.stop().await.unwrap();
+        drop(first);
+        let foreign_bytes = {
+            let resources = indexes.create_indexes("recovery", "query").await.unwrap();
+            let outbox = resources.outbox_writer().unwrap();
+            let retained = outbox.read_from("query", 0).await.unwrap();
+            let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).unwrap());
+            codec.register_schema(GraphChangeCodec::schema()).unwrap();
+            let mut output = codec.decode(&retained[0].1).unwrap();
+            let identity = QueryRecoveryIdentity::from_envelope(&output).unwrap();
+            QueryRecoveryIdentity::try_new(
+                "foreign-graph",
+                ComponentId::try_new("query").unwrap(),
+                identity.configuration_hash(),
+                identity.incarnation(),
+            )
+            .unwrap()
+            .annotate(&mut output, &ComponentId::try_new("query").unwrap())
+            .unwrap();
+            let bytes = codec.encode(&output).unwrap();
+            resources.indexes().session_control.begin().await.unwrap();
+            outbox.append("query", retained[0].0, &bytes).await.unwrap();
+            resources.indexes().session_control.commit().await.unwrap();
+            resources.cleanup().unwrap().shutdown().await.unwrap();
+            bytes
+        };
+        for (policy, requested) in [
+            (QueryRecoveryPolicy::Strict, text),
+            (QueryRecoveryPolicy::AutoReset, text),
+            (
+                QueryRecoveryPolicy::AutoReset,
+                "MATCH (n:Person) RETURN n.name AS name, 1 AS marker",
+            ),
+        ] {
+            let mut restored =
+                query(indexes.clone(), requested, policy, false, calls.clone()).await;
+            let error = restored.start().await.unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<QueryRecoveryError>(),
+                Some(QueryRecoveryError::OwnershipMismatch)
+            ));
+            restored.stop().await.unwrap();
+            drop(restored);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let resources = indexes.create_indexes("recovery", "query").await.unwrap();
+            assert_eq!(
+                resources
+                    .outbox_writer()
+                    .unwrap()
+                    .read_from("query", 0)
+                    .await
+                    .unwrap()[0]
+                    .1,
+                foreign_bytes
+            );
+            resources.cleanup().unwrap().shutdown().await.unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn failed_snapshot_releases_published_storage_views_before_same_object_restart() {
         let temp = tempfile::tempdir().expect("temp");
@@ -1008,6 +1272,7 @@ mod persistent {
             Ok(ComputationBootstrapSnapshot {
                 changes: Box::pin(futures::stream::iter(changes)),
                 watermarks: vec![BootstrapWatermark {
+                    producer: None,
                     stream: StreamId::try_new("source/out")?,
                     source_id: Some("people".into()),
                     sequence: 17,

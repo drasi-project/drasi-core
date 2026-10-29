@@ -24,6 +24,11 @@ The **relabel** middleware processes `SourceChange` events (`Insert`, `Update`, 
 5. **Error Handling**
    Invalid configurations (empty `labelMappings` or malformed JSON) will cause middleware creation to fail.
 
+## Property Removals and Replacements
+
+Only labels are rewritten. An update's `removed_properties` and a replacement's full
+element semantics pass through unchanged.
+
 ## Configuration Options
 
 | Field          | Type                          | Required | Default  | Description                                                                                      |

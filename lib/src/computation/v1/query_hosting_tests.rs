@@ -114,7 +114,7 @@ fn input(sequence: u64, update: bool, name: &str) -> anyhow::Result<InputEnvelop
         properties: ElementPropertyMap::from(serde_json::json!({ "name": name })),
     };
     let change = if update {
-        SourceChange::Update { element }
+        SourceChange::update(element)
     } else {
         SourceChange::Insert { element }
     };

@@ -14,17 +14,27 @@
 
 #![allow(unexpected_cfgs)]
 
-//! Shared types for MS SQL source and bootstrap plugins
+//! Shared SQL Server connection, mapping and command helpers.
 //!
 //! This crate contains configuration, connection, error, and type conversion
-//! types used by both `drasi-source-mssql` and `drasi-bootstrap-mssql`.
+//! types shared by SQL Server sources and bootstrap providers. The `sql`
+//! feature also exposes stored-procedure rendering, routing and parameter
+//! binding. These use shared value types and contracts, not a query engine or
+//! component runtime. Select `native-tls` (default) or `rustls` for connections.
 
 pub mod config;
+pub mod decoder;
 pub mod connection;
 pub mod error;
 pub mod keys;
 pub mod lsn;
 pub mod types;
+
+#[cfg(feature = "sql")]
+pub mod sql;
+
+#[cfg(feature = "native")]
+pub mod native;
 
 // Re-export main types
 pub use config::{

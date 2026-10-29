@@ -626,12 +626,18 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
                 )]),
             };
             let mut invalid = specification.clone();
+            let schema = GraphChangeCodec::schema();
             invalid.descriptor = ComponentDescriptor::try_new(
                 ComponentId::try_new("source")?,
                 vec![PortDescriptor::new(
                     PortId::try_new("out")?,
                     PortDirection::Output,
-                    GraphChangeCodec::schema().descriptor().clone(),
+                    SchemaDescriptor::try_new(
+                        SchemaId::try_new("not-graph-change")?,
+                        schema.descriptor().version(),
+                        schema.descriptor().encoding(),
+                        schema.descriptor().definition().clone(),
+                    )?,
                     PipeRequirements::default(),
                 )],
             )?;

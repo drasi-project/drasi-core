@@ -94,7 +94,7 @@ async fn snapshot_then_live(
             pipeline = pipeline.query_bootstrap(query, bootstrap)?.query(
                 Query::cypher(query)
                     .query("MATCH (n:items) RETURN n.id AS id,n.value AS value")
-                    .from_source("source")
+                    .from_input("source")
                     .enable_bootstrap(true)
                     .build(),
             );

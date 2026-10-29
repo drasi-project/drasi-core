@@ -2053,7 +2053,12 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
             original.id().clone(),
             ChangeSet::try_new(
                 original.changes().id().clone(),
-                QueryChangeCodec::schema().descriptor().clone(),
+                SchemaDescriptor::try_new(
+                    SchemaId::try_new("test.wrong-output-schema")?,
+                    SchemaVersion::try_new(1)?,
+                    "test-wrong-output",
+                    Bytes::from_static(b"wrong-output-schema"),
+                )?,
                 vec![],
             )?,
             original.system().as_ref().clone(),
@@ -2063,7 +2068,16 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
             .await
             .expect_err("wrong output schema");
         assert!(
-            matches!(error, PipeError::Backend(ref error) if error.downcast_ref::<GraphError>().is_some())
+            matches!(
+                error,
+                PipeError::Backend(ref error)
+                    if matches!(
+                        error.downcast_ref::<EnvelopeCodecError>(),
+                        Some(EnvelopeCodecError::Schema { id, version })
+                            if id == "test.wrong-output-schema" && *version == 1
+                    )
+            ),
+            "{error:?}"
         );
         assert_eq!(channel.progress().await?.accepted, 0);
         for sequence in 1..=2 {

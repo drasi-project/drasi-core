@@ -44,4 +44,4 @@ uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"
-tokio = { version = "1.0", features = ["rt", "macros"] }
+tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "macros"] }

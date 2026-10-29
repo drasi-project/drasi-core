@@ -48,6 +48,75 @@ impl crate::computation::v1::EnvelopeSink for Sink {
 fn id(value: &str) -> ComponentId {
     ComponentId::try_new(value).unwrap()
 }
+
+struct StartingService {
+    descriptor: ComponentDescriptor,
+    hang: bool,
+    stops: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl crate::computation::v1::ComputationComponent for StartingService {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        if self.hang {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::computation::v1::ComputationService for StartingService {
+    async fn run(&mut self) -> anyhow::Result<()> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn activation_deadline_is_local_and_every_attempted_owner_is_cleaned_up() {
+    let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut builder = ComputationGraph::builder("bounded-activation")
+        .activation_timeout(std::time::Duration::from_secs(2));
+    for (name, hang) in [("held", true), ("healthy", false)] {
+        builder = builder.service(Box::new(StartingService {
+            descriptor: ComponentDescriptor::try_new(id(name), Vec::new()).unwrap(),
+            hang,
+            stops: stops.clone(),
+        }));
+    }
+    let mut graph = builder.build().unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let started = tokio::time::Instant::now();
+        let report = control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+        let StartOutcome::StartFailed(failure) = &report.components[&id("held")] else {
+            panic!("hung activation must have a per-component failure");
+        };
+        assert!(failure.cause.to_string().contains("activation timeout"));
+        assert_eq!(
+            control.observed().components[&id("healthy")].lifecycle,
+            ComponentLifecycle::Running
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(2));
+        control.cancel();
+    });
+    assert!(result.is_err());
+    assert_eq!(stops.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
 fn descriptor(value: &str, output: bool) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
         id(value),
@@ -65,6 +134,251 @@ fn descriptor(value: &str, output: bool) -> ComponentDescriptor {
         )],
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn busy_start_group_does_not_drop_unrelated_start_requests() {
+    let (graph, mut operations, _, _, _) = fixture().await;
+    let source = graph.ids[&id("source")];
+    let sink = graph.ids[&id("sink")];
+    update(&graph, |state| {
+        state.components.get_mut(&id("source")).unwrap().lifecycle = ComponentLifecycle::Failed;
+        state.components.get_mut(&id("sink")).unwrap().lifecycle = ComponentLifecycle::Running;
+    });
+    let mut held = graph.components[source].take().unwrap();
+    held.attempted = true;
+    let (reply, mut blocked) = oneshot::channel();
+    operations.begin_start(&graph, BTreeSet::from([source]), Some(reply), true);
+    let (reply, independent) = oneshot::channel();
+    operations.begin_start(&graph, BTreeSet::from([sink]), Some(reply), true);
+    operations.advance_start(&graph).unwrap();
+    assert!(matches!(
+        blocked.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        independent.await.unwrap().unwrap().summary,
+        OperationSummary::Completed
+    );
+    assert_eq!(operations.starting.len(), 1);
+    drop(held);
+    operations.advance_start(&graph).unwrap();
+    assert!(blocked.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn deferred_binding_waits_for_a_busy_endpoint_without_failing_the_controller() {
+    let (mut graph, mut operations, mut controls, _, _) = fixture().await;
+    let edge = graph.snapshot.edges[0].definition.clone();
+    update(&graph, |state| {
+        state.relationships.get_mut(&edge).unwrap().binding = BindingState::Declared;
+    });
+    let held = graph.components[graph.ids[&id("source")]].take().unwrap();
+    let (_cancel, mut cancel) = watch::channel(false);
+    let (_sender, mut commands) = command_channel();
+    bind_ready_dependencies(
+        &mut graph,
+        &mut operations,
+        &mut controls,
+        &mut cancel,
+        &mut commands,
+    )
+    .await
+    .unwrap();
+    assert!(operations.bindings_dirty);
+    assert!(graph.observed().relationships[&edge].failure.is_none());
+    drop(held);
+    bind_ready_dependencies(
+        &mut graph,
+        &mut operations,
+        &mut controls,
+        &mut cancel,
+        &mut commands,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        graph.observed().relationships[&edge].binding,
+        BindingState::Bound
+    );
+}
+
+#[tokio::test]
+async fn stale_completion_keeps_the_current_operation_and_controller_alive() {
+    let (graph, mut operations, controls, _, _) = fixture().await;
+    let index = graph.ids[&id("source")];
+    let generation = graph.components[index].generation;
+    operations
+        .complete(
+            &graph,
+            Completion {
+                index,
+                generation,
+                epoch: OperationEpoch(99),
+                operation: Operation::Start,
+                result: Ok(Ok(())),
+            },
+            &controls,
+        )
+        .unwrap();
+    let (abort, _) = AbortHandle::new_pair();
+    operations.active.insert(
+        index,
+        Active {
+            epoch: OperationEpoch(2),
+            operation: Operation::Start,
+            abort,
+            quiesce: watch::channel(false).0,
+            outputs: Vec::new(),
+            reply: None,
+        },
+    );
+    operations
+        .complete(
+            &graph,
+            Completion {
+                index,
+                generation,
+                epoch: OperationEpoch(1),
+                operation: Operation::Start,
+                result: Ok(Ok(())),
+            },
+            &controls,
+        )
+        .unwrap();
+    assert_eq!(operations.active[&index].epoch, OperationEpoch(2));
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_changed_impact_without_changing_revision() {
+    let (mut graph, mut operations, mut controls, _, _) = fixture().await;
+    let changes = vec![DesiredMutation::Restart(GraphSelection::Exact(vec![id("source")]))];
+    let supplied = preview(&graph, changes.clone()).unwrap();
+    assert!(supplied.rebind.is_empty());
+    update(&graph, |state| {
+        state.components.get_mut(&id("source")).unwrap().exhausted = true;
+    });
+    assert!(!preview(&graph, changes).unwrap().rebind.is_empty());
+    let previous = graph.desired.borrow().clone();
+    let (_cancel, mut cancel) = watch::channel(false);
+    let (_sender, mut commands) = command_channel();
+    let error = execute(
+        &mut graph,
+        &mut operations,
+        &mut controls,
+        &mut cancel,
+        supplied,
+        TopologyBindings::default(),
+        &mut commands,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, GraphError::StalePreview { .. }));
+    assert!(Arc::ptr_eq(&previous, &graph.desired.borrow()));
+    assert!(operations.reconciliation.is_none());
+}
+
+#[tokio::test]
+async fn all_declaration_paths_reject_invalid_streams_and_subscription_cycles() {
+    let (mut graph, _, _, _, _) = fixture().await;
+    let original = graph.desired.borrow().clone();
+    for port in ["out", "undeclared"] {
+        let mut addition = super::super::super::addition::ComponentAddition::new(
+            ConstructedComponent::source(Box::new(Source(descriptor("duplicate", true)))),
+        );
+        addition.definition.streams.insert(
+            crate::computation::v1::PortId::try_new(port).unwrap(),
+            crate::computation::v1::StreamId::try_new("source/out").unwrap(),
+        );
+        let mut pending = Some(addition);
+        assert!(super::super::super::addition::insert(&mut graph, &mut pending).is_err());
+        assert!(
+            pending.is_some(),
+            "rejection must retain supplied ownership"
+        );
+        assert!(Arc::ptr_eq(&original, &graph.desired.borrow()));
+    }
+    let mut desired = graph.snapshot.select(GraphSelection::All).unwrap();
+    desired.subscriptions.push((id("sink"), id("source")));
+    assert!(desired.validate_structure().is_err());
+    assert!(preview(&graph, vec![DesiredMutation::SetTopology(desired)]).is_err());
+    for pair in [(id("source"), id("source")), (id("missing"), id("sink"))] {
+        let mut desired = graph.snapshot.select(GraphSelection::All).unwrap();
+        desired.control_connections.push(pair);
+        assert!(preview(&graph, vec![DesiredMutation::SetTopology(desired)]).is_err());
+    }
+}
+
+#[tokio::test]
+async fn rejected_control_refresh_preserves_the_live_configuration() {
+    let (mut graph, mut operations, mut controls, _, _) = fixture().await;
+    let previous = graph.desired.borrow().clone();
+    let revision = graph.snapshot.revision;
+    graph.peers.close().unwrap();
+    let (reply, result) = oneshot::channel();
+    let (_cancel, mut cancel) = watch::channel(false);
+    let (_sender, mut commands) = command_channel();
+    handle_command(
+        &mut graph,
+        &mut operations,
+        &mut controls,
+        &mut cancel,
+        Command::ControlConnections {
+            connections: vec![(id("sink"), id("source"))],
+            subscriptions: false,
+            management_access: false,
+            reply,
+        },
+        &mut commands,
+    )
+    .await
+    .unwrap();
+    assert!(result.await.unwrap().is_err());
+    assert!(graph.snapshot.control_connections.is_empty());
+    assert_eq!(graph.snapshot.revision, revision);
+    assert!(Arc::ptr_eq(&previous, &graph.desired.borrow()));
+}
+
+#[tokio::test]
+async fn failed_reconciliation_retains_boundary_and_resume_failures() {
+    let (mut graph, mut operations, mut controls, _, _) = fixture().await;
+    let source = graph.ids[&id("source")];
+    operations.paused.insert(source);
+    update(&graph, |state| {
+        let source = state.components.get_mut(&id("source")).unwrap();
+        source.lifecycle = ComponentLifecycle::Quiesced;
+    });
+    let edge = graph.snapshot.edges[0].definition.clone();
+    let plan = preview(
+        &graph,
+        vec![DesiredMutation::Bind(DesiredRelationship {
+            definition: edge,
+            policy: Default::default(),
+            pipe: DesiredPipe::Bounded { capacity: 3 },
+        })],
+    )
+    .unwrap();
+    let held = graph.components[source].take().unwrap();
+    let (_cancel, mut cancel) = watch::channel(false);
+    let (_sender, mut commands) = command_channel();
+    let report = execute(
+        &mut graph,
+        &mut operations,
+        &mut controls,
+        &mut cancel,
+        plan,
+        TopologyBindings::default(),
+        &mut commands,
+    )
+    .await
+    .unwrap();
+    assert!(!report.committed);
+    assert!(report.ensure_committed().is_err());
+    assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+    assert_eq!(report.failures.len(), 2);
+    assert_eq!(report.failures[0].phase, FailurePhase::Removal);
+    assert_eq!(report.failures[1].phase, FailurePhase::Activation);
+    drop(held);
 }
 
 async fn preflight_waits_for_retained_metadata_retirement() {

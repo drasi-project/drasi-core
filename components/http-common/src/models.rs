@@ -95,7 +95,7 @@ pub fn convert_http_to_source_change(
         }
         HttpSourceChange::Update { element, timestamp } => {
             let element = create_element_from_http(element, source_id, get_timestamp(*timestamp))?;
-            Ok(SourceChange::Update { element })
+            Ok(SourceChange::update(element))
         }
         HttpSourceChange::Delete {
             id,

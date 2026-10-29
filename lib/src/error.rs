@@ -47,26 +47,42 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rust
 //! use drasi_lib::error::{DrasiError, Result};
 //!
-//! fn example() -> Result<()> {
-//!     // Pattern match on specific error variants
+//! fn example(some_operation: impl FnOnce() -> Result<()>) -> Result<()> {
 //!     match some_operation() {
-//!         Err(DrasiError::ComponentNotFound { component_type, component_id }) => {
-//!             println!("{} '{}' not found", component_type, component_id);
-//!         }
-//!         Err(DrasiError::InvalidState { message }) => {
-//!             println!("Invalid state: {}", message);
-//!         }
-//!         Err(e) => return Err(e),
+//!         Err(error) => match error.classification() {
+//!             DrasiError::ComponentNotFound { component_type, component_id } => {
+//!                 println!("{} '{}' not found", component_type, component_id);
+//!             }
+//!             DrasiError::InvalidState { message } => {
+//!                 println!("Invalid state: {}", message);
+//!             }
+//!             _ => return Err(error),
+//!         },
 //!         Ok(v) => { /* ... */ }
 //!     }
 //!     Ok(())
 //! }
+//! # example(|| Err(DrasiError::component_not_found("source", "example")))?;
+//! # Ok::<(), DrasiError>(())
 //! ```
 
 use thiserror::Error;
+
+/// Startup accepted work, but not every requested component became available.
+/// The instance remains running so callers can inspect failures and call `stop`
+/// or `shutdown`; retry `start` only after stopping it.
+#[derive(Debug, Error)]
+#[error(
+    "instance startup was partial; inspect component failures and stop before restarting: {cause}"
+)]
+#[non_exhaustive]
+pub struct PartialStartError {
+    #[source]
+    pub cause: anyhow::Error,
+}
 
 /// Typed lookup failure carried through internal `anyhow` errors.
 ///
@@ -206,8 +222,10 @@ impl DrasiError {
     /// Create a component not found error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::component_not_found("source", "my-source-id")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::component_not_found("source", "my-source-id");
+    /// assert!(matches!(error, DrasiError::ComponentNotFound { .. }));
     /// ```
     pub fn component_not_found(
         component_type: impl Into<String>,
@@ -222,8 +240,10 @@ impl DrasiError {
     /// Create an already exists error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::already_exists("query", "my-query-id")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::already_exists("query", "my-query-id");
+    /// assert!(matches!(error, DrasiError::AlreadyExists { .. }));
     /// ```
     pub fn already_exists(
         component_type: impl Into<String>,
@@ -238,8 +258,10 @@ impl DrasiError {
     /// Create an invalid configuration error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::invalid_config("Missing required field 'query'")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::invalid_config("Missing required field 'query'");
+    /// assert!(matches!(error, DrasiError::InvalidConfig { .. }));
     /// ```
     pub fn invalid_config(message: impl Into<String>) -> Self {
         DrasiError::InvalidConfig {
@@ -250,8 +272,10 @@ impl DrasiError {
     /// Create an invalid state error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::invalid_state("Server must be initialized before starting")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::invalid_state("Server must be initialized before starting");
+    /// assert!(matches!(error, DrasiError::InvalidState { .. }));
     /// ```
     pub fn invalid_state(message: impl Into<String>) -> Self {
         DrasiError::InvalidState {
@@ -262,8 +286,10 @@ impl DrasiError {
     /// Create a validation error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::validation("Query string cannot be empty")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::validation("Query string cannot be empty");
+    /// assert!(matches!(error, DrasiError::Validation { .. }));
     /// ```
     pub fn validation(message: impl Into<String>) -> Self {
         DrasiError::Validation {
@@ -274,8 +300,10 @@ impl DrasiError {
     /// Create an operation failed error.
     ///
     /// # Example
-    /// ```ignore
-    /// DrasiError::operation_failed("source", "my-source", "start", "Connection refused")
+    /// ```rust
+    /// use drasi_lib::error::DrasiError;
+    /// let error = DrasiError::operation_failed("source", "my-source", "start", "Connection refused");
+    /// assert!(matches!(error, DrasiError::OperationFailed { .. }));
     /// ```
     pub fn operation_failed(
         component_type: impl Into<String>,

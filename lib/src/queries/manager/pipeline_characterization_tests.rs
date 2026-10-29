@@ -62,7 +62,7 @@ use crate::{
         SubscriptionResponse,
     },
     computation::v1::{progress_key, EnvelopeCodec, QueryChangeCodec},
-    config::{QueryLanguage, SourceSubscriptionConfig},
+    config::{QueryInputConfig, QueryLanguage},
     indexes::config::StorageBackendRef,
     profiling::ProfilingMetadata,
     sources::{Source, SourceBase, SourceBaseParams},
@@ -1114,11 +1114,12 @@ fn query_config() -> QueryConfig {
         query: "MATCH (n:Person) RETURN n.name AS name".to_string(),
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
-        sources: vec![SourceSubscriptionConfig {
-            source_id: SOURCE_ID.to_string(),
+        inputs: vec![QueryInputConfig {
+            component: SOURCE_ID.to_string(),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
+            port: None,
         }],
         auto_start: false,
         joins: None,
@@ -1130,6 +1131,7 @@ fn query_config() -> QueryConfig {
         recovery_policy: None,
         outbox_capacity: 16,
         bootstrap_timeout_secs: 5,
+        result: Default::default(),
     }
 }
 
@@ -1257,9 +1259,10 @@ async fn strict_restart_keeps_sequence_only_checkpoint_output() {
 }
 
 #[tokio::test]
-async fn strict_reconstruction_bootstraps_without_source_checkpoint() {
+async fn cursorless_reconstruction_bootstraps_with_explicit_reset_authorization() {
     let backend = Arc::new(CharacterizationBackend::new(false));
     let bootstraps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut previous_generation = None;
     for expected in 1..=2 {
         let mut harness = PipelineHarness::new(backend.clone()).await;
         harness
@@ -1271,6 +1274,7 @@ async fn strict_reconstruction_bootstraps_without_source_checkpoint() {
             .await;
         let mut config = query_config();
         config.enable_bootstrap = true;
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         let (query, _) = harness.start_config(config, backend.trace.clone()).await;
         let subscription = harness.next_subscription().await;
         assert!(subscription.enable_bootstrap);
@@ -1283,7 +1287,12 @@ async fn strict_reconstruction_bootstraps_without_source_checkpoint() {
             .await
             .unwrap()
             .is_none());
-        assert_eq!(query.fetch_snapshot().await.unwrap().as_of_sequence, 0);
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snapshot.as_of_sequence, 0);
+        if let Some(previous) = previous_generation {
+            assert!(snapshot.output_generation > previous);
+        }
+        previous_generation = Some(snapshot.output_generation);
         harness.core.shutdown().await.unwrap();
     }
 }
@@ -1367,6 +1376,8 @@ fn assert_native_evaluation_codec() {
         None,
         &ComponentId::try_new("query-a").unwrap(),
         SystemMetadata::new(StreamId::try_new("query-a/out").unwrap(), 1),
+        &crate::computation::v1::ResultNodeProjector::try_new("test/pipeline/query-a", None)
+            .unwrap(),
         &contexts,
         QueryOutputMetadata {
             query_id: "query-a".into(),

@@ -14,7 +14,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::config::{QueryConfig, SourceSubscriptionConfig, SourceSubscriptionSettings};
+use crate::config::{QueryConfig, QueryInputConfig, SourceSubscriptionSettings};
 use crate::queries::QueryLabels;
 
 /// Builder for creating SourceSubscriptionSettings from QueryConfig
@@ -26,12 +26,12 @@ impl SubscriptionSettingsBuilder {
         query_config: &QueryConfig,
         query_labels: &QueryLabels,
     ) -> Result<Vec<SourceSubscriptionSettings>> {
-        // Create a Vec of SourceSubscriptionSettings, one for each unique SourceSubscriptionConfig
+        // Create a Vec of SourceSubscriptionSettings, one for each unique QueryInputConfig
         let mut settings_vec: Vec<SourceSubscriptionSettings> = query_config
-            .sources
+            .inputs
             .iter()
             .map(|source_config| SourceSubscriptionSettings {
-                source_id: source_config.source_id.clone(),
+                source_id: source_config.component.clone(),
                 enable_bootstrap: query_config.enable_bootstrap,
                 query_id: query_config.id.clone(),
                 nodes: source_config.nodes.iter().cloned().collect(),
@@ -43,12 +43,12 @@ impl SubscriptionSettingsBuilder {
             .collect();
 
         // Allocate node labels
-        Self::allocate_node_labels(&mut settings_vec, &query_config.sources, query_labels)?;
+        Self::allocate_node_labels(&mut settings_vec, &query_config.inputs, query_labels)?;
 
         // Allocate relation labels
         Self::allocate_relation_labels(
             &mut settings_vec,
-            &query_config.sources,
+            &query_config.inputs,
             query_labels,
             &query_config.joins,
         )?;
@@ -59,7 +59,7 @@ impl SubscriptionSettingsBuilder {
     /// Allocate node labels to the correct source subscription settings
     fn allocate_node_labels(
         settings_vec: &mut [SourceSubscriptionSettings],
-        source_configs: &[SourceSubscriptionConfig],
+        source_configs: &[QueryInputConfig],
         query_labels: &QueryLabels,
     ) -> Result<()> {
         for node_label in &query_labels.node_labels {
@@ -101,7 +101,7 @@ impl SubscriptionSettingsBuilder {
     /// Allocate relation labels to the correct source subscription settings
     fn allocate_relation_labels(
         settings_vec: &mut [SourceSubscriptionSettings],
-        source_configs: &[SourceSubscriptionConfig],
+        source_configs: &[QueryInputConfig],
         query_labels: &QueryLabels,
         joins: &Option<Vec<crate::config::QueryJoinConfig>>,
     ) -> Result<()> {
@@ -163,16 +163,16 @@ impl SubscriptionSettingsBuilder {
 mod tests {
     use super::*;
     use crate::config::{
-        QueryConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage, SourceSubscriptionConfig,
+        QueryConfig, QueryInputConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage,
     };
 
-    fn create_test_query_config(sources: Vec<SourceSubscriptionConfig>) -> QueryConfig {
+    fn create_test_query_config(sources: Vec<QueryInputConfig>) -> QueryConfig {
         QueryConfig {
             id: "test-query".to_string(),
             query: "MATCH (n:Person) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
-            sources,
+            inputs: sources,
             auto_start: true,
             joins: None,
             enable_bootstrap: true,
@@ -183,16 +183,18 @@ mod tests {
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
+            result: Default::default(),
         }
     }
 
     #[test]
     fn test_node_label_in_one_source() {
-        let sources = vec![SourceSubscriptionConfig {
-            source_id: "source1".to_string(),
+        let sources = vec![QueryInputConfig {
+            component: "source1".to_string(),
             nodes: vec!["Person".to_string()],
             relations: vec![],
             pipeline: vec![],
+            port: None,
         }];
 
         let query_config = create_test_query_config(sources);
@@ -213,17 +215,19 @@ mod tests {
     #[test]
     fn test_node_label_not_in_any_source_goes_to_all() {
         let sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "source1".to_string(),
+            QueryInputConfig {
+                component: "source1".to_string(),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
-            SourceSubscriptionConfig {
-                source_id: "source2".to_string(),
+            QueryInputConfig {
+                component: "source2".to_string(),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
         ];
 
@@ -246,17 +250,19 @@ mod tests {
     #[test]
     fn test_node_label_in_multiple_sources_error() {
         let sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "source1".to_string(),
+            QueryInputConfig {
+                component: "source1".to_string(),
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
-            SourceSubscriptionConfig {
-                source_id: "source2".to_string(),
+            QueryInputConfig {
+                component: "source2".to_string(),
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
         ];
 
@@ -274,11 +280,12 @@ mod tests {
 
     #[test]
     fn test_relation_label_in_one_source() {
-        let sources = vec![SourceSubscriptionConfig {
-            source_id: "source1".to_string(),
+        let sources = vec![QueryInputConfig {
+            component: "source1".to_string(),
             nodes: vec![],
             relations: vec!["KNOWS".to_string()],
             pipeline: vec![],
+            port: None,
         }];
 
         let query_config = create_test_query_config(sources);
@@ -299,17 +306,19 @@ mod tests {
     #[test]
     fn test_relation_label_not_in_any_source_goes_to_all() {
         let sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "source1".to_string(),
+            QueryInputConfig {
+                component: "source1".to_string(),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
-            SourceSubscriptionConfig {
-                source_id: "source2".to_string(),
+            QueryInputConfig {
+                component: "source2".to_string(),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
         ];
 
@@ -332,17 +341,19 @@ mod tests {
     #[test]
     fn test_relation_label_in_multiple_sources_error() {
         let sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "source1".to_string(),
+            QueryInputConfig {
+                component: "source1".to_string(),
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
                 pipeline: vec![],
+                port: None,
             },
-            SourceSubscriptionConfig {
-                source_id: "source2".to_string(),
+            QueryInputConfig {
+                component: "source2".to_string(),
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
                 pipeline: vec![],
+                port: None,
             },
         ];
 
@@ -360,11 +371,12 @@ mod tests {
 
     #[test]
     fn test_join_relation_not_added_to_source() {
-        let sources = vec![SourceSubscriptionConfig {
-            source_id: "source1".to_string(),
+        let sources = vec![QueryInputConfig {
+            component: "source1".to_string(),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
+            port: None,
         }];
 
         let mut query_config = create_test_query_config(sources);
@@ -402,11 +414,12 @@ mod tests {
 
     #[test]
     fn test_configured_join_relation_error() {
-        let sources = vec![SourceSubscriptionConfig {
-            source_id: "source1".to_string(),
+        let sources = vec![QueryInputConfig {
+            component: "source1".to_string(),
             nodes: vec![],
             relations: vec!["CUSTOMER".to_string()],
             pipeline: vec![],
+            port: None,
         }];
 
         let mut query_config = create_test_query_config(sources);
@@ -443,11 +456,12 @@ mod tests {
         fn build(source_ids: &[&str]) -> Vec<SourceSubscriptionSettings> {
             let sources = source_ids
                 .iter()
-                .map(|source_id| SourceSubscriptionConfig {
-                    source_id: (*source_id).to_string(),
+                .map(|source_id| QueryInputConfig {
+                    component: (*source_id).to_string(),
                     nodes: vec![],
                     relations: vec![],
                     pipeline: vec![],
+                    port: None,
                 })
                 .collect();
             let mut query_config = create_test_query_config(sources);
@@ -498,11 +512,12 @@ mod tests {
 
     #[test]
     fn test_join_relation_with_missing_node_label_error() {
-        let sources = vec![SourceSubscriptionConfig {
-            source_id: "source1".to_string(),
+        let sources = vec![QueryInputConfig {
+            component: "source1".to_string(),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
+            port: None,
         }];
 
         let mut query_config = create_test_query_config(sources);
@@ -537,17 +552,19 @@ mod tests {
     #[test]
     fn test_complex_multi_source_scenario() {
         let sources = vec![
-            SourceSubscriptionConfig {
-                source_id: "orders_db".to_string(),
+            QueryInputConfig {
+                component: "orders_db".to_string(),
                 nodes: vec!["Order".to_string()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
-            SourceSubscriptionConfig {
-                source_id: "customers_db".to_string(),
+            QueryInputConfig {
+                component: "customers_db".to_string(),
                 nodes: vec!["Customer".to_string()],
                 relations: vec![],
                 pipeline: vec![],
+                port: None,
             },
         ];
 

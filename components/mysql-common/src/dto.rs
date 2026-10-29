@@ -14,8 +14,8 @@
 
 //! Shared serde/OpenAPI DTOs for MySQL plugin descriptors.
 //!
-//! Gated behind the `api` feature so that only the plugin descriptor crates
-//! (which already depend on `utoipa`) pull in the schema machinery.
+//! Serde types are shared with native plugins; only the `api` feature pulls in
+//! the legacy descriptor's OpenAPI machinery.
 
 use std::str::FromStr;
 
@@ -27,8 +27,9 @@ use crate::config::SslMode;
 ///
 /// Single source of truth for the `ssl_mode` config field shared by the MySQL
 /// source and bootstrap plugin descriptors.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = mysql::SslMode)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", schema(as = mysql::SslMode))]
 #[serde(rename_all = "snake_case")]
 pub enum SslModeDto {
     Disabled,

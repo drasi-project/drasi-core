@@ -49,6 +49,15 @@
 //!
 //! Keys and values are stored as byte arrays (`&[u8]` / `Vec<u8>`).
 //!
+//! # Local shutdown
+//!
+//! Before releasing or reopening the database, stop new operations and await
+//! [`StateStoreProvider::sync`](drasi_lib::StateStoreProvider::sync).
+//! The provider retains submitted blocking reads and writes across caller
+//! cancellation. Sync joins them, reports abandoned errors or worker failures,
+//! and performs an immediate durable commit. An interrupted sync can be retried;
+//! its unfinished operation ownership remains with the provider.
+//!
 //! With the optional `configuration` feature, `RedbConfigurationStore` provides
 //! a separate transactional, encrypted desired-state store for DrasiLib management.
 //! One cloned provider supports multiple instance IDs. The application supplies

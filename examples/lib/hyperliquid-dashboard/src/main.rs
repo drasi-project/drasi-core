@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
             RETURN c.name AS coin, m.price AS price, m.timestamp AS ts
             "#,
         )
-        .from_source("hl")
+        .from_input("hl")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
                    t.size AS size, t.timestamp AS ts
             "#,
         )
-        .from_source("hl")
+        .from_input("hl")
         .auto_start(true)
         .build();
 
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
                    f.premium AS premium, f.timestamp AS ts
             "#,
         )
-        .from_source("hl")
+        .from_input("hl")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
                    l.size AS size, l.timestamp AS ts
             "#,
         )
-        .from_source("hl")
+        .from_input("hl")
         .auto_start(true)
         .build();
 
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
                    o.bid_depth AS bid_depth, o.ask_depth AS ask_depth, o.timestamp AS ts
             "#,
         )
-        .from_source("hl")
+        .from_input("hl")
         .auto_start(true)
         .enable_bootstrap(true)
         .build();

@@ -133,6 +133,7 @@ fn shared_handles_preserve_nodes_relations_properties_and_source_identity() {
                 )
                 | (
                     SourceChange::Update {
+                        removed_properties: _,
                         element:
                             Element::Node {
                                 metadata,

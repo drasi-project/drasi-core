@@ -190,7 +190,6 @@ impl QueryScheduledSource {
             return Ok(Some(OutputEnvelope {
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_futures_due(
-                    self.descriptor.id(),
                     self.stream.clone(),
                     sequence,
                     timestamp,
@@ -450,7 +449,7 @@ mod tests {
         if insert {
             SourceChange::Insert { element }
         } else {
-            SourceChange::Update { element }
+            SourceChange::update(element)
         }
     }
 

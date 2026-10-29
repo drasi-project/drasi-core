@@ -110,6 +110,7 @@ pub async fn overdue_invoice(config: &(impl QueryTestConfig + Send)) {
     //pay invoice
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "INV1"),
@@ -244,6 +245,7 @@ pub async fn overdue_count_persistent(config: &(impl QueryTestConfig + Send)) {
     //pay invoice
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("test", "INV1"),

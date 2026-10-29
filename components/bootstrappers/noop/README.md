@@ -72,7 +72,7 @@ drasi.add_source(source).await?;
 // Query will only process new changes, no historical data
 let query = Query::cypher("recent_changes")
     .query("MATCH (n:Event) WHERE n.timestamp > datetime() RETURN n")
-    .from_source("api_source")
+    .from_input("api_source")
     .build();
 
 drasi.add_query(query).await?;

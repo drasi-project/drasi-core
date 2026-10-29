@@ -17,6 +17,7 @@ use drasi_core::evaluation::context::QueryVariables;
 
 fn update(id: &str, properties: serde_json::Value, time: u64) -> SourceChange {
     SourceChange::Update {
+        removed_properties: Default::default(),
         element: Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new("source", id),

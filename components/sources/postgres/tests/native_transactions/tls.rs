@@ -5,7 +5,8 @@ use super::*;
 use chrono::Datelike;
 use drasi_source_postgres::native::PostgresSnapshot;
 use rcgen::{
-    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
 };
 
 pub(super) struct Certificates {
@@ -22,6 +23,9 @@ impl Certificates {
         };
         let ca_key = KeyPair::generate()?;
         let mut ca = CertificateParams::new(Vec::new())?;
+        ca.distinguished_name = DistinguishedName::new();
+        ca.distinguished_name
+            .push(DnType::CommonName, "Drasi PostgreSQL fixture CA");
         ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         ca.not_before = date(today - chrono::Duration::days(14));
@@ -29,6 +33,10 @@ impl Certificates {
         let ca = ca.self_signed(&ca_key)?;
         let key = KeyPair::generate()?;
         let mut server = CertificateParams::new(vec!["localhost".into()])?;
+        server.distinguished_name = DistinguishedName::new();
+        server
+            .distinguished_name
+            .push(DnType::CommonName, "localhost");
         server.not_before = date(today - chrono::Duration::days(7));
         server.not_after = date(today + chrono::Duration::days(if expired { -1 } else { 7 }));
         server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
@@ -67,6 +75,36 @@ impl Certificates {
         database.config.tls_ca_pem = Some(self.ca.clone());
         Ok(database)
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_tls_chain_is_accepted_by_openssl_and_rejects_an_unrelated_ca() -> Result<()> {
+    let certificates = Certificates::new(false)?;
+    let unrelated = Certificates::new(false)?;
+    let directory = tempfile::tempdir()?;
+    let ca = directory.path().join("ca.pem");
+    let other = directory.path().join("other-ca.pem");
+    let server = directory.path().join("server.pem");
+    std::fs::write(&ca, certificates.ca)?;
+    std::fs::write(&other, unrelated.ca)?;
+    std::fs::write(&server, certificates.server)?;
+    for (authority, valid) in [(&ca, true), (&other, false)] {
+        let output = std::process::Command::new("openssl")
+            .arg("verify")
+            .arg("-CAfile")
+            .arg(authority)
+            .arg(&server)
+            .output()
+            .context("native TLS fixture checks require the OpenSSL command-line tool")?;
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "certificate-chain verification: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
 }
 
 fn paired(

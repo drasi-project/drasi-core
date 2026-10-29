@@ -25,7 +25,8 @@ use super::{
     topology, ComputationGraph, GraphError, GraphResult, ResourceHandle, ResourceId,
 };
 use crate::computation::v1::{
-    FailurePhase, OperationEpoch, ResourceConstructor, ResourceRealization, ResourceRole,
+    FailurePhase, OperationEpoch, ResourceConstructor, ResourceOwnership, ResourceRealization,
+    ResourceRole, ResourceSpecification,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -530,8 +531,41 @@ pub(super) fn complete(graph: &mut ComputationGraph, job: &Arc<ResourceJob>) -> 
         .map(|resource| resource.generation)
         != Some(job.identity.generation)
     {
-        job.applied.store(false, Ordering::Release);
-        return Err(GraphError::StaleGeneration);
+        if let Some(handle) = value.handle.take() {
+            let specification = ResourceSpecification {
+                id: id.clone(),
+                role: handle.role(),
+                ownership: ResourceOwnership::Graph,
+                binding: Arc::from(id.as_str()),
+            };
+            if let Some(retained) = super::addition::RejectedResources::new(
+                [specification],
+                &BTreeMap::from([(id.clone(), handle)]),
+            ) {
+                graph.rejected_resources.push(retained);
+            }
+        }
+        let cause = Arc::new(match outcome {
+            Ok(()) => GraphError::StaleGeneration,
+            Err(primary) => GraphError::Cleanup {
+                primary: Some(Box::new(GraphError::Reported { cause: primary })),
+                errors: vec![GraphError::StaleGeneration],
+            },
+        });
+        value.outcome = Some(Err(cause.clone()));
+        let mut jobs = graph
+            .tasks
+            .resources
+            .jobs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if jobs
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, job))
+        {
+            jobs.remove(id);
+        }
+        return Err(GraphError::Reported { cause });
     }
     let failure = outcome.as_ref().err().map(|cause| {
         failure(
@@ -594,4 +628,67 @@ pub(super) fn complete(graph: &mut ComputationGraph, job: &Arc<ResourceJob>) -> 
             .remove(id);
     }
     outcome.map_err(|cause| GraphError::Reported { cause })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_joined_resource_is_removed_from_polling_without_losing_ownership() {
+        for failed in [false, true] {
+            let mut graph = ComputationGraph::empty("stale-resource").unwrap();
+            let id = ResourceId::try_new("removed").unwrap();
+            let (abort, _) = AbortHandle::new_pair();
+            let handle = ResourceHandle::new(ResourceRole::StateStore, Arc::new(()));
+            let job = Arc::new(ResourceJob {
+                identity: ResourceIdentity {
+                    resource: id.clone(),
+                    generation: 1,
+                    epoch: OperationEpoch(1),
+                    phase: FailurePhase::Creation,
+                    damage: Arc::new(Mutex::new(None)),
+                },
+                operation: ResourceOperation::Construct,
+                value: Arc::new(Mutex::new(Value {
+                    handle: Some(handle),
+                    outcome: Some(if failed {
+                        Err(Arc::new(GraphError::Topology {
+                            reason: "original callback failure".into(),
+                        }))
+                    } else {
+                        Ok(())
+                    }),
+                })),
+                join: Mutex::new(None),
+                abort,
+                applied: AtomicBool::new(false),
+            });
+            graph
+                .tasks
+                .resources
+                .jobs
+                .lock()
+                .unwrap()
+                .insert(id.clone(), job.clone());
+            let error = complete(&mut graph, &job).unwrap_err();
+            if failed {
+                assert!(matches!(
+                    error.underlying(),
+                    GraphError::Cleanup {
+                        primary: Some(_),
+                        ..
+                    }
+                ));
+                assert!(error.to_string().contains("original callback failure"));
+            } else {
+                assert!(matches!(error.underlying(), GraphError::StaleGeneration));
+            }
+            assert!(!graph.tasks.resources.contains(&id));
+            assert!(job.applied.load(Ordering::Acquire));
+            assert_eq!(graph.rejected_resources.len(), 1);
+            assert!(job.wait().await.is_err());
+            graph.dispose().await.unwrap();
+        }
+    }
 }

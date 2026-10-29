@@ -13,12 +13,16 @@ use drasi_lib::{
 };
 use serde::{Deserialize, Serialize};
 
+mod bootstrap_coordination;
 #[cfg(test)]
 mod composite_bootstrap_tests;
+mod identity;
 mod native;
+pub use bootstrap_coordination::NativeSourceBootstrapConfig;
+pub use identity::NativeIdentityConfig;
 pub use native::{
-    CompositeBootstrapConfig, ConsumerProgressConfig, NativeBootstrapConfig,
-    NativeQuerySnapshotsConfig,
+    CompositeBootstrapConfig, ConsumerProgressConfig, NativeBootstrapConfig, NativeOutputSelector,
+    NativeOutputSnapshotsConfig,
 };
 
 #[derive(Deserialize)]
@@ -39,9 +43,11 @@ enum Recipe {
     SharedQos(SharedQosConfig),
     NativeConsumer(NativeConsumerConfig),
     NativeBootstrap(NativeBootstrapConfig),
+    NativeSourceBootstrap(NativeSourceBootstrapConfig),
     CompositeBootstrap(CompositeBootstrapConfig),
-    NativeQuerySnapshots(NativeQuerySnapshotsConfig),
+    NativeOutputSnapshots(NativeOutputSnapshotsConfig),
     ConsumerProgress(ConsumerProgressConfig),
+    NativeIdentity(NativeIdentityConfig),
     Middleware,
     QueryMiddleware,
     TransactionalTransformers,
@@ -182,6 +188,8 @@ pub struct HostManagementResources {
     secrets: Option<Arc<dyn SecretStoreProvider>>,
     factories: FactoryRegistry,
     bootstraps: crate::computation::NativeBootstrapFactories,
+    source_bootstraps: crate::computation::NativeSourceBootstrapFactories,
+    identity_providers: crate::computation::NativeIdentityProviders,
     indexes: BTreeMap<String, Arc<dyn drasi_core::computation::ComputationIndexProvider>>,
 }
 
@@ -275,6 +283,8 @@ impl HostManagementResources {
             secrets,
             factories: registry.computation_factory_registry()?,
             bootstraps: registry.computation_bootstrap_factories()?,
+            source_bootstraps: registry.computation_source_bootstrap_factories()?,
+            identity_providers: registry.computation_identity_providers(),
             indexes: BTreeMap::new(),
         })
     }
@@ -379,6 +389,15 @@ impl ManagementResourceResolver for HostManagementResources {
                         &BTreeMap::new(),
                     )?;
                 }
+                Recipe::NativeSourceBootstrap(config) => {
+                    config.validate(resource, &dependencies)?;
+                    config.validate_owner(&resource.id, desired)?;
+                    config.validate_configuration(
+                        &self.source_bootstraps,
+                        &dependencies,
+                        &BTreeMap::new(),
+                    )?;
+                }
                 Recipe::CompositeBootstrap(config) => {
                     config.validate(resource, &dependencies)?;
                     config.validate_owner(&resource.id, desired)?;
@@ -386,8 +405,11 @@ impl ManagementResourceResolver for HostManagementResources {
                 Recipe::NativeConsumer(config) => {
                     config.validate_dependencies(resource, &dependencies)?
                 }
-                Recipe::NativeQuerySnapshots(config) => config.validate(resource, &dependencies)?,
+                Recipe::NativeOutputSnapshots(config) => {
+                    config.validate(resource, &dependencies)?
+                }
                 Recipe::ConsumerProgress(config) => config.validate(resource, &dependencies)?,
+                Recipe::NativeIdentity(config) => config.validate(resource, &dependencies)?,
                 _ => {}
             }
         }
@@ -464,14 +486,34 @@ impl ManagementResourceResolver for HostManagementResources {
                 )
                 .await;
         }
+        if let Recipe::NativeSourceBootstrap(config) = recipe {
+            return config
+                .resolve(
+                    instance,
+                    graph,
+                    specification,
+                    dependencies,
+                    &self.source_bootstraps,
+                )
+                .await;
+        }
         if let Recipe::CompositeBootstrap(config) = recipe {
             return config.resolve(instance, graph, specification, dependencies);
         }
-        if let Recipe::NativeQuerySnapshots(config) = recipe {
-            return config.resolve(graph, specification, dependencies);
+        if let Recipe::NativeOutputSnapshots(config) = recipe {
+            return config.resolve(specification, dependencies);
         }
         if let Recipe::ConsumerProgress(config) = recipe {
             return config.resolve(graph, specification, dependencies);
+        }
+        if let Recipe::NativeIdentity(config) = recipe {
+            return config.resolve(
+                instance,
+                specification,
+                dependencies,
+                &self.identity_providers,
+                self.secrets.clone(),
+            );
         }
         anyhow::ensure!(
             dependencies.is_empty(),
@@ -527,15 +569,19 @@ impl ManagementResourceResolver for HostManagementResources {
             Recipe::NativeBootstrap(_) => {
                 unreachable!("native bootstrap resolved with dependencies")
             }
+            Recipe::NativeSourceBootstrap(_) => {
+                unreachable!("native source bootstrap resolved with dependencies")
+            }
             Recipe::CompositeBootstrap(_) => {
                 unreachable!("composite bootstrap resolved with dependencies")
             }
-            Recipe::NativeQuerySnapshots(_) => {
-                unreachable!("native query snapshots resolved with dependencies")
+            Recipe::NativeOutputSnapshots(_) => {
+                unreachable!("native output snapshots resolved separately")
             }
             Recipe::ConsumerProgress(_) => {
                 unreachable!("consumer progress resolved with dependencies")
             }
+            Recipe::NativeIdentity(_) => unreachable!("native identity resolved with dependencies"),
             Recipe::Middleware => ResourceHandle::new(
                 ResourceRole::Middleware,
                 Arc::new(MiddlewareRegistryResource(self.middleware.clone())),

@@ -46,9 +46,9 @@ pub fn build_update_changes(
     obj: &DynamicObject,
     config: &KubernetesSourceConfig,
 ) -> anyhow::Result<Vec<SourceChange>> {
-    let mut changes = vec![SourceChange::Update {
-        element: build_node_element(source_id, kind, obj, config)?,
-    }];
+    let mut changes = vec![SourceChange::update(build_node_element(
+        source_id, kind, obj, config,
+    )?)];
 
     if config.include_owner_relations {
         changes.extend(build_owner_relation_upserts(
@@ -171,9 +171,7 @@ fn build_owner_relation_upserts(
                 element: rel_element,
             });
         } else {
-            out.push(SourceChange::Update {
-                element: rel_element,
-            });
+            out.push(SourceChange::update(rel_element));
         }
     }
 

@@ -45,6 +45,14 @@ class RequirementGuards(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expired test quarantine"):
                 check_exemptions(path, date(2026, 9, 26))
 
+    def test_quarantine_is_valid_on_expiry_but_not_the_next_day(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ignored.tsv"
+            path.write_text("package\tbinary\tcase\t-\ttracked gap\towner\t2026-10-26\n")
+            check_exemptions(path, date(2026, 10, 26))
+            with self.assertRaisesRegex(ValueError, "expired test quarantine"):
+                check_exemptions(path, date(2026, 10, 27))
+
     def test_named_cases_cannot_hide_a_failed_or_synthetic_matrix(self):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
