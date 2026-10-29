@@ -14,6 +14,7 @@ an **investigation** needs a reproduction before a fix is selected;
 means important for the affected deployment or release claim, not that every
 item blocks every merge. Optional capabilities are identified explicitly.
 Areas identify the owning repositories, not assigned individuals.
+Resolved anchor stubs are labeled explicitly and are not open work.
 
 The [executable requirement ledger](../tests/runtime_parity/requirements.tsv)
 and [contract checks](../tests/runtime_parity/computation-contracts.tsv) record
@@ -46,35 +47,42 @@ backlog or a second set of checklists in a reference guide.
 
 <a id="cw-06"></a>
 
-## 1. Finish startup and shutdown deadlines (CW-06)
+## 1. Lifecycle deadlines and contention (CW-06)
 
-**Kind:** Issue/improvement. **Area:** Core, Server.
-**Priority:** High. **Effort:** Large. **Review:** M4, M18, M31.
+**Status:** Implemented; retained anchor, not outstanding work.
+**Area:** Core, Server. **Review:** M4, M18, M31.
 
-**Work:** Complete separate time limits for startup steps, individual components
-and resources, and the whole startup/shutdown operation. Resource construction
-still has a fixed 30-second timeout; make that policy configurable and expose
-phase-specific typed timeout causes. A timeout
-must identify unfinished work and its actual owner without abandoning accepted
-operations, revoking readers needed for drain, or pretending cleanup succeeded.
+**Implemented:** Startup has a configurable 600-second overall budget;
+stop/shutdown have 60 seconds. Construction/configuration, resource construction,
+activation and cleanup have separate configurable budgets. Core builders,
+configuration snapshots, Server YAML/environment resolution and instance creation
+carry the same settings. Typed expiry reports owner, operation, phase, budget
+and request acceptance. Cancelled/timed-out stops retain cleanup ownership and
+block unsafe restart; shutdown does not close configuration storage underneath
+unfinished processing. Dropped-management cleanup uses visible exponential
+backoff rather than fixed one-second retries.
 
-Shorten lifecycle/plugin locks held across long asynchronous operations without
-allowing concurrent mutable calls into one component. Stop and independent
-inspection must remain serviceable during gated startup, and observation
-receivers must have explicit ownership. Supervise dropped-management cleanup:
-replace the unbounded fixed one-second retry policy with visible retry/backoff
-and escalation boundaries, while retaining unfinished ownership after a deadline.
-Do not close storage underneath processing merely to make shutdown return.
+Startup is now owned independently of its caller. Stop/shutdown supersede that
+wait and join its coordinator, including when the original caller is unpolled or
+dropped. Accepted component operations remain graph-owned; late startup work
+cannot resurrect a stopped instance. Managed realization releases the instance
+gate before construction/startup waits and retains its pending graph result.
+Acknowledged interrupted construction can be retried through reconciliation or
+instance restart. Server captures native plugin bindings before releasing its
+registry guard and awaiting resource preparation.
 
-**Current boundary:** Activation defaults to 300 seconds and is configurable
-through the graph builder, DrasiLib and Server's `activationTimeoutSecs`.
-Configuration resolution is bounded too. Typed partial startup remains
-stoppable; shutdown preserves aggregate failures and pending ownership.
+The [configuration guide](computation-graph-configuration.md#library-settings)
+describes defaults and retry behavior. Focused coverage includes total budgets
+across phases, lock admission, unpolled/dropped startup callers, component and
+instance stop retries, managed construction/reconciliation ownership, resource
+construction/disposal and plugin-registry guard release.
 
-**Finish when:** Slow or failing components cannot cause an unexplained indefinite
-wait. Gated construction, start, input/output binding, provider I/O and cleanup
-tests identify the expired phase and retained owner; cancelled callers and
-stop-during-start tests prove safe retry and independent control progress.
+These changes do not permit abandoning uncertain configuration commits or
+interrupting previously running owners during an uncommitted resource cutover.
+Other conflicting lifecycle work still has a bounded wait. Nonyielding native
+code cannot be preempted by an asynchronous deadline. Wider deployment/provider
+qualification remains in [CW-14](#cw-14), [CW-41](#cw-41) and [CW-46](#cw-46),
+not an unfinished instance-startup contention fix.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -164,23 +172,32 @@ created from the same template.
 
 <a id="cw-14"></a>
 
-## 4. Recover safely while saved input is still waiting (CW-14)
+## 4. Extend native-input recovery qualification (CW-14)
 
 **Kind:** Qualification. **Area:** Core, Server, test-infra.
-**Priority:** High for deployments needing this recovery mode. **Effort:** Large.
+**Priority:** Medium for broader coverage; high before claiming an unqualified
+deployment profile. **Effort:** Large across additional providers/connectors.
 **Origins:** CG-01/22/24; reliability W2/W5.
 
-**Work:** Establish cold reconstruction with undrained **native persistent
-input-pipe frames**, and qualify remaining source/provider combinations after a
-process dies. Saved consumer progress alone does not describe every queued
-message or its transport number. Extend source-history
-and initial-loading checks to the remaining required connectors.
+**Qualified:** The
+[native-input crash matrix](../../lib-integration-tests/tests/native_input_crash_recovery.rs)
+passes 28 real SIGKILL cases: admission QoS (12), retained inputs (8), and shared
+journals (8), with eager/paged storage and both Tokio runtimes. Fresh processes
+reconstruct accepted input beyond the committed consumer cursor before/after
+query commit and after an admission commit whose reply was lost. Checks compare
+exact receipts, producer identities, payloads, checkpoints, outbox, projection,
+outputs and cleanup. This closes the previously unproved RocksDB
+process-restart boundary; no production recovery defect was reproduced.
+
+**Remaining work:** Extend this evidence to the remaining connector/provider and
+initial-loading combinations. It is not power-loss qualification, a guarantee for
+memory-only queries, or proof that an external effect happens exactly once.
 
 **Implemented repair:** Ordinary HTTP/gRPC WAL cleanup waits for the actual
 startup subscription batch, protects replay registration against pruning, and
 retains submitted cleanup through cancellation. Missing retained history fails
 explicitly. This closes the discovered fast-subscriber/slow-subscriber startup
-race; it does not qualify every native persistent-input-pipe restart profile.
+race; it does not qualify every connector-specific restart profile.
 The ordinary source-WAL case is verified in [CW-36](#cw-36); it is no longer an
 unproved blanket requirement.
 
@@ -245,20 +262,22 @@ intermediate captures.
 
 <a id="cw-13"></a>
 
-## 7. Reject unsupported path bounds and verify query matching (CW-13)
+## 7. Verify remaining query matching reports (CW-13)
 
-**Kind:** Issue plus historical-report investigations. **Area:** Core evaluator/parsers.
-**Priority:** High for the confirmed path-bound gap; conditional on reproduction
-for the historical reports. **Effort:** Medium to large.
+**Kind:** Investigation. **Area:** Core evaluator/parsers.
+**Priority:** Conditional on reproduction. **Effort:** Medium to large.
 
-**Work:** Stop accepting variable-length relationship bounds and planning them
-as a single edge. Honor the supported bounds through planning and incremental
-execution, or reject unsupported forms explicitly. Separately reproduce
-optional-match filters, outer-variable references, list membership and
+**Work:** Reproduce optional-match filters, outer-variable references, list membership and
 relationship-end reports, including changes and removals.
 
-**Finish when:** An accepted query never silently ignores its hop bounds, and
-each remaining report has a tested fix or evidence that it does not reproduce.
+**Implemented:** The shared query builder rejects quantified relationship
+patterns with a typed unsupported-feature error before evaluator construction.
+Both Cypher and GQL are covered, including quantified single-hop spellings and
+later Cypher query parts. Ordinary unquantified edges and fixed chains remain
+supported. Full variable-length execution was not added.
+
+**Finish when:** Each remaining report has a tested fix or evidence that it does
+not reproduce.
 
 **Reports:** [#795](https://github.com/drasi-project/drasi-core/issues/795),
 [#796](https://github.com/drasi-project/drasi-core/issues/796),
@@ -303,10 +322,10 @@ examples for the remaining selected connectors, and verify readiness, reset and
 expected effects. The stock-Server GPU directory is still a reserved deployment,
 not the implemented embedded lab. Reuse its shared domain/plugin/UI code.
 
-The Learning Trading build failure is still reproducible:
-`npm run build` in `learning-drasi-server/tutorials/trading/app` reports TS6133
-for the write-only `createdReaction` field. Fix it without disabling compiler
-checks; a successful Vite development server does not establish a normal build.
+**Implemented build repair:** The older copied Learning Trading frontend now
+passes `tsc && vite build` after removing its unused `createdReaction` flag.
+Compiler checks and cleanup behavior are unchanged. The runnable tutorial
+continues to use the sibling Server application, not that older copy.
 
 Retain the seven migrated tutorials' existing scenario checks and automate
 uncovered walkthrough/CI profiles with exact expected rows, effects and visible
@@ -363,27 +382,40 @@ exhausting the call stack or terminating the process.
 
 <a id="cw-66"></a>
 
-## 12. Fix the reported dependency security advisories (CW-66)
+## 12. Retire mitigated legacy dependency paths (CW-66)
 
 **Kind:** Dependency remediation. **Area:** Core and affected consumers.
-**Priority:** High. **Effort:** Large across the affected dependency families.
+**Priority:** Medium for upstream replacements; reassess before expanding usage.
+**Effort:** Depends on compatible upstream releases.
 
-**Work:** Resolve the RustSec findings recorded during
+**Origin:** The RustSec findings recorded during
 [PR #988's dependency review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780).
-That review scan recorded 23 advisory entries affecting `azure_core`
-0.21, `quick-xml` 0.31/0.37, `quinn-proto` 0.11.17, `rustls` 0.21/0.23.44,
-`rustls-webpki` 0.101/0.103.15, the 1.0.9 WebPKI root packages, and `rsa` 0.9.10.
-Re-scan the current supported graphs rather than treating those historical
-versions/counts as a fresh audit. Trace each applicable production use, upgrade
-to patched versions where available, and
-carry the changes into the relevant manifests and tracked consumer lockfiles.
-The legacy TLS/XML/Azure upgrades and the unpatched RSA advisory need explicit
-compatibility or exposure decisions, not blanket advisory suppression.
 
-**Finish when:** Repeatable scans of the supported dependency graphs contain no
-unreviewed applicable advisories, with explicit mitigations for any unpatched
-case. Real TLS/authentication and affected connector tests pass. Do not change
-the allocator ban or add license/advisory exceptions merely to make a check green.
+**Remediated:** Supported dependency paths and consumer locks now use patched
+TLS, Tokio, XML, QUIC, crypto and gRPC compression versions; maintained `imbl`
+replaces `im`/`sized-chunks`. Tiberius retains the existing TDS 7.3 profile.
+HTTP/XML, MSSQL, AWS/Azure safeguards, signature verification, storage and
+test-infra HTTP/2/telemetry behavior have executable coverage.
+
+The reviewed raw audit counts fell from 30 to 7 in Core, 18 to 3 in Server,
+and 21 to 6 in test-infra. These are recorded scan results, not zero-advisory
+claims. The retained findings have the following boundaries:
+
+| Retained path | Mitigation or unaffected usage |
+|---|---|
+| Legacy Azure Core 0.20/0.21 | Per-call transport safeguards preserve SDK signing/TLS and redact authorization before retry/success/cancellation logging. SharedKey/Table capabilities remain available. |
+| Azure's quick-xml 0.31 | A 0.41 preflight rejects duplicate/excessive attributes in fixed-schema service metadata; the affected namespace resolver is not used. User blob content remains streamed and is not treated as XML. |
+| RSA 0.9 | MySQL uses public-key OAEP encryption, not the affected private-key decryption/signing operations. |
+| MySQL's zstd 0.13 / zstd-safe 7 | Existing read-side decoding does not use the affected context reuse, write-side, experimental, dictionary or multithreaded operations. |
+| ZIP 0.6 build tooling | Extraction is limited to the trusted bundled Swagger UI archive, not user-supplied archives. |
+| Old rand transitive dependency | The advisory's required logging feature is disabled. |
+
+**Remaining work:** Adopt compatible patched Azure/Table and MySQL compression
+releases when available, and re-audit before changing these usage boundaries.
+The safeguards do not patch every use of the retained libraries. Raw scanners
+remain nonzero; no new advisory exceptions or weakened allocator/license rules
+were added merely to make a check green. Prior Azure debug/trace logs may have
+contained credentials: affected operators should rotate their account keys.
 
 <a id="cw-20"></a>
 
@@ -452,12 +484,17 @@ told to refresh, and old readers cannot report a replacement as their old compon
 
 **Work:** Check remaining public outcomes for partial startup/shutdown, missing
 or duplicate components, replaced query readers, missing result history and
-initial-result/live-update races. The compatibility `get_graph` snapshot still
-hard-codes its instance node to `Running`. Make that status truthful, and define
-its legacy projection versus full native inspection explicitly: generic native
+initial-result/live-update races. Define the compatibility view's legacy
+projection versus full native inspection explicitly: generic native
 transformers must not be silently presented as a complete graph when omitted.
 Preserve the repaired `Reconfiguring` status and initialized, generation-fenced
 snapshot/history reads during quiescence.
+
+**Implemented:** The instance root in both `get_graph` and retained read-only
+views follows the existing library running flag instead of a constant. It is
+Stopped before startup and after stop, and Running while a partial startup still
+owns active work. This is not an aggregate component-readiness or cleanup-success
+claim; individual failures remain visible separately.
 
 **Finish when:** Supported library and Server operations report the same truthful
 state and results through replacement, restart and failure.
@@ -621,21 +658,24 @@ exact result checks and explicit operating limits.
 
 ## 25. Avoid rebuilding unchanged information for status updates (CW-31)
 
-**Kind:** Scaling improvement. **Area:** Core registry/inspection.
-**Priority:** High for the agreed scaling requirement. **Effort:** Large.
-**Review:** M6; publication/scan findings. **Origin:** execution-plan E2.
+**Status:** Implemented; retained anchor, not outstanding work.
+**Review:** M6/publication findings. **Origin:** execution-plan E2.
 
-**Work:** Measure the cost of rebuilding whole-application read-only reports.
-Use graph-owned information on request or share unchanged data instead of
-recreating all lookup tables whenever one component changes status. This concerns
-reporting work, not changing or restarting working components. Include the
-desired/observed map clones, registry publication and repeated topology scans.
-Measure single-node status transitions at increasing live graph sizes, including
-allocations and notification/control latency. Keep coherent revision snapshots;
-do not introduce an asynchronously maintained shadow graph.
+Desired snapshots, observed/registry maps and reports share unchanged data.
+Dirty component captures refresh read capabilities without relying solely on
+topology revision. Event translation visits changed members and uses immutable
+kind lookups; producer updates select only their ordered edge range. Coherent
+addition/provider publications, weak ownership, event order and history remain
+covered.
 
-**Finish when:** Small status changes avoid unnecessary whole-graph rebuilding,
-while current-state reads, notifications and required history remain consistent.
+Synthetic 128-publication runs at 4,096 nodes fell from about 256 ms to 0.33 ms.
+Native allocation samples show substantially less retained publication memory;
+live controller/notification measurements cover both runtimes. This is reporting
+overhead, not a claim of equivalent query-throughput improvement. See the
+[maintainer guide](computation-graph-maintainers-guide.md#inspection-and-diagnosing-a-running-system)
+for the repeatable diagnostics. Whole-graph exports still cost work proportional
+to their output; tombstone reclamation and wider workloads remain in
+[CW-33](#cw-33) and [CW-40](#cw-40).
 
 <a id="cw-33"></a>
 
@@ -742,6 +782,13 @@ Server telemetry fixture's assumed immediate query readiness. Preserve the
 intentional child-worker ignores: the parent tests execute them with the required
 state and watchdogs.
 
+**Implemented timer slice:** The future-notification deduplication regression
+uses the existing `QueryTestControl`, fixed logical input times and explicit
+before-due, due and stale-wake checks on both Tokio runtimes. Actual reaction
+observations fence input processing and downstream receipt separately. This
+removes wall-clock waiting from that regression, not every timing assumption
+or the workspace-wide serialization policy.
+
 Replace the workspace-wide `--test-threads=1` workaround only after identifying
 and isolating the tests that actually share ports, files or global state. Add a
 normal parallel CI run without dropping serialized coverage where it is still
@@ -786,18 +833,29 @@ enabled across supported configurations.
 
 <a id="cw-67"></a>
 
-## 32. Pin and verify the CI Protocol Buffers compiler (CW-67)
+## 32. Qualify the pinned CI Protocol Buffers compiler (CW-67)
 
-**Kind:** CI provisioning improvement. **Area:** Core native/coverage workflows.
+**Kind:** CI qualification. **Area:** Core native/coverage workflows.
 **Priority:** Medium. **Effort:** Small to medium.
 
-**Work:** Replace unversioned Protocol Buffers compiler installation in native
-FFI and coverage jobs with a reviewed version and verified download or package
-identity on Linux, macOS and Windows. Check the actual installed version and
-rebuild the HTTP/gRPC libraries and wire tests on each supported runner.
-This provisioning change is deferred from
-[PR #988's CI supply-chain review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780);
-an arbitrary version pin that is unavailable on a runner is not a fix.
+**Work:** Run the updated native FFI/build/wire matrix and both coverage jobs on
+their actual supported runners. Verify the pinned compiler and resulting
+HTTP/gRPC libraries on Linux x86_64, macOS ARM64 and Windows x86_64.
+
+**Implemented:** A [shared setup action](../../.github/actions/setup-protoc/action.yml)
+uses the [pinned installer](../../ci/install_protoc.py) for protoc 36.2, matching
+the locally used compiler. Official archive SHA-256 values are fixed per
+platform; extraction, executable version and standard includes are checked
+before publishing `PROTOC`, `PROTOC_INCLUDE` and `PATH`. Target-cache keys include
+the installer pin and runner architecture. Corrupt archives, unsupported
+platforms, wrong versions and existing installation directories fail explicitly.
+
+Installer tests and real macOS/Linux ARM64 execution pass locally. All 12
+checked-in schemas compile in their actual protocol groups, producing identical
+descriptors with the pinned macOS/Linux tools and the existing local compiler.
+This does not replace the full CI matrix or establish Windows execution.
+The remaining qualification follows
+[PR #988's CI supply-chain review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780).
 
 **Finish when:** CI records the expected compiler version, rejects an unexpected
 artifact, and the existing cross-platform native build/wire checks pass.

@@ -63,11 +63,11 @@ pub(crate) trait PublicationObserver: Send + Sync {
 pub struct ComputationInspector(Arc<InspectionState>);
 
 impl ComputationInspector {
-    pub(super) fn new(desired: &GraphSnapshot, observed: Arc<ObservedGraph>) -> Self {
+    pub(super) fn new(desired: Arc<GraphSnapshot>, observed: Arc<ObservedGraph>) -> Self {
         let initial = Arc::new(ComputationInspection {
             sequence: 0,
             timestamp: Utc::now(),
-            desired: Arc::new(desired.clone()),
+            desired,
             observed,
         });
         Self(Arc::new(InspectionState {
@@ -116,7 +116,7 @@ impl ComputationInspector {
             .cloned()
             .collect())
     }
-    pub(super) fn publish(&self, desired: &GraphSnapshot, observed: Arc<ObservedGraph>) {
+    pub(super) fn publish(&self, desired: Arc<GraphSnapshot>, observed: Arc<ObservedGraph>) {
         let mut history = self.0.history.lock().unwrap_or_else(|error| {
             log::error!("Publishing through poisoned computation history: {error}");
             error.into_inner()
@@ -128,7 +128,7 @@ impl ComputationInspector {
         let snapshot = Arc::new(ComputationInspection {
             sequence: history.sequence,
             timestamp: Utc::now(),
-            desired: Arc::new(desired.clone()),
+            desired,
             observed,
         });
         let previous = history

@@ -272,11 +272,27 @@ Resources returned with an incorrect role are never injected; the graph retains
 cleanup responsibility for graph-owned instances, including failed cleanup.
 
 Factories must obey the existing cancellation-safe construction contract.
-Resource resolution has a 30-second timeout and must also be cancellation safe.
+Graph-owned resource resolution defaults to 30 seconds and uses the instance's
+`resource_construction_timeout_secs` setting (`resourceConstructionTimeoutSecs`
+in Server). It must also be cancellation safe.
 Unavailable resources remain identified in the management report and graph
 observations. Call `shutdown().await` to finish graph cleanup and release the
 instance's exclusive configuration-store session; it is not equivalent to
 merely dropping a Rust handle.
+
+The management actor releases the instance lifecycle gate before waiting for
+graph construction and startup. Its pending reconciliation future stays owned
+if stop interrupts that wait; the actual result is consumed before accepting
+another configuration change. New/reconstructed members are submitted with
+activation deferred, then started only when the current instance intent permits
+it. Stopping a gated construction does not erase its accepted definition or
+receipt. Later reconciliation/start can retry acknowledged incomplete construction
+without adopting an unmanaged component or replaying a configuration request as new.
+
+Configuration-store acceptance and protected retirement checks still serialize
+their authoritative decision. A stop request does not justify abandoning an
+uncertain durable commit, closing storage beneath processing, or force-aborting
+an arbitrary native call.
 
 ## Shared encrypted redb storage
 

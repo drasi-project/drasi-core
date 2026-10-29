@@ -636,7 +636,10 @@ impl DesiredTopology {
             }
         }
         graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
-        graph.inspector.publish(&graph.snapshot, graph.observed());
+        super::registry::publish(&graph);
+        graph
+            .inspector
+            .publish(graph.desired.borrow().clone(), graph.observed());
         Ok(graph)
     }
 }

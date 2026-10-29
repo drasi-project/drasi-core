@@ -233,7 +233,7 @@ drasi-grpc-common = { version = "0.11.3", path = "components/grpc-common" }
 drasi-reaction-common = { version = "0.11.3", path = "components/reaction-common" }
 
 # Common dependencies
-im = "15"
+im = { package = "imbl", version = "7.0.2" }
 # Pin roaring below 0.11.4 which requires rustc 1.90.0 (transitive via sui-sdk-types)
 roaring = ">=0.11.2, <0.11.4"
 utoipa = { version = "4", features = ["chrono"] }

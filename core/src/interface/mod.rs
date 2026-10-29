@@ -65,6 +65,9 @@ pub use drasi_core_types::interface::IndexError;
 
 #[derive(Error, Debug)]
 pub enum QueryBuilderError {
+    #[error("Unsupported query feature: {feature}")]
+    UnsupportedFeature { feature: &'static str },
+
     #[error("Middleware setup error: {0}")]
     MiddlewareSetupError(MiddlewareSetupError),
 

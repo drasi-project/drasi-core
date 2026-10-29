@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::sync::{Arc, Weak};
+use tokio::sync::RwLock;
 
 use crate::{
-    channels::{ComponentEvent, ComponentEventBroadcastReceiver},
+    channels::{ComponentEvent, ComponentEventBroadcastReceiver, ComponentStatus},
     computation::{runtime::Runtime, v1::ComputationInspector},
 };
 
@@ -24,18 +25,21 @@ use super::{ComponentNode, GraphSnapshot, RelationshipKind};
 /// Read-only view of an instance's ComputationGraph.
 ///
 /// This handle owns no topology, component instances, or lifecycle state.
-/// Every snapshot is derived from one authoritative controller publication.
+/// Component state is derived from one authoritative controller publication;
+/// the instance root reflects DrasiLib's running flag, not aggregate readiness.
 /// Obtain it from [`crate::DrasiLib::component_graph`]; mutate the runtime through
 /// DrasiLib operations or its computation controller instead.
 #[derive(Clone)]
 pub struct ComponentGraphView {
     runtime: Weak<Runtime>,
+    running: Weak<RwLock<bool>>,
 }
 
 impl ComponentGraphView {
-    pub(crate) fn from_runtime(runtime: &Arc<Runtime>) -> Self {
+    pub(crate) fn from_runtime(runtime: &Arc<Runtime>, running: &Arc<RwLock<bool>>) -> Self {
         Self {
             runtime: Arc::downgrade(runtime),
+            running: Arc::downgrade(running),
         }
     }
 
@@ -46,7 +50,17 @@ impl ComponentGraphView {
     }
 
     pub async fn snapshot(&self) -> anyhow::Result<GraphSnapshot> {
-        self.runtime()?.graph_snapshot().await
+        let runtime = self.runtime()?;
+        let running = self
+            .running
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("instance lifecycle was dropped"))?;
+        let status = if *running.read().await {
+            ComponentStatus::Running
+        } else {
+            ComponentStatus::Stopped
+        };
+        runtime.graph_snapshot(status).await
     }
 
     pub async fn get_events(&self, id: &str) -> anyhow::Result<Vec<ComponentEvent>> {

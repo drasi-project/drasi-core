@@ -21,6 +21,83 @@ use chrono::{DateTime, Utc};
 
 use super::{ComponentId, EdgeDefinition, GraphError, ResourceId};
 
+pub const DEFAULT_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+pub const DEFAULT_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+pub const DEFAULT_CONSTRUCTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const DEFAULT_RESOURCE_CONSTRUCTION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+pub const DEFAULT_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const DEFAULT_ACTIVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A caller's lifecycle deadline expired; accepted work remains owned by the graph.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{operation} for '{owner}' exceeded {timeout:?} while {phase} (accepted={accepted}); inspect current state and retry cleanup for unfinished work")]
+pub struct LifecycleTimeoutError {
+    pub owner: Arc<str>,
+    pub operation: &'static str,
+    pub phase: &'static str,
+    pub timeout: std::time::Duration,
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("instance '{owner}' startup superseded by stop or shutdown")]
+pub struct StartupSupersededError {
+    pub owner: Arc<str>,
+}
+
+#[derive(Clone)]
+pub(crate) struct OperationDeadline {
+    owner: Arc<str>,
+    operation: &'static str,
+    timeout: std::time::Duration,
+    expires: tokio::time::Instant,
+}
+
+impl OperationDeadline {
+    pub(crate) fn new(
+        owner: impl Into<Arc<str>>,
+        operation: &'static str,
+        timeout: std::time::Duration,
+    ) -> super::GraphResult<Self> {
+        let expires = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .filter(|_| !timeout.is_zero())
+            .ok_or_else(|| GraphError::Topology {
+                reason: format!("{operation} timeout must be positive and representable"),
+            })?;
+        Ok(Self {
+            owner: owner.into(),
+            operation,
+            timeout,
+            expires,
+        })
+    }
+
+    pub(crate) async fn wait<T>(
+        &self,
+        phase: &'static str,
+        accepted: bool,
+        work: impl std::future::Future<Output = T>,
+    ) -> super::GraphResult<T> {
+        let expired = || {
+            GraphError::LifecycleTimeout(LifecycleTimeoutError {
+                owner: self.owner.clone(),
+                operation: self.operation,
+                phase,
+                timeout: self.timeout,
+                accepted,
+            })
+        };
+        if tokio::time::Instant::now() >= self.expires {
+            return Err(expired());
+        }
+        tokio::time::timeout_at(self.expires, work)
+            .await
+            .map_err(|_| expired())
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -347,6 +424,7 @@ impl GraphError {
             | Self::OperationInProgress
             | Self::ObservationQueueFull
             | Self::ReconciliationTimeout
+            | Self::LifecycleTimeout(_)
             | Self::StartupIncomplete
             | Self::DependencyUnavailable { .. }
             | Self::CreationStopped { .. }
@@ -387,6 +465,17 @@ pub struct ComponentFailure {
     pub cause: Arc<GraphError>,
     pub timestamp: DateTime<Utc>,
 }
+
+impl PartialEq for ComponentFailure {
+    fn eq(&self, other: &Self) -> bool {
+        self.phase == other.phase
+            && self.disposition == other.disposition
+            && self.timestamp == other.timestamp
+            && Arc::ptr_eq(&self.cause, &other.cause)
+    }
+}
+
+impl Eq for ComponentFailure {}
 
 impl ComponentFailure {
     /// Whether an explicit stop acknowledges this failure.
@@ -455,7 +544,7 @@ impl std::fmt::Display for DependencyWait {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedComponent {
     pub generation: ComponentGeneration,
     pub operation: OperationEpoch,
@@ -539,7 +628,7 @@ impl ObservedComponent {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedRelationship {
     pub binding: BindingState,
     pub availability: DataAvailability,
@@ -571,8 +660,8 @@ pub enum CreationOutcome {
 pub struct DeploymentReport {
     pub revision: GraphRevision,
     pub summary: OperationSummary,
-    pub components: BTreeMap<ComponentId, CreationOutcome>,
-    pub resources: BTreeMap<ResourceId, ResourceRealization>,
+    pub components: im::OrdMap<ComponentId, CreationOutcome>,
+    pub resources: im::OrdMap<ResourceId, ResourceRealization>,
 }
 
 #[derive(Debug, Clone)]
@@ -700,11 +789,42 @@ impl std::error::Error for LifecycleReportError {
 pub struct ObservedGraph {
     pub revision: GraphRevision,
     pub run_epoch: u64,
-    pub components: BTreeMap<ComponentId, ObservedComponent>,
-    pub relationships: BTreeMap<EdgeDefinition, ObservedRelationship>,
-    pub resources: BTreeMap<ResourceId, ObservedResource>,
-    pub deployment: Option<DeploymentReport>,
-    pub startup: Option<StartReport>,
+    pub components: im::OrdMap<ComponentId, ObservedComponent>,
+    pub relationships: im::OrdMap<EdgeDefinition, ObservedRelationship>,
+    pub resources: im::OrdMap<ResourceId, ObservedResource>,
+    pub deployment: Option<Arc<DeploymentReport>>,
+    pub startup: Option<Arc<StartReport>>,
+}
+
+// Sentinels bracket a producer's entire key prefix, including every port.
+struct RelationshipProducer<'a>(&'a ComponentId, bool);
+
+impl equivalent::Equivalent<EdgeDefinition> for RelationshipProducer<'_> {
+    fn equivalent(&self, _: &EdgeDefinition) -> bool {
+        false
+    }
+}
+
+impl equivalent::Comparable<EdgeDefinition> for RelationshipProducer<'_> {
+    fn compare(&self, edge: &EdgeDefinition) -> std::cmp::Ordering {
+        self.0.cmp(&edge.from.component).then(if self.1 {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Less
+        })
+    }
+}
+
+impl ObservedGraph {
+    pub(crate) fn outgoing_relationships(
+        &self,
+        component: &ComponentId,
+    ) -> impl Iterator<Item = (&EdgeDefinition, &ObservedRelationship)> {
+        self.relationships.range((
+            std::ops::Bound::Excluded(RelationshipProducer(component, false)),
+            std::ops::Bound::Excluded(RelationshipProducer(component, true)),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -715,7 +835,7 @@ pub enum ResourceRealization {
     Released,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedResource {
     pub realization: ResourceRealization,
     pub revision: GraphRevision,
@@ -799,6 +919,126 @@ pub enum GraphSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outgoing_relationship_ranges_select_exact_producers_without_scanning_the_graph() {
+        use super::super::{Endpoint, PortId};
+        use equivalent::Comparable;
+        let mut observed = ObservedGraph {
+            revision: GraphRevision(1),
+            run_epoch: 0,
+            components: im::OrdMap::new(),
+            relationships: im::OrdMap::new(),
+            resources: im::OrdMap::new(),
+            deployment: None,
+            startup: None,
+        };
+        for index in 0..1024 {
+            for port in ["a", "z"] {
+                for destination in ["first", "last"] {
+                    observed.relationships.insert(
+                        EdgeDefinition::new(
+                            Endpoint::new(
+                                ComponentId::try_new(format!("source-{index:05}")).unwrap(),
+                                PortId::try_new(port).unwrap(),
+                            ),
+                            Endpoint::new(
+                                ComponentId::try_new(destination).unwrap(),
+                                PortId::try_new("in").unwrap(),
+                            ),
+                        ),
+                        ObservedRelationship {
+                            binding: BindingState::Bound,
+                            availability: DataAvailability::Idle,
+                            generation: 1,
+                            revision: GraphRevision(1),
+                            failure: None,
+                            transition_time: Utc::now(),
+                        },
+                    );
+                }
+            }
+        }
+        for name in ["source-00000", "source-00512", "source-01023", "source-00512-extra"] {
+            let id = ComponentId::try_new(name).unwrap();
+            let actual: Vec<_> = observed
+                .outgoing_relationships(&id)
+                .map(|(edge, _)| edge)
+                .collect();
+            let expected: Vec<_> = observed
+                .relationships
+                .keys()
+                .filter(|edge| edge.from.component == id)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+
+        struct Counted<'a>(RelationshipProducer<'a>, &'a std::cell::Cell<usize>);
+        impl equivalent::Equivalent<EdgeDefinition> for Counted<'_> {
+            fn equivalent(&self, edge: &EdgeDefinition) -> bool {
+                self.0.equivalent(edge)
+            }
+        }
+        impl Comparable<EdgeDefinition> for Counted<'_> {
+            fn compare(&self, edge: &EdgeDefinition) -> std::cmp::Ordering {
+                self.1.set(self.1.get() + 1);
+                self.0.compare(edge)
+            }
+        }
+        let comparisons = std::cell::Cell::new(0);
+        let id = ComponentId::try_new("source-00512").unwrap();
+        let matches = observed
+            .relationships
+            .range((
+                std::ops::Bound::Excluded(Counted(RelationshipProducer(&id, false), &comparisons)),
+                std::ops::Bound::Excluded(Counted(RelationshipProducer(&id, true), &comparisons)),
+            ))
+            .count();
+        assert_eq!(matches, 4);
+        assert!(
+            comparisons.get() < 256,
+            "range lookup compared {} keys",
+            comparisons.get()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_deadline_is_not_restarted_between_phases() {
+        let deadline =
+            OperationDeadline::new("instance", "stop", std::time::Duration::from_secs(5)).unwrap();
+        deadline
+            .wait(
+                "first phase",
+                true,
+                tokio::time::sleep(std::time::Duration::from_secs(3)),
+            )
+            .await
+            .unwrap();
+        let began = tokio::time::Instant::now();
+        assert!(matches!(
+            deadline
+                .wait(
+                    "second phase",
+                    true,
+                    tokio::time::sleep(std::time::Duration::from_secs(3))
+                )
+                .await,
+            Err(GraphError::LifecycleTimeout(LifecycleTimeoutError {
+                phase: "second phase",
+                ..
+            }))
+        ));
+        assert_eq!(began.elapsed(), std::time::Duration::from_secs(2));
+        let polled = std::cell::Cell::new(false);
+        assert!(deadline
+            .wait("late phase", true, async { polled.set(true) })
+            .await
+            .is_err());
+        assert!(
+            !polled.get(),
+            "expired operations must not begin another phase"
+        );
+    }
 
     #[test]
     fn failure_policy_preserves_classification_through_context_and_reporting() {

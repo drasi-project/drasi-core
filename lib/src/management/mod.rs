@@ -78,7 +78,8 @@ impl DesiredInstance {
 /// and backend-specific policy outside drasi-lib. Successful resources transfer
 /// the declared cleanup ownership to the graph. Replacements are constructed
 /// only after the graph releases the prior owner. Resolution is cancellation-safe
-/// and bounded by a 30-second deadline; partial acquisitions must be
+/// and bounded by the instance's resource-construction deadline (30 seconds by
+/// default); partial acquisitions must be
 /// released if the resolver fails or its future is dropped.
 #[async_trait]
 pub trait ManagementResourceResolver: Send + Sync {

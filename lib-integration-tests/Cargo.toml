@@ -14,7 +14,7 @@ computation-middleware-tests = ["drasi-lib/middleware-unwind"]
 
 [dependencies]
 # Test dependencies only - this crate has no library code
-drasi-lib.workspace = true
+drasi-lib = { workspace = true, features = ["test-support"] }
 drasi-core.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
@@ -24,7 +24,7 @@ drasi-source-sqlite.workspace = true
 drasi-bootstrap-sqlite.workspace = true
 drasi-reaction-http.workspace = true
 drasi-reaction-grpc.workspace = true
-drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
+drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor", "computation"] }
 drasi-index-garnet.workspace = true
 drasi-plugin-sdk.workspace = true
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }

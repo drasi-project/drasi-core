@@ -383,6 +383,11 @@ impl InspectionAPI {
             priority_queue_capacity: self.config.global_priority_queue_capacity,
             dispatch_buffer_capacity: self.config.global_dispatch_buffer_capacity,
             activation_timeout_secs: self.config.activation_timeout_secs,
+            startup_timeout_secs: self.config.startup_timeout_secs,
+            shutdown_timeout_secs: self.config.shutdown_timeout_secs,
+            construction_timeout_secs: self.config.construction_timeout_secs,
+            resource_construction_timeout_secs: self.config.resource_construction_timeout_secs,
+            cleanup_timeout_secs: self.config.cleanup_timeout_secs,
             storage_backends: self.config.storage_backends.clone(),
             queries: self.computation.query_configurations().await?,
         })

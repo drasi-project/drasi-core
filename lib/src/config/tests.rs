@@ -18,6 +18,27 @@ mod schema_tests {
     use serde_json::json;
 
     #[test]
+    fn lifecycle_limits_validate_and_round_trip() {
+        for field in [
+            "startup_timeout_secs",
+            "shutdown_timeout_secs",
+            "construction_timeout_secs",
+            "resource_construction_timeout_secs",
+            "cleanup_timeout_secs",
+            "activation_timeout_secs",
+        ] {
+            for seconds in [0, u64::MAX] {
+                let config: DrasiLibConfig =
+                    serde_json::from_value(json!({(field): seconds})).unwrap();
+                assert!(config.validate().is_err(), "{field} accepted {seconds}");
+            }
+            let config: DrasiLibConfig = serde_json::from_value(json!({(field): 37})).unwrap();
+            config.validate().unwrap();
+            assert_eq!(serde_json::to_value(config).unwrap()[field], 37);
+        }
+    }
+
+    #[test]
     fn removed_bootstrap_buffer_setting_is_rejected_and_actual_capacity_round_trips() {
         let config = crate::Query::cypher("query")
             .query("MATCH (n) RETURN n")
@@ -581,6 +602,11 @@ mod runtime_tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
+            startup_timeout_secs: None,
+            shutdown_timeout_secs: None,
+            construction_timeout_secs: None,
+            resource_construction_timeout_secs: None,
+            cleanup_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![QueryConfig {
                 id: "q1".to_string(),
@@ -624,6 +650,11 @@ mod runtime_tests {
             priority_queue_capacity: Some(50000),
             dispatch_buffer_capacity: Some(5000),
             activation_timeout_secs: None,
+            startup_timeout_secs: None,
+            shutdown_timeout_secs: None,
+            construction_timeout_secs: None,
+            resource_construction_timeout_secs: None,
+            cleanup_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![
                 QueryConfig {
@@ -695,6 +726,11 @@ mod runtime_tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
+            startup_timeout_secs: None,
+            shutdown_timeout_secs: None,
+            construction_timeout_secs: None,
+            resource_construction_timeout_secs: None,
+            cleanup_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![],
         };
@@ -718,6 +754,11 @@ mod runtime_tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
+            startup_timeout_secs: None,
+            shutdown_timeout_secs: None,
+            construction_timeout_secs: None,
+            resource_construction_timeout_secs: None,
+            cleanup_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![],
         };

@@ -70,6 +70,27 @@ protect against passive eavesdropping but not an active man-in-the-middle. Use
 
 - Packets > 16 MB are not supported.
 
+### Dependency advisory boundary
+
+The October 2026 dependency review retains `rsa` 0.9 for public-key password
+encryption; these connectors do not hold RSA private keys or call private-key
+decryption/signing, the operations affected by `RUSTSEC-2023-0071`.
+
+`mysql_common` 0.37's binlog feature still requires `zstd` 0.13.3 /
+`zstd-safe` 7.3. Its transaction-payload decoding uses fresh **read-side**
+decoders (`copy_decode` / `Decoder::with_buffer`), not borrowed/reused contexts
+or write-side decoders. Those paths are outside `RUSTSEC-2026-0391` and
+`RUSTSEC-2026-0403`; the latter advisory explicitly excludes read-side
+decoders. Seekable, experimental and multithreaded zstd features are not
+enabled, and these connectors do not train dictionaries or construct raw
+input/output buffers. Native parsing continues to reject unsupported compressed
+transaction events without advancing a checkpoint.
+
+This is an exposure assessment, not an audit ignore or removal of compressed
+legacy binlog support. Reassess before adding other zstd operations, and move
+to a patched upstream binlog dependency when one is available. Other compression
+users such as gRPC use the patched zstd 0.14.3 family.
+
 ## Checkpoint positions and resuming
 
 Each emitted change carries an opaque position token used to resume replication

@@ -18,6 +18,7 @@
 pub(crate) mod blob;
 pub mod config;
 pub mod descriptor;
+mod logging;
 pub(crate) mod queue;
 pub mod reaction;
 pub(crate) mod table;

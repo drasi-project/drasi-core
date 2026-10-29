@@ -303,8 +303,6 @@ impl DrasiLib {
         if let Err(error) = runtime.start_kind("source").await {
             failures.push(error.context("sources"));
         }
-        // Keep stop available if independent components start before a failure.
-        *self.running.write().await = true;
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             failures.push(
                 anyhow::Error::new(super::v1::GraphError::Cancelled)
@@ -324,7 +322,10 @@ impl DrasiLib {
             )
             .into());
         }
-        if let Err(error) = runtime.start_native_components().await {
+        if let Err(error) = runtime
+            .start_native_components(self.management.get().is_some())
+            .await
+        {
             failures.push(error.context("native components"));
         }
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {

@@ -57,7 +57,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
+          sudo apt-get install -y jq libjq-dev libonig-dev
+
+      - name: Install pinned Protobuf compiler
+        uses: ./.github/actions/setup-protoc
 
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -96,9 +99,9 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-llvm-cov-core-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-core-${{ hashFiles('ci/install_protoc.py') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-llvm-cov-core-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-core-${{ hashFiles('ci/install_protoc.py') }}-
 
       - name: Generate core coverage
         env:
@@ -171,7 +174,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
+          sudo apt-get install -y jq libjq-dev libonig-dev
+
+      - name: Install pinned Protobuf compiler
+        uses: ./.github/actions/setup-protoc
 
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -210,9 +216,9 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-llvm-cov-plugins-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-plugins-${{ hashFiles('ci/install_protoc.py') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-llvm-cov-plugins-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-llvm-cov-plugins-${{ hashFiles('ci/install_protoc.py') }}-
 
       - name: Generate plugin coverage (tier 1)
         env:

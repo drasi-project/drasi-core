@@ -225,6 +225,7 @@ async fn stale_completion_keeps_the_current_operation_and_controller_alive() {
     operations.active.insert(
         index,
         Active {
+            _admission_activation: None,
             epoch: OperationEpoch(2),
             operation: Operation::Start,
             abort,
@@ -683,7 +684,8 @@ async fn resume_collects_all_failures_and_still_restarts_later_members() {
             operations.paused.insert(graph.ids[id]);
         }
         update(&graph, |state| {
-            for (id, node) in &mut state.components {
+            for id in &state.components.keys().cloned().collect::<Vec<_>>() {
+                let node = state.components.get_mut(id).expect("observed component");
                 node.lifecycle = ComponentLifecycle::Quiesced;
                 if failed_ids.contains(&id.as_str()) {
                     node.operation = OperationEpoch(u64::MAX);

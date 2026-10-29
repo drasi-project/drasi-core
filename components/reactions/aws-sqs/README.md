@@ -15,6 +15,12 @@ Key capabilities:
 - Built-in system attributes: `drasi-query-id`, `drasi-operation`
 - Optional local endpoint override for ElasticMQ/LocalStack testing
 
+The AWS SDK/Smithy dependency family is aligned with the AWS identity plugin.
+It requires Rust 1.94.1 or newer (the workspace uses 1.95), and sets a minimum
+of `aws-sigv4` 1.6.4 for the constant-time cryptography fixes. Standard/FIFO
+queues, credential providers, custom endpoints and SigV4a-capable identity
+flows are retained; disabling authentication features is not the remediation.
+
 ## Lifecycle and delivery boundary
 
 Startup and stop are serialized. Running is published only after SDK client

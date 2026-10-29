@@ -412,6 +412,41 @@ writes. A drain timeout reports failure and retains active work, rather than
 aborting it. Explicit `GraphControl::cancel()` or dropping the run forces
 cancellation and can require storage reconstruction.
 
+Instance-wide `start()` is coordinated by an owned lifecycle task. Its caller
+waits for the result rather than owning the only future capable of releasing
+the startup gate. `stop()` and `shutdown()` advance the instance's stop epoch,
+interrupt the startup wait and join that task before completing cleanup.
+Superseded starts return `PartialStartError` with `StartupSupersededError`;
+they cannot later restore the running flag. Component work already admitted to
+the graph remains graph-owned. Queued starts whose waiters have disappeared
+are not started later.
+
+| Budget | Graph builder | DrasiLib builder | Default |
+|---|---|---|---|
+| Whole startup | `startup_timeout` | `with_startup_timeout_secs` | 600 s |
+| Whole stop/shutdown | `shutdown_timeout` | `with_shutdown_timeout_secs` | 60 s |
+| Configuration plus construction/reconfiguration | `construction_timeout` | `with_construction_timeout_secs` | 5 s |
+| Resource construction | `resource_construction_timeout` | `with_resource_construction_timeout_secs` | 30 s |
+| Input binding, start and output binding | `activation_timeout` | `with_activation_timeout_secs` | 300 s |
+| Individual cleanup | `cleanup_timeout` | `with_cleanup_timeout_secs` | 5 s |
+
+Graph builders take `Duration`; DrasiLib setters take positive seconds. Server
+exposes the corresponding camel-case instance settings and accepts numeric
+overrides on instance creation. One absolute overall deadline covers admission
+and subsequent phases. `LifecycleTimeoutError` records the owner, operation,
+phase, budget and request acceptance; it is not a completed-stop receipt.
+Explicit `wait_created()` / `wait_started()` are observation waits and remain
+caller-bounded.
+
+Managed realization retains its pending graph request after an interrupted wait,
+so the actor can consume the actual result before another configuration change.
+Construction is submitted with activation deferred, outside the instance
+lifecycle gate; activation then checks the current instance intent. A committed
+component whose startup has not completed can be stopped during realization.
+Previously running reserved owners remain protected during their cutover.
+Configuration acceptance/retirement and non-yielding native calls are not made
+arbitrarily interruptible.
+
 `force_cancel_components(revision, selection)` is explicit scoped escalation,
 not a graceful stop. Selection must cover the complete registered actual
 resource domain, including aliases, dependent users and required propagation
@@ -729,6 +764,20 @@ all running graphs. The topology source converges to the latest state rather
 than preserving every intermediate event. Inspector history is bounded to 256
 publications and fails explicitly when requested history has been evicted.
 
+Desired snapshots are shared across observation-only publications.
+`ObservedGraph` uses persistent ordered maps for components, relationships and
+resources, and shares its completed deployment/startup reports. The registry
+likewise shares unchanged metadata. Slots mark captures dirty when configuration
+or reader capabilities change; a topology-revision-only cache would miss those
+changes. Additions and provider reports publish their desired metadata before
+the corresponding coherent observation.
+
+Compatibility events use observed-map differences and an immutable kind lookup.
+Desired metadata changes still trigger the necessary record-token/generation
+checks. Current-member events precede removals, and removal clears that member's
+history. Full exports and opt-in topology-as-data projection still reflect the
+size of the requested output.
+
 Supplied providers are represented even if unused. Reports can arrive during
 initialization or later; an add acknowledgement is not proof that every internal
 provider has already been reported. Shared instances can be deduplicated with
@@ -771,7 +820,8 @@ cargo test --locked -p drasi-lib --features computation-rocksdb-tests \
 cargo test --locked -p lib-integration-tests
 ```
 
-The integration suite includes container-backed cases and needs Docker.
+The integration suite includes container-backed cases and needs a
+Docker-compatible daemon; this workspace uses Podman.
 The runtime runner executes default, no-default-feature, extra-capability,
 integration and SDK descriptor-factory profiles. These are build configurations
 of one engine, not alternate execution modes. Leave `RUST_LOG` unset for suites
@@ -791,8 +841,8 @@ mutable graph API is not a blanket exemption from its observable contract.
 The runner checks both discovery and actual passing results. Adding `#[ignore]`,
 dropping a test file, losing a mapped replacement, or filtering required tests
 out of execution fails the run. The only
-[permitted ignores](../tests/runtime_parity/allowed-ignored.tsv) are the existing
-manual serialization benchmark and subprocess workers whose crash drivers must
+[permitted ignores](../tests/runtime_parity/allowed-ignored.tsv) are the named
+manual serialization/publication diagnostics and subprocess workers whose crash drivers must
 pass, plus explicitly owned, expiring environment exceptions. The
 macOS/Linux network case runs when its Linux peer is prepared; its unprepared
 exception does not establish network acceptance. The Host SDK subscribe/drop
@@ -800,6 +850,15 @@ stress case runs as an ordinary test; its bounded cycles do not qualify
 sustained DLL ownership. The
 [runner self-check](../tests/runtime_parity/check-runner.sh) exercises these
 failure paths without compiling Rust.
+
+The native input crash matrix independently qualifies admission QoS, retained
+inputs and shared journals with eager/paged RocksDB storage on both runtimes.
+Its parent drivers execute the ignored worker in fresh processes and check
+28 SIGKILL scenarios, exact accepted frames, retry identities, query progress,
+projection and output. See
+[`native_input_crash_recovery.rs`](../../lib-integration-tests/tests/native_input_crash_recovery.rs).
+This is process-restart evidence, not universal provider, power-loss or
+exactly-once external-effect qualification.
 
 The [graph contract inventory](../tests/runtime_parity/computation-contracts.tsv)
 also requires named coverage for functionality with no ComponentGraph equivalent:

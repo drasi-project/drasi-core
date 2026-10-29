@@ -40,8 +40,8 @@ semver = "1.0"
 # Optional: OCI registry support
 oci-client = { version = "0.16", optional = true }
 x509-parser = { version = "0.16", optional = true }
-p256 = { version = "0.13", features = ["ecdsa"], optional = true }
-p384 = { version = "0.13", features = ["ecdsa"], optional = true }
+p256 = { version = "0.14", features = ["ecdsa"], optional = true }
+p384 = { version = "0.14", features = ["ecdsa"], optional = true }
 pem = { version = "3", optional = true }
 base64 = { version = "0.22", optional = true }
 
@@ -89,7 +89,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-ut
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-util = { version = "0.7", features = ["io"] }
 serial_test = "3"
-im = "15"
+im = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 async-stream = "0.3"
 axum = "0.7"

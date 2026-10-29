@@ -14,6 +14,8 @@
 
 use super::*;
 
+pub(super) type MetadataChanges = Arc<std::sync::Mutex<BTreeSet<ComponentId>>>;
+
 /// A coherent current publication for in-process hosts. Weak bindings avoid a
 /// cycle through components that themselves hold their graph's control handle.
 /// Public inspection/history continues to contain no runtime handles.
@@ -21,14 +23,14 @@ use super::*;
 pub(crate) struct GraphRegistrySnapshot {
     pub desired: Arc<GraphSnapshot>,
     pub observed: Arc<ObservedGraph>,
-    resources: BTreeMap<ResourceId, specification::WeakResourceHandle>,
-    configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
-    query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
+    resources: im::OrdMap<ResourceId, specification::WeakResourceHandle>,
+    configurations: im::OrdMap<ComponentId, CapturedComponentConfiguration>,
+    query_apis: im::OrdMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
     source_schema_readers:
-        BTreeMap<ComponentId, std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>>,
-    output_readers: BTreeMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
-    primary_ports: BTreeMap<ComponentId, crate::computation::v1::PortPrimaries>,
-    deferred_activation: BTreeSet<ComponentId>,
+        im::OrdMap<ComponentId, std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>>,
+    output_readers: im::OrdMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
+    primary_ports: im::OrdMap<ComponentId, crate::computation::v1::PortPrimaries>,
+    deferred_activation: im::OrdSet<ComponentId>,
 }
 
 impl GraphRegistrySnapshot {
@@ -59,21 +61,21 @@ impl GraphRegistrySnapshot {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        desired: &GraphSnapshot,
+        desired: Arc<GraphSnapshot>,
         observed: Arc<ObservedGraph>,
         resources: &BTreeMap<ResourceId, ResourceHandle>,
-        configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
-        query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
-        source_schema_readers: BTreeMap<
+        configurations: im::OrdMap<ComponentId, CapturedComponentConfiguration>,
+        query_apis: im::OrdMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
+        source_schema_readers: im::OrdMap<
             ComponentId,
             std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>,
         >,
-        output_readers: BTreeMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
+        output_readers: im::OrdMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
         factories: &BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
-        deferred_activation: BTreeSet<ComponentId>,
+        deferred_activation: im::OrdSet<ComponentId>,
     ) -> Self {
         Self {
-            desired: Arc::new(desired.clone()),
+            desired: desired.clone(),
             observed,
             configurations,
             query_apis,
@@ -99,7 +101,11 @@ impl GraphRegistrySnapshot {
     pub(crate) fn configuration_snapshot(&self) -> GraphResult<GraphConfigurationSnapshot> {
         Ok(GraphConfigurationSnapshot {
             topology: self.desired.select(super::super::GraphSelection::All)?,
-            configurations: self.configurations.clone(),
+            configurations: self
+                .configurations
+                .iter()
+                .map(|(id, value)| (id.clone(), value.clone()))
+                .collect(),
         })
     }
 
@@ -173,11 +179,17 @@ impl GraphRegistrySnapshot {
 }
 
 pub(super) fn publish(graph: &ComputationGraph) {
-    graph
-        .registry
-        .send_replace(Arc::new(GraphRegistrySnapshot::new(
-            &graph.snapshot,
-            graph.observed(),
+    let changed = std::mem::take(&mut *graph.metadata_changes.lock().unwrap_or_else(|error| {
+        log::error!("Publishing through poisoned component metadata ownership: {error}");
+        error.into_inner()
+    }));
+    let desired = graph.desired.borrow().clone();
+    let observed = graph.observed();
+    let previous = graph.registry.borrow().clone();
+    let next = if !Arc::ptr_eq(&previous.desired, &desired) {
+        GraphRegistrySnapshot::new(
+            desired,
+            observed,
             &graph.resource_handles,
             graph
                 .ids
@@ -213,7 +225,61 @@ pub(super) fn publish(graph: &ComputationGraph) {
                 .collect(),
             &graph.factories,
             graph.deferred_activation.clone(),
-        )));
+        )
+    } else {
+        let mut next = (*previous).clone();
+        next.observed = observed.clone();
+        next.deferred_activation = graph.deferred_activation.clone();
+        for id in changed {
+            if let Some(index) = graph.ids.get(&id) {
+                let slot = &graph.components[*index];
+                next.configurations.insert(id.clone(), slot.configuration());
+                replace_optional(&mut next.query_apis, &id, slot.query_api());
+                replace_optional(
+                    &mut next.source_schema_readers,
+                    &id,
+                    slot.source_schema_reader(),
+                );
+                replace_optional(&mut next.output_readers, &id, slot.output_readers());
+            } else {
+                next.configurations.remove(&id);
+                next.query_apis.remove(&id);
+                next.source_schema_readers.remove(&id);
+                next.output_readers.remove(&id);
+            }
+        }
+        for change in previous.observed.resources.diff(&observed.resources) {
+            let id = match change {
+                im::ordmap::DiffItem::Add(id, _) | im::ordmap::DiffItem::Remove(id, _) => id,
+                im::ordmap::DiffItem::Update { new: (id, _), .. } => id,
+            };
+            match graph.resource_handles.get(id) {
+                Some(handle) => {
+                    next.resources.insert(id.clone(), handle.downgrade());
+                }
+                None => {
+                    next.resources.remove(id);
+                }
+            }
+        }
+        next
+    };
+    graph.registry.send_replace(Arc::new(next));
+}
+
+fn replace_optional<T: Clone>(
+    map: &mut im::OrdMap<ComponentId, T>,
+    id: &ComponentId,
+    value: Option<T>,
+) {
+    match value {
+        Some(value) => {
+            map.insert(id.clone(), value);
+        }
+        None => {
+            map.remove(id);
+        }
+    }
 }
 
 pub(super) fn publish_observed(
@@ -280,6 +346,42 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual publication scaling measurement"]
+    #[allow(clippy::print_stdout)]
+    fn publication_status_scaling() {
+        for count in [16, 1024, 4096] {
+            let mut builder = ComputationGraph::builder("publication-scaling");
+            for index in 0..count {
+                builder = builder.service(Box::new(Idle(
+                    ComponentDescriptor::try_new(
+                        ComponentId::try_new(format!("component-{index:05}")).unwrap(),
+                        vec![],
+                    )
+                    .unwrap(),
+                )));
+            }
+            let graph = builder.build().unwrap();
+            let id = ComponentId::try_new("component-00000").unwrap();
+            let began = std::time::Instant::now();
+            for index in 0..128 {
+                super::super::controller::update(&graph, |state| {
+                    let component = state.components.get_mut(&id).unwrap();
+                    component.operation = OperationEpoch(index);
+                    component.lifecycle = if index % 2 == 0 {
+                        ComponentLifecycle::Running
+                    } else {
+                        ComponentLifecycle::Stopped
+                    };
+                });
+            }
+            println!(
+                "publication nodes={count}, updates=128, elapsed_us={}",
+                began.elapsed().as_micros()
+            );
+        }
+    }
+
+    #[test]
     fn configuration_comparison_ignores_status_but_fences_changed_owners_and_values() {
         let graph = graph();
         let original = graph.registry.borrow().clone();
@@ -317,6 +419,65 @@ mod tests {
         let mut restarted = status;
         Arc::make_mut(&mut restarted.observed).run_epoch += 1;
         assert!(!original.same_configuration_as(&restarted));
+    }
+
+    #[test]
+    fn status_publication_shares_metadata_reports_and_unchanged_observations() {
+        let graph = graph();
+        super::super::controller::update(&graph, |state| {
+            state.deployment = Some(Arc::new(DeploymentReport {
+                revision: state.revision,
+                summary: OperationSummary::Completed,
+                components: im::OrdMap::new(),
+                resources: im::OrdMap::new(),
+            }));
+            state.startup = Some(Arc::new(StartReport {
+                revision: state.revision,
+                summary: OperationSummary::Completed,
+                components: BTreeMap::new(),
+            }));
+        });
+        let before = graph.registry.borrow().clone();
+        let inspection = graph.inspector.snapshot();
+        let id = ComponentId::try_new("component").unwrap();
+        super::super::controller::update(&graph, |state| {
+            state.components.get_mut(&id).unwrap().health = ComponentHealth::Healthy;
+        });
+        let after = graph.registry.borrow().clone();
+        assert_eq!(
+            before.observed.components[&id].health,
+            ComponentHealth::Unknown
+        );
+        assert_eq!(
+            after.observed.components[&id].health,
+            ComponentHealth::Healthy
+        );
+        assert!(Arc::ptr_eq(&before.desired, &after.desired));
+        assert!(Arc::ptr_eq(
+            &inspection.desired,
+            &graph.inspector.snapshot().desired
+        ));
+        assert!(before.configurations.ptr_eq(&after.configurations));
+        assert!(before.query_apis.ptr_eq(&after.query_apis));
+        assert!(before
+            .source_schema_readers
+            .ptr_eq(&after.source_schema_readers));
+        assert!(before.output_readers.ptr_eq(&after.output_readers));
+        assert!(before.primary_ports.ptr_eq(&after.primary_ports));
+        assert!(before.resources.ptr_eq(&after.resources));
+        assert!(before
+            .observed
+            .relationships
+            .ptr_eq(&after.observed.relationships));
+        assert!(before.observed.resources.ptr_eq(&after.observed.resources));
+        assert!(Arc::ptr_eq(
+            before.observed.deployment.as_ref().unwrap(),
+            after.observed.deployment.as_ref().unwrap(),
+        ));
+        assert!(Arc::ptr_eq(
+            before.observed.startup.as_ref().unwrap(),
+            after.observed.startup.as_ref().unwrap(),
+        ));
     }
 
     #[tokio::test]
@@ -380,14 +541,24 @@ mod tests {
 
     #[test]
     fn registry_and_inspection_publications_do_not_keep_resource_instances_alive() {
-        let mut graph = graph();
         let id = ResourceId::try_new("resource").unwrap();
         let instance = Arc::new(123usize);
         let weak = Arc::downgrade(&instance);
-        graph.resource_handles.insert(
-            id.clone(),
-            ResourceHandle::new(ResourceRole::Component, instance),
-        );
+        let mut graph = ComputationGraph::builder("registry")
+            .declare_resource(ResourceSpecification {
+                id: id.clone(),
+                role: ResourceRole::Component,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "resource".into(),
+            })
+            .unwrap()
+            .provide_resource(
+                id.clone(),
+                ResourceHandle::new(ResourceRole::Component, instance),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
         publish(&graph);
         let publication = graph.registry.borrow().clone();
         let inspection = graph.inspector();

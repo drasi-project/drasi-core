@@ -22,3 +22,9 @@ bindings. Native libraries consume the shared protocol logic directly. The
 original helper regression suites move with their implementation.
 
 Run `cargo test -p drasi-http-common --all-features` from the workspace root.
+
+Both XML entry points use `quick-xml` 0.41 or newer, including its bounded
+namespace handling and linear-time duplicate-attribute checking. Webhook XML
+keeps its existing object/attribute/repeated-element shape and preserves text
+across entity references and CDATA. Invalid attributes and unclosed elements
+fail instead of being partially accepted.

@@ -785,6 +785,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn p256_der_verification_accepts_valid_signatures_and_rejects_changed_payloads() {
+        use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+
+        let signer = SigningKey::from_slice(&[7; 32]).unwrap();
+        let signature: Signature = signer.sign(b"verified OCI payload");
+        let der = signature.to_der();
+        let signature = DerSignature::from_bytes(der.as_bytes()).unwrap();
+        let verifier =
+            VerifyingKey::from_sec1_bytes(signer.verifying_key().to_sec1_point(false).as_bytes())
+                .unwrap();
+        assert!(verifier.verify(b"verified OCI payload", &signature).is_ok());
+        assert!(verifier.verify(b"changed OCI payload", &signature).is_err());
+    }
+
+    #[test]
+    fn p384_der_verification_accepts_valid_signatures_and_rejects_changed_payloads() {
+        use p384::ecdsa::{signature::Signer, Signature, SigningKey};
+
+        let signer = SigningKey::from_slice(&[7; 48]).unwrap();
+        let signature: Signature = signer.sign(b"certificate TBS bytes");
+        let der = signature.to_der();
+        let signature = p384::ecdsa::DerSignature::from_bytes(der.as_bytes()).unwrap();
+        let verifier = p384::ecdsa::VerifyingKey::from_sec1_bytes(
+            signer.verifying_key().to_sec1_point(false).as_bytes(),
+        )
+        .unwrap();
+        assert!(verifier
+            .verify(b"certificate TBS bytes", &signature)
+            .is_ok());
+        assert!(verifier.verify(b"changed certificate", &signature).is_err());
+    }
+
+    #[test]
     fn test_glob_match_exact() {
         assert!(glob_match("hello", "hello"));
         assert!(!glob_match("hello", "world"));

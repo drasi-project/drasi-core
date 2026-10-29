@@ -252,6 +252,11 @@ pub struct RuntimeConfig {
     pub global_dispatch_buffer_capacity: Option<usize>,
     /// Explicit instance activation deadline, preserving omission in snapshots.
     pub activation_timeout_secs: Option<u64>,
+    pub startup_timeout_secs: Option<u64>,
+    pub shutdown_timeout_secs: Option<u64>,
+    pub construction_timeout_secs: Option<u64>,
+    pub resource_construction_timeout_secs: Option<u64>,
+    pub cleanup_timeout_secs: Option<u64>,
     /// Original storage backend configurations
     pub storage_backends: Vec<crate::indexes::StorageBackendConfig>,
     /// Global default recovery policy for all queries.
@@ -291,6 +296,14 @@ impl std::fmt::Debug for RuntimeConfig {
             )
             .field("storage_backends", &self.storage_backends)
             .field("activation_timeout_secs", &self.activation_timeout_secs)
+            .field("startup_timeout_secs", &self.startup_timeout_secs)
+            .field("shutdown_timeout_secs", &self.shutdown_timeout_secs)
+            .field("construction_timeout_secs", &self.construction_timeout_secs)
+            .field(
+                "resource_construction_timeout_secs",
+                &self.resource_construction_timeout_secs,
+            )
+            .field("cleanup_timeout_secs", &self.cleanup_timeout_secs)
             .field("default_recovery_policy", &self.default_recovery_policy)
             .finish()
     }
@@ -372,6 +385,11 @@ impl RuntimeConfig {
             global_priority_queue_capacity,
             global_dispatch_buffer_capacity,
             activation_timeout_secs: config.activation_timeout_secs,
+            startup_timeout_secs: config.startup_timeout_secs,
+            shutdown_timeout_secs: config.shutdown_timeout_secs,
+            construction_timeout_secs: config.construction_timeout_secs,
+            resource_construction_timeout_secs: config.resource_construction_timeout_secs,
+            cleanup_timeout_secs: config.cleanup_timeout_secs,
             storage_backends,
             default_recovery_policy,
         }

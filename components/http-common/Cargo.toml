@@ -15,7 +15,7 @@ reaction = [
     "dep:handlebars-reaction", "dep:utoipa", "dep:tokio",
 ]
 bootstrap = [
-    "dep:reqwest", "dep:handlebars", "dep:serde_yaml", "dep:quick-xml-bootstrap",
+    "dep:reqwest", "dep:handlebars", "dep:serde_yaml", "dep:quick-xml",
     "dep:url", "dep:tokio",
 ]
 webhook = [
@@ -38,7 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = { version = "0.7", optional = true }
 serde_yaml = { version = "0.9", optional = true }
-quick-xml = { version = "0.37", features = ["serialize"], optional = true }
+quick-xml = { version = "0.41", features = ["serialize"], optional = true }
 hmac = { version = "0.12", optional = true }
 sha1 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -50,7 +50,6 @@ tower-http = { version = "0.5", features = ["cors"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 handlebars = { version = "6", optional = true }
 handlebars-reaction = { package = "handlebars", version = "5.1", optional = true }
-quick-xml-bootstrap = { package = "quick-xml", version = "0.31", features = ["serialize"], optional = true }
 url = { version = "2", optional = true }
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 

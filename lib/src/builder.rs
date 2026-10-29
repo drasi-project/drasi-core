@@ -126,6 +126,11 @@ pub struct DrasiLibBuilder {
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
     activation_timeout_secs: Option<u64>,
+    startup_timeout_secs: Option<u64>,
+    shutdown_timeout_secs: Option<u64>,
+    construction_timeout_secs: Option<u64>,
+    resource_construction_timeout_secs: Option<u64>,
+    cleanup_timeout_secs: Option<u64>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
     #[cfg(feature = "test-support")]
@@ -209,6 +214,11 @@ impl DrasiLibBuilder {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
+            startup_timeout_secs: None,
+            shutdown_timeout_secs: None,
+            construction_timeout_secs: None,
+            resource_construction_timeout_secs: None,
+            cleanup_timeout_secs: None,
             storage_backends: Vec::new(),
             query_configs: Vec::new(),
             #[cfg(feature = "test-support")]
@@ -460,6 +470,36 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Bound the whole instance startup operation. Defaults to 600 seconds.
+    pub fn with_startup_timeout_secs(mut self, seconds: u64) -> Self {
+        self.startup_timeout_secs = Some(seconds);
+        self
+    }
+
+    /// Bound stop and shutdown waits without abandoning unfinished work. Defaults to 60 seconds.
+    pub fn with_shutdown_timeout_secs(mut self, seconds: u64) -> Self {
+        self.shutdown_timeout_secs = Some(seconds);
+        self
+    }
+
+    /// Bound each component construction/configuration callback. Defaults to five seconds.
+    pub fn with_construction_timeout_secs(mut self, seconds: u64) -> Self {
+        self.construction_timeout_secs = Some(seconds);
+        self
+    }
+
+    /// Bound each resource constructor. Defaults to thirty seconds.
+    pub fn with_resource_construction_timeout_secs(mut self, seconds: u64) -> Self {
+        self.resource_construction_timeout_secs = Some(seconds);
+        self
+    }
+
+    /// Bound each owner's cleanup separately from the total shutdown budget. Defaults to five seconds.
+    pub fn with_cleanup_timeout_secs(mut self, seconds: u64) -> Self {
+        self.cleanup_timeout_secs = Some(seconds);
+        self
+    }
+
     /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
@@ -668,6 +708,11 @@ impl DrasiLibBuilder {
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             activation_timeout_secs: self.activation_timeout_secs,
+            startup_timeout_secs: self.startup_timeout_secs,
+            shutdown_timeout_secs: self.shutdown_timeout_secs,
+            construction_timeout_secs: self.construction_timeout_secs,
+            resource_construction_timeout_secs: self.resource_construction_timeout_secs,
+            cleanup_timeout_secs: self.cleanup_timeout_secs,
             storage_backends: self.storage_backends,
             queries: self.query_configs.clone(),
         };

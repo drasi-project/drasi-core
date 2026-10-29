@@ -3264,7 +3264,12 @@ fn commit_desired(
         .into_iter()
         .zip(graph.next_generation..next_generation)
     {
-        let slot = InstanceSlot::declared(id.clone(), component, ComponentGeneration(generation));
+        let slot = InstanceSlot::declared(
+            id.clone(),
+            component,
+            ComponentGeneration(generation),
+            graph.metadata_changes.clone(),
+        );
         let lease = slot.take()?;
         replacements.insert(id, (slot, lease));
     }
@@ -3527,7 +3532,8 @@ fn commit_desired(
                 },
             );
         }
-        for component in state.components.values_mut() {
+        for id in state.components.keys().cloned().collect::<Vec<_>>() {
+            let component = state.components.get_mut(&id).expect("observed component");
             component.revision = state.revision;
         }
         for id in plan.restart.iter().chain(&plan.reactivate) {
@@ -3541,13 +3547,22 @@ fn commit_desired(
                 }
             }
         }
-        state.relationships.retain(|edge, _| {
-            plan.desired
-                .relationships
-                .iter()
-                .chain(&plan.desired.boundary_relationships)
-                .any(|relationship| &relationship.definition == edge)
-        });
+        let retained: BTreeSet<_> = plan
+            .desired
+            .relationships
+            .iter()
+            .chain(&plan.desired.boundary_relationships)
+            .map(|relationship| &relationship.definition)
+            .collect();
+        let removed: Vec<_> = state
+            .relationships
+            .keys()
+            .filter(|edge| !retained.contains(edge))
+            .cloned()
+            .collect();
+        for edge in removed {
+            state.relationships.remove(&edge);
+        }
         for edge in plan.rebind.iter().chain(
             plan.desired
                 .boundary_relationships
@@ -3567,9 +3582,9 @@ fn commit_desired(
                 },
             );
         }
-        state
-            .resources
-            .retain(|id, _| !plan.remove_resources.contains(id));
+        for id in &plan.remove_resources {
+            state.resources.remove(id);
+        }
         for id in &plan.resources {
             let generation = resource_generations[id];
             state.resources.insert(

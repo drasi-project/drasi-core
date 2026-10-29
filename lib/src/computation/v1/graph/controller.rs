@@ -51,6 +51,7 @@ pub(super) struct InstanceSlot {
     pub(super) generation: ComponentGeneration,
     value: Mutex<Option<Instance>>,
     configuration: Mutex<super::CapturedComponentConfiguration>,
+    metadata_changes: super::registry::MetadataChanges,
     query_api: Mutex<Option<Arc<crate::computation::v1::QueryApi>>>,
     source_schema_reader: Mutex<Option<Arc<dyn crate::computation::v1::SourceSchemaReader>>>,
     output_readers: Mutex<crate::computation::v1::OutputReaders>,
@@ -81,19 +82,25 @@ impl InstanceSlot {
         instance.component
     }
 
-    pub(super) fn new(component: Component, generation: ComponentGeneration) -> Arc<Self> {
+    pub(super) fn new(
+        component: Component,
+        generation: ComponentGeneration,
+        metadata_changes: super::registry::MetadataChanges,
+    ) -> Arc<Self> {
         let id = component.descriptor().id().clone();
-        Self::declared(id, component, generation)
+        Self::declared(id, component, generation, metadata_changes)
     }
 
     pub(super) fn declared(
         id: ComponentId,
         component: Component,
         generation: ComponentGeneration,
+        metadata_changes: super::registry::MetadataChanges,
     ) -> Arc<Self> {
         let slot = Arc::new(Self {
             id,
             generation,
+            metadata_changes,
             configuration: Mutex::new(super::CapturedComponentConfiguration::Unavailable {
                 reason: "component metadata has not been captured".into(),
             }),
@@ -285,6 +292,24 @@ struct InstanceLease {
     value: Option<Instance>,
 }
 
+struct MetadataChange<'a>(&'a InstanceSlot);
+
+impl Drop for MetadataChange<'_> {
+    fn drop(&mut self) {
+        self.0
+            .metadata_changes
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!(
+                    "Component metadata change ownership is poisoned: {}",
+                    self.0.id
+                );
+                error.into_inner()
+            })
+            .insert(self.0.id.clone());
+    }
+}
+
 impl InstanceLease {
     fn refresh_recovery(&self) -> GraphResult<crate::computation::v1::ComponentRecovery> {
         let contract = self.component.recovery_contract();
@@ -310,6 +335,7 @@ impl InstanceLease {
     }
 
     fn refresh_configuration(&self) -> GraphResult<()> {
+        let _changed = MetadataChange(&self.slot);
         self.refresh_recovery()?;
         *self.slot.query_api.lock().unwrap_or_else(|error| {
             log::error!("Query API publication is poisoned: {}", self.slot.id);
@@ -809,6 +835,40 @@ fn addition_id(pending: &Option<super::ComponentAddition>) -> &ComponentId {
 }
 
 impl GraphControl {
+    async fn lifecycle_request<T>(
+        &self,
+        operation: &'static str,
+        timeout: std::time::Duration,
+        command: impl FnOnce(oneshot::Sender<GraphResult<T>>) -> Command,
+    ) -> GraphResult<T> {
+        let deadline = crate::computation::v1::OperationDeadline::new(
+            self.desired.borrow().id.clone(),
+            operation,
+            timeout,
+        )?;
+        self.lifecycle_request_until(&deadline, command).await
+    }
+
+    pub(super) async fn lifecycle_request_until<T>(
+        &self,
+        deadline: &crate::computation::v1::OperationDeadline,
+        command: impl FnOnce(oneshot::Sender<GraphResult<T>>) -> Command,
+    ) -> GraphResult<T> {
+        let (reply, result) = oneshot::channel();
+        deadline
+            .wait(
+                "queueing the lifecycle request",
+                false,
+                self.commands.send(command(reply)),
+            )
+            .await?
+            .map_err(|_| GraphError::ControllerClosed)?;
+        deadline
+            .wait("awaiting component outcomes", true, result)
+            .await?
+            .map_err(|_| GraphError::ControllerClosed)?
+    }
+
     /// Explicitly interrupt selected work without a drain/rollback promise.
     /// The selection must include every registered user of the same actual
     /// resources. Interrupted generations remain quarantined after cleanup.
@@ -818,16 +878,14 @@ impl GraphControl {
         revision: GraphRevision,
         selection: GraphSelection,
     ) -> GraphResult<crate::computation::v1::ForceCancellationReport> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::ForceCancel {
+        self.lifecycle_request("force cancellation", self.shutdown_timeout, |reply| {
+            Command::ForceCancel {
                 revision,
                 selection,
                 reply,
-            })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
+            }
+        })
+        .await
     }
 
     pub(crate) async fn retired_resources(&self) -> GraphResult<BTreeSet<super::ResourceId>> {
@@ -874,12 +932,10 @@ impl GraphControl {
         &self,
         members: BTreeMap<ComponentId, ComponentGeneration>,
     ) -> GraphResult<StartReport> {
-        let (reply, receive) = oneshot::channel();
-        self.commands
-            .send(Command::StartMembers { members, reply })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        receive.await.map_err(|_| GraphError::ControllerClosed)?
+        self.lifecycle_request("start", self.startup_timeout, |reply| {
+            Command::StartMembers { members, reply }
+        })
+        .await
     }
 
     /// Admit activation of newly rebound members without waiting for their
@@ -888,24 +944,20 @@ impl GraphControl {
         &self,
         members: BTreeMap<ComponentId, ComponentGeneration>,
     ) -> GraphResult<()> {
-        let (reply, receive) = oneshot::channel();
-        self.commands
-            .send(Command::RequestMemberActivation { members, reply })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        receive.await.map_err(|_| GraphError::ControllerClosed)?
+        self.lifecycle_request("activation", self.startup_timeout, |reply| {
+            Command::RequestMemberActivation { members, reply }
+        })
+        .await
     }
 
     pub(crate) async fn stop_members(
         &self,
         members: BTreeMap<ComponentId, ComponentGeneration>,
     ) -> GraphResult<StopReport> {
-        let (reply, receive) = oneshot::channel();
-        self.commands
-            .send(Command::StopMembers { members, reply })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        receive.await.map_err(|_| GraphError::ControllerClosed)?
+        self.lifecycle_request("stop", self.shutdown_timeout, |reply| {
+            Command::StopMembers { members, reply }
+        })
+        .await
     }
 
     pub(crate) async fn mutate_members(
@@ -991,16 +1043,12 @@ impl GraphControl {
         revision: GraphRevision,
         selection: GraphSelection,
     ) -> GraphResult<Vec<ComponentId>> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Quiesce {
-                revision,
-                selection,
-                reply,
-            })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
+        self.lifecycle_request("quiesce", self.shutdown_timeout, |reply| Command::Quiesce {
+            revision,
+            selection,
+            reply,
+        })
+        .await
     }
 
     pub fn observed(&self) -> Arc<ObservedGraph> {
@@ -1030,26 +1078,37 @@ impl GraphControl {
     }
 
     pub async fn deployment_report(&self) -> GraphResult<DeploymentReport> {
-        let mut observed = self.observed.clone();
-        let snapshot = tokio::select! {
-            biased;
-            result = observed.wait_for(|value| value.deployment.is_some()) => result.map_err(|_| GraphError::ControllerClosed)?,
-            _ = self.commands.closed() => return Err(GraphError::ControllerClosed),
-        };
-        snapshot
-            .deployment
-            .clone()
-            .ok_or(GraphError::ControllerClosed)
+        let deadline = crate::computation::v1::OperationDeadline::new(
+            self.desired.borrow().id.clone(),
+            "deployment",
+            self.startup_timeout,
+        )?;
+        deadline.wait("awaiting deployment outcomes", true, async {
+            let mut observed = self.observed.clone();
+            let snapshot = tokio::select! {
+                biased;
+                result = observed.wait_for(|value| value.deployment.is_some()) => result.map_err(|_| GraphError::ControllerClosed)?,
+                _ = self.commands.closed() => return Err(GraphError::ControllerClosed),
+            };
+            snapshot.deployment.as_deref().cloned().ok_or(GraphError::ControllerClosed)
+        }).await?
     }
 
     pub async fn startup_report(&self) -> GraphResult<StartReport> {
-        let mut observed = self.observed.clone();
-        let snapshot = tokio::select! {
-            biased;
-            result = observed.wait_for(|value| value.startup.is_some()) => result.map_err(|_| GraphError::ControllerClosed)?,
-            _ = self.commands.closed() => return Err(GraphError::ControllerClosed),
-        };
-        snapshot.startup.clone().ok_or(GraphError::ControllerClosed)
+        let deadline = crate::computation::v1::OperationDeadline::new(
+            self.desired.borrow().id.clone(),
+            "startup",
+            self.startup_timeout,
+        )?;
+        deadline.wait("awaiting startup outcomes", true, async {
+            let mut observed = self.observed.clone();
+            let snapshot = tokio::select! {
+                biased;
+                result = observed.wait_for(|value| value.startup.is_some()) => result.map_err(|_| GraphError::ControllerClosed)?,
+                _ = self.commands.closed() => return Err(GraphError::ControllerClosed),
+            };
+            snapshot.startup.as_deref().cloned().ok_or(GraphError::ControllerClosed)
+        }).await?
     }
 
     pub async fn start_components(
@@ -1075,17 +1134,13 @@ impl GraphControl {
         selection: GraphSelection,
         force: bool,
     ) -> GraphResult<StartReport> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Start {
-                revision,
-                selection,
-                force,
-                reply,
-            })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
+        self.lifecycle_request("start", self.startup_timeout, |reply| Command::Start {
+            revision,
+            selection,
+            force,
+            reply,
+        })
+        .await
     }
 
     pub async fn stop_components(
@@ -1093,11 +1148,25 @@ impl GraphControl {
         revision: GraphRevision,
         selection: GraphSelection,
     ) -> GraphResult<StopReport> {
+        self.lifecycle_request("stop", self.shutdown_timeout, |reply| Command::Stop {
+            revision,
+            selection,
+            reply,
+        })
+        .await
+    }
+
+    /// The driver, unlike a public waiter, must keep owning an accepted drain
+    /// after the caller's shutdown deadline. Callback budgets still apply.
+    pub(crate) async fn stop_for_shutdown(
+        &self,
+        revision: GraphRevision,
+    ) -> GraphResult<StopReport> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Stop {
                 revision,
-                selection,
+                selection: GraphSelection::All,
                 reply,
             })
             .await
@@ -1223,13 +1292,19 @@ pub(super) fn update(graph: &ComputationGraph, change: impl FnOnce(&mut Observed
         .observed
         .send_modify(|snapshot| change(Arc::make_mut(snapshot)));
     super::registry::publish(graph);
-    graph.inspector.publish(&graph.snapshot, graph.observed());
+    graph
+        .inspector
+        .publish(graph.desired.borrow().clone(), graph.observed());
 }
 
 pub(super) fn mark_cleanup_required(observed: &watch::Sender<Arc<ObservedGraph>>) {
     observed.send_modify(|snapshot| {
         let snapshot = Arc::make_mut(snapshot);
-        for node in snapshot.components.values_mut() {
+        for id in snapshot.components.keys().cloned().collect::<Vec<_>>() {
+            let node = snapshot
+                .components
+                .get_mut(&id)
+                .expect("observed component");
             if matches!(
                 node.lifecycle,
                 ComponentLifecycle::Starting
@@ -1241,7 +1316,11 @@ pub(super) fn mark_cleanup_required(observed: &watch::Sender<Arc<ObservedGraph>>
                 node.transition_time = Utc::now();
             }
         }
-        for edge in snapshot.relationships.values_mut() {
+        for id in snapshot.relationships.keys().cloned().collect::<Vec<_>>() {
+            let edge = snapshot
+                .relationships
+                .get_mut(&id)
+                .expect("observed relationship");
             if edge.binding == BindingState::Bound {
                 edge.binding = BindingState::Draining;
                 edge.availability = DataAvailability::Unavailable;
@@ -1532,7 +1611,8 @@ async fn deploy(
     operations: &mut Operations,
 ) -> GraphResult<PipeGuard> {
     update(graph, |state| {
-        for (id, resource) in &mut state.resources {
+        for id in &state.resources.keys().cloned().collect::<Vec<_>>() {
+            let resource = state.resources.get_mut(id).expect("observed resource");
             resource.realization = if graph.resource_handles.contains_key(id) {
                 ResourceRealization::Created
             } else {
@@ -1721,7 +1801,7 @@ async fn deploy(
             break;
         }
     }
-    let mut outcomes = BTreeMap::new();
+    let mut outcomes = im::OrdMap::new();
     for &index in &graph.order {
         let node = &graph.nodes[index];
         let id = node.descriptor.id();
@@ -1805,7 +1885,7 @@ async fn deploy(
             .map(|(id, state)| (id.clone(), state.realization))
             .collect(),
     };
-    update(graph, |state| state.deployment = Some(report));
+    update(graph, |state| state.deployment = Some(Arc::new(report)));
     Ok(controls)
 }
 
@@ -2510,6 +2590,15 @@ impl ReconciliationReservation {
                 })
             })
         };
+        let observed = graph.observed();
+        let stoppable = |id: &ComponentId| {
+            !self.components.contains(id)
+                || self.committed
+                    && observed
+                        .components
+                        .get(id)
+                        .is_some_and(|node| !node.started)
+        };
         match command {
             Command::RetiredResources(_)
             | Command::RecoveryReport { .. }
@@ -2519,26 +2608,23 @@ impl ReconciliationReservation {
             | Command::ObservePlugin { .. }
             | Command::AutoStart => true,
             Command::ForceCancel { .. } => true,
-            Command::Start { selection, .. }
-            | Command::Stop { selection, .. }
-            | Command::Quiesce { selection, .. } => disjoint(selection),
+            Command::Start { selection, .. } | Command::Quiesce { selection, .. } => {
+                disjoint(selection)
+            }
+            Command::Stop { selection, .. } => select(graph, selection).map_or(true, |selected| {
+                selected
+                    .iter()
+                    .all(|index| stoppable(graph.nodes[*index].descriptor.id()))
+            }),
             Command::HandleStart { component, .. } | Command::ControlHandler { component, .. } => {
                 !self.components.contains(component)
             }
-            Command::HandleStop { component, .. } => {
-                !self.components.contains(component)
-                    || self.committed
-                        && graph
-                            .observed()
-                            .components
-                            .get(component)
-                            .is_some_and(|node| node.realization == RealizationState::Creating)
-            }
+            Command::HandleStop { component, .. } => stoppable(component),
             Command::StartMembers { members, .. }
-            | Command::RequestMemberActivation { members, .. }
-            | Command::StopMembers { members, .. } => {
+            | Command::RequestMemberActivation { members, .. } => {
                 members.keys().all(|id| !self.components.contains(id))
             }
+            Command::StopMembers { members, .. } => members.keys().all(stoppable),
             Command::Add { addition, .. } => {
                 let reserved = |id: &super::ResourceId| {
                     self.resources.contains(id)
@@ -3197,6 +3283,7 @@ impl Operations {
                 node.waiting_for = waiting;
                 node.transition_time = Utc::now();
                 if let Some(report) = &mut state.deployment {
+                    let report = Arc::make_mut(report);
                     report.components.insert(id.clone(), outcome.clone());
                     report.summary = OperationSummary::CompletedWithFailures;
                 }
@@ -3449,6 +3536,7 @@ impl Operations {
                 .ok_or_else(|| topology("component operation epoch exhausted"))?,
         );
         let timeout = graph.cleanup_timeout;
+        let construction_timeout = graph.construction_timeout;
         let activation_timeout = graph.activation_timeout;
         let declarations = graph.snapshot.resources.clone();
         let resources = graph.resource_handles.clone();
@@ -3598,7 +3686,8 @@ impl Operations {
                         } else {
                             Vec::new()
                         };
-                        let context = tokio::time::timeout(timeout, ConstructionContext::resolve(
+                        let construction_deadline = tokio::time::Instant::now() + construction_timeout;
+                        let context = tokio::time::timeout_at(construction_deadline, ConstructionContext::resolve(
                             scope,
                             graph_id,
                             generation,
@@ -3616,15 +3705,21 @@ impl Operations {
                             source: error.source,
                         })?;
                         if operation == Operation::Reconfigure {
-                            tokio::time::timeout(timeout, lease.component.reconfigure(context))
+                            tokio::time::timeout_at(construction_deadline, lease.component.reconfigure(context))
                                 .await
                                 .map_err(|_| work_identity.interrupted("reconfiguration timeout"))?
                                 .map_err(|source| component_error(&node, "reconfigure", source))?;
                         } else {
                             let constructed =
-                                tokio::time::timeout(timeout, factory.create(context))
+                                tokio::time::timeout_at(construction_deadline, factory.create(context))
                                     .await
-                                    .map_err(|_| GraphError::ReconciliationTimeout)?
+                                    .map_err(|error| GraphError::Creation {
+                                        component: node.descriptor.id().clone(),
+                                        disposition: FailureDisposition::Retryable,
+                                        source: anyhow::Error::new(error).context(format!(
+                                            "component construction exceeded {construction_timeout:?}"
+                                        )),
+                                    })?
                                     .map_err(|error| GraphError::Creation {
                                         component: node.descriptor.id().clone(),
                                         disposition: error.disposition,
@@ -4030,7 +4125,9 @@ impl Operations {
                         summary: OperationSummary::CompletedWithFailures,
                         components: group.outcomes,
                     };
-                    update(graph, |state| state.startup = Some(report.clone()));
+                    update(graph, |state| {
+                        state.startup = Some(Arc::new(report.clone()))
+                    });
                     if let Some(reply) = group.reply {
                         let _ = reply.send(Ok(report));
                     }
@@ -4225,7 +4322,9 @@ impl Operations {
                 },
                 components: std::mem::take(&mut group.outcomes),
             };
-            update(graph, |state| state.startup = Some(report.clone()));
+            update(graph, |state| {
+                state.startup = Some(Arc::new(report.clone()))
+            });
             graph.state.send_replace(GraphState::Running);
             if let Some(reply) = group.reply.take() {
                 let _ = reply.send(Ok(report));
@@ -4891,6 +4990,7 @@ impl Operations {
             };
             update(graph, |state| {
                 if let Some(report) = &mut state.deployment {
+                    let report = Arc::make_mut(report);
                     report.components.insert(id.clone(), outcome);
                     report.summary = if report
                         .components
@@ -4994,10 +5094,17 @@ impl Operations {
                     }
                 }
                 update(graph, |state| {
-                    for (edge, observed) in &mut state.relationships {
-                        if edge.from.component == *id && observed.binding == BindingState::Bound {
-                            observed.availability = DataAvailability::Exhausted;
-                        }
+                    let edges = state
+                        .outgoing_relationships(id)
+                        .filter(|(_, observed)| observed.binding == BindingState::Bound)
+                        .map(|(edge, _)| edge.clone())
+                        .collect::<Vec<_>>();
+                    for edge in edges {
+                        state
+                            .relationships
+                            .get_mut(&edge)
+                            .expect("outgoing relationship")
+                            .availability = DataAvailability::Exhausted;
                     }
                 });
             }
@@ -5020,13 +5127,20 @@ impl Operations {
                     } else {
                         ComponentHealth::Unknown
                     };
-                    for (edge, observed) in &mut state.relationships {
-                        if edge.from.component == *id
-                            && observed.binding == BindingState::Bound
-                            && observed.availability != DataAvailability::Exhausted
-                        {
-                            observed.availability = DataAvailability::Idle;
-                        }
+                    let edges = state
+                        .outgoing_relationships(id)
+                        .filter(|(_, observed)| {
+                            observed.binding == BindingState::Bound
+                                && observed.availability != DataAvailability::Exhausted
+                        })
+                        .map(|(edge, _)| edge.clone())
+                        .collect::<Vec<_>>();
+                    for edge in edges {
+                        state
+                            .relationships
+                            .get_mut(&edge)
+                            .expect("outgoing relationship")
+                            .availability = DataAvailability::Idle;
                     }
                 });
                 for group in self
@@ -5098,10 +5212,16 @@ impl Operations {
             node.health = ComponentHealth::Unavailable;
             node.failure = Some(failure.clone());
             node.transition_time = Utc::now();
-            for (edge, observed) in &mut state.relationships {
-                if edge.from.component == *id {
-                    observed.availability = DataAvailability::Unavailable;
-                }
+            let edges = state
+                .outgoing_relationships(id)
+                .map(|(edge, _)| edge.clone())
+                .collect::<Vec<_>>();
+            for edge in edges {
+                state
+                    .relationships
+                    .get_mut(&edge)
+                    .expect("outgoing relationship")
+                    .availability = DataAvailability::Unavailable;
             }
         });
         if operation == Operation::Start {
@@ -5230,6 +5350,9 @@ async fn submit_handle_request(
     cancel: &mut watch::Receiver<bool>,
     request: HandleRequest,
 ) -> GraphResult<()> {
+    if matches!(&request, HandleRequest::Start { .. }) && request.abandoned() {
+        return Ok(());
+    }
     if let Err(error) = request.validate(graph) {
         request.reject(error);
         return Ok(());
@@ -5818,6 +5941,7 @@ fn handle_command<'a>(
                         for node in &desired.components {
                             if observed.components.get(node.descriptor.id()).is_some_and(|node| {
                                 node.failure.as_ref().is_some_and(|failure| failure.disposition == FailureDisposition::Retryable)
+                                    || node.realization == RealizationState::CreationFailed && node.failure.is_none()
                             }) {
                                 changes.push(reconcile::DesiredMutation::Retry(GraphSelection::Exact(vec![node.descriptor.id().clone()])));
                             }
@@ -6002,6 +6126,7 @@ fn handle_command<'a>(
                     submit_handle_request(graph, operations, controls, cancel, HandleRequest::Start { component, generation, reply }).await?;
                 }
                 Some(Command::StartMembers { members, reply }) => {
+                    if reply.is_closed() { return Ok(()); }
                     let selected = member_indices(graph, &members).and_then(|selected| {
                         if graph.retirement_active() || operations.conflicts(&selected, true) { Err(GraphError::OperationInProgress) }
                         else { Ok(selected) }
@@ -6015,6 +6140,7 @@ fn handle_command<'a>(
                     }
                 }
                 Some(Command::RequestMemberActivation { members, reply }) => {
+                    if reply.is_closed() { return Ok(()); }
                     let selected = member_indices(graph, &members).and_then(|selected| {
                         if graph.retirement_active() || operations.conflicts(&selected, true) {
                             Err(GraphError::OperationInProgress)
@@ -6076,6 +6202,7 @@ fn handle_command<'a>(
                     if cancelled { return Err(GraphError::Cancelled); }
                 }
                 Some(Command::Start { revision, selection, force, reply }) => {
+                    if reply.is_closed() { return Ok(()); }
                     let valid = check_revision(graph, revision).and_then(|_| {
                         let selected = select(graph, &selection)?;
                         if graph.retirement_active() || operations.conflicts(&selected, true) {
@@ -6163,17 +6290,17 @@ fn handle_command<'a>(
                             node.health = observation.health;
                             node.revision = state.revision;
                             node.transition_time = Utc::now();
-                            for (edge, observed) in &mut state.relationships {
-                                if edge.from.component == observation.component
-                                    && observed.binding == BindingState::Bound
+                            let edges = state.outgoing_relationships(&observation.component)
+                                .filter(|(_, observed)| observed.binding == BindingState::Bound
                                     && observed.availability != DataAvailability::Exhausted
-                                {
-                                    observed.availability = match observation.health {
+                                )
+                                .map(|(edge, _)| edge.clone()).collect::<Vec<_>>();
+                            for edge in edges {
+                                    state.relationships.get_mut(&edge).expect("outgoing relationship").availability = match observation.health {
                                         ComponentHealth::Unknown => DataAvailability::Unknown,
                                         ComponentHealth::Healthy => DataAvailability::Available,
                                         ComponentHealth::Degraded | ComponentHealth::Unavailable => DataAvailability::Unavailable,
                                     };
-                                }
                             }
                         });
                         Ok(())
@@ -6480,14 +6607,19 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
         }
     }
     update(graph, |state| {
-        for edge in state.relationships.values_mut() {
+        for id in state.relationships.keys().cloned().collect::<Vec<_>>() {
+            let edge = state
+                .relationships
+                .get_mut(&id)
+                .expect("observed relationship");
             if matches!(edge.binding, BindingState::Bound | BindingState::Draining) {
                 edge.binding = BindingState::Declared;
                 edge.availability = DataAvailability::Unavailable;
                 edge.transition_time = Utc::now();
             }
         }
-        for node in state.components.values_mut() {
+        for id in state.components.keys().cloned().collect::<Vec<_>>() {
+            let node = state.components.get_mut(&id).expect("observed component");
             if matches!(
                 node.realization,
                 RealizationState::Created | RealizationState::Creating
@@ -6646,6 +6778,48 @@ mod command_tests {
             drop(remaining);
             assert!(receiver.recv().await.is_none());
         }
+    }
+
+    #[test]
+    fn captured_metadata_is_published_without_a_topology_or_status_change() {
+        let id = ComponentId::try_new("metadata-source").unwrap();
+        let graph = ComputationGraph::builder("metadata-publication")
+            .source(Box::new(AdmittedSource(
+                ComponentDescriptor::try_new(
+                    id.clone(),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out").unwrap(),
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .unwrap(),
+            )))
+            .build()
+            .unwrap();
+        let before = graph.registry.borrow().clone();
+        let slot = &graph.components[graph.ids[&id]];
+        let value = super::super::CapturedComponentConfiguration::Available {
+            values: serde_json::json!({"updated": true}),
+        };
+        {
+            let _changed = MetadataChange(slot);
+            *slot.configuration.lock().unwrap() = value.clone();
+        }
+        update(&graph, |_| {});
+        let after = graph.registry.borrow().clone();
+        assert!(Arc::ptr_eq(&before.desired, &after.desired));
+        assert!(before
+            .observed
+            .components
+            .ptr_eq(&after.observed.components));
+        assert_eq!(after.component_configuration(&id), Some(&value));
+        assert!(!before.same_configuration_as(&after));
+        assert!(graph.metadata_changes.lock().unwrap().is_empty());
+
+        slot.take().unwrap().refresh_configuration().unwrap();
+        assert!(graph.metadata_changes.lock().unwrap().contains(&id));
     }
 
     struct AdmittedSource(ComponentDescriptor);

@@ -31,6 +31,8 @@ impl DrasiLib {
     /// The snapshot includes the instance root node, all component nodes
     /// (sources, queries, reactions), and all bidirectional relationship edges.
     /// The returned `GraphSnapshot` is serializable to JSON via serde.
+    /// The instance root is Running when [`Self::is_running`] is true and
+    /// Stopped otherwise. Component failures and readiness remain separate.
     ///
     /// This method does NOT require the server to be initialized or running.
     /// The graph is available immediately after construction.
@@ -47,7 +49,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn get_graph(&self) -> Result<GraphSnapshot> {
-        Ok(self.computation_runtime.graph_snapshot().await?)
+        Ok(self.component_graph().snapshot().await?)
     }
 
     /// Get all components that depend on the given component.

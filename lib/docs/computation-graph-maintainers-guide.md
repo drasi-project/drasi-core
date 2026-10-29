@@ -587,7 +587,8 @@ outcome through the same generation-fenced state.
 Readiness and neighbor notifications use separate bounded control channels.
 They need not wait behind a full data pipe. Components can address connected
 neighbors, not arbitrary graph members. Requiring readiness on both sides can
-still create an application-level startup deadlock.
+still prevent successful startup. A deadline reports the failed startup; it
+does not repair a cyclic application-level readiness protocol.
 
 [`lifecycle.rs`](../src/computation/v1/lifecycle.rs) defines the state model;
 [`control.rs`](../src/computation/v1/control.rs) owns control-message rules.
@@ -1042,11 +1043,13 @@ cover the canonical records and projection.
 
 Accepted syntax is not an execution guarantee. `VariableLengthMatch` in the
 [AST](../../query-ast/src/ast.rs) carries hop bounds accepted by both parsers,
-but [match-path planning](../../core/src/path_solver/match_path.rs) currently
-reduces the relationship to a single slot without those bounds. Keep
-[CW-13](computation-graph-remaining-work.md#cw-13) open until unsupported forms
-are rejected or the requested bounds are executed correctly; do not present
-this as a native graph capability or a fixed ComponentGraph defect.
+but the [shared query builder](../../core/src/query/query_builder.rs) rejects
+quantified relationship patterns with `QueryBuilderError::UnsupportedFeature`
+before constructing the evaluator. This includes fixed-looking quantifiers
+such as `*1`; their binding semantics are not implemented. Ordinary unquantified
+single-edge relationships and fixed chains remain supported. The separate
+matching reports in [CW-13](computation-graph-remaining-work.md#cw-13) remain
+investigations, not evidence that variable-length execution is available.
 
 <a id="mutation-integrity-uses-source-time"></a>
 
@@ -2235,9 +2238,13 @@ role-specific libraries and supported modes.
 
 Native source/reaction conversion is not universal, and the continuous query
 implementation is built into the runtime rather than an independently loadable
-query plugin. Ordinary adapters remain supported on the same graph. Remaining
-native persistent-input-pipe reconstruction combinations need their own proof;
-working source-WAL/query/journal reopen cases do not qualify every combination.
+query plugin. Ordinary adapters remain supported on the same graph. RocksDB-backed
+native admission QoS, retained inputs and shared journals have real process-crash
+coverage with eager/paged storage on both Tokio runtimes. The
+[native-input matrix](../../lib-integration-tests/tests/native_input_crash_recovery.rs)
+checks pending accepted frames, lost admission replies and pre/post-query-commit
+reconstruction against exact identities, progress and outputs. This does not
+qualify every provider/connector combination or power-loss behavior.
 HTTP snapshots/live prices gain no durable or atomic replay guarantee, and a
 handled procedure call is not an exactly-once external effect.
 
@@ -2258,6 +2265,29 @@ snapshots, coalesced observations and bounded history. The compatibility
 translator in [`runtime/events.rs`](../src/computation/runtime/events.rs)
 derives old-style events synchronously from publication changes; it does not
 maintain a second lifecycle state machine.
+
+Status publication shares the immutable desired snapshot, persistent ordered
+observed maps and completed reports across the 256-entry history. Registry maps
+are persistent too. Component slots mark captured metadata dirty at construction
+and reconfiguration boundaries, including failed captures; only those entries
+are refreshed during an observation-only publication. A topology publication
+rebuilds its derived metadata once. Do not replace dirty capture with a revision-only
+cache: a newly constructed query or schema reader can become available without
+changing topology.
+
+The event translator caches only immutable component-kind lookups. It compares
+shared observed maps for changed members, preserves current-member events before
+removals, and rechecks all members when desired metadata changes (including record
+tokens). Health and completion updates select the producer's ordered relationship
+range instead of scanning unrelated edges. Full topology exports still naturally
+cost work proportional to the exported graph.
+
+To measure publication bookkeeping and live control/notification latency, run
+`cargo test -p drasi-lib --lib -- --ignored publication_status_scaling publication_control_latency --nocapture --test-threads=1`.
+The diagnostics cover 16, 1,024 and 4,096 components; the live-control cases run
+on both Tokio flavors. Ordinary regression tests separately enforce structural
+sharing, one-member event selection, exact relationship ranges, weak ownership
+and metadata refreshes that do not change the desired revision.
 
 Query discovery is based on semantic role and captured read capabilities,
 not a hard-coded factory name. Inspect

@@ -51,6 +51,11 @@ Server YAML.
 | `with_dispatch_buffer_capacity(n)` | 1,000 when no override is set | Default runtime dispatch-buffer capacity |
 | `with_default_recovery_policy(policy)` | `RecoveryPolicy::Strict` | Query recovery default when the query has no override |
 | `with_activation_timeout_secs(seconds)` | 300 | Positive per-component deadline covering input binding, startup and output binding |
+| `with_startup_timeout_secs(seconds)` | 600 | Overall `start()` budget, including lifecycle-lock admission and managed reconciliation |
+| `with_shutdown_timeout_secs(seconds)` | 60 | Overall `stop()` / `shutdown()` budget, including lock admission and cleanup phases |
+| `with_construction_timeout_secs(seconds)` | 5 | One budget for configuration resolution and component construction/reconfiguration |
+| `with_resource_construction_timeout_secs(seconds)` | 30 | Per-resource construction budget |
+| `with_cleanup_timeout_secs(seconds)` | 5 | Individual owner cleanup budget, independent of the overall shutdown budget |
 | `with_index_provider(name, provider)` | None registered by this call | Register an existing index provider under a name |
 | `with_default_index_provider(name, provider)` | In-memory indexes otherwise | Register the provider and make it the default for queries |
 | `with_state_store_provider(provider)` | In-memory state store | Storage for component state, including supported reaction checkpoints |
@@ -273,9 +278,10 @@ while quiesced; that read capability does not mean it is processing new inputs.
 startup or shutdown timeout. Each component's input binding, start hook and
 output binding are bounded by graph activation, defaulting to 300 seconds.
 Direct graph builders can set `activation_timeout(Duration)`. Configuration
-resolution uses the existing construction/cleanup boundary. A directly built
-graph also has `cleanup_timeout(Duration)`, defaulting to 5 seconds; it is a
-per-cleanup-pass bound, not an overall shutdown deadline. Interrupted activation
+resolution and construction share `construction_timeout(Duration)`, defaulting
+to 5 seconds. Resource creation uses `resource_construction_timeout(Duration)`,
+defaulting to 30 seconds. `cleanup_timeout(Duration)` defaults to 5 seconds per
+owner, separately from the overall shutdown budget. Interrupted activation
 retains cleanup ownership rather than allowing immediate reuse of damaged state.
 Component batches carry definitions and bindings, not a separate execution
 policy; they use the owning instance's deadlines.
@@ -284,6 +290,41 @@ retains `activation_timeout_secs`. Server exposes the same setting as
 `instances[].activationTimeoutSecs`, including environment references, and on
 instance creation. Set it high enough for the intended full bootstrap workload;
 changing a YAML instance setting takes effect when that instance is reconstructed.
+
+Instance `start()` has a 600-second overall budget; `stop()` and `shutdown()` have
+a 60-second overall budget. Each budget starts before lifecycle-lock admission
+and is shared across subsequent phases, not restarted at every await. Native
+start/stop/quiesce/force-cancellation requests and deployment/startup report waits
+also have finite budgets. Direct graph `shutdown()` and `dispose()` retain
+unfinished resources when their overall budget expires.
+
+Timeouts retain a typed `GraphError::LifecycleTimeout` cause with the instance
+or graph identity, operation, expired phase, configured budget and whether work
+was accepted. Acceptance is not completion: inspect the current observations,
+then retry cleanup. An accepted start may finish after its caller times out.
+Timed-out or cancelled stops block restart until cleanup is retried. Permanent
+shutdown remains permanent even when its first cleanup attempt times out, and
+configuration storage is not closed underneath unfinished processing. Dropped
+management cleanup retains its owner and logs failed attempts with exponential
+retry delays from 1 to 30 seconds.
+
+Stop and shutdown supersede the instance-owned startup coordinator and join it
+before cleanup. They do not depend on the original `start()` caller continuing
+to poll its future. A superseded start reports a typed `StartupSupersededError`
+through `PartialStartError`, and cannot later set a stopped instance running.
+Managed reconciliation releases the instance gate before construction/startup
+waits while retaining the pending graph result. Definition acceptance and
+resource-retirement decisions remain serialized; they are not silently cancelled.
+
+Server accepts all six limits as positive `instances[]` settings and on instance
+creation: `startupTimeoutSecs`, `shutdownTimeoutSecs`, `constructionTimeoutSecs`,
+`resourceConstructionTimeoutSecs`, `cleanupTimeoutSecs` and
+`activationTimeoutSecs`. YAML settings support environment references. Omitted
+values retain the defaults; configuration snapshots preserve explicit overrides.
+Changing an existing instance's YAML requires reconstruction to apply new limits.
+Budgets bound cooperative asynchronous work; they cannot preempt nonyielding
+synchronous code, a native fault, or constructors an application runs before
+handing a component to Drasi.
 
 Reconciliation is bound to the preview's affected components, resources, bindings
 and generations. A changed impact returns `GraphError::StalePreview`; obtain a

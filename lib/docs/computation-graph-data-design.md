@@ -1755,6 +1755,12 @@ generation: u64
 identity: Option<QueryRecoveryIdentity>
 ```
 
+The workspace's `im` dependency name refers to the maintained `imbl` package.
+This changes the collection implementation, not the canonical graph-change
+encoding or record identity. Native snapshot exchange serializes sorted records
+and reconstructs the receiving process's local map; it does not transmit that
+Rust collection's memory layout.
+
 The rows and the retained outbox are both canonical graph records: the rows are
 the current result nodes, and the outbox holds the published graph-change
 envelopes. Applying committed output changes the keyed rows and appends the
@@ -2039,6 +2045,19 @@ position handles and actual prune operation.
 This source-WAL recovery path is separate from reconstructing arbitrary
 undrained native persistent input-pipe frames. Having saved consumer checkpoints
 alone is not a universal description of every queued transport frame.
+
+The native admission QoS, retained-input and shared-journal implementations have
+separate [process-crash coverage](../../lib-integration-tests/tests/native_input_crash_recovery.rs).
+Twenty-eight SIGKILL cases cover eager/paged RocksDB storage on both Tokio
+runtimes, including input beyond a committed consumer cursor, pre/post-query
+commit and a committed admission whose reply never reached its caller. Fresh
+processes compare receipts, producer identities, payloads, input progress,
+outbox, projection and output against an uninterrupted reference.
+
+That evidence applies to those actual storage/processing combinations. It is
+not a power-loss guarantee, does not make a memory-only query recoverable, and
+does not prevent an external effect from repeating without a destination
+deduplication or transaction contract.
 
 ### 15.2 Reconstructing query state
 

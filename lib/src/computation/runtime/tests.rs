@@ -207,6 +207,7 @@ struct SourceControl {
     starting_only: AtomicBool,
     subscription_fences: AtomicUsize,
     release_bootstrap_at_fence: AtomicBool,
+    panic_subscription_fence: AtomicBool,
     bootstrap_entered: Notify,
     bootstrap_release: Notify,
     fail_bootstrap: AtomicBool,
@@ -946,6 +947,13 @@ impl Source for ControlledSource {
         Ok(())
     }
     async fn on_subscriptions_complete(&self) {
+        assert!(
+            !self
+                .control
+                .panic_subscription_fence
+                .load(Ordering::Acquire),
+            "injected startup subscription panic"
+        );
         self.control
             .subscription_fences
             .fetch_add(1, Ordering::AcqRel);
@@ -3002,10 +3010,13 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         .await
         .unwrap();
     assert_eq!(runtime.current_records().await.unwrap().len(), 2);
-    let error = tokio::time::timeout(Duration::from_secs(3), runtime.start_native_components())
-        .await
-        .expect("blocked and failed creation must not leave startup waiting")
-        .unwrap_err();
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.start_native_components(false),
+    )
+    .await
+    .expect("blocked and failed creation must not leave startup waiting")
+    .unwrap_err();
     let message = format!("{error:#}");
     assert!(!message.contains("native-blocked"), "{message}");
     assert!(

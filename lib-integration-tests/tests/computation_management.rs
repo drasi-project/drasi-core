@@ -695,6 +695,66 @@ async fn cancelled_restore_retains_lease_until_reconciliation_and_cleanup_finish
     Ok(())
 }
 
+async fn instance_stop_retains_pending_managed_construction(
+    reconcile_while_stopped: bool,
+) -> Result<()> {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factory = Factory::new(created.clone());
+    factory.create_gate = Some((entered.clone(), release.clone()));
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(factory))?;
+    let core = DrasiLib::builder()
+        .with_component_factories(factories)
+        .with_construction_timeout_secs(60)
+        .with_shutdown_timeout_secs(2)
+        .build()
+        .await?;
+    core.start().await?;
+    core.apply_desired_state(0, "held-definition", desired(&[("held", false)]))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await?;
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    tokio::time::timeout(Duration::from_secs(3), core.stop()).await??;
+    assert!(!core.is_running().await);
+    assert_eq!(
+        core.configuration_receipt("held-definition")
+            .await?
+            .expect("accepted receipt")
+            .revision,
+        1
+    );
+    release.notify_one();
+    if reconcile_while_stopped {
+        let status =
+            tokio::time::timeout(Duration::from_secs(3), core.reconcile_desired_state()).await??;
+        assert!(status.applied, "{status:?}");
+        assert!(status.error.is_none(), "{status:?}");
+    }
+    core.start().await?;
+    core.computation_component("held")?.wait_started().await?;
+    assert_eq!(created.load(Ordering::Acquire), 1);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn instance_stop_interrupts_managed_construction_current_thread() -> Result<()> {
+    for reconcile in [false, true] {
+        instance_stop_retains_pending_managed_construction(reconcile).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instance_stop_interrupts_managed_construction_multi_thread() -> Result<()> {
+    for reconcile in [false, true] {
+        instance_stop_retains_pending_managed_construction(reconcile).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn stored_definitions_and_snapshots_are_encrypted_and_wrong_keys_fail() -> Result<()> {
     let directory = tempfile::tempdir()?;

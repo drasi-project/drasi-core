@@ -90,6 +90,8 @@ Inspection answers separate questions:
 A stopped component may still have an initialization error. A running graph
 does not mean every component is running. The older status API has fewer states
 and cannot show all these distinctions.
+The instance running flag records admitted startup, including partial startup;
+it is not aggregate component readiness or proof of completed cleanup.
 
 Pausing keeps the component and its state so processing can resume without
 running its start hook again. Stopping calls its stop hook. Restarting also
@@ -112,6 +114,29 @@ Generation-fenced lifecycle groups start and stop a query and its exclusive
 helpers without stopping a shared source. Shutdown waits for owned tasks and
 cleanup before releasing query resources. Cancelling the caller's wait does
 not abandon that work.
+
+## Lifecycle budgets and interruption
+
+Instance startup has a configurable 600-second overall budget; stop and shutdown
+have 60 seconds. Separate construction/configuration, resource-construction,
+activation and cleanup limits default to 5, 30, 300 and 5 seconds. These limits
+cover cooperative asynchronous work, not preemption of non-yielding native code.
+
+A small instance-owned startup task preserves operation ownership independently
+of the caller. Stop and permanent shutdown supersede its startup wait, so an
+unpolled or abandoned start request cannot retain the lifecycle gate indefinitely.
+Accepted component work still belongs to the graph and is stopped through its
+normal lifecycle operations. A late startup completion cannot mark a stopped
+instance running again. This task coordinates lifecycle calls; it is not another
+graph or query executor.
+
+Managed reconciliation retains its accepted graph request while releasing the
+instance gate before construction and activation waits. A stop can interrupt that
+wait without losing the accepted definition or the eventual reconciliation result.
+Configuration acceptance and protected resource-retirement checks remain
+serialized; interruption is not permission to discard an uncertain commit.
+See the [configuration guide](computation-graph-configuration.md#library-settings)
+for the settings and retry behavior.
 
 ## How events are ordered and buffered
 
@@ -155,8 +180,9 @@ a readiness notification.
 
 A component can contact only its connected neighbours. Old connections and old
 component handles cannot control replacement instances. Waiting for downstream
-readiness is optional; an application can still create a startup deadlock if
-each side waits for the other to start first.
+readiness is optional; a cycle in which each side waits for the other still
+prevents successful startup. Deadlines report that failure; they do not repair
+the application's readiness protocol.
 
 ## Storage and recovery
 
@@ -187,6 +213,14 @@ middleware output; query storage cannot repair lost transformer state.
 Persistent indexes alone do not make query output durable. A reaction that saves
 progress needs both persistent reaction state and persistent output from its
 queries. The reaction records completed handling, not merely queue acceptance.
+
+Native admission QoS, retained inputs and shared journals have RocksDB-backed
+process-crash coverage with eager/paged storage on both Tokio runtimes. The
+[28-case crash matrix](../../lib-integration-tests/tests/native_input_crash_recovery.rs)
+checks pending accepted input, lost admission replies and pre/post-query-commit
+reconstruction against exact identities, progress and output. This does not
+qualify memory-only queries, arbitrary connectors, power loss or exactly-once
+external effects.
 
 Recovery can fail rather than skip data, rebuild from a snapshot where supported,
 or deliberately skip a gap for reactions configured to allow that. Fresh trigger
@@ -235,6 +269,13 @@ Logs, metrics, recent state changes and per-change timing data support diagnosis
 The inventory comes from one coherent graph registry publication, not a
 combination of separately observed query graphs. It is not an atomic snapshot
 of every provider's private processing state.
+
+Observation-only publications share immutable desired snapshots, persistent
+observed/registry maps and completed reports. Component slots explicitly mark
+configuration and read-capability captures dirty; newly constructed capabilities
+can therefore become visible without a topology revision. The event translator
+visits changed members and reuses immutable kind lookups. Full topology exports
+still cost work proportional to the exported graph.
 
 ## Current limits
 

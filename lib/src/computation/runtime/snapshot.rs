@@ -86,13 +86,14 @@ impl Runtime {
 
     pub(crate) async fn graph_snapshot(
         &self,
+        instance_status: ComponentStatus,
     ) -> anyhow::Result<crate::component_graph::GraphSnapshot> {
         let mut snapshot = crate::component_graph::GraphSnapshot {
             instance_id: self.config.id.clone(),
             nodes: vec![ComponentNode {
                 id: self.config.id.clone(),
                 kind: ComponentKind::Instance,
-                status: ComponentStatus::Running,
+                status: instance_status,
                 metadata: HashMap::new(),
             }],
             edges: Vec::new(),

@@ -46,19 +46,8 @@ jobs:
       - name: Show Rust toolchain
         run: rustup show
 
-      - name: Install Protobuf compiler (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Install Protobuf compiler (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
-
-      - name: Install Protobuf compiler (Windows)
-        if: runner.os == 'Windows'
-        run: choco install protoc -y
+      - name: Install pinned Protobuf compiler
+        uses: ./.github/actions/setup-protoc
 
       - name: Cache Cargo registry
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
@@ -80,9 +69,9 @@ jobs:
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: target
-          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-ffi-${{ hashFiles('ci/install_protoc.py') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-ffi-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-ffi-${{ hashFiles('ci/install_protoc.py') }}-
 
       - name: Build test plugins (cdylib)
         shell: bash

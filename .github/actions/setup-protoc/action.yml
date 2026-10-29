@@ -1,0 +1,17 @@
+name: Set up pinned protoc
+description: Install the official protoc release after SHA-256 and version verification.
+
+runs:
+  using: composite
+  steps:
+    - name: Check installer failure handling
+      shell: bash
+      run: python -B -m unittest discover -s ci -p test_install_protoc.py
+
+    - name: Install verified compiler and standard includes
+      shell: bash
+      run: |
+        python ci/install_protoc.py \
+          --destination "$RUNNER_TEMP/drasi-protoc" \
+          --github-env "$GITHUB_ENV" \
+          --github-path "$GITHUB_PATH"

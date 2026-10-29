@@ -377,9 +377,37 @@ impl Runtime {
         graph_owner: &Arc<super::instance::InstanceGraph>,
     ) -> anyhow::Result<()> {
         let mut builder = self.services.declare(
-            ComputationGraph::builder("__drasi_lib_runtime__").activation_timeout(
-                std::time::Duration::from_secs(self.config.activation_timeout_secs.unwrap_or(300)),
-            ),
+            ComputationGraph::builder("__drasi_lib_runtime__")
+                .activation_timeout(std::time::Duration::from_secs(
+                    self.config
+                        .activation_timeout_secs
+                        .unwrap_or(DEFAULT_ACTIVATION_TIMEOUT.as_secs()),
+                ))
+                .startup_timeout(std::time::Duration::from_secs(
+                    self.config
+                        .startup_timeout_secs
+                        .unwrap_or(DEFAULT_STARTUP_TIMEOUT.as_secs()),
+                ))
+                .shutdown_timeout(std::time::Duration::from_secs(
+                    self.config
+                        .shutdown_timeout_secs
+                        .unwrap_or(DEFAULT_SHUTDOWN_TIMEOUT.as_secs()),
+                ))
+                .construction_timeout(std::time::Duration::from_secs(
+                    self.config
+                        .construction_timeout_secs
+                        .unwrap_or(DEFAULT_CONSTRUCTION_TIMEOUT.as_secs()),
+                ))
+                .resource_construction_timeout(std::time::Duration::from_secs(
+                    self.config
+                        .resource_construction_timeout_secs
+                        .unwrap_or(DEFAULT_RESOURCE_CONSTRUCTION_TIMEOUT.as_secs()),
+                ))
+                .cleanup_timeout(std::time::Duration::from_secs(
+                    self.config
+                        .cleanup_timeout_secs
+                        .unwrap_or(DEFAULT_CLEANUP_TIMEOUT.as_secs()),
+                )),
         )?;
         for (name, provider) in self.config.index_factory.configured_providers() {
             // Provider names are configuration keys, not validated graph identifiers.
@@ -1777,7 +1805,7 @@ impl Runtime {
             .cloned()
             .collect())
     }
-    pub(crate) async fn start_native_components(&self) -> anyhow::Result<()> {
+    pub(crate) async fn start_native_components(&self, managed: bool) -> anyhow::Result<()> {
         let control = self.control()?;
         let publication = control.registry_snapshot();
         let desired = &publication.desired;
@@ -1795,7 +1823,25 @@ impl Runtime {
         let mut ready = Vec::new();
         let mut failures = Vec::new();
         for id in selected {
-            let handle = control.component_handle(&id)?;
+            let mut handle = control.component_handle(&id)?;
+            let initial = handle.observed()?;
+            if initial.realization == RealizationState::CreationFailed && initial.failure.is_none()
+            {
+                if managed {
+                    continue;
+                }
+                let preview = control
+                    .preview(
+                        control.desired_snapshot().revision,
+                        vec![DesiredMutation::Retry(GraphSelection::Exact(vec![id.clone()]))],
+                    )
+                    .await?;
+                let report = control
+                    .reconcile(preview, TopologyBindings::default())
+                    .await?;
+                report.ensure_committed()?;
+                handle = control.component_handle(&id)?;
+            }
             let mut changes = control.subscribe_observed();
             let settled = tokio::select! {
                 result = changes.wait_for(|state| {
@@ -1929,11 +1975,18 @@ impl Runtime {
         let mut failures = Vec::new();
         let control = self.control()?;
         let publication = control.registry_snapshot();
-        let desired = &publication.desired;
         match self.native_component_ids(&publication).await {
             Ok(native) if native.is_empty() => {}
             Ok(native) => match control
-                .stop_components(desired.revision, GraphSelection::Exact(native))
+                .stop_members(
+                    native
+                        .into_iter()
+                        .map(|id| {
+                            let generation = publication.observed.components[&id].generation;
+                            (id, generation)
+                        })
+                        .collect(),
+                )
                 .await
             {
                 Ok(report) if report.summary == OperationSummary::Completed => {}
@@ -2129,7 +2182,7 @@ impl Runtime {
                 current
                     .observed
                     .components
-                    .get(id)
+                    .get(*id)
                     .is_some_and(|component| {
                         component.generation.0 == snapshot.component_generation
                             && component.operation.0 == snapshot.component_operation

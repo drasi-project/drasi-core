@@ -304,6 +304,15 @@ or explicit, narrowly scoped loss authorization. This is not rollback of
 external effects, automatic data deletion, or permission to reset a whole
 database.
 
+Startup, stop and shutdown now have explicit whole-operation budgets in addition
+to component/resource limits. Defaults are ten minutes for instance startup and
+one minute for stop/shutdown, configurable through Core and Server. Stop
+supersedes an instance-owned startup waiter rather than depending on the original
+caller to keep polling it. Managed construction waits and Server native resource
+preparation do not retain their broad lifecycle/plugin-registry guards.
+Accepted graph work and reconciliation results remain owned for cleanup or retry;
+this is not force cancellation of business processing.
+
 ### Saved definitions can describe more than source/query/reaction settings
 
 A rebuildable definition can include native components, explicit connections
@@ -417,6 +426,32 @@ checks. These close the earlier local acceptance work; they do not turn
 pre-existing ignored external-service cases into executed tests or replace the
 broader [qualification ledger][qualification].
 
+Those recorded application and 35-profile results are not a fresh qualification
+of every subsequently changed build. Current source-linked checks distinguish
+the verified lifecycle, publication, dependency and native-input boundaries.
+
+The pending-native-input boundary has an additional
+[28-case SIGKILL matrix](../../lib-integration-tests/tests/native_input_crash_recovery.rs):
+admission QoS, retained inputs and shared journals, eager/paged RocksDB storage,
+and both Tokio runtimes. It checks exact accepted frames and retry identities
+across query-commit and lost-admission-reply boundaries. This complements the
+earlier Building Comfort run; it does not qualify every connector or power loss.
+
+### Small status changes no longer rebuild the whole inspection state
+
+Observed state, registry metadata and retained inspection history share unchanged
+data. Explicit dirty captures refresh configurations and reader capabilities;
+event translation compares changed members rather than searching every node.
+Producer health/completion updates select their ordered outgoing-edge range.
+
+For the same synthetic 4,096-component workload, 128 status publications took
+about 256 ms before this change and 0.33 ms afterward. Native allocator samples
+show substantially less retained publication memory, and live control/notification
+measurements cover both runtimes. These measurements concern reporting overhead,
+not a corresponding claim about end-to-end query throughput. The
+[maintainer guide](computation-graph-maintainers-guide.md#inspection-and-diagnosing-a-running-system)
+provides the repeatable diagnostics.
+
 <a id="performance-and-qualification-boundaries"></a>
 
 ## Current limits
@@ -444,12 +479,19 @@ broader [qualification ledger][qualification].
   relationship execution is not established merely because syntax parses.
   Stateless event mappers do not maintain filtered datasets; the dedicated
   view-transform work is still open.
-- **Lifecycle, security and scale still have boundaries.** The remaining
-  startup/shutdown deadline policy and large-graph costs need work. Native
+- **Lifecycle, security and scale still have boundaries.** Finite lifecycle
+  budgets and incremental status publication are implemented. Cleanup may still
+  fail, configuration acceptance must retain uncertain commits, and complete
+  graph exports remain proportional to their output. Native
   process-host checks are not Windows qualification or a security sandbox.
   Arbitrary non-yielding native code cannot always be stopped safely in-process.
   Standard HTTP ingress still needs isolation or an authenticated, rate-limited
   proxy until the recorded ingress protection work is complete.
+- **Dependency mitigation is not a zero-finding scan.** Patched dependency
+  families and targeted legacy-Azure safeguards address the reviewed applicable
+  paths. Retained Azure/XML, MySQL compression/RSA and build-tool findings have
+  documented mitigations or unaffected usage. Raw audits remain nonzero; these
+  results do not justify blanket ignores or arbitrary new uses of those APIs.
 - **Builds must match.** The unreleased graph wire remains v1; the replaced
   earlier wire/query-row representations are not a second supported format.
   Rebuild the host and native libraries together. Custom formats must be

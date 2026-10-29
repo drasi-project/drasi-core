@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 
 use super::*;
@@ -28,7 +29,10 @@ enum Command {
         desired: DesiredInstance,
         reply: oneshot::Sender<Result<AcceptanceReceipt>>,
     },
-    Reconcile(oneshot::Sender<Result<ManagementStatus>>),
+    Reconcile(
+        crate::computation::instance::StartupCancellation,
+        oneshot::Sender<Result<ManagementStatus>>,
+    ),
     Register(Arc<dyn ComponentFactory>, oneshot::Sender<Result<()>>),
     Receipt(String, oneshot::Sender<Result<Option<AcceptanceReceipt>>>),
     Snapshot(String, oneshot::Sender<Result<CommittedConfiguration>>),
@@ -134,10 +138,16 @@ struct Driver {
     receipts: BTreeMap<String, (DesiredInstance, AcceptanceReceipt)>,
     snapshots: BTreeMap<String, CommittedConfiguration>,
     applied: DesiredTopology,
+    pending_realization: Option<PendingRealization>,
     desired: watch::Sender<CommittedConfiguration>,
     status: watch::Sender<ManagementStatus>,
     confirmed: Arc<AtomicBool>,
     transition: Option<super::transitions::PreparedRecoveryTransition>,
+}
+
+struct PendingRealization {
+    desired: DesiredTopology,
+    request: BoxFuture<'static, GraphResult<ReconciliationReport>>,
 }
 
 pub(super) struct ManagedResource {
@@ -233,6 +243,7 @@ impl Management {
             resolver: options.resources,
             store,
             applied: DesiredInstance::default().topology,
+            pending_realization: None,
             current,
             receipts: BTreeMap::new(),
             snapshots: BTreeMap::new(),
@@ -329,7 +340,15 @@ impl Management {
         Ok(status)
     }
     pub(crate) async fn reconcile(&self) -> Result<ManagementStatus> {
-        self.request(Command::Reconcile).await
+        self.reconcile_for_startup(self.graph.startup_cancellation())
+            .await
+    }
+    pub(crate) async fn reconcile_for_startup(
+        &self,
+        cancellation: crate::computation::instance::StartupCancellation,
+    ) -> Result<ManagementStatus> {
+        self.request(|reply| Command::Reconcile(cancellation, reply))
+            .await
     }
     pub(crate) async fn register(&self, factory: Arc<dyn ComponentFactory>) -> Result<()> {
         self.request(|reply| Command::Register(factory, reply))
@@ -459,6 +478,7 @@ impl Driver {
             !self.shutdown.load(Ordering::Acquire),
             "instance is shut down"
         );
+        self.settle_realization().await?;
         let graph = self.graph.clone();
         let _lifecycle = graph.lifecycle.lock().await;
         if !self.confirmed.load(Ordering::Acquire) {
@@ -614,27 +634,51 @@ impl Driver {
         Ok(receipt)
     }
 
-    async fn protect(&self, control: &GraphControl, desired: &DesiredTopology) -> Result<()> {
-        control
-            .protect_components(
-                self.applied
-                    .components
-                    .iter()
-                    .chain(&desired.components)
-                    .map(|node| node.descriptor.id().clone())
-                    .collect(),
-                self.applied
-                    .resources
-                    .iter()
-                    .chain(&desired.resources)
-                    .map(|resource| resource.id.clone())
-                    .collect(),
-            )
-            .await?;
-        Ok(())
+    fn protect<'a>(
+        &self,
+        control: &'a GraphControl,
+        desired: &DesiredTopology,
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
+        let components = self
+            .applied
+            .components
+            .iter()
+            .chain(&desired.components)
+            .map(|node| node.descriptor.id().clone())
+            .collect();
+        let resources = self
+            .applied
+            .resources
+            .iter()
+            .chain(&desired.resources)
+            .map(|resource| resource.id.clone())
+            .collect();
+        async move {
+            control.protect_components(components, resources).await?;
+            Ok(())
+        }
     }
 
-    async fn realize(&mut self, desired: &DesiredTopology) -> ManagementStatus {
+    async fn settle_realization(&mut self) -> Result<Option<ReconciliationReport>> {
+        let Some(pending) = self.pending_realization.as_mut() else {
+            return Ok(None);
+        };
+        let result = pending.request.as_mut().await;
+        let pending = self
+            .pending_realization
+            .take()
+            .expect("owned reconciliation");
+        if result.as_ref().is_ok_and(|report| report.committed) {
+            self.applied = pending.desired;
+        }
+        result.map(Some).map_err(Into::into)
+    }
+
+    async fn realize(
+        &mut self,
+        desired: &DesiredTopology,
+        lifecycle: tokio::sync::OwnedMutexGuard<crate::computation::instance::InstanceLifecycle>,
+    ) -> ManagementStatus {
         let id = &desired.graph_id;
         let mut status = ManagementStatus {
             revision: self.current.revision,
@@ -657,7 +701,7 @@ impl Driver {
             let mut bindings = TopologyBindings {
                 factories: self.factories.clone(),
                 deferred_management_validation: true,
-                defer_activation: !*self.running.read().await,
+                defer_activation: true,
                 ..Default::default()
             };
             let mut changed_resources = control.retired_resources().await?;
@@ -697,13 +741,27 @@ impl Driver {
                     ),
                 );
             }
-            let report = control
-                .reconcile_components(self.applied.clone(), desired.clone(), bindings)
-                .await?;
+            let request_control = control.clone();
+            let previous = self.applied.clone();
+            let next = desired.clone();
+            self.pending_realization = Some(PendingRealization {
+                desired: next.clone(),
+                request: Box::pin(async move {
+                    request_control
+                        .reconcile_components(previous, next, bindings)
+                        .await
+                }),
+            });
+            // Accepted graph work remains owned even if stop interrupts this
+            // wait. Do not keep the instance gate across constructors/startup.
+            drop(lifecycle);
+            let report = self
+                .settle_realization()
+                .await?
+                .expect("submitted reconciliation");
             status.resource_errors = resource_errors(&control.observed(), desired);
             if report.committed {
                 status.applied = true;
-                self.applied = desired.clone();
             } else {
                 anyhow::bail!("component transition did not commit: {:?}", report.failures);
             }
@@ -773,15 +831,40 @@ impl Driver {
     }
 
     async fn reconcile(&mut self) -> Result<ManagementStatus> {
+        self.reconcile_cancellable(self.graph.startup_cancellation())
+            .await
+    }
+
+    async fn reconcile_cancellable(
+        &mut self,
+        mut cancellation: crate::computation::instance::StartupCancellation,
+    ) -> Result<ManagementStatus> {
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(cancellation.error()),
+            result = self.reconcile_active() => result,
+        };
+        if let Err(error) = &result {
+            self.status.send_modify(|status| {
+                status.reconciling = false;
+                status.converged = false;
+                status.error = Some(format!("{error:#}"));
+            });
+        }
+        result
+    }
+
+    async fn reconcile_active(&mut self) -> Result<ManagementStatus> {
         anyhow::ensure!(
             !self.shutdown.load(Ordering::Acquire),
             "instance is shut down"
         );
+        self.settle_realization().await?;
         let graph = self.graph.clone();
-        let _lifecycle = graph.lifecycle.lock().await;
+        let lifecycle = graph.lifecycle.clone().lock_owned().await;
         self.refresh_committed().await?;
         let desired = self.current.desired.clone();
-        let status = self.realize(&desired.topology).await;
+        let status = self.realize(&desired.topology, lifecycle).await;
         self.status.send_replace(status.clone());
         Ok(status)
     }
@@ -824,8 +907,8 @@ impl Driver {
                         }
                     }
                 }
-                Command::Reconcile(reply) => {
-                    let _ = reply.send(self.reconcile().await);
+                Command::Reconcile(cancellation, reply) => {
+                    let _ = reply.send(self.reconcile_cancellable(cancellation).await);
                 }
                 Command::Register(factory, reply) => {
                     let result = if self.shutdown.load(Ordering::Acquire) {
@@ -933,12 +1016,13 @@ impl Driver {
                 }
             }
         }
+        let mut retry_delay = std::time::Duration::from_secs(1);
         loop {
             let stopped = self.graph.shutdown().await;
             if stopped.is_ok() {
                 if let Some(store) = &self.store {
                     if let Err(error) = store.close().await {
-                        log::error!("Closing dropped configuration session failed: {error}");
+                        log::error!("Closing dropped configuration session failed; ownership retained, retry in {retry_delay:?}: {error}");
                     } else {
                         break;
                     }
@@ -946,9 +1030,10 @@ impl Driver {
                     break;
                 }
             } else {
-                log::error!("Dropped managed instance retains store ownership until cleanup succeeds: {stopped:?}");
+                log::error!("Dropped managed instance retains store ownership until cleanup succeeds; retry in {retry_delay:?}: {stopped:?}");
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(30));
         }
     }
 }

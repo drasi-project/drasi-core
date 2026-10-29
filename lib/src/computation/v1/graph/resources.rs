@@ -415,6 +415,7 @@ pub(super) fn observe(
         }
     }
     graph.snapshot.revision = revision;
+    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
     controller::update(graph, |state| {
         state.revision = revision;
         state.resources.extend(observed);
@@ -422,7 +423,6 @@ pub(super) fn observe(
             state.resources.remove(&id);
         }
     });
-    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
     Ok(())
 }
 

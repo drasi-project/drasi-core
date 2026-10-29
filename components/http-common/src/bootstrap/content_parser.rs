@@ -81,7 +81,7 @@ pub fn parse_body(body: &str, content_type: &ContentType) -> Result<JsonValue> {
 fn parse_xml(body: &str) -> Result<JsonValue> {
     // Use quick-xml to parse into a simple JSON structure
     let value: JsonValue =
-        quick_xml_bootstrap::de::from_str(body).context("Failed to parse response body as XML")?;
+        quick_xml::de::from_str(body).context("Failed to parse response body as XML")?;
     Ok(value)
 }
 

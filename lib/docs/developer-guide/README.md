@@ -5714,10 +5714,10 @@ ISO GQL product surface. Validate the actual query at construction and keep
 a regression test for expressions your application relies on.
 
 Variable-length relationship patterns such as `[:DEPENDS_ON*1..3]` are not a
-qualified traversal feature in this checkout: some forms parse, but the current
-match planner discards their hop bounds. Use supported fixed-length patterns
-instead; [CW-13](../computation-graph-remaining-work.md#cw-13) tracks explicit
-rejection or correct execution rather than silently treating them as one edge.
+supported traversal feature. Query construction rejects quantified patterns,
+including `*1`, even when the parser recognizes their syntax. Use unquantified
+single-edge relationships or explicit fixed chains instead; bounds are never
+silently treated as one edge.
 
 ### Values and comparisons
 

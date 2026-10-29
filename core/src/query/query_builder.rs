@@ -174,6 +174,18 @@ impl QueryBuilder {
 
         let query = self.query_parser.parse(self.query_source.as_str())?;
 
+        if query
+            .parts
+            .iter()
+            .flat_map(|part| &part.match_clauses)
+            .flat_map(|clause| &clause.path)
+            .any(|(relationship, _)| relationship.variable_length.is_some())
+        {
+            return Err(QueryBuilderError::UnsupportedFeature {
+                feature: "variable-length relationship patterns",
+            });
+        }
+
         let match_path = Arc::new(MatchPath::from_query(&query.parts[0])?);
 
         let element_index = match self.element_index.take() {

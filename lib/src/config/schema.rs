@@ -425,6 +425,21 @@ pub struct DrasiLibConfig {
     /// Per-component activation deadline in seconds (default: 300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_timeout_secs: Option<u64>,
+    /// Overall startup deadline, including lifecycle admission and managed reconciliation (default: 600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_secs: Option<u64>,
+    /// Overall stop/shutdown deadline; unfinished work remains owned (default: 60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_timeout_secs: Option<u64>,
+    /// Per-component construction/configuration deadline (default: 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub construction_timeout_secs: Option<u64>,
+    /// Per-resource construction deadline (default: 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_construction_timeout_secs: Option<u64>,
+    /// Per-owner cleanup deadline, independent of the overall shutdown budget (default: 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_timeout_secs: Option<u64>,
     /// Global storage backend definitions that can be referenced by queries
     #[serde(default)]
     pub storage_backends: Vec<StorageBackendConfig>,
@@ -440,6 +455,11 @@ impl Default for DrasiLibConfig {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
+            startup_timeout_secs: None,
+            shutdown_timeout_secs: None,
+            construction_timeout_secs: None,
+            resource_construction_timeout_secs: None,
+            cleanup_timeout_secs: None,
             storage_backends: Vec::new(),
             queries: Vec::new(),
         }
@@ -743,14 +763,26 @@ impl DrasiLibConfig {
     ///
     /// Returns error if validation fails with a description of the problem.
     pub fn validate(&self) -> Result<()> {
-        if let Some(seconds) = self.activation_timeout_secs {
-            anyhow::ensure!(
-                seconds > 0
-                    && std::time::Instant::now()
-                        .checked_add(std::time::Duration::from_secs(seconds))
-                        .is_some(),
-                "activation_timeout_secs must be positive and representable"
-            );
+        for (name, value) in [
+            ("activation_timeout_secs", self.activation_timeout_secs),
+            ("startup_timeout_secs", self.startup_timeout_secs),
+            ("shutdown_timeout_secs", self.shutdown_timeout_secs),
+            ("construction_timeout_secs", self.construction_timeout_secs),
+            (
+                "resource_construction_timeout_secs",
+                self.resource_construction_timeout_secs,
+            ),
+            ("cleanup_timeout_secs", self.cleanup_timeout_secs),
+        ] {
+            if let Some(seconds) = value {
+                anyhow::ensure!(
+                    seconds > 0
+                        && std::time::Instant::now()
+                            .checked_add(std::time::Duration::from_secs(seconds))
+                            .is_some(),
+                    "{name} must be positive and representable"
+                );
+            }
         }
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();

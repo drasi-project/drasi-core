@@ -37,7 +37,7 @@ native = ["dep:drasi-computation-contracts", "dep:serde_json", "dep:sha2", "dep:
 drasi-core-types.workspace = true
 drasi-computation-contracts = { workspace = true, optional = true }
 drasi-reaction-common = { workspace = true, optional = true }
-tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono", "rust_decimal"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "chrono", "rust_decimal"] }
 tokio = { version = "1.0", features = ["net"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 anyhow = "1.0"
@@ -56,6 +56,7 @@ bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"
+tokio = { version = "1.53.3", features = ["rt-multi-thread"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure

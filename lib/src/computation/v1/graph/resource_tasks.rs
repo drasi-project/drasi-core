@@ -386,7 +386,7 @@ pub(super) fn construct(
         FailurePhase::Creation,
     )?;
     let id = id.clone();
-    let timeout = Duration::from_secs(30);
+    let timeout = graph.resource_construction_timeout;
     Ok(graph.tasks.resources.start(
         identity,
         ResourceOperation::Construct,
@@ -398,7 +398,8 @@ pub(super) fn construct(
             .await
             .map_err(|error| GraphError::ResourceCreation {
                 resource: id.clone(),
-                source: error.into(),
+                source: anyhow::Error::new(error)
+                    .context(format!("resource construction exceeded {timeout:?}")),
             })?
             .map_err(|source| GraphError::ResourceCreation {
                 resource: id.clone(),

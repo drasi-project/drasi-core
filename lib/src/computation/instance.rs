@@ -257,8 +257,7 @@ async fn finish_driver(
         // The existing driver owns and polls this drain even if a shutdown
         // waiter disappears. Keep real input owners live until producers stop.
         loop {
-            let stop =
-                control.stop_components(control.desired_snapshot().revision, GraphSelection::All);
+            let stop = control.stop_for_shutdown(control.desired_snapshot().revision);
             tokio::pin!(stop);
             let report = tokio::select! {
                 result = &mut stop => result,
@@ -531,16 +530,17 @@ impl ComputationHandle {
 /// [`InstanceGraph::lifecycle`] is held.
 #[derive(Debug, Default)]
 pub(crate) struct InstanceLifecycle {
-    /// The last `stop()` did not stop every component. The instance reports
-    /// itself stopped, yet some components may still be active, so the next
-    /// `stop()` sweeps them again rather than reporting the instance already
-    /// stopped.
+    /// The last stop failed, timed out, or was cancelled. Completed attempts
+    /// report Stopped; interrupted waits retain the prior running flag. Either
+    /// way, retry cleanup before permitting restart.
     pub(crate) stop_incomplete: bool,
 }
 
 pub(crate) struct InstanceGraph {
     /// Serializes instance-wide lifecycle operations.
-    pub(crate) lifecycle: tokio::sync::Mutex<InstanceLifecycle>,
+    pub(crate) lifecycle: Arc<tokio::sync::Mutex<InstanceLifecycle>>,
+    startup_task: tokio::sync::RwLock<Option<JoinHandle<()>>>,
+    stop_epoch: watch::Sender<u64>,
     instance_id: String,
     entry: Mutex<Option<Arc<Entry>>>,
     pending: Mutex<Vec<Arc<PendingComponents>>>,
@@ -550,12 +550,68 @@ pub(crate) struct InstanceGraph {
 impl InstanceGraph {
     pub(crate) fn new(instance_id: String) -> Self {
         Self {
-            lifecycle: tokio::sync::Mutex::default(),
+            lifecycle: Arc::default(),
+            startup_task: tokio::sync::RwLock::new(None),
+            stop_epoch: watch::channel(0).0,
             instance_id,
             entry: Mutex::new(None),
             pending: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn startup_cancellation(&self) -> StartupCancellation {
+        let changes = self.stop_epoch.subscribe();
+        let epoch = *changes.borrow();
+        StartupCancellation {
+            changes,
+            epoch,
+            owner: Arc::from(self.instance_id.as_str()),
+        }
+    }
+
+    pub(crate) fn interrupt_startup(&self) {
+        self.stop_epoch.send_modify(|epoch| {
+            *epoch = epoch.checked_add(1).expect("instance stop epoch exhausted");
+        });
+    }
+
+    pub(crate) fn spawn_startup(
+        &self,
+        work: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> anyhow::Result<()> {
+        crate::context::workers::try_spawn_owned_worker(&self.startup_task, work)?;
+        Ok(())
+    }
+
+    pub(crate) async fn join_startup(&self) -> anyhow::Result<()> {
+        let mut slot = self.startup_task.write().await;
+        if let Some(task) = slot.as_mut() {
+            let result = task.await;
+            *slot = None;
+            result?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StartupCancellation {
+    changes: watch::Receiver<u64>,
+    epoch: u64,
+    owner: Arc<str>,
+}
+
+impl StartupCancellation {
+    pub(crate) async fn cancelled(&mut self) {
+        let _ = self.changes.wait_for(|epoch| *epoch != self.epoch).await;
+    }
+
+    pub(crate) fn error(&self) -> anyhow::Error {
+        super::v1::StartupSupersededError {
+            owner: self.owner.clone(),
+        }
+        .into()
     }
 }
 
@@ -653,6 +709,7 @@ pub(crate) async fn cleanup_failed_instance(
 
 impl InstanceGraph {
     pub(crate) fn request_shutdown(&self) {
+        self.interrupt_startup();
         self.closed.store(true, Ordering::Release);
         let entry = self.entry.lock().unwrap_or_else(|error| {
             log::error!("Cancelling computation through poisoned ownership: {error}");
@@ -704,6 +761,7 @@ impl InstanceGraph {
     }
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         self.request_shutdown();
+        self.join_startup().await?;
         let entry = self
             .entry
             .lock()

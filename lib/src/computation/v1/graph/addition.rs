@@ -452,10 +452,14 @@ impl ComponentHandle {
         result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
+    /// Observe readiness without issuing a lifecycle operation. Missing
+    /// prerequisites can keep this pending; callers may bound their own wait.
     pub async fn wait_created(&self) -> GraphResult<()> {
         self.wait(false).await
     }
 
+    /// Observe readiness without a deadline; `start()` bounds its entire
+    /// operation, including this observation, with the owning graph's budget.
     pub async fn wait_started(&self) -> GraphResult<()> {
         self.wait(true).await
     }
@@ -497,43 +501,75 @@ impl ComponentHandle {
     }
 
     pub(crate) async fn start_requested(&self) -> GraphResult<super::super::StartReport> {
-        self.wait_created().await?;
+        let deadline = self.lifecycle_deadline("start", self.control.startup_timeout)?;
+        self.start_requested_until(&deadline).await
+    }
+
+    fn lifecycle_deadline(
+        &self,
+        operation: &'static str,
+        timeout: std::time::Duration,
+    ) -> GraphResult<super::super::OperationDeadline> {
+        super::super::OperationDeadline::new(
+            format!("{}/{}", self.control.desired_snapshot().id, self.id),
+            operation,
+            timeout,
+        )
+    }
+
+    async fn start_requested_until(
+        &self,
+        deadline: &super::super::OperationDeadline,
+    ) -> GraphResult<super::super::StartReport> {
+        deadline
+            .wait("waiting for component creation", false, self.wait_created())
+            .await??;
         if let Some(members) = &self.lifecycle_members {
-            let report = self.control.start_members(members.as_ref().clone()).await?;
+            let report = deadline
+                .wait(
+                    "starting component group",
+                    true,
+                    self.control.start_members(members.as_ref().clone()),
+                )
+                .await??;
             self.observed()?;
             return Ok(report);
         }
-        let (reply, result) = oneshot::channel();
-        self.control
-            .commands
-            .send(controller::Command::HandleStart {
+        let report = self
+            .control
+            .lifecycle_request_until(deadline, |reply| controller::Command::HandleStart {
                 component: self.id.clone(),
                 generation: self.generation,
                 reply,
             })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        let report = result.await.map_err(|_| GraphError::ControllerClosed)??;
+            .await?;
         self.observed()?;
         Ok(report)
     }
 
     pub async fn start(&self) -> GraphResult<()> {
-        let report = match self.start_requested().await {
+        let deadline = self.lifecycle_deadline("start", self.control.startup_timeout)?;
+        let report = match self.start_requested_until(&deadline).await {
             Err(GraphError::OperationInProgress)
                 if matches!(
                     self.observed()?.lifecycle,
                     ComponentLifecycle::Starting | ComponentLifecycle::Running
                 ) =>
             {
-                return self.wait_started().await;
+                return deadline
+                    .wait("waiting for component readiness", true, self.wait_started())
+                    .await?;
             }
             report => report?,
         };
         match report.components.get(&self.id) {
             Some(
                 super::super::StartOutcome::Started | super::super::StartOutcome::AlreadyRunning,
-            ) => self.wait_started().await,
+            ) => {
+                deadline
+                    .wait("waiting for component readiness", true, self.wait_started())
+                    .await?
+            }
             Some(super::super::StartOutcome::StartFailed(failure)) => Err(GraphError::Reported {
                 cause: failure.cause.clone(),
             }),
@@ -544,16 +580,25 @@ impl ComponentHandle {
                     .readiness_required
                     .contains(&self.id) =>
             {
-                self.wait_started().await
+                deadline
+                    .wait("waiting for component readiness", true, self.wait_started())
+                    .await?
             }
             _ => Err(GraphError::StartupIncomplete),
         }
     }
 
     pub async fn stop(&self) -> GraphResult<()> {
+        let deadline = self.lifecycle_deadline("stop", self.control.shutdown_timeout)?;
         if let Some(members) = &self.lifecycle_members {
             self.observed()?;
-            let report = self.control.stop_members(members.as_ref().clone()).await?;
+            let report = deadline
+                .wait(
+                    "stopping component group",
+                    true,
+                    self.control.stop_members(members.as_ref().clone()),
+                )
+                .await??;
             if report.summary != super::super::OperationSummary::Completed {
                 return Err(GraphError::Component {
                     component: self.id.clone(),
@@ -564,17 +609,14 @@ impl ComponentHandle {
             self.observed()?;
             return Ok(());
         }
-        let (reply, result) = oneshot::channel();
-        self.control
-            .commands
-            .send(controller::Command::HandleStop {
+        let report = self
+            .control
+            .lifecycle_request_until(&deadline, |reply| controller::Command::HandleStop {
                 component: self.id.clone(),
                 generation: self.generation,
                 reply,
             })
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        let report = result.await.map_err(|_| GraphError::ControllerClosed)??;
+            .await?;
         self.observed()?;
         match report.components.get(&self.id) {
             Some(super::super::StopOutcome::StopFailed(failure)) => Err(GraphError::Reported {
@@ -1013,6 +1055,7 @@ pub(super) fn insert(
         id.clone(),
         component,
         generation,
+        graph.metadata_changes.clone(),
     ));
     graph.order = order;
     let mut nodes = graph.snapshot.nodes.to_vec();
@@ -1052,6 +1095,7 @@ pub(super) fn insert(
         .insert(id.clone(), resource_ids.clone());
     graph.resource_handles.extend(addition.bindings.resources);
     graph.next_resource_generation = next_resource_generation;
+    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
     controller::update(graph, |state| {
         state.revision = revision;
         state.components.insert(
@@ -1071,7 +1115,8 @@ pub(super) fn insert(
                 transition_time: chrono::Utc::now(),
             },
         );
-        for node in state.components.values_mut() {
+        for id in state.components.keys().cloned().collect::<Vec<_>>() {
+            let node = state.components.get_mut(&id).expect("observed component");
             node.revision = revision;
         }
         for resource in resource_ids {
@@ -1101,13 +1146,13 @@ pub(super) fn insert(
             observed.transition_time = chrono::Utc::now();
         }
         if let Some(deployment) = &mut state.deployment {
+            let deployment = Arc::make_mut(deployment);
             deployment.revision = revision;
             deployment
                 .components
                 .insert(id.clone(), super::super::CreationOutcome::NotAttempted);
         }
     });
-    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
     Ok((index, id, generation))
 }
 

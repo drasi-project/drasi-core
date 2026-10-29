@@ -575,6 +575,112 @@ impl ResourceConstructor for Constructor {
     }
 }
 
+struct PendingConstructor;
+#[async_trait::async_trait]
+impl ResourceConstructor for PendingConstructor {
+    async fn construct(&self) -> anyhow::Result<ResourceHandle> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn resource_construction_uses_its_configured_phase_budget() {
+    let resource = ResourceId::try_new("slow-resource").unwrap();
+    let mut graph = ComputationGraph::builder("resource-deadline")
+        .resource_construction_timeout(Duration::from_secs(2))
+        .cleanup_timeout(Duration::from_secs(9))
+        .declare_resource(ResourceSpecification {
+            id: resource.clone(),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Graph,
+            binding: "resource".into(),
+        })
+        .unwrap()
+        .build()
+        .unwrap();
+    let began = tokio::time::Instant::now();
+    let job = super::super::resource_tasks::construct(
+        &graph,
+        &resource,
+        Arc::new(PendingConstructor),
+        BTreeMap::new(),
+        ResourceRole::StateStore,
+    )
+    .unwrap();
+    let error = job.wait().await.unwrap_err();
+    assert_eq!(began.elapsed(), Duration::from_secs(2));
+    match error.underlying() {
+        GraphError::ResourceCreation {
+            resource: owner,
+            source,
+        } => {
+            assert_eq!(owner, &resource);
+            assert!(source
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some());
+        }
+        _ => panic!("expected the resource's timeout cause, got {error:#}"),
+    }
+    assert!(super::super::resource_tasks::complete(&mut graph, &job).is_err());
+    assert!(graph.observed().resources[&resource].failure.is_some());
+    graph.dispose().await.unwrap();
+    assert!(graph.tasks.is_empty());
+}
+
+struct HeldResource {
+    release: Arc<tokio::sync::Semaphore>,
+    calls: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl ResourceCleanup for HeldResource {
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.release.acquire().await?.forget();
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn graph_dispose_deadline_retains_the_unfinished_resource_owner() {
+    let id = ResourceId::try_new("held-resource").unwrap();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resource = Arc::new(HeldResource {
+        release: release.clone(),
+        calls: calls.clone(),
+    });
+    let weak = Arc::downgrade(&resource);
+    let mut graph = ComputationGraph::builder("dispose-deadline")
+        .shutdown_timeout(Duration::from_secs(1))
+        .cleanup_timeout(Duration::from_secs(30))
+        .declare_resource(ResourceSpecification {
+            id: id.clone(),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Graph,
+            binding: "resource".into(),
+        })
+        .unwrap()
+        .provide_resource(
+            id,
+            ResourceHandle::new(ResourceRole::StateStore, resource.clone()).with_cleanup(resource),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let began = tokio::time::Instant::now();
+    assert!(matches!(
+        graph.dispose().await,
+        Err(GraphError::LifecycleTimeout(_))
+    ));
+    assert_eq!(began.elapsed(), Duration::from_secs(1));
+    assert_eq!(graph.state(), GraphState::CleanupRequired);
+    assert!(weak.upgrade().is_some());
+    release.add_permits(1);
+    graph.dispose().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(weak.upgrade().is_none());
+}
+
 async fn resource_without_control_or_drain() {
     let mut graph = ComputationGraph::empty("unconsumed-resource").unwrap();
     let resource = ResourceId::try_new("resource").unwrap();

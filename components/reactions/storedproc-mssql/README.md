@@ -42,6 +42,13 @@ backend. This crate exposes two mutually exclusive Cargo features, with
 | `native-tls` | platform TLS (OpenSSL / Secure Transport) | ✅       |
 | `rustls`     | rustls                                    |         |
 
+The SQL Server components use Tiberius 0.13 with **TDS 7.3 explicitly selected**;
+the upgrade does not opt into Tiberius's new TDS 8.0 default. Existing native TLS,
+Windows authentication, date/time and decimal support remain selected. The
+rustls profile resolves rustls 0.23.46 and webpki 0.103.16 or newer. Dependency
+and shared-helper tests do not substitute for the separately deferred live SQL
+Server qualification.
+
 The default works out of the box on Linux. Use rustls instead when the platform
 TLS stack rejects the server handshake — notably **macOS**, whose Secure
 Transport stack fails the TLS handshake against SQL Server 2022:

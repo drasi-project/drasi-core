@@ -137,12 +137,7 @@ fn xml_to_json(xml: &str) -> Result<JsonValue> {
     use quick_xml::Reader;
 
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-
-    let mut stack: Vec<(String, JsonValue)> = vec![(
-        "root".to_string(),
-        JsonValue::Object(serde_json::Map::new()),
-    )];
+    let mut stack = vec![("root".to_string(), serde_json::Map::new(), String::new())];
 
     loop {
         match reader.read_event() {
@@ -151,58 +146,77 @@ fn xml_to_json(xml: &str) -> Result<JsonValue> {
                 let mut obj = serde_json::Map::new();
 
                 // Add attributes
-                for attr in e.attributes().flatten() {
+                for attr in e.attributes() {
+                    let attr = attr.map_err(|error| anyhow!("XML attribute error: {error}"))?;
                     let key = format!("@{}", String::from_utf8_lossy(attr.key.as_ref()));
                     let value = String::from_utf8_lossy(&attr.value).to_string();
                     obj.insert(key, JsonValue::String(value));
                 }
 
-                stack.push((name, JsonValue::Object(obj)));
+                stack.push((name, obj, String::new()));
             }
-            Ok(Event::End(_)) if stack.len() > 1 => {
-                if let Some((name, value)) = stack.pop() {
-                    if let Some((_, JsonValue::Object(parent_obj))) = stack.last_mut() {
-                        // Handle repeated elements by converting to array
-                        if let Some(existing) = parent_obj.get_mut(&name) {
-                            match existing {
-                                JsonValue::Array(arr) => arr.push(value),
-                                _ => {
-                                    let prev = existing.take();
-                                    *existing = JsonValue::Array(vec![prev, value]);
-                                }
-                            }
-                        } else {
-                            parent_obj.insert(name, value);
-                        }
-                    }
+            Ok(Event::End(_)) => {
+                if stack.len() <= 1 {
+                    return Err(anyhow!("Unexpected XML closing element"));
                 }
+                let (name, mut fields, text) =
+                    stack.pop().ok_or_else(|| anyhow!("Missing XML element"))?;
+                let text = text.trim();
+                let value = if fields.is_empty() && !text.is_empty() {
+                    JsonValue::String(text.to_owned())
+                } else {
+                    if !text.is_empty() {
+                        fields.insert("_text".into(), JsonValue::String(text.to_owned()));
+                    }
+                    JsonValue::Object(fields)
+                };
+                let (_, parent, _) = stack
+                    .last_mut()
+                    .ok_or_else(|| anyhow!("Missing XML parent"))?;
+                insert_xml_child(parent, name, value);
             }
             Ok(Event::Text(e)) => {
                 let text = e
-                    .unescape()
-                    .map_err(|e| anyhow!("XML unescape error: {e}"))?;
-                let text = text.trim();
-                if !text.is_empty() {
-                    if let Some((_, current)) = stack.last_mut() {
-                        if let JsonValue::Object(obj) = current {
-                            if obj.is_empty() {
-                                // If no attributes, just use the text value directly
-                                *current = JsonValue::String(text.to_string());
-                            } else {
-                                obj.insert(
-                                    "_text".to_string(),
-                                    JsonValue::String(text.to_string()),
-                                );
-                            }
-                        }
-                    }
+                    .decode()
+                    .map_err(|error| anyhow!("XML text decoding error: {error}"))?;
+                let (_, _, content) = stack
+                    .last_mut()
+                    .ok_or_else(|| anyhow!("Missing XML text owner"))?;
+                content.push_str(&text);
+            }
+            Ok(Event::CData(e)) => {
+                let text = e
+                    .decode()
+                    .map_err(|error| anyhow!("XML CDATA decoding error: {error}"))?;
+                let (_, _, content) = stack
+                    .last_mut()
+                    .ok_or_else(|| anyhow!("Missing XML text owner"))?;
+                content.push_str(&text);
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let (_, _, content) = stack
+                    .last_mut()
+                    .ok_or_else(|| anyhow!("Missing XML reference owner"))?;
+                if let Some(character) = reference
+                    .resolve_char_ref()
+                    .map_err(|error| anyhow!("XML character reference error: {error}"))?
+                {
+                    content.push(character);
+                } else {
+                    let name = reference
+                        .decode()
+                        .map_err(|error| anyhow!("XML reference decoding error: {error}"))?;
+                    let value = quick_xml::escape::resolve_predefined_entity(&name)
+                        .ok_or_else(|| anyhow!("Unknown XML entity: {name}"))?;
+                    content.push_str(value);
                 }
             }
             Ok(Event::Empty(e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 let mut obj = serde_json::Map::new();
 
-                for attr in e.attributes().flatten() {
+                for attr in e.attributes() {
+                    let attr = attr.map_err(|error| anyhow!("XML attribute error: {error}"))?;
                     let key = format!("@{}", String::from_utf8_lossy(attr.key.as_ref()));
                     let value = String::from_utf8_lossy(&attr.value).to_string();
                     obj.insert(key, JsonValue::String(value));
@@ -214,19 +228,10 @@ fn xml_to_json(xml: &str) -> Result<JsonValue> {
                     JsonValue::Object(obj)
                 };
 
-                if let Some((_, JsonValue::Object(parent_obj))) = stack.last_mut() {
-                    if let Some(existing) = parent_obj.get_mut(&name) {
-                        match existing {
-                            JsonValue::Array(arr) => arr.push(value),
-                            _ => {
-                                let prev = existing.take();
-                                *existing = JsonValue::Array(vec![prev, value]);
-                            }
-                        }
-                    } else {
-                        parent_obj.insert(name, value);
-                    }
-                }
+                let (_, parent, _) = stack
+                    .last_mut()
+                    .ok_or_else(|| anyhow!("Missing XML parent"))?;
+                insert_xml_child(parent, name, value);
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(anyhow!("XML parse error: {e}")),
@@ -234,20 +239,40 @@ fn xml_to_json(xml: &str) -> Result<JsonValue> {
         }
     }
 
-    // Return the root object's content
-    let Some((_, JsonValue::Object(mut root))) = stack.pop() else {
-        return Err(anyhow!("Failed to parse XML structure"));
-    };
+    if stack.len() != 1 {
+        return Err(anyhow!("Unclosed XML element"));
+    }
+    let (_, root, text) = stack.pop().ok_or_else(|| anyhow!("Missing XML document"))?;
+    if !text.trim().is_empty() {
+        return Err(anyhow!("Unexpected text outside an XML element"));
+    }
 
     // If there's only one child, return it directly
     if root.len() == 1 {
-        Ok(root
-            .into_iter()
+        root.into_iter()
             .next()
             .map(|(_, v)| v)
-            .unwrap_or(JsonValue::Null))
+            .ok_or_else(|| anyhow!("Missing XML root"))
     } else {
         Ok(JsonValue::Object(root))
+    }
+}
+
+fn insert_xml_child(
+    parent: &mut serde_json::Map<String, JsonValue>,
+    name: String,
+    value: JsonValue,
+) {
+    if let Some(existing) = parent.get_mut(&name) {
+        match existing {
+            JsonValue::Array(items) => items.push(value),
+            _ => {
+                let previous = existing.take();
+                *existing = JsonValue::Array(vec![previous, value]);
+            }
+        }
+    } else {
+        parent.insert(name, value);
     }
 }
 
@@ -369,6 +394,43 @@ items:
         assert_eq!(items[0], "one");
         assert_eq!(items[1], "two");
         assert_eq!(items[2], "three");
+    }
+
+    #[test]
+    fn xml_references_preserve_text_and_internal_whitespace() {
+        let value = parse_content(
+            b"<root><name> A &amp; B &#x43;&#32;&#68; </name></root>",
+            ContentType::Xml,
+        )
+        .expect("valid XML references");
+        assert_eq!(value["name"], "A & B C D");
+        assert!(parse_content(b"<root>&unknown;</root>", ContentType::Xml).is_err());
+    }
+
+    #[test]
+    fn xml_text_fragments_preserve_attributes_children_and_cdata() {
+        let value = parse_content(
+            b"<root kind=\"mixed\">before &amp; <child>one</child><![CDATA[ after <two>]]></root>",
+            ContentType::Xml,
+        )
+        .expect("valid mixed XML content");
+        assert_eq!(value["@kind"], "mixed");
+        assert_eq!(value["child"], "one");
+        assert_eq!(value["_text"], "before &  after <two>");
+    }
+
+    #[test]
+    fn malformed_xml_attributes_and_unclosed_elements_fail() {
+        for xml in [
+            "<item id=\"one\" id=\"two\"/>",
+            "<item id=\"one\" id=\"two\">value</item>",
+            "<root><child>",
+        ] {
+            assert!(
+                parse_content(xml.as_bytes(), ContentType::Xml).is_err(),
+                "{xml}"
+            );
+        }
     }
 
     #[test]

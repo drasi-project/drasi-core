@@ -52,6 +52,13 @@ This does **not** establish historical delivery, outlet observation, reaction
 processing or external business completion. Keep those fences separate.
 Source/WAL admission alone is not proof that query input has been processed.
 
+The [future-notification regression](../../lib-integration-tests/tests/future_notification_dedup.rs)
+is a complete example using fixed logical input timestamps, before-due/due/stale
+wakes and both Tokio runtime flavors. It observes the actual reaction output
+before advancing time, and separately awaits reaction receipt after a drain.
+Run it with `cargo test -p lib-integration-tests --test future_notification_dedup`;
+the integration-test crate enables `test-support` on its test dependency.
+
 Physical eligibility is independent of logical evaluation: a late wake at 9000
 can process an entry due at 3000, but `datetime.realtime()` for that scheduled
 evaluation still observes 3000. Stale entries use the evaluator's normal
