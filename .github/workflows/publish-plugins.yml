@@ -568,6 +568,8 @@ jobs:
       - name: Publish plugins (per-architecture tag)
         if: ${{ !inputs.dry_run }}
         shell: bash
+        # Always use the trusted publisher's ABI preflight, not the selected revision's xtask.
+        working-directory: .
         env:
           OCI_REGISTRY_USERNAME: ${{ github.actor }}
           OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -597,7 +599,8 @@ jobs:
           fi
           # Build the args as an array so each element is passed verbatim (no
           # word-splitting or globbing).
-          ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --report publication.json)
+          ARGS=(--plugins-dir "prepared/target/$TARGET/release/plugins" --target "$TARGET"
+                --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --report prepared/publication.json)
           if [ "$INPUT_SIGN" = "true" ]; then
             ARGS+=(--sign)
           fi
@@ -640,6 +643,7 @@ jobs:
       - name: Publish plugins (dry run)
         if: ${{ inputs.dry_run }}
         shell: bash
+        working-directory: .
         env:
           INPUT_REGISTRY: ${{ inputs.registry }}
           INPUT_TAG: ${{ inputs.tag }}
@@ -656,7 +660,8 @@ jobs:
           if ! [[ "$INPUT_REGISTRY" =~ ^[A-Za-z0-9._/:-]+$ ]]; then
             echo "Invalid registry format: $INPUT_REGISTRY" >&2; exit 1
           fi
-          ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --dry-run)
+          ARGS=(--plugins-dir "prepared/target/$TARGET/release/plugins" --target "$TARGET"
+                --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --dry-run)
           if [ -n "$INPUT_TAG" ]; then
             ARGS+=(--tag "$INPUT_TAG")
           elif [ -n "$INPUT_PRE_RELEASE" ]; then

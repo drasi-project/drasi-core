@@ -190,9 +190,14 @@ entries against the current host before reuse. The SDK does not own the server's
 installation/cache policy.
 
 Resolution now returns the digest from the very manifest whose annotations were
-checked, avoiding a second mutable-tag lookup. Downloads require ABI metadata
-that agrees exactly with the embedded binary marker, and check the binary ABI
-against the loader before writing the plugin into its destination directory.
+checked, avoiding a second mutable-tag lookup. Downloads require exact ABI
+agreement between the downloaded manifest annotation, metadata JSON, and
+embedded binary marker, including the patch component. Missing manifest ABI
+annotations are rejected even when the JSON and binary agree. The check uses
+the manifest returned with the same artifact download, never another lookup
+of a mutable tag. It also checks the binary ABI against the loader before
+writing the plugin into its destination directory; host/plugin patch differences
+remain compatible when the artifact's own ABI declarations agree exactly.
 The loader still independently rejects incompatible binaries before initialization.
 Signature verification behavior is unchanged.
 

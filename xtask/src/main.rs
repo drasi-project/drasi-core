@@ -1125,14 +1125,9 @@ fn publish_plugins(args: &[String]) {
             publish_result.catalog_fail_count
         );
         if let Some(path) = report_path {
-            let report = serde_json::json!({
-                "schema_version": 1,
-                "artifacts": artifacts,
-                "artifact_failures": publish_result.fail_count,
-                "catalog_successes": publish_result.catalog_success_count,
-                "catalog_failures": publish_result.catalog_fail_count,
-            });
-            if let Err(error) = fs::write(&path, report.to_string()) {
+            if let Err(error) =
+                write_publication_report(Path::new(&path), &publish_result, &artifacts)
+            {
                 eprintln!("Cannot write publication report {path}: {error}");
                 std::process::exit(1);
             }
@@ -1142,6 +1137,21 @@ fn publish_plugins(args: &[String]) {
             std::process::exit(publish_result.exit_code());
         }
     });
+}
+
+fn write_publication_report(
+    path: &Path,
+    result: &PublishBatchResult,
+    artifacts: &[serde_json::Value],
+) -> std::io::Result<()> {
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "artifacts": artifacts,
+        "artifact_failures": result.fail_count,
+        "catalog_successes": result.catalog_success_count,
+        "catalog_failures": result.catalog_fail_count,
+    });
+    fs::write(path, report.to_string())
 }
 
 async fn publish_batch<'a, Upload, UploadFuture, Catalog, CatalogFuture, Sign>(
@@ -1157,36 +1167,41 @@ where
     UploadFuture: std::future::Future<Output = Result<String, String>>,
     Catalog: FnMut(String) -> CatalogFuture,
     CatalogFuture: std::future::Future<Output = Result<(), String>>,
-    Sign: FnMut(&str) -> Result<(), String>,
+    Sign: FnMut(&str) -> Result<(), SignatureFailure>,
 {
     let mut result = PublishBatchResult::default();
     let mut artifacts = Vec::new();
     for (plugin, reference) in publications {
         match upload(reference.clone(), plugin).await {
             Ok(url) => {
-                if result.record_pushed_artifact(
-                    sign,
-                    reference,
-                    &plugin.metadata.target_triple,
-                    &url,
-                    &mut sign_and_verify,
-                ) {
-                    artifacts.push(serde_json::json!({
-                        "name": plugin.metadata.name,
-                        "version": plugin.metadata.version,
-                        "type": plugin.metadata.plugin_type,
-                        "kind": plugin.metadata.kind,
-                        "target": plugin.metadata.target_triple,
-                        "sdk_version": plugin.metadata.sdk_version,
-                        "abi_version": plugin.metadata.abi_version,
-                        "core_version": plugin.metadata.core_version,
-                        "lib_version": plugin.metadata.lib_version,
-                        "reference": reference,
-                        "digest_reference": digest_reference(reference, &url),
-                        "signed": sign,
-                        "verified": sign,
-                    }));
-                }
+                let signature_error = result
+                    .record_pushed_artifact(
+                        sign,
+                        reference,
+                        &plugin.metadata.target_triple,
+                        &url,
+                        &mut sign_and_verify,
+                    )
+                    .err();
+                let signed =
+                    sign && !matches!(&signature_error, Some(SignatureFailure::Signing(_)));
+                let verified = sign && signature_error.is_none();
+                artifacts.push(serde_json::json!({
+                    "name": plugin.metadata.name,
+                    "version": plugin.metadata.version,
+                    "type": plugin.metadata.plugin_type,
+                    "kind": plugin.metadata.kind,
+                    "target": plugin.metadata.target_triple,
+                    "sdk_version": plugin.metadata.sdk_version,
+                    "abi_version": plugin.metadata.abi_version,
+                    "core_version": plugin.metadata.core_version,
+                    "lib_version": plugin.metadata.lib_version,
+                    "reference": reference,
+                    "digest_reference": digest_reference(reference, &url),
+                    "signed": signed,
+                    "verified": verified,
+                    "signature_error": signature_error,
+                }));
             }
             Err(error) => {
                 eprintln!("  ✗ {reference} — {error}");
@@ -1227,22 +1242,22 @@ impl PublishBatchResult {
         target_triple: &str,
         manifest_url: &str,
         sign_and_verify: F,
-    ) -> bool
+    ) -> Result<(), SignatureFailure>
     where
-        F: FnOnce(&str) -> Result<(), String>,
+        F: FnOnce(&str) -> Result<(), SignatureFailure>,
     {
         if sign {
             let digest_ref = digest_reference(reference, manifest_url);
             if let Err(e) = sign_and_verify(&digest_ref) {
                 eprintln!("  ✗ {reference} ({target_triple}) — {e}");
                 self.record_failure();
-                return false;
+                return Err(e);
             }
         }
 
         println!("  ✓ {reference} → {manifest_url}");
         self.success_count += 1;
-        true
+        Ok(())
     }
 
     fn record_failure(&mut self) {
@@ -1272,6 +1287,21 @@ impl PublishBatchResult {
 
     fn should_update_directory(&self) -> bool {
         self.success_count > 0 && !self.has_failures()
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "stage", content = "error", rename_all = "snake_case")]
+enum SignatureFailure {
+    Signing(String),
+    Verification(String),
+}
+
+impl std::fmt::Display for SignatureFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signing(error) | Self::Verification(error) => formatter.write_str(error),
+        }
     }
 }
 
@@ -1317,7 +1347,7 @@ fn make_tag(
 /// - Public-key verification override: set `COSIGN_VERIFY_KEY` to a public key path or KMS reference
 ///
 /// Returns an error on failure so the publish batch exits non-zero.
-fn cosign_sign_and_verify(reference: &str) -> Result<(), String> {
+fn cosign_sign_and_verify(reference: &str) -> Result<(), SignatureFailure> {
     let max_attempts = env_usize("COSIGN_MAX_ATTEMPTS", 3).max(1);
     let retry_delay = Duration::from_secs(env_u64("COSIGN_RETRY_DELAY_SECONDS", 10));
 
@@ -1329,9 +1359,11 @@ fn cosign_sign_and_verify_with_program(
     program: &str,
     max_attempts: usize,
     retry_delay: Duration,
-) -> Result<(), String> {
-    cosign_sign_with_program(reference, program, max_attempts, retry_delay)?;
+) -> Result<(), SignatureFailure> {
+    cosign_sign_with_program(reference, program, max_attempts, retry_delay)
+        .map_err(SignatureFailure::Signing)?;
     cosign_verify_with_program(reference, program, max_attempts, retry_delay)
+        .map_err(SignatureFailure::Verification)
 }
 
 fn cosign_sign_with_program(
@@ -1881,10 +1913,11 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_publication_rejects_invalid_artifacts_before_upload() {
+    fn publication_preflight_rejects_invalid_artifacts_before_credentials_or_upload() {
         for scenario in [
             "valid",
             "legacy",
+            "mixed-legacy",
             "mismatch",
             "patch-mismatch",
             "missing-marker",
@@ -1918,36 +1951,75 @@ mod tests {
             .expect("write metadata");
             fs::write(dir.join("libdrasi_source_mock.dylib"), binary)
                 .expect("write binary fixture");
-            let output = Command::new(std::env::current_exe().expect("test executable"))
-                .args([
-                    "--exact",
-                    "tests::artifact_preflight_probe",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env("ABI_PREFLIGHT_PLUGINS_DIR", &dir)
-                .output()
-                .expect("run publication preflight");
+            if scenario == "mixed-legacy" {
+                json.as_object_mut()
+                    .expect("metadata object")
+                    .remove("abi_version");
+                fs::write(
+                    dir.join("libdrasi_source_legacy.metadata.json"),
+                    serde_json::to_vec(&json).expect("legacy metadata bytes"),
+                )
+                .expect("write legacy metadata");
+                fs::write(dir.join("libdrasi_source_legacy.dylib"), binary)
+                    .expect("write legacy binary");
+            }
+            for dry_run in [false, true] {
+                let output = Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::artifact_preflight_probe",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("ABI_PREFLIGHT_PLUGINS_DIR", &dir)
+                    .env("ABI_PREFLIGHT_DRY_RUN", dry_run.to_string())
+                    .env_remove("OCI_REGISTRY_PASSWORD")
+                    .env_remove("GHCR_TOKEN")
+                    .output()
+                    .expect("run publication preflight");
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(scenario != "valid" || !dry_run)),
+                    "{scenario}, dry_run={dry_run}: {stderr}"
+                );
+                let expected_error = match scenario {
+                    "valid" if dry_run => "",
+                    "valid" => "env var required for authentication",
+                    "legacy" | "mixed-legacy" => "missing field `abi_version`",
+                    "mismatch" | "patch-mismatch" => "disagrees with binary",
+                    "missing-marker" => "missing plugin FFI ABI version marker",
+                    "invalid-version" => "invalid plugin FFI ABI version",
+                    _ => unreachable!("unknown preflight fixture"),
+                };
+                assert!(
+                    stderr.contains(expected_error),
+                    "{scenario}, dry_run={dry_run}: {stderr}"
+                );
+                if scenario != "valid" {
+                    assert!(
+                        !stderr.contains("env var required for authentication"),
+                        "all artifacts must pass ABI preflight before credentials are used"
+                    );
+                }
+            }
             fs::remove_dir_all(&dir).expect("remove artifact fixtures");
-            assert_eq!(
-                output.status.code(),
-                Some(i32::from(scenario != "valid")),
-                "{scenario}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
         }
     }
 
     #[test]
-    #[ignore = "subprocess fixture invoked by dry_run_publication_rejects_invalid_artifacts_before_upload"]
+    #[ignore = "subprocess fixture invoked by publication_preflight_rejects_invalid_artifacts_before_credentials_or_upload"]
     fn artifact_preflight_probe() {
         let plugins_dir = std::env::var("ABI_PREFLIGHT_PLUGINS_DIR").expect("fixture directory");
-        publish_plugins(&[
+        let mut args = vec![
             "--plugins-dir".to_string(),
             plugins_dir,
-            "--dry-run".to_string(),
             "--sign".to_string(),
-        ]);
+        ];
+        if std::env::var("ABI_PREFLIGHT_DRY_RUN").as_deref() == Ok("true") {
+            args.push("--dry-run".to_string());
+        }
+        publish_plugins(&args);
     }
 
     struct EnvGuard {
@@ -2139,7 +2211,7 @@ exit 2
             &[("MOCK_COSIGN_CALLS", calls.to_str().unwrap())],
             &["COSIGN_KEY", "COSIGN_VERIFY_KEY"],
         );
-        let error = cosign_sign_with_program(
+        let error = cosign_sign_and_verify_with_program(
             reference,
             script.to_str().unwrap(),
             1,
@@ -2147,8 +2219,9 @@ exit 2
         )
         .expect_err("failed signing command should fail publication");
 
-        assert!(error.contains("signing failed"));
-        assert!(error.contains(reference));
+        assert!(matches!(&error, SignatureFailure::Signing(_)));
+        assert!(error.to_string().contains("signing failed"));
+        assert!(error.to_string().contains(reference));
         assert_eq!(read_calls(&calls), format!("sign --yes {reference}\n"));
         fs::remove_dir_all(dir).expect("test temp dir should be removed");
     }
@@ -2197,7 +2270,8 @@ exit 2
         )
         .expect_err("failed verification should fail publication");
 
-        assert!(error.contains("verification failed"));
+        assert!(matches!(&error, SignatureFailure::Verification(_)));
+        assert!(error.to_string().contains("verification failed"));
         assert!(read_calls(&calls)
             .contains("sign --yes ghcr.io/drasi-project/reaction/sse@sha256:abc\n"));
         assert!(read_calls(&calls).contains("verify --certificate-identity https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/drasi-project/reaction/sse@sha256:abc\n"));
@@ -2413,7 +2487,8 @@ exit 2
         )
         .expect_err("unexpected workflow/ref should be rejected by verification");
 
-        assert!(error.contains("unexpected workflow identity"));
+        assert!(matches!(&error, SignatureFailure::Verification(_)));
+        assert!(error.to_string().contains("unexpected workflow identity"));
         assert!(read_calls(&calls).contains("@refs/heads/feature"));
         fs::remove_dir_all(dir).expect("test temp dir should be removed");
     }
@@ -2556,11 +2631,11 @@ exit 2
             "https://ghcr.io/v2/drasi-project/reaction/sse/manifests/sha256:abc",
             |reference| {
                 assert_eq!(reference, "ghcr.io/drasi-project/reaction/sse@sha256:abc");
-                Err("signing failed".to_string())
+                Err(SignatureFailure::Signing("signing failed".to_string()))
             },
         );
 
-        assert!(!ok);
+        assert!(matches!(ok, Err(SignatureFailure::Signing(_))));
         assert_eq!(
             result,
             PublishBatchResult {
@@ -2584,7 +2659,7 @@ exit 2
             |_| Ok(()),
         );
 
-        assert!(ok);
+        assert!(ok.is_ok());
         assert_eq!(
             result,
             PublishBatchResult {
@@ -2615,7 +2690,9 @@ exit 2
 
     #[test]
     fn publication_process_exit_matches_required_outcomes() {
-        for scenario in ["success", "catalog", "upload", "sign", "verify"] {
+        let directory = test_temp_dir("publication-reports");
+        for scenario in ["success", "unsigned", "catalog", "upload", "sign", "verify"] {
+            let report_path = directory.join(format!("{scenario}.json"));
             let output = Command::new(std::env::current_exe().expect("test executable"))
                 .args([
                     "--exact",
@@ -2624,11 +2701,12 @@ exit 2
                     "--nocapture",
                 ])
                 .env("PUBLICATION_TEST_SCENARIO", scenario)
+                .env("PUBLICATION_TEST_REPORT", &report_path)
                 .output()
                 .expect("run publication subprocess");
             assert_eq!(
                 output.status.code(),
-                Some(i32::from(scenario != "success")),
+                Some(i32::from(!["success", "unsigned"].contains(&scenario))),
                 "{scenario}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -2636,7 +2714,69 @@ exit 2
                 assert!(String::from_utf8_lossy(&output.stderr)
                     .contains("test/drasi-plugin-directory:reaction.http"));
             }
+            let report: serde_json::Value = serde_json::from_slice(
+                &fs::read(report_path).expect("retained publication report"),
+            )
+            .expect("publication report JSON");
+            let artifacts = report["artifacts"].as_array().expect("pushed artifacts");
+            assert_eq!(
+                artifacts.len(),
+                if scenario == "upload" { 1 } else { 2 },
+                "{scenario}"
+            );
+            for artifact in artifacts {
+                let ptype = artifact["type"].as_str().expect("plugin type");
+                assert_eq!(
+                    artifact["digest_reference"],
+                    format!("test/{ptype}/http@sha256:{}", "a".repeat(64)),
+                    "every successful upload must retain its immutable digest"
+                );
+                assert_eq!(artifact["reference"], format!("test/{ptype}/http:test"));
+                let signing_failed = scenario == "sign" && ptype == "source";
+                let verification_failed = scenario == "verify" && ptype == "source";
+                assert_eq!(
+                    artifact["signed"],
+                    scenario != "unsigned" && !signing_failed
+                );
+                assert_eq!(
+                    artifact["verified"],
+                    scenario != "unsigned" && !signing_failed && !verification_failed
+                );
+                if signing_failed || verification_failed {
+                    assert_eq!(
+                        artifact["signature_error"]["stage"],
+                        if signing_failed {
+                            "signing"
+                        } else {
+                            "verification"
+                        }
+                    );
+                    assert_eq!(
+                        artifact["signature_error"]["error"],
+                        format!("{scenario} failed")
+                    );
+                } else {
+                    assert!(artifact["signature_error"].is_null());
+                }
+            }
+            assert_eq!(
+                report["artifact_failures"],
+                usize::from(["upload", "sign", "verify"].contains(&scenario))
+            );
+            assert_eq!(
+                report["catalog_failures"],
+                usize::from(scenario == "catalog")
+            );
+            assert_eq!(
+                report["catalog_successes"],
+                if ["success", "unsigned"].contains(&scenario) {
+                    2
+                } else {
+                    usize::from(scenario == "catalog")
+                }
+            );
         }
+        fs::remove_dir_all(directory).expect("remove publication reports");
     }
 
     #[test]
@@ -2678,7 +2818,7 @@ exit 2
                 .block_on(publish_batch(
                     &publications,
                     "test",
-                    true,
+                    scenario != "unsigned",
                     |reference, _| {
                         std::future::ready(
                             if scenario == "upload" && reference.contains("/source/") {
@@ -2699,22 +2839,24 @@ exit 2
                         )
                     },
                     |reference| {
-                        if ["sign", "verify"].contains(&scenario.as_str())
-                            && reference.contains("/source/")
-                        {
-                            Err(format!("{scenario} failed"))
+                        if reference.contains("/source/") && scenario == "sign" {
+                            Err(SignatureFailure::Signing("sign failed".to_string()))
+                        } else if reference.contains("/source/") && scenario == "verify" {
+                            Err(SignatureFailure::Verification("verify failed".to_string()))
                         } else {
                             Ok(())
                         }
                     },
                 ));
-        if ["success", "catalog"].contains(&scenario.as_str()) {
+        if ["success", "unsigned", "catalog"].contains(&scenario.as_str()) {
             assert_eq!(catalog_calls, 2);
-            assert_eq!(artifacts.len(), 2);
         } else {
             assert_eq!(catalog_calls, 0);
-            assert_eq!(artifacts.len(), 1);
         }
+        let report_path =
+            std::env::var("PUBLICATION_TEST_REPORT").expect("publication report path");
+        write_publication_report(Path::new(&report_path), &result, &artifacts)
+            .expect("write retained publication report");
         std::process::exit(result.exit_code());
     }
 

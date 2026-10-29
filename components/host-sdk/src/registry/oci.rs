@@ -16,11 +16,12 @@
 
 use crate::registry::cosign::{CosignVerifier, SignatureStatus};
 use crate::registry::types::{
-    media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
+    annotations, media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, info, warn};
 use oci_client::client::{ClientConfig, ClientProtocol};
+use oci_client::manifest::OciImageManifest;
 use oci_client::Reference;
 use std::path::{Path, PathBuf};
 
@@ -37,15 +38,25 @@ pub struct DownloadResult {
 /// Each tag in this package represents a registered plugin (e.g., "source.postgres").
 const PLUGIN_DIRECTORY_PACKAGE: &str = "drasi-plugin-directory";
 
-fn validate_binary_abi(binary: &[u8], advertised_abi: Option<&str>) -> Result<()> {
-    let advertised_abi = advertised_abi.context(
+fn validate_binary_abi(
+    binary: &[u8],
+    metadata_abi: Option<&str>,
+    manifest: Option<&OciImageManifest>,
+) -> Result<()> {
+    let manifest = manifest.context("plugin artifact is missing its downloaded manifest")?;
+    let manifest_abi = manifest
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(annotations::ABI_VERSION))
+        .context("missing FFI ABI manifest annotation (io.drasi.plugin.abi-version)")?;
+    let metadata_abi = metadata_abi.context(
         "missing FFI ABI metadata; legacy artifacts must be republished with validated ABI metadata",
     )?;
     let binary_abi =
         drasi_ffi_primitives::read_plugin_abi_version(binary).map_err(anyhow::Error::msg)?;
-    if advertised_abi != binary_abi {
+    if manifest_abi != metadata_abi || metadata_abi != binary_abi {
         bail!(
-            "FFI ABI metadata disagrees with binary: metadata={advertised_abi}, binary={binary_abi}"
+            "FFI ABI metadata mismatch: manifest={manifest_abi}, metadata={metadata_abi}, binary={binary_abi}"
         );
     }
     let host_abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
@@ -59,31 +70,123 @@ fn validate_binary_abi(binary: &[u8], advertised_abi: Option<&str>) -> Result<()
 mod abi_tests {
     use super::*;
 
+    fn manifest(abi: Option<&str>) -> OciImageManifest {
+        OciImageManifest {
+            annotations: abi.map(|abi| {
+                [(annotations::ABI_VERSION.to_string(), abi.to_string())]
+                    .into_iter()
+                    .collect()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn accepts_matching_binary_metadata_and_host_abi() {
+    fn accepts_matching_manifest_metadata_binary_and_host_abi() {
         let abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
         let binary = format!("binary\0drasi-plugin-ffi-abi={abi}\0");
-        validate_binary_abi(binary.as_bytes(), Some(abi)).expect("matching ABI");
+        validate_binary_abi(binary.as_bytes(), Some(abi), Some(&manifest(Some(abi))))
+            .expect("matching ABI");
+    }
+
+    #[test]
+    fn allows_host_patch_differences_but_requires_exact_artifact_agreement() {
+        let host_abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
+        let mut patch_abi = semver::Version::parse(host_abi).expect("host ABI");
+        patch_abi.patch += 1;
+        let patch_abi = patch_abi.to_string();
+        let binary = format!("binary\0drasi-plugin-ffi-abi={patch_abi}\0");
+        validate_binary_abi(
+            binary.as_bytes(),
+            Some(&patch_abi),
+            Some(&manifest(Some(&patch_abi))),
+        )
+        .expect("artifact agrees exactly, with a compatible host patch difference");
+
+        for (manifest_abi, metadata_abi, binary_abi) in [
+            (patch_abi.as_str(), host_abi, host_abi),
+            (host_abi, patch_abi.as_str(), host_abi),
+            (host_abi, host_abi, patch_abi.as_str()),
+        ] {
+            let binary = format!("binary\0drasi-plugin-ffi-abi={binary_abi}\0");
+            let error = validate_binary_abi(
+                binary.as_bytes(),
+                Some(metadata_abi),
+                Some(&manifest(Some(manifest_abi))),
+            )
+            .expect_err("patch-compatible but inconsistent artifact metadata");
+            assert!(
+                error.to_string().contains("FFI ABI metadata mismatch"),
+                "{error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("manifest={manifest_abi}")),
+                "{error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("metadata={metadata_abi}")),
+                "{error}"
+            );
+            assert!(
+                error.to_string().contains(&format!("binary={binary_abi}")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_missing_downloaded_manifest_or_abi_annotation() {
+        let abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
+        let binary = format!("binary\0drasi-plugin-ffi-abi={abi}\0");
+        let error = validate_binary_abi(binary.as_bytes(), Some(abi), None)
+            .expect_err("missing downloaded manifest");
+        assert!(
+            error
+                .to_string()
+                .contains("missing its downloaded manifest"),
+            "{error}"
+        );
+        for annotations in [None, Some(std::collections::BTreeMap::new())] {
+            let manifest = OciImageManifest {
+                annotations,
+                ..Default::default()
+            };
+            let error = validate_binary_abi(binary.as_bytes(), Some(abi), Some(&manifest))
+                .expect_err("missing ABI annotation");
+            assert!(
+                error.to_string().contains(annotations::ABI_VERSION),
+                "{error}"
+            );
+        }
     }
 
     #[test]
     fn rejects_missing_or_incorrect_metadata_before_installation() {
         let abi = drasi_plugin_sdk::ffi::FFI_SDK_VERSION;
         let binary = format!("binary\0drasi-plugin-ffi-abi={abi}\0");
-        assert!(validate_binary_abi(binary.as_bytes(), None).is_err());
-        let error =
-            validate_binary_abi(binary.as_bytes(), Some("0.99.0")).expect_err("incorrect metadata");
+        let manifest = manifest(Some(abi));
+        assert!(validate_binary_abi(binary.as_bytes(), None, Some(&manifest)).is_err());
+        let error = validate_binary_abi(binary.as_bytes(), Some("0.99.0"), Some(&manifest))
+            .expect_err("incorrect metadata");
         assert!(
-            error.to_string().contains("disagrees with binary"),
+            error.to_string().contains("FFI ABI metadata mismatch"),
             "{error}"
         );
-        assert!(validate_binary_abi(b"legacy binary", Some(abi)).is_err());
+        assert!(validate_binary_abi(b"legacy binary", Some(abi), Some(&manifest)).is_err());
     }
 
     #[test]
     fn rejects_incompatible_binary_even_when_metadata_agrees() {
-        let error = validate_binary_abi(b"binary\0drasi-plugin-ffi-abi=99.0.0\0", Some("99.0.0"))
-            .expect_err("incompatible binary");
+        let error = validate_binary_abi(
+            b"binary\0drasi-plugin-ffi-abi=99.0.0\0",
+            Some("99.0.0"),
+            Some(&manifest(Some("99.0.0"))),
+        )
+        .expect_err("incompatible binary");
         assert!(
             error.to_string().contains("FFI ABI version mismatch"),
             "{error}"
@@ -321,8 +424,12 @@ impl OciRegistryClient {
                     .context("plugin artifact is missing its metadata layer")?;
                 let metadata: PluginMetadataJson = serde_json::from_slice(&metadata_layer.data)
                     .context("failed to parse plugin metadata JSON")?;
-                validate_binary_abi(&layer.data, metadata.abi_version.as_deref())
-                    .with_context(|| format!("invalid plugin ABI metadata for {reference}"))?;
+                validate_binary_abi(
+                    &layer.data,
+                    metadata.abi_version.as_deref(),
+                    image_data.manifest.as_ref(),
+                )
+                .with_context(|| format!("invalid plugin ABI metadata for {reference}"))?;
 
                 let dest_path = dest_dir.join(filename);
                 tokio::fs::create_dir_all(dest_dir)
