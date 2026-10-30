@@ -144,8 +144,18 @@ fn extract_os(triple: &str) -> &str {
 }
 
 fn load_cargo_metadata(no_deps: bool) -> CargoMetadata {
+    if !std::env::current_dir()
+        .expect("current directory")
+        .ancestors()
+        .any(|directory| directory.join("Cargo.lock").is_file())
+    {
+        eprintln!(
+            "Missing required Cargo.lock; restore the committed release dependency baseline."
+        );
+        std::process::exit(1);
+    }
     let mut command = Command::new("cargo");
-    command.args(["metadata", "--format-version", "1"]);
+    command.args(["metadata", "--locked", "--format-version", "1"]);
     if no_deps {
         command.arg("--no-deps");
     }
@@ -422,6 +432,9 @@ fn main() {
             eprintln!("  --arch-suffix <SUFFIX> Append architecture suffix to tag (e.g., linux-amd64 → 0.1.8-linux-amd64)");
             eprintln!("  --dry-run             Show what would be published without pushing");
             eprintln!("  --sign                Sign each published artifact with cosign (requires cosign in PATH)");
+            eprintln!(
+                "  --report <PATH>       Write publication outcomes and immutable OCI references"
+            );
             std::process::exit(1);
         }
     }
@@ -537,6 +550,7 @@ fn plugin_build_command(options: PluginBuildOptions<'_>) -> Command {
     let mut cmd = Command::new(options.build_tool);
     cmd.current_dir(options.workspace_root);
     cmd.arg("build");
+    cmd.arg("--locked");
     cmd.arg("--lib");
     for plugin in options.plugins {
         cmd.args(["-p", plugin]);
@@ -843,11 +857,15 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 plugins_dir.display(),
                 e
             );
-            return plugins;
+            std::process::exit(1);
         }
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            eprintln!("Cannot enumerate plugin artifacts: {error}");
+            std::process::exit(1);
+        });
         let path = entry.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
 
@@ -856,7 +874,7 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("Failed to read {}: {}", path.display(), e);
-                    continue;
+                    std::process::exit(1);
                 }
             };
 
@@ -864,7 +882,7 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("Failed to parse {}: {}", path.display(), e);
-                    continue;
+                    std::process::exit(1);
                 }
             };
 
@@ -884,11 +902,11 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
 
             if !binary_path.exists() {
                 eprintln!(
-                    "Warning: binary not found for {}: expected {}",
+                    "Error: binary not found for {}: expected {}",
                     name,
                     binary_path.display()
                 );
-                continue;
+                std::process::exit(1);
             }
 
             plugins.push(PublishablePlugin {
@@ -911,6 +929,7 @@ fn publish_plugins(args: &[String]) {
     let arch_suffix = parse_flag_value(args, "--arch-suffix");
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let sign = args.iter().any(|a| a == "--sign");
+    let report_path = parse_flag_value(args, "--report");
 
     if tag_override.is_some() && pre_release.is_some() {
         eprintln!("Error: --tag and --pre-release are mutually exclusive");
@@ -969,6 +988,7 @@ fn publish_plugins(args: &[String]) {
         println!("  Pre-release label: {label}");
     }
 
+    let mut publications = Vec::new();
     for p in &plugins {
         let tag = make_tag(
             &p.metadata.version,
@@ -988,6 +1008,7 @@ fn publish_plugins(args: &[String]) {
             p.metadata.target_triple,
             reference
         );
+        publications.push((p, reference));
     }
 
     if dry_run {
@@ -1020,74 +1041,125 @@ fn publish_plugins(args: &[String]) {
             oci_client::secrets::RegistryAuth::Basic(username.clone(), password.clone())
         };
 
-        let mut publish_result = PublishBatchResult::default();
-
-        for p in &plugins {
-            let tag = make_tag(
-                &p.metadata.version,
-                tag_override.as_deref(),
-                pre_release.as_deref(),
-                arch_suffix.as_deref(),
-            );
-            let reference_str = format!(
-                "{}/{}/{}:{}",
-                registry, p.metadata.plugin_type, p.metadata.kind, tag
-            );
-
-            match publish_single_plugin(&client, &auth, &reference_str, p).await {
-                Ok(url) => {
-                    publish_result.record_pushed_artifact(
-                        sign,
-                        &reference_str,
-                        &p.metadata.target_triple,
-                        &url,
-                        cosign_sign_and_verify,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("  ✗ {reference_str} — {e}");
-                    publish_result.record_failure();
-                }
-            }
-        }
+        let (client, auth) = (&client, &auth);
+        let (publish_result, artifacts) = publish_batch(
+            &publications,
+            &registry,
+            sign,
+            |reference, plugin| async move {
+                publish_single_plugin(client, auth, &reference, plugin)
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            |reference| async move {
+                publish_directory_entry(client, auth, &reference)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| "required catalog upload failed".to_string())
+            },
+            cosign_sign_and_verify,
+        )
+        .await;
 
         println!(
-            "\n=== Published: {} succeeded, {} failed ===",
-            publish_result.success_count, publish_result.fail_count
+            "\n=== Artifacts: {} succeeded, {} failed; catalog: {} succeeded, {} failed ===",
+            publish_result.success_count,
+            publish_result.fail_count,
+            publish_result.catalog_success_count,
+            publish_result.catalog_fail_count
         );
-
-        // Update plugin directory with entries for each successfully published plugin
-        if publish_result.should_update_directory() {
-            println!("\n=== Updating plugin directory ===");
-            let mut dir_entries: Vec<(String, String)> = plugins
-                .iter()
-                .map(|p| (p.metadata.plugin_type.clone(), p.metadata.kind.clone()))
-                .collect();
-            dir_entries.sort();
-            dir_entries.dedup();
-
-            for (ptype, kind) in &dir_entries {
-                let dir_tag = format!("{ptype}.{kind}");
-                let dir_ref = format!("{registry}/drasi-plugin-directory:{dir_tag}");
-                match publish_directory_entry(&client, &auth, &dir_ref).await {
-                    Ok(_) => println!("  ✓ directory entry: {dir_tag}"),
-                    Err(e) => eprintln!("  ✗ directory entry: {dir_tag} — {e}"),
-                }
+        if let Some(path) = report_path {
+            let report = serde_json::json!({
+                "schema_version": 1,
+                "artifacts": artifacts,
+                "artifact_failures": publish_result.fail_count,
+                "catalog_successes": publish_result.catalog_success_count,
+                "catalog_failures": publish_result.catalog_fail_count,
+            });
+            if let Err(error) = fs::write(&path, report.to_string()) {
+                eprintln!("Cannot write publication report {path}: {error}");
+                std::process::exit(1);
             }
-        } else if publish_result.has_failures() {
-            eprintln!("\n=== Skipping plugin directory update because publishing had failures ===");
         }
-
-        if publish_result.has_failures() {
-            std::process::exit(1);
+        if publish_result.exit_code() != 0 {
+            eprintln!("Publication incomplete; uploaded artifacts have not been rolled back.");
+            std::process::exit(publish_result.exit_code());
         }
     });
+}
+
+async fn publish_batch<'a, Upload, UploadFuture, Catalog, CatalogFuture, Sign>(
+    publications: &[(&'a PublishablePlugin, String)],
+    registry: &str,
+    sign: bool,
+    mut upload: Upload,
+    mut update_catalog: Catalog,
+    mut sign_and_verify: Sign,
+) -> (PublishBatchResult, Vec<serde_json::Value>)
+where
+    Upload: FnMut(String, &'a PublishablePlugin) -> UploadFuture,
+    UploadFuture: std::future::Future<Output = Result<String, String>>,
+    Catalog: FnMut(String) -> CatalogFuture,
+    CatalogFuture: std::future::Future<Output = Result<(), String>>,
+    Sign: FnMut(&str) -> Result<(), String>,
+{
+    let mut result = PublishBatchResult::default();
+    let mut artifacts = Vec::new();
+    for (plugin, reference) in publications {
+        match upload(reference.clone(), plugin).await {
+            Ok(url) => {
+                if result.record_pushed_artifact(
+                    sign,
+                    reference,
+                    &plugin.metadata.target_triple,
+                    &url,
+                    &mut sign_and_verify,
+                ) {
+                    artifacts.push(serde_json::json!({
+                        "name": plugin.metadata.name,
+                        "version": plugin.metadata.version,
+                        "type": plugin.metadata.plugin_type,
+                        "kind": plugin.metadata.kind,
+                        "target": plugin.metadata.target_triple,
+                        "sdk_version": plugin.metadata.sdk_version,
+                        "core_version": plugin.metadata.core_version,
+                        "lib_version": plugin.metadata.lib_version,
+                        "reference": reference,
+                        "digest_reference": digest_reference(reference, &url),
+                        "signed": sign,
+                        "verified": sign,
+                    }));
+                }
+            }
+            Err(error) => {
+                eprintln!("  ✗ {reference} — {error}");
+                result.record_failure();
+            }
+        }
+    }
+    if result.should_update_directory() {
+        println!("\n=== Updating plugin directory ===");
+        let entries: BTreeSet<_> = publications
+            .iter()
+            .map(|(plugin, _)| (&plugin.metadata.plugin_type, &plugin.metadata.kind))
+            .collect();
+        for (ptype, kind) in entries {
+            let reference = format!("{registry}/drasi-plugin-directory:{ptype}.{kind}");
+            let outcome = update_catalog(reference.clone()).await;
+            result.record_catalog_result(&reference, outcome);
+        }
+    } else if result.has_failures() {
+        eprintln!("\n=== Skipping plugin directory update because publishing had failures ===");
+    }
+    (result, artifacts)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PublishBatchResult {
     success_count: usize,
     fail_count: usize,
+    catalog_success_count: usize,
+    catalog_fail_count: usize,
 }
 
 impl PublishBatchResult {
@@ -1121,7 +1193,24 @@ impl PublishBatchResult {
     }
 
     fn has_failures(&self) -> bool {
-        self.fail_count > 0
+        self.fail_count > 0 || self.catalog_fail_count > 0
+    }
+
+    fn record_catalog_result(&mut self, reference: &str, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                self.catalog_success_count += 1;
+                println!("  ✓ directory entry: {reference}");
+            }
+            Err(error) => {
+                self.catalog_fail_count += 1;
+                eprintln!("  ✗ directory entry: {reference} — {error}");
+            }
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        i32::from(self.has_failures())
     }
 
     fn should_update_directory(&self) -> bool {
@@ -1131,7 +1220,9 @@ impl PublishBatchResult {
 
 fn digest_reference(reference: &str, manifest_url: &str) -> String {
     if let Some((_, digest)) = manifest_url.rsplit_once("/manifests/") {
-        let repo = reference.split(':').next().unwrap_or(reference);
+        let repo = reference
+            .rsplit_once(':')
+            .map_or(reference, |(repo, _)| repo);
         format!("{repo}@{digest}")
     } else {
         reference.to_string()
@@ -2304,7 +2395,8 @@ exit 2
             result,
             PublishBatchResult {
                 success_count: 0,
-                fail_count: 1
+                fail_count: 1,
+                ..Default::default()
             }
         );
         assert!(result.has_failures());
@@ -2327,11 +2419,133 @@ exit 2
             result,
             PublishBatchResult {
                 success_count: 1,
-                fail_count: 0
+                fail_count: 0,
+                ..Default::default()
             }
         );
         assert!(!result.has_failures());
         assert!(result.should_update_directory());
+    }
+
+    #[test]
+    fn mixed_catalog_outcomes_fail_publication() {
+        let mut result = PublishBatchResult {
+            success_count: 2,
+            ..Default::default()
+        };
+        assert!(result.should_update_directory());
+        result.record_catalog_result("test/directory:source.http", Err("injected failure".into()));
+        result.record_catalog_result("test/directory:reaction.http", Ok(()));
+        assert_eq!(result.success_count, 2);
+        assert_eq!(result.fail_count, 0);
+        assert_eq!(result.catalog_fail_count, 1);
+        assert_eq!(result.catalog_success_count, 1);
+        assert_eq!(result.exit_code(), 1);
+    }
+
+    #[test]
+    fn publication_process_exit_matches_required_outcomes() {
+        for scenario in ["success", "catalog", "upload", "sign", "verify"] {
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "tests::publication_exit_probe",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("PUBLICATION_TEST_SCENARIO", scenario)
+                .output()
+                .expect("run publication subprocess");
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(scenario != "success")),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if scenario == "catalog" {
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("test/drasi-plugin-directory:reaction.http"));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture invoked by publication_process_exit_matches_required_outcomes"]
+    fn publication_exit_probe() {
+        let scenario = std::env::var("PUBLICATION_TEST_SCENARIO").expect("test scenario");
+        let plugins: Vec<_> = ["source", "reaction"]
+            .iter()
+            .map(|ptype| PublishablePlugin {
+                metadata: PluginArtifactMetadata {
+                    name: format!("drasi-{ptype}-http"),
+                    kind: "http".into(),
+                    plugin_type: (*ptype).into(),
+                    version: "1.0.0".into(),
+                    sdk_version: "1.0.0".into(),
+                    core_version: "1.0.0".into(),
+                    lib_version: "1.0.0".into(),
+                    target_triple: "target".into(),
+                    description: None,
+                    license: None,
+                },
+                binary_path: PathBuf::new(),
+                metadata_path: PathBuf::new(),
+            })
+            .collect();
+        let publications: Vec<_> = plugins
+            .iter()
+            .map(|plugin| {
+                (
+                    plugin,
+                    format!("test/{}/http:test", plugin.metadata.plugin_type),
+                )
+            })
+            .collect();
+        let mut catalog_calls = 0;
+        let (result, artifacts) =
+            tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(publish_batch(
+                    &publications,
+                    "test",
+                    true,
+                    |reference, _| {
+                        std::future::ready(
+                            if scenario == "upload" && reference.contains("/source/") {
+                                Err("injected upload failure".into())
+                            } else {
+                                Ok(format!("https://test/manifests/sha256:{}", "a".repeat(64)))
+                            },
+                        )
+                    },
+                    |reference| {
+                        catalog_calls += 1;
+                        std::future::ready(
+                            if scenario == "catalog" && reference.ends_with("reaction.http") {
+                                Err("injected catalog failure".into())
+                            } else {
+                                Ok(())
+                            },
+                        )
+                    },
+                    |reference| {
+                        if ["sign", "verify"].contains(&scenario.as_str())
+                            && reference.contains("/source/")
+                        {
+                            Err(format!("{scenario} failed"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                ));
+        if ["success", "catalog"].contains(&scenario.as_str()) {
+            assert_eq!(catalog_calls, 2);
+            assert_eq!(artifacts.len(), 2);
+        } else {
+            assert_eq!(catalog_calls, 0);
+            assert_eq!(artifacts.len(), 1);
+        }
+        std::process::exit(result.exit_code());
     }
 
     #[test]
@@ -2358,6 +2572,7 @@ exit 2
             args,
             [
                 "build",
+                "--locked",
                 "--lib",
                 "-p",
                 "drasi-source-http",
@@ -2400,6 +2615,7 @@ exit 2
                 args,
                 [
                     "build",
+                    "--locked",
                     "--lib",
                     "-p",
                     "drasi-source-http",

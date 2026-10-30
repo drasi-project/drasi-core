@@ -63,3 +63,5 @@ serial_test = "3"
 im = "15"
 tokio-stream = "0.1"
 async-stream = "0.3"
+drasi-wal-redb = { path = "../wals/redb" }
+drasi-index-rocksdb.workspace = true

@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 
 const SOURCE_ID: &str = "people-source";
@@ -143,6 +143,13 @@ struct RecordingReaction {
     snapshot_on_fresh: bool,
     bootstrap_count: Arc<AtomicUsize>,
     bootstrap_as_of: Arc<Mutex<Option<u64>>>,
+    checkpoint_gate: Option<Arc<CheckpointGate>>,
+}
+
+#[derive(Default)]
+struct CheckpointGate {
+    entered: Notify,
+    release: Notify,
 }
 
 struct RecordingReceiver {
@@ -201,6 +208,7 @@ fn recording_reaction(
             snapshot_on_fresh,
             bootstrap_count: bootstrap_count.clone(),
             bootstrap_as_of: bootstrap_as_of.clone(),
+            checkpoint_gate: None,
         },
         RecordingReceiver {
             rx,
@@ -270,9 +278,10 @@ impl Reaction for RecordingReaction {
             .map(|checkpoint| checkpoint.config_hash)
             .unwrap_or(0);
 
-        self.tx
-            .send(result)
-            .map_err(|_| anyhow::anyhow!("Recording reaction receiver closed"))?;
+        if let Some(gate) = &self.checkpoint_gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         self.base
             .write_checkpoint(
                 &query_id,
@@ -282,6 +291,10 @@ impl Reaction for RecordingReaction {
                 },
             )
             .await?;
+        // Tests may stop the reaction as soon as they receive this notification.
+        self.tx
+            .send(result)
+            .map_err(|_| anyhow::anyhow!("Recording reaction receiver closed"))?;
         Ok(())
     }
 
@@ -788,6 +801,61 @@ async fn seed_reaction_then_update_query(
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
     wait_for_wipe(&core).await?;
     Ok((core, source, receiver, store, hash_v1))
+}
+
+#[tokio::test]
+async fn recording_notification_waits_for_durable_checkpoint() -> Result<()> {
+    let paths = Paths::new("checkpoint-notification")?;
+    let store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
+    let (mut reaction, mut receiver) =
+        recording_reaction(ReactionRecoveryPolicy::AutoSkipGap, false, false);
+    let gate = Arc::new(CheckpointGate::default());
+    reaction.checkpoint_gate = Some(gate.clone());
+    let (core, source) = build_core(
+        &paths,
+        CoreOpts {
+            query_text: QUERY_TEXT_V1,
+            wal: paths.wal.clone(),
+            state: Some(store.clone()),
+            reaction: Some(reaction),
+        },
+    )
+    .await?;
+    start_running(&core).await?;
+    core.start_reaction(REACTION_ID).await?;
+    wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
+    let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
+    let expected_hash = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
+
+    insert_person(&source, "p1", "Alice").await?;
+    timeout(Duration::from_secs(5), gate.entered.notified()).await?;
+    let before = read_reaction_checkpoint(store.as_ref())
+        .await?
+        .context("initial reaction checkpoint")?;
+    assert_eq!(before.sequence, 0);
+    assert_eq!(before.config_hash, expected_hash);
+    assert!(
+        matches!(
+            receiver.rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
+        "recording notification must wait until the checkpoint is durable"
+    );
+
+    gate.release.notify_one();
+    let results = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].sequence, 1);
+    stop_reaction_and_wait(&core).await?;
+    let after = read_reaction_checkpoint(store.as_ref())
+        .await?
+        .context("reaction checkpoint after notification and stop")?;
+    assert_eq!(after.sequence, 1);
+    assert_eq!(after.config_hash, expected_hash);
+
+    core.shutdown().await?;
+    paths.cleanup();
+    Ok(())
 }
 
 /// 4. Strict + hash mismatch: reaction start fails; no new-hash side effects.

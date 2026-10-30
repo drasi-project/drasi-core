@@ -693,8 +693,11 @@ The settings are important:
 - `resume_from` contains opaque source-position bytes from a prior checkpoint.
   Only the Source knows how to interpret them.
 - `resume_sequence` carries the last source-local sequence the query
-  checkpointed, so `SourceBase` keeps framework sequence numbers monotonic
-  after restart (it raises its counter to `resume_sequence + 1`).
+  checkpointed, or zero for a completed bootstrap or streaming-only recovery
+  without a source checkpoint.
+  `SourceBase` uses it to keep framework sequences monotonic after restart.
+  Sources whose WAL position is the sequence also replay from it when
+  `resume_from` is absent.
 - `request_position_handle` asks replay-capable sources for a shared
   `Arc<AtomicU64>` so the query can report its durably processed sequence.
 
@@ -1521,11 +1524,16 @@ the retained WAL by Drasi sequence before live events flow:
 async fn subscribe(&self, settings: SourceSubscriptionSettings) -> Result<SubscriptionResponse> {
     if self.config.durable {
         let wal_guard = self.wal.read().await;
-        if let (Some(wal), Some(resume_from)) =
-            (wal_guard.as_ref(), settings.resume_from.as_ref())
-        {
-            if resume_from.len() >= 8 {
-                let resume_seq = u64::from_be_bytes(resume_from[..8].try_into().unwrap());
+        if let Some(wal) = wal_guard.as_ref() {
+            let resume_seq = if let Some(resume_from) = settings.resume_from.as_ref() {
+                if resume_from.len() < 8 {
+                    anyhow::bail!("invalid WAL resume position");
+                }
+                Some(u64::from_be_bytes(resume_from[..8].try_into()?))
+            } else {
+                settings.resume_sequence
+            };
+            if let Some(resume_seq) = resume_seq {
                 let wal = wal.clone();
                 drop(wal_guard);
                 return self.base
@@ -1549,8 +1557,9 @@ Rules:
 - `WriteAheadLogConfig::default()` is a fine start; size `max_events` and choose a
   capacity policy for your throughput.
 - On restart, `head_sequence()` + `set_next_sequence(head)` resumes sequencing.
-- Use `subscribe_with_replay()` when `resume_from` is present; fall back to
-  `subscribe_with_bootstrap()` otherwise.
+- Use `subscribe_with_replay()` for `resume_from` or, when no position is
+  present, `resume_sequence`. Fall back to `subscribe_with_bootstrap()` only
+  when neither is present.
 - Return `true` from `supports_replay()` only when durability is enabled.
 - Delete WAL data in `deprovision()` via `wal.delete_wal(id)`.
 

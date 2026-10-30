@@ -1,0 +1,31 @@
+{
+  "endpoint": "${DTS_ENDPOINT}",
+  "taskHub": "${DTS_TASKHUB:-default}",
+  "producerId": "${DTS_PRODUCER_ID:-orders-test-v1}",
+  "authentication": "none",
+  "defaultTemplate": {
+    "added": {
+      "action": "start",
+      "orchestration": "RecoveryWorkflow",
+      "instanceId": "{{after.episodeId}}",
+      "onConflict": "error",
+      "template": "{\"commandId\":{{json command_id}},\"episodeId\":{{json after.episodeId}},\"kind\":{{json operation}},\"revision\":{{json after.revision}},\"reason\":{{json after.reason}}}"
+    },
+    "updated": {
+      "action": "raiseEvent",
+      "instanceId": "{{after.episodeId}}",
+      "eventName": "condition",
+      "onMissing": "error",
+      "onTerminal": "error",
+      "template": "{\"commandId\":{{json command_id}},\"episodeId\":{{json after.episodeId}},\"kind\":{{json operation}},\"revision\":{{json after.revision}},\"reason\":{{json after.reason}}}"
+    },
+    "deleted": {
+      "action": "raiseEvent",
+      "instanceId": "{{before.episodeId}}",
+      "eventName": "condition",
+      "onMissing": "error",
+      "onTerminal": "error",
+      "template": "{\"commandId\":{{json command_id}},\"episodeId\":{{json before.episodeId}},\"kind\":{{json operation}},\"revision\":{{json before.revision}},\"reason\":{{json before.reason}}}"
+    }
+  }
+}

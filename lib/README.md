@@ -275,6 +275,32 @@ let config = Query::gql("active-orders")
 | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
 | `build() -> QueryConfig` | Build the configuration | — |
 
+### Persistent Bootstrap Recovery
+
+Persistent queries commit their source snapshot boundaries, initial result
+snapshot and result sequence zero atomically before live processing. These writes
+use the existing checkpoint and live-results interfaces. A failed begin, staging
+operation or handover commit stops the query before live processing. Completed
+empty snapshots with a source position can recover without a first live event.
+Filtered live events may advance a source's sequence without an opaque position;
+those checkpoints still preserve a committed sequence-zero result snapshot.
+
+`RecoveryPolicy::Strict` refuses a matching bootstrap-enabled query configuration
+that has no committed result sequence. Source checkpoints alone do not prove
+that the initial result snapshot was persisted. Replacement bootstraps after a
+configuration change or `AutoReset` retain the existing reset-in-progress marker
+until their handover commits. A reset-created result sequence zero alone does not
+prove completion: `Strict` rejects an interrupted replacement, while `AutoReset`
+clears partial indexes and bootstraps again.
+The explicit `AutoReset` policy rebuilds output, indexes and checkpoints from
+available source snapshots/replay. Before upgrading an existing persistent
+bootstrapped query, preserve its storage and choose the recovery policy
+deliberately, including the consequences for downstream reaction checkpoints.
+There is no silent migration or fallback to the current source head.
+
+No checkpoint methods, index storage keys, or serialized checkpoint formats
+are added. Custom index implementations keep their existing contracts.
+
 ---
 
 ## Multi-Source Queries and Joins
@@ -358,6 +384,16 @@ core.start().await?;                    // Start sources -> queries -> reactions
 core.stop().await?;                     // Stop reactions -> queries -> sources
 let running = core.is_running().await;  // Check if running
 ```
+
+Use `core.shutdown().await?` for permanent teardown. Unlike restartable `stop()`,
+it releases the runtime-owned components and persistent index handles without
+deleting their stored data, so a new instance can reopen the same directories.
+Save configuration first: topology and event history remain inspectable, but the
+component runtime instances are removed and the instance cannot restart.
+Cancelling the caller does not cancel teardown; another `shutdown()` call joins
+the same owned task. A failed shutdown reports the error, retains component
+ownership, and can be retried, including cleanup for reactions in `Error`.
+This permanent-teardown retry does not change the normal reaction `stop()` rules.
 
 ### Adding, Removing, and Updating Components at Runtime
 
@@ -852,7 +888,7 @@ impl Reaction for MyReaction {
 }
 ```
 
-**Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-a2a`, `drasi-reaction-grpc`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`.
+**Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-a2a`, [`drasi-reaction-durable-task`](../components/reactions/durable-task/README.md), `drasi-reaction-grpc`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`.
 
 ### Reaction Recovery
 

@@ -69,6 +69,7 @@ members = [
   "components/reactions/http",
   "components/reactions/a2a",
   "components/reactions/temporal",
+  "components/reactions/durable-task",
   "components/reactions/grpc",
   "components/reactions/aws-sqs",
   "components/reactions/sse",
@@ -188,6 +189,7 @@ drasi-source-cloudflare-radar = { version = "0.1.10", path = "components/sources
 drasi-bootstrap-application = { version = "0.2.15", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.3.5", path = "components/reactions/http" }
 drasi-reaction-temporal = { version = "0.1.0", path = "components/reactions/temporal" }
+drasi-reaction-durable-task = { version = "0.1.0", path = "components/reactions/durable-task" }
 drasi-reaction-grpc = { version = "0.4.5", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.6", path = "components/reactions/file" }
 drasi-reaction-eventgrid = { version = "0.1.3", path = "components/reactions/eventgrid" }

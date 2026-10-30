@@ -13,6 +13,10 @@ drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
+drasi-source-http = { path = "../components/sources/http" }
+drasi-source-grpc = { path = "../components/sources/grpc" }
+drasi-source-otel.workspace = true
+drasi-bootstrap-noop = { path = "../components/bootstrappers/noop" }
 drasi-reaction-application.workspace = true
 drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
 drasi-plugin-sdk.workspace = true
