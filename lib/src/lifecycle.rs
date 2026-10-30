@@ -154,6 +154,14 @@ impl LifecycleManager {
     /// All components are attempted even if some fail. Returns an aggregated
     /// error listing all failures, or `Ok(())` if all stopped successfully.
     pub async fn stop_all_components(&self) -> Result<()> {
+        self.stop_components(false).await
+    }
+
+    pub async fn shutdown_all_components(&self) -> Result<()> {
+        self.stop_components(true).await
+    }
+
+    async fn stop_components(&self, permanent: bool) -> Result<()> {
         use log::error;
 
         // Get a single consistent snapshot of components in reverse dependency order
@@ -197,18 +205,29 @@ impl LifecycleManager {
                 Some(s) => s,
                 None => continue, // component removed concurrently
             };
-            if !crate::component_graph::is_valid_transition(
-                &kind,
-                &live_status,
-                &ComponentStatus::Stopping,
-            ) {
+            let retry_failed_reaction = permanent
+                && kind == ComponentKind::Reaction
+                && live_status == ComponentStatus::Error;
+            if !retry_failed_reaction
+                && !crate::component_graph::is_valid_transition(
+                    &kind,
+                    &live_status,
+                    &ComponentStatus::Stopping,
+                )
+            {
                 continue;
             }
 
             let result = match kind {
                 ComponentKind::Reaction => {
                     info!("Stopping reaction '{id}'");
-                    self.reaction_manager.stop_reaction(id.clone()).await
+                    if permanent {
+                        self.reaction_manager
+                            .stop_reaction_for_shutdown(id.clone())
+                            .await
+                    } else {
+                        self.reaction_manager.stop_reaction(id.clone()).await
+                    }
                 }
                 ComponentKind::Query => {
                     info!("Stopping query '{id}'");

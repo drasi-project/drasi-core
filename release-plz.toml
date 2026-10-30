@@ -20,8 +20,8 @@ publish_no_verify = true
 # PR settings
 pr_labels = ["release"]
 
-# Dependencies updates
-dependencies_update = true
+# Preserve the reviewed dependency baseline; refresh explicitly with cargo update.
+dependencies_update = false
 
 # Unpublished/internal packages - exclude from releases
 [[package]]

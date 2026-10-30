@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-a2a"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "A2A JSON-RPC reaction plugin for Drasi"

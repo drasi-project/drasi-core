@@ -348,9 +348,8 @@ impl ComponentGraph {
         self.runtimes.contains_key(id)
     }
 
-    /// Drop stopped runtimes on terminal shutdown, retaining topology and history.
-    pub(crate) fn clear_runtimes(&mut self) {
-        self.runtimes.clear();
+    pub(crate) fn take_all_runtimes(&mut self) -> HashMap<String, Box<dyn Any + Send + Sync>> {
+        std::mem::take(&mut self.runtimes)
     }
 
     // ========================================================================
@@ -1240,11 +1239,9 @@ pub(crate) fn is_valid_transition(
     to: &ComponentStatus,
 ) -> bool {
     use ComponentStatus::*;
+    // Reactions have not yet adopted failed-runtime cleanup.
     if matches!((from, to), (Error, Stopping)) {
-        return matches!(
-            kind,
-            ComponentKind::Query | ComponentKind::Source | ComponentKind::Reaction
-        );
+        return matches!(kind, ComponentKind::Query | ComponentKind::Source);
     }
     matches!(
         (from, to),
