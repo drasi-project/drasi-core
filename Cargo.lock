@@ -3095,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-core"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "approx",
  "async-recursion",
@@ -3140,14 +3140,14 @@ version = "0.12.0"
 
 [[package]]
 name = "drasi-functions-cypher"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "drasi-core",
 ]
 
 [[package]]
 name = "drasi-functions-gql"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "drasi-core",
  "tokio",
@@ -3374,7 +3374,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-middleware"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-mssql-common"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3412,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-mysql-common"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3428,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-neo4j-common"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "drasi-core",
@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-oracle-common"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "drasi-core",
@@ -3480,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-postgres-common"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3495,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-query-ast"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -3504,7 +3504,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-query-cypher"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "drasi-query-ast",
  "peg",
@@ -3514,7 +3514,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-query-gql"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "drasi-query-ast",
  "peg",
@@ -4448,7 +4448,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-mapping"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "chrono",
