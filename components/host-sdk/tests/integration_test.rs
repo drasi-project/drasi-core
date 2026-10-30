@@ -3368,6 +3368,249 @@ impl drasi_lib::bootstrap::BootstrapProvider for TestBootstrapProvider {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_cdylib_durable_http_replays_from_sequence_zero() {
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+    use drasi_lib::config::SourceSubscriptionSettings;
+    use drasi_lib::context::SourceRuntimeContext;
+    use drasi_lib::wal::WalProvider;
+    use drasi_wal_redb::RedbWalProvider;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let plugin = load_plugin_from_path(
+        &require_plugin("drasi-source-http"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("load HTTP source plugin");
+    let config = serde_json::json!({
+        "host": "127.0.0.1",
+        "port": 0,
+        "durability": {
+            "enabled": true,
+            "max_events": 128,
+            "capacity_policy": "RejectIncoming"
+        }
+    });
+    let source = plugin.source_plugins[0]
+        .create_source("ffi-http", &config, false)
+        .await
+        .expect("create HTTP source");
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(dir.path()));
+    let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
+    source
+        .initialize(SourceRuntimeContext {
+            instance_id: "ffi-http-test".into(),
+            source_id: "ffi-http".into(),
+            update_tx,
+            state_store: None,
+            identity_provider: None,
+            wal_provider: Some(wal.clone()),
+        })
+        .await;
+    source
+        .set_bootstrap_provider(Box::new(TestBootstrapProvider {
+            source_position: None,
+        }))
+        .await;
+    source.start().await.expect("start HTTP source");
+
+    for id in ["one", "two"] {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("id", ElementValue::String(id.into()));
+        let change = SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("ffi-http", id),
+                    labels: Arc::from(vec![Arc::from("Node")]),
+                    effective_from: 0,
+                },
+                properties,
+            },
+        };
+        wal.append("ffi-http", &change)
+            .await
+            .expect("append WAL event");
+    }
+
+    let settings = |query_id: &str, resume_sequence, resume_from| SourceSubscriptionSettings {
+        source_id: "ffi-http".into(),
+        query_id: query_id.into(),
+        enable_bootstrap: true,
+        nodes: Default::default(),
+        relations: Default::default(),
+        resume_from,
+        resume_sequence,
+        request_position_handle: true,
+    };
+
+    let fresh = source
+        .subscribe(settings("fresh", None, None))
+        .await
+        .expect("subscribe fresh");
+    assert!(fresh.bootstrap_receiver.is_some());
+    drop(fresh);
+
+    for (query_id, sequence, position, expected) in [
+        ("zero", Some(0), None, 1),
+        ("nonzero", Some(1), None, 2),
+        (
+            "position",
+            Some(0),
+            Some(bytes::Bytes::copy_from_slice(&1u64.to_be_bytes())),
+            2,
+        ),
+    ] {
+        let mut subscription = source
+            .subscribe(settings(query_id, sequence, position))
+            .await
+            .expect("subscribe for replay");
+        assert!(
+            subscription.bootstrap_receiver.is_none(),
+            "{query_id} must replay instead of bootstrapping"
+        );
+        let event = tokio::time::timeout(Duration::from_secs(5), subscription.receiver.recv())
+            .await
+            .expect("replay timeout")
+            .expect("replay event");
+        assert_eq!(event.sequence, expected, "{query_id}");
+        drop(subscription);
+        source.remove_position_handle(query_id).await;
+    }
+    source.remove_position_handle("fresh").await;
+    source.stop().await.expect("stop HTTP source");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_cdylib_durable_http_query_restarts_after_empty_bootstrap() {
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use drasi_lib::wal::WalProvider;
+    use drasi_lib::{DrasiLib, Query, RecoveryPolicy, StorageBackendRef};
+    use drasi_wal_redb::RedbWalProvider;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let plugin = load_plugin_from_path(
+        &require_plugin("drasi-source-http"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("load HTTP source plugin");
+    let config = serde_json::json!({
+        "host": "127.0.0.1",
+        "port": 0,
+        "durability": {
+            "enabled": true,
+            "max_events": 128,
+            "capacity_policy": "RejectIncoming"
+        }
+    });
+    let source = plugin.source_plugins[0]
+        .create_source("ffi-http-recovery", &config, true)
+        .await
+        .expect("create HTTP source");
+    source
+        .set_bootstrap_provider(Box::new(TestBootstrapProvider {
+            source_position: None,
+        }))
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(dir.path().join("wal")));
+    let core = DrasiLib::builder()
+        .with_id("ffi-http-recovery-instance")
+        .with_source(source)
+        .with_query(
+            Query::cypher("query")
+                .query("MATCH (n:Node) RETURN n.id AS id")
+                .from_source("ffi-http-recovery")
+                .auto_start(false)
+                .enable_bootstrap(true)
+                .with_storage_backend(StorageBackendRef::Named("persistent".into()))
+                .with_recovery_policy(RecoveryPolicy::Strict)
+                .build(),
+        )
+        .with_index_provider(
+            "persistent",
+            Arc::new(RocksDbIndexProvider::new(
+                dir.path().join("rocks"),
+                false,
+                false,
+            )),
+        )
+        .with_wal_provider(wal.clone())
+        .build()
+        .await
+        .expect("build runtime");
+    core.start().await.expect("start runtime");
+    core.start_query("query").await.expect("start query");
+    let query = core
+        .query_manager()
+        .get_query_instance("query")
+        .await
+        .expect("get query");
+    let snapshot = query.fetch_snapshot().await.expect("completed bootstrap");
+    assert_eq!(snapshot.as_of_sequence, 0);
+    assert!(snapshot.to_vec().is_empty());
+    drop(query);
+    core.stop_query("query").await.expect("stop query");
+
+    let mut properties = ElementPropertyMap::new();
+    properties.insert("id", ElementValue::String("replayed".into()));
+    let change = SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("ffi-http-recovery", "replayed"),
+                labels: Arc::from(vec![Arc::from("Node")]),
+                effective_from: 0,
+            },
+            properties,
+        },
+    };
+    assert_eq!(
+        wal.append("ffi-http-recovery", &change)
+            .await
+            .expect("append WAL event"),
+        1
+    );
+
+    core.start_query("query").await.expect("restart query");
+    let query = core
+        .query_manager()
+        .get_query_instance("query")
+        .await
+        .expect("get restarted query");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = query.fetch_snapshot().await.expect("fetch snapshot");
+            if snapshot.as_of_sequence == 1 {
+                assert_eq!(
+                    snapshot.to_vec(),
+                    vec![serde_json::json!({"id": "replayed"})]
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("WAL event must be replayed");
+    drop(query);
+    core.shutdown().await.expect("shutdown runtime");
+}
+
 /// Verify `bootstrap_result_receiver` delivers `BootstrapResult` with
 /// `source_position` through the FFI boundary (plugin → host callback).
 #[tokio::test]

@@ -50,7 +50,10 @@ use super::types::FfiStr;
 ///   which raise their sequence counter above it for restart monotonicity
 ///   (#827). This changes the subscribe call contract, so old plugins must be
 ///   rejected by the loader's major.minor check.
-pub const FFI_SDK_VERSION: &str = "0.14.0";
+/// - `0.15.0`: `SourceVtable::subscribe_fn` adds a presence flag so a completed
+///   bootstrap can resume from sequence zero without being confused with an
+///   absent sequence.
+pub const FFI_SDK_VERSION: &str = "0.15.0";
 
 #[doc(hidden)]
 pub const FFI_ABI_VERSION_OFFSET: usize =

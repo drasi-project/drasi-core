@@ -42,6 +42,7 @@ jobs:
       test-command: |
         .github/scripts/package-visibility.test.sh
         .github/scripts/release-with-retry.test.sh
+        python3 .github/scripts/build-test-plugins.test.py
         cargo run -p xtask -- check-publish-dependency-cycles
         cargo test --workspace --exclude drasi-host-sdk
         make test-host-sdk

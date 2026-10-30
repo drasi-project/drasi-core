@@ -1,0 +1,35 @@
+{
+  "endpoint": "http://temporal:7233",
+  "outputTemplates": {
+    "routes": {
+      "placed": {
+        "added": {
+          "action": "signal",
+          "workflowId": "order-1001",
+          "signalName": "placed"
+        }
+      },
+      "paid": {
+        "added": {
+          "action": "signal",
+          "workflowId": "order-1001",
+          "signalName": "paid"
+        }
+      },
+      "shipped": {
+        "added": {
+          "action": "signal",
+          "workflowId": "order-1001",
+          "signalName": "shipped"
+        }
+      },
+      "delivered": {
+        "added": {
+          "action": "signal",
+          "workflowId": "order-1001",
+          "signalName": "delivered"
+        }
+      }
+    }
+  }
+}

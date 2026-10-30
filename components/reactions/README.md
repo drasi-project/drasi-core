@@ -1050,7 +1050,7 @@ Methods you call from your `Reaction` implementation, alphabetical:
 | `properties_or_serialize(&dto)` | Build the `properties()` map (raw config if descriptor-built, DTO serialization otherwise). |
 | `read_all_checkpoints()` | Bulk-read every checkpoint for this reaction (state store required). |
 | `read_checkpoint(query_id)` | Read one checkpoint (state store required). |
-| `run_standard_loop(rx, ckpts, handler)` | Optional convenience: dedup-aware dequeue → handler → checkpoint loop. |
+| `run_standard_loop(rx, ckpts, policy, handler)` | Optional convenience: dedup-aware dequeue → handler → checkpoint loop. |
 | `set_identity_provider(provider)` | Stash a programmatically-supplied identity provider; takes precedence over the context one. |
 | `set_processing_task(handle)` | Register your `tokio::spawn` handle so `stop_common` can join or abort it. |
 | `set_raw_config(json)` | Stash the raw config JSON (used by descriptor `create_reaction`). |
@@ -2143,16 +2143,19 @@ after a crash), use the state-store integration.
    `QueryResult::sequence` you have processed for that query.
 
 3. At start, read the existing checkpoints via
-   `self.base.read_all_checkpoints().await?` and skip any inbound
-   result whose `sequence <= checkpoint.sequence`.
+   `self.base.read_all_checkpoints().await?`. Refresh from the store before
+   deduplicating or advancing: host recovery can change the checkpoint after
+   `start()` or during live gap recovery. Skip any inbound result whose
+   `sequence <= checkpoint.sequence`.
 
 4. The `config_hash` field is used by the `drasi-lib` instance to detect breaking
-   configuration changes and force a fresh start. Reactions that don't
-   model this SHOULD set it to `0` and preserve whatever value was on
-   the previous checkpoint.
+   configuration changes and force a fresh start. Preserve the host's current
+   hash; use `0` only when no checkpoint exists. A changed hash starts a new
+   epoch whose sequence can be lower. Within an epoch, refreshing MUST NOT
+   regress in-memory progress after an explicitly skipped persistence failure.
 
 `ReactionBase::run_standard_loop(shutdown_rx, initial_checkpoints,
-handler)` implements this entire pattern in one call. Use it unless
+policy, handler)` implements this entire pattern in one call. Use it unless
 you need custom batching or multi-query coordination.
 
 ### 12.3 Recovery Policy
@@ -2173,6 +2176,8 @@ consults `default_recovery_policy()`:
 
 `Strict` is the default. Override on the trait or per-instance via
 `ReactionBaseParams::with_recovery_policy()`.
+When supporting a per-instance override, `default_recovery_policy()` MUST
+return that resolved policy so host recovery and the processing loop agree.
 
 ### 12.4 Bootstrap on Fresh Start
 

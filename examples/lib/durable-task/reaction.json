@@ -1,0 +1,23 @@
+{
+  "endpoint": "${DTS_ENDPOINT}",
+  "taskHub": "${DTS_TASKHUB:-default}",
+  "producerId": "${DTS_PRODUCER_ID:-orders-example-v1}",
+  "authentication": "none",
+  "defaultTemplate": {
+    "added": {
+      "action": "start",
+      "orchestration": "OrderWorkflow",
+      "instanceId": "{{after.orderId}}",
+      "template": "{\"orderId\":{{json after.orderId}},\"status\":{{json after.status}}}"
+    },
+    "updated": {
+      "action": "raiseEvent",
+      "instanceId": "{{after.orderId}}",
+      "eventName": "{{after.status}}",
+      "template": "{\"orderId\":{{json after.orderId}},\"status\":{{json after.status}}}"
+    },
+    "deleted": {
+      "action": "ignore"
+    }
+  }
+}

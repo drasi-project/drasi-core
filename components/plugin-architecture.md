@@ -146,6 +146,12 @@ tooling validates it without loading the binary, including cross-compiled
 targets, before publishing the JSON metadata and OCI annotations. No FFI layout
 change is needed. See the
 [host rollout and legacy policy](host-sdk/README.md#registry-compatibility-and-host-migration).
+The 0.15 source subscription ABI carries a separate presence flag for the
+resume sequence. This lets plugins distinguish a completed bootstrap at
+sequence zero from a fresh subscription without a sequence. Hosts and plugins
+with metadata must both use the same ABI major.minor version; rebuild older
+plugins before loading them with a 0.15 host. Plugins without metadata skip
+the version check and therefore cannot be verified for compatibility.
 
 ## FFI Boundary Design
 

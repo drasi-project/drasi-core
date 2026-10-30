@@ -50,29 +50,26 @@ const AUTO_RESET_CHECKPOINT_ATTEMPTS: u32 = 4;
 /// the budget is four attempts and the backoff is intentionally small.
 const AUTO_RESET_CHECKPOINT_BASE_BACKOFF: Duration = Duration::from_millis(10);
 
-/// Tracks the last persisted `(sequence, config_hash)` per query so checkpoint
+/// Tracks the last known `(sequence, config_hash)` per query so checkpoint
 /// advances move forward monotonically and preserve `config_hash`.
 ///
-/// The `config_hash` is read **lazily on the first advance for a query**, not at
-/// construction. The host persists the startup-seed checkpoint (carrying the
-/// real `config_hash`) *after* the reaction's `start()` runs, so reading it
-/// eagerly would capture a stale `config_hash` of `0` and a subsequent write
-/// would clobber the seed — causing a false `config_hash` mismatch (and
-/// recovery) on the next restart. Seeding lazily, after the bootstrap gate has
-/// opened, picks up the correct value.
+/// Each advance refreshes from the store. The standard loop also refreshes before
+/// deduplication.
+/// The host may persist a new checkpoint after the reaction's `start()` or during
+/// gap recovery. A new configuration hash replaces the previous epoch, even if
+/// its sequence is lower. Within an epoch, the in-memory sequence never decreases.
 ///
 /// Checkpoints are persisted only when a state store is configured. A
 /// non-durable reaction (`is_durable() == false`) without a store advances its
 /// in-memory view only and reprocesses from the start on restart.
 pub struct CheckpointState {
-    /// Cache of the last known checkpoint per query, seeded lazily from the store.
+    /// Cache of the last known checkpoint per query.
     checkpoints: HashMap<String, ReactionCheckpoint>,
     has_store: bool,
 }
 
 impl CheckpointState {
-    /// Capture whether a durable store is configured. Checkpoints are seeded
-    /// lazily on first advance (see the struct docs).
+    /// Capture whether a durable store is configured. Checkpoints are read on use.
     pub async fn load(base: &ReactionBase) -> Self {
         let has_store = base.state_store().await.is_some();
         Self {
@@ -81,30 +78,35 @@ impl CheckpointState {
         }
     }
 
-    /// Seed the in-memory checkpoint for `query_id` from the store on first use,
-    /// capturing the host-persisted `config_hash` and sequence baseline.
-    async fn ensure_seeded(&mut self, base: &ReactionBase, query_id: &str) -> anyhow::Result<()> {
-        if self.checkpoints.contains_key(query_id) {
-            return Ok(());
-        }
-        let seed = if self.has_store {
+    /// Observe host recovery without regressing progress within the same epoch.
+    pub(super) async fn refresh(
+        &mut self,
+        base: &ReactionBase,
+        query_id: &str,
+    ) -> anyhow::Result<()> {
+        let persisted = if self.has_store {
             base.read_checkpoint(query_id).await?
         } else {
             None
         };
-        self.checkpoints.insert(
-            query_id.to_string(),
-            seed.unwrap_or(ReactionCheckpoint {
+        let current = self
+            .checkpoints
+            .entry(query_id.to_string())
+            .or_insert(ReactionCheckpoint {
                 sequence: 0,
                 config_hash: 0,
-            }),
-        );
+            });
+        if let Some(persisted) = persisted {
+            if persisted.config_hash != current.config_hash || persisted.sequence > current.sequence
+            {
+                *current = persisted;
+            }
+        }
         Ok(())
     }
 
     /// Seed in-memory checkpoints (for example from bootstrap). Existing
-    /// entries are left unchanged so a later lazy store read cannot clobber
-    /// a caller-provided seed.
+    /// entries are left unchanged. Later host recovery can supersede these seeds.
     pub fn seed(&mut self, initial: HashMap<String, ReactionCheckpoint>) {
         for (query_id, checkpoint) in initial {
             self.checkpoints.entry(query_id).or_insert(checkpoint);
@@ -126,11 +128,11 @@ impl CheckpointState {
         query_id: &str,
         sequence: u64,
     ) -> anyhow::Result<()> {
-        self.ensure_seeded(base, query_id).await?;
+        self.refresh(base, query_id).await?;
         let current = self
             .checkpoints
             .get(query_id)
-            .expect("checkpoint present after ensure_seeded");
+            .expect("checkpoint present after refresh");
         if sequence <= current.sequence {
             return Ok(());
         }
@@ -159,11 +161,11 @@ impl CheckpointState {
         sequence: u64,
         policy: ReactionRecoveryPolicy,
     ) -> anyhow::Result<()> {
-        self.ensure_seeded(base, query_id).await?;
+        self.refresh(base, query_id).await?;
         let current = self
             .checkpoints
             .get(query_id)
-            .expect("checkpoint present after ensure_seeded");
+            .expect("checkpoint present after refresh");
         if sequence <= current.sequence {
             return Ok(());
         }
@@ -467,6 +469,73 @@ mod tests {
         let mut state = CheckpointState::load(&base).await;
         state.advance(&base, "q1", 7).await.unwrap();
         assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn advance_preserves_host_recovery_and_accepts_a_new_epoch() {
+        let base = store_backed_base("host-recovery").await;
+        let mut state = CheckpointState::load(&base).await;
+        state.advance(&base, "q1", 4).await.unwrap();
+        base.write_checkpoint(
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 0,
+            },
+        )
+        .await
+        .unwrap();
+        state.advance(&base, "q1", 5).await.unwrap();
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            10
+        );
+
+        base.write_checkpoint(
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 7,
+            },
+        )
+        .await
+        .unwrap();
+        state.advance(&base, "q1", 2).await.unwrap();
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap(),
+            ReactionCheckpoint {
+                sequence: 2,
+                config_hash: 7,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_preserves_autoskip_progress_after_a_failed_write() {
+        let store = Arc::new(FailWritesStore::always());
+        store.remaining_failures.store(0, Ordering::SeqCst);
+        let base = store_backed_base_with("autoskip-refresh", store.clone()).await;
+        let mut state = CheckpointState::load(&base).await;
+        state.advance(&base, "q1", 3).await.unwrap();
+        store.remaining_failures.store(1, Ordering::SeqCst);
+        state
+            .advance_with_policy(&base, "q1", 7, ReactionRecoveryPolicy::AutoSkipGap)
+            .await
+            .unwrap();
+        state.refresh(&base, "q1").await.unwrap();
+        assert_eq!(state.get("q1").unwrap().sequence, 7);
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            3
+        );
+        state
+            .advance_with_policy(&base, "q1", 8, ReactionRecoveryPolicy::AutoSkipGap)
+            .await
+            .unwrap();
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            8
+        );
     }
 
     #[test]
