@@ -15,6 +15,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 - `cargo fmt -- --check` passes
 - `make clippy` passes - do NOT use `cargo clippy --all-features` (the bundled-jq feature has a flaky source build); warnings are errors
 - `cargo test --workspace --exclude drasi-host-sdk` and `make test-host-sdk` pass; a running Docker daemon is required (testcontainers)
+- Architecture CI runs `cargo bylaw check` directly against `bylaw.toml`; there is no separate dependency checker. Local setup is opt-in; see docs/contributing/contributing-code/contributing-code-tests/ for setup and coverage limits. Never weaken a boundary or allow incomplete analysis to make a change pass.
 - Commits are signed off: `git commit -s` (DCO)
 - CI additionally gates PRs on: a typos check, cargo-audit, cargo-deny, FFI layout tests, and coverage
 

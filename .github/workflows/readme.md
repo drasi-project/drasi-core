@@ -51,6 +51,16 @@ To modify or create agentic workflows, you'll need to:
 
 ## Standard Workflows
 
+### [architecture.yml](architecture.yml)
+- **Purpose**: Runs `cargo bylaw check` directly against the initial FFI, embedded-runtime, AST, and parser dependency rules in `bylaw.toml`. There is no separate dependency checker.
+- **Triggers**: All pull requests, including drafts, and manual dispatch. No path filters.
+- **Environment**: Uses the repository's Rust pin, explicit `rust-src`, and native build tools. It does not change ordinary developer commands or automatic local setup.
+- **Limits**: Checks the configured host and default features. Plugin and index selector lists use exact names and need manual updates when crates change.
+- **Failures**: Incomplete analysis is an error. JSON diagnostics and stderr are saved as artifacts, and changes to `Cargo.lock` fail the job.
+- **Rollout**: After a successful run, a maintainer must select the observed `Architecture` job context as required in the ruleset for `main`. Preserve existing requirements; workflow YAML alone does not change rulesets.
+- **Tool updates**: Before changing `BYLAW_REV`, have another maintainer review the new source commit and its `Cargo.lock`. Keep the full commit SHA and `--locked`.
+- **Local use**: See [Run architecture checks](../../docs/contributing/contributing-code/contributing-code-tests/#run-architecture-checks).
+
 ### [ci-lint.yml](ci-lint.yml)
 - **Purpose**: Runs linting checks to ensure code quality and adherence to coding standards.
 - **Trigger**: 

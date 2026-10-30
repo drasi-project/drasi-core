@@ -15,6 +15,7 @@ jobs:
   lint:
     uses: drasi-project/.github/.github/workflows/rust-lint.yaml@main
     with:
+      runner: ubuntu-24.04
       install-jq: true
       clippy-command: >-
         cargo clippy --workspace --all-targets

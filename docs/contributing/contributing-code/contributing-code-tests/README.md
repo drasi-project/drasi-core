@@ -6,6 +6,7 @@ We apply the [testing pyramid](https://martinfowler.com/articles/practical-test-
 
 - Unit tests: exercise functions and types directly
 - Integration tests: exercise features working with dependencies
+- Architecture checks: reject the selected dependency directions with cargo-bylaw
 
 ## Unit tests
 
@@ -38,3 +39,43 @@ cargo run -p xtask -- list-integration-test-matrix
 
 Running `cargo test` in the `index-rocksdb` folder will run them against a real RocksDb, which is embedded as an in-process library. Running the tests will create a `test-data` directory where the RocksDb files will be stored.
 
+## Run architecture checks
+
+After [optional setup](../contributing-code-prerequisites/#set-up-optional-architecture-checks), run from the repository root:
+
+```sh
+cargo bylaw check
+```
+
+If you used the isolated installation, prefix the command with `PATH="$HOME/.local/share/drasi-bylaw/bin:$PATH"`.
+
+The [policy](../../../../bylaw.toml) analyzes the library targets of `drasi-ffi-primitives`, `drasi-lib`, `drasi-query-ast`, `drasi-query-cypher`, and `drasi-query-gql`.
+
+| Origin | Forbidden production dependencies |
+| --- | --- |
+| FFI primitives | Everything except themselves and toolchain crates |
+| Embedded runtime | Concrete source, reaction, bootstrap, identity, and secret-store plugins, plus index backends |
+| AST | Parsers, engine, function-binding crates, runtime, concrete plugins, and index backends |
+| Both parsers | Engine, function-binding crates, runtime, concrete plugins, and index backends |
+
+Plugin-to-runtime dependencies, runtime-to-AST/parser dependencies, and parser-to-AST dependencies remain allowed. The runtime's RocksDB dev-dependency remains allowed. There is no general third-party dependency allowlist outside FFI primitives.
+
+CI runs the same Bylaw command directly. There is no separate dependency checker or Python requirement.
+
+Bylaw checks source use and resolved declarations for the current host and default features. Dependencies behind disabled features or settings for another platform may not be checked. This initial setup does not guarantee enforcement across every feature and target combination. These checks do not replace behavioral tests or make query results, scheduling, and external services deterministic.
+
+To add a concrete plugin or index backend, update both its package selector and `external_crates` selector in `bylaw.toml`. Use the library target's Rust crate name for `external_crates`, not a dependency alias. Static implementations and test plugins count as concrete plugins; `drasi-source-mapping` is a helper and does not.
+
+Package selectors match workspace crates and modules, while `external_crates` selectors match external dependency nodes. These select different kinds of components and are not interchangeable.
+
+Package and external-crate selectors use exact names; the pinned version supports wildcards only for module paths. Bylaw does not add new plugins or indexes to these lists automatically. A misspelled or outdated name can match nothing without failing the check and can leave a crate outside the intended rules. Review both lists whenever crates are added, removed, or renamed.
+
+Bylaw exits with `0` for success, `1` for rule violations, `2` for configuration errors, and `3` for analysis errors. For structured diagnostics, run `cargo bylaw check --format json`. Fix the dependency direction or build prerequisites rather than allowing incomplete analysis. Report analyzer failures separately from architecture violations.
+
+When changing a boundary rule, verify both an allowed case and a forbidden dependency in a disposable workspace copy. The unmodified workspace, including the intentional RocksDB dev-dependency, should pass.
+
+For a std-only negative control, add `serde = "1"` to `[dependencies]` in the copy's `components/ffi-primitives/Cargo.toml`. Running `cargo bylaw check --format json` must exit with `1` and report `ffi-is-std-only`. Remove the injected dependency and rerun to confirm the copy passes again. Cargo dependency cycles, configuration errors, and analysis errors do not count as a successful negative check. Do not inject forbidden dependencies into your working checkout.
+
+The standalone [Architecture workflow](../../../../.github/workflows/architecture.yml) runs on every pull request, including drafts, without path filters. It preserves diagnostics and fails if analysis changes `Cargo.lock`. Normal `cargo build`, `cargo test`, lint commands, and hooks do not invoke Bylaw.
+
+After the workflow first passes on GitHub, a maintainer must add its observed `Architecture` check context to the ruleset for `main`. Preserve existing required checks. Adding the workflow file alone does not make the check required.
