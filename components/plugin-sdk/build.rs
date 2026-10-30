@@ -32,18 +32,33 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET_TRIPLE={target}");
 
-    // Capture the git commit SHA (short hash) for plugin provenance.
-    // In dev builds, use a stable placeholder to avoid cache invalidation on every commit.
-    let git_commit = if std::env::var("PROFILE").as_deref() == Ok("release")
+    // Prepared sources have no .git and may live inside an unrelated tooling checkout.
+    let git_commit = if let Some(commit) = std::env::var_os("DRASI_BUILD_GIT_SHA") {
+        let commit = commit
+            .into_string()
+            .unwrap_or_else(|_| panic!("DRASI_BUILD_GIT_SHA must be valid Unicode"));
+        assert!(
+            commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "DRASI_BUILD_GIT_SHA must be a full 40-character hexadecimal Git commit SHA"
+        );
+        commit
+    } else if std::env::var("PROFILE").as_deref() == Ok("release")
         || std::env::var("DRASI_EMBED_GIT_SHA").is_ok()
     {
         Command::new("git")
             .args(["rev-parse", "--short", "HEAD"])
             .output()
             .ok()
+            .filter(|output| output.status.success())
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
+            .filter(|commit| !commit.is_empty())
+            .unwrap_or_else(|| {
+                println!(
+                    "cargo:warning=Git commit unavailable; set DRASI_BUILD_GIT_SHA for source archives"
+                );
+                "unknown".to_string()
+            })
     } else {
         "dev".to_string()
     };
@@ -84,6 +99,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=DRASI_EMBED_BUILD_TIMESTAMP");
     println!("cargo:rerun-if-env-changed=DRASI_EMBED_GIT_SHA");
+    println!("cargo:rerun-if-env-changed=DRASI_BUILD_GIT_SHA");
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         println!("cargo:rerun-if-changed=.git/HEAD");
     }

@@ -183,6 +183,8 @@ pub struct DrasiLib {
     pub(crate) component_graph: Arc<RwLock<ComponentGraph>>,
     /// Handle to the graph update loop task for clean shutdown.
     pub(crate) graph_update_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    shutdown_handle:
+        Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<crate::error::Result<()>>>>>,
 }
 
 impl Clone for DrasiLib {
@@ -202,6 +204,7 @@ impl Clone for DrasiLib {
             component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
             component_graph: Arc::clone(&self.component_graph),
             graph_update_handle: Arc::clone(&self.graph_update_handle),
+            shutdown_handle: Arc::clone(&self.shutdown_handle),
         }
     }
 }
@@ -385,6 +388,7 @@ impl DrasiLib {
             component_event_broadcast_tx,
             component_graph,
             graph_update_handle,
+            shutdown_handle: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -570,8 +574,8 @@ impl DrasiLib {
     ///
     /// Unlike [`stop()`](Self::stop), which allows the server to be restarted,
     /// `shutdown()` performs a full teardown: it stops all components, aborts
-    /// the internal graph update loop, and releases the persistent index-backend
-    /// handles held by queries. After `shutdown()`, the instance cannot
+    /// the internal graph update loop, and releases runtime-owned component and
+    /// persistent index-backend handles. After `shutdown()`, the instance cannot
     /// be restarted — create a new `DrasiLib` instance instead.
     ///
     /// Releasing the index handles is non-destructive: on-disk data is left intact,
@@ -582,6 +586,10 @@ impl DrasiLib {
     ///
     /// This method is idempotent — calling it on an already-stopped server will
     /// still clean up the graph update loop.
+    /// Cancelling the caller does not cancel teardown; subsequent calls join the
+    /// same owned task. Failed teardown retains component ownership and can be
+    /// retried. Save configuration before successful shutdown; topology and
+    /// event history remain available, but component runtime instances do not.
     ///
     /// # Examples
     ///
@@ -596,25 +604,62 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn shutdown(&self) -> crate::error::Result<()> {
-        // Mark as permanently shut down; idempotent if already set
-        if self
-            .is_shutdown
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
-            return Ok(());
+        let mut task = self.shutdown_handle.lock().await;
+        if task.is_none() {
+            if self
+                .is_shutdown
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                return Ok(());
+            }
+            let core = self.clone();
+            *task = Some(tokio::spawn(async move {
+                let result = core.shutdown_inner().await;
+                if let Err(error) = &result {
+                    warn!("drasi-lib shutdown failed; component ownership retained: {error}");
+                }
+                result
+            }));
         }
+        let result = match task.as_mut().expect("shutdown task was initialized").await {
+            Ok(result) => result,
+            Err(error) => {
+                self.is_shutdown
+                    .store(false, std::sync::atomic::Ordering::Release);
+                Err(DrasiError::Internal(error.into()))
+            }
+        };
+        *task = None;
+        result
+    }
 
-        // Stop components if still running (tolerate stop errors during shutdown)
-        if self.is_running().await {
-            if let Err(e) = self.stop().await {
-                warn!("Errors during shutdown stop: {e}");
+    async fn shutdown_inner(&self) -> crate::error::Result<()> {
+        struct ShutdownAttempt<'a> {
+            flag: &'a std::sync::atomic::AtomicBool,
+            completed: bool,
+        }
+        impl Drop for ShutdownAttempt<'_> {
+            fn drop(&mut self) {
+                if !self.completed {
+                    self.flag.store(false, std::sync::atomic::Ordering::Release);
+                }
             }
         }
+
+        let mut graph_task = self.graph_update_handle.lock().await;
+        let mut attempt = ShutdownAttempt {
+            flag: &self.is_shutdown,
+            completed: false,
+        };
+
+        let stopped = self.lifecycle.shutdown_all_components().await;
+        *self.running.write().await = false;
+        stopped.map_err(DrasiError::Internal)?;
 
         // Abort the graph update loop task to prevent leaked spawned tasks.
         // The loop exits naturally when all senders are dropped, but abort
         // ensures immediate cleanup even if references linger.
-        if let Some(handle) = self.graph_update_handle.lock().await.take() {
+        if let Some(handle) = graph_task.take() {
             handle.abort();
             let _ = handle.await;
         }
@@ -625,6 +670,9 @@ impl DrasiLib {
         // backends (e.g. RocksDB) release their exclusive lock. On-disk data is left
         // intact for a future reopen.
         self.query_manager.release_all_persistent_handles().await;
+        let runtimes = self.component_graph.write().await.take_all_runtimes();
+        drop(runtimes);
+        attempt.completed = true;
 
         info!("drasi-lib shut down permanently");
         Ok(())
@@ -970,6 +1018,239 @@ impl DrasiLib {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reactions::Reaction;
+    use crate::sources::Source;
+
+    struct FailOnceStopReaction {
+        inner: crate::reactions::tests::manager_tests::TestMockReaction,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        active: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Reaction for FailOnceStopReaction {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn type_name(&self) -> &str {
+            "fail-once-stop"
+        }
+        fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+            self.inner.properties()
+        }
+        fn query_ids(&self) -> Vec<String> {
+            self.inner.query_ids()
+        }
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.inner.initialize(context).await;
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.inner.start().await
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0,
+                "injected reaction stop failure"
+            );
+            self.active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.inner.stop().await
+        }
+        async fn status(&self) -> crate::ComponentStatus {
+            self.inner.status().await
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn permanent_shutdown_retries_failed_reaction_before_releasing_runtime() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicBool::new(false));
+        let core = DrasiLib::builder()
+            .with_reaction(FailOnceStopReaction {
+                inner: crate::reactions::tests::manager_tests::TestMockReaction::new(
+                    "fail-once".into(),
+                    vec![],
+                ),
+                calls: calls.clone(),
+                active: active.clone(),
+            })
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        assert!(core.shutdown().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(active.load(Ordering::SeqCst));
+        assert!(core.component_graph.read().await.has_runtime("fail-once"));
+        assert_eq!(
+            core.get_reaction_status("fail-once").await.unwrap(),
+            crate::ComponentStatus::Error
+        );
+        assert!(core.stop_reaction("fail-once").await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        core.shutdown().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!active.load(Ordering::SeqCst));
+        assert!(!core.component_graph.read().await.has_runtime("fail-once"));
+    }
+
+    struct ControlledStopSource {
+        inner: crate::sources::tests::TestMockSource,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        fail_once: std::sync::atomic::AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Source for ControlledStopSource {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn type_name(&self) -> &str {
+            "controlled-stop"
+        }
+        fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+            self.inner.properties()
+        }
+        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+            self.inner.initialize(context).await;
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            self.inner.start().await
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            anyhow::ensure!(
+                !self
+                    .fail_once
+                    .swap(false, std::sync::atomic::Ordering::SeqCst),
+                "injected stop failure"
+            );
+            self.inner.stop().await
+        }
+        async fn status(&self) -> crate::ComponentStatus {
+            self.inner.status().await
+        }
+        async fn subscribe(
+            &self,
+            settings: crate::config::SourceSubscriptionSettings,
+        ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
+            self.inner.subscribe(settings).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn permanent_shutdown_owns_cancelled_work_and_retries_stop_failures() {
+        use std::sync::atomic::Ordering;
+        for fail_once in [false, true] {
+            let source = ControlledStopSource {
+                inner: crate::sources::tests::create_test_mock_source("controlled".into()),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                fail_once: std::sync::atomic::AtomicBool::new(fail_once),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let core = DrasiLib::builder()
+                .with_source(source)
+                .build()
+                .await
+                .unwrap();
+            let runtime = core
+                .component_graph
+                .read()
+                .await
+                .get_runtime::<Arc<dyn Source>>("controlled")
+                .unwrap()
+                .clone();
+            let source = runtime
+                .as_any()
+                .downcast_ref::<ControlledStopSource>()
+                .unwrap();
+            core.start().await.unwrap();
+            let waiter_core = core.clone();
+            let waiter = tokio::spawn(async move { waiter_core.shutdown().await });
+            tokio::time::timeout(std::time::Duration::from_secs(2), source.entered.notified())
+                .await
+                .unwrap();
+            if fail_once {
+                source.release.notify_one();
+                assert!(waiter.await.unwrap().is_err());
+            } else {
+                waiter.abort();
+                assert!(waiter.await.unwrap_err().is_cancelled());
+                assert!(core.start().await.is_err());
+            }
+            assert!(core.component_graph.read().await.has_runtime("controlled"));
+            source.release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(2), core.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(source.status().await, crate::ComponentStatus::Stopped);
+            assert_eq!(
+                source.calls.load(Ordering::SeqCst),
+                if fail_once { 2 } else { 1 }
+            );
+            assert!(!core.component_graph.read().await.has_runtime("controlled"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn permanent_shutdown_releases_graph_cycles_but_stop_preserves_restart() {
+        let core = DrasiLib::builder()
+            .with_source(crate::sources::tests::create_test_mock_source(
+                "owned-source".into(),
+            ))
+            .with_query(
+                crate::Query::cypher("owned-query")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("owned-source")
+                    .enable_bootstrap(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+        let graph = core.component_graph();
+        let weak_graph = Arc::downgrade(&graph);
+        let mut events = core.subscribe_all_component_events();
+        let weak_source = {
+            let graph = graph.read().await;
+            Arc::downgrade(
+                graph
+                    .get_runtime::<Arc<dyn crate::sources::Source>>("owned-source")
+                    .unwrap(),
+            )
+        };
+        core.start().await.unwrap();
+        core.stop().await.unwrap();
+        assert!(weak_source.upgrade().is_some());
+        crate::test_helpers::wait_for_component_status(
+            &mut events,
+            "owned-source",
+            crate::ComponentStatus::Stopped,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        core.start().await.unwrap();
+        core.shutdown().await.unwrap();
+        assert!(weak_source.upgrade().is_none());
+        assert!(!graph.read().await.has_runtime("owned-query"));
+        assert!(graph.read().await.get_component("owned-source").is_some());
+        core.shutdown().await.unwrap();
+        assert!(core.start().await.is_err());
+        drop(graph);
+        drop(core);
+        assert!(weak_graph.upgrade().is_none());
+    }
 
     async fn create_test_server() -> DrasiLib {
         DrasiLib::builder()

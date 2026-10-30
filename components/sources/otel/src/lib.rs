@@ -421,10 +421,19 @@ impl Source for OtelSource {
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         let wal_guard = self.wal.read().await;
-        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
-            if resume_from.len() >= 8 {
-                let resume_seq =
-                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
+        if let Some(wal) = wal_guard.as_ref() {
+            let resume_seq = if let Some(ref resume_from) = settings.resume_from {
+                if resume_from.len() < 8 {
+                    return Err(anyhow::anyhow!(
+                        "Invalid resume_from position: expected at least 8 bytes, got {}",
+                        resume_from.len()
+                    ));
+                }
+                Some(u64::from_be_bytes(resume_from[..8].try_into()?))
+            } else {
+                settings.resume_sequence
+            };
+            if let Some(resume_seq) = resume_seq {
                 let wal_clone = wal.clone();
                 drop(wal_guard);
                 match wal_clone
@@ -436,7 +445,9 @@ impl Source for OtelSource {
                     }) => {
                         return Err(SourceError::PositionUnavailable {
                             source_id: self.base.id.clone(),
-                            requested: resume_from.clone(),
+                            requested: settings.resume_from.clone().unwrap_or_else(|| {
+                                bytes::Bytes::copy_from_slice(&resume_seq.to_be_bytes())
+                            }),
                             earliest_available: oldest_available
                                 .map(|seq| bytes::Bytes::copy_from_slice(&seq.to_be_bytes())),
                         }
@@ -450,11 +461,6 @@ impl Source for OtelSource {
                     .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "OTel")
                     .await;
             }
-            drop(wal_guard);
-            return Err(anyhow::anyhow!(
-                "Invalid resume_from position: expected at least 8 bytes, got {}",
-                resume_from.len()
-            ));
         }
         drop(wal_guard);
         self.base.subscribe_with_bootstrap(&settings, "OTel").await
@@ -953,6 +959,44 @@ mod tests {
         assert!(matches!(
             source_err,
             SourceError::PositionUnavailable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resume_sequence_pruned_position_is_unavailable() {
+        let source = OtelSource::builder("otel")
+            .with_durability(drasi_lib::DurabilityConfig {
+                enabled: true,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        *source.wal.write().await = Some(Arc::new(MemoryWal {
+            oldest: 10,
+            unavailable: true,
+        }));
+        let settings = drasi_lib::config::SourceSubscriptionSettings {
+            source_id: "otel".to_string(),
+            query_id: "q".to_string(),
+            nodes: Default::default(),
+            relations: Default::default(),
+            enable_bootstrap: true,
+            resume_from: None,
+            resume_sequence: Some(0),
+            request_position_handle: false,
+        };
+        let err = match source.subscribe(settings).await {
+            Ok(_) => panic!("pruned resume sequence"),
+            Err(err) => err,
+        };
+        let source_err = err
+            .downcast_ref::<SourceError>()
+            .expect("SourceError::PositionUnavailable");
+        assert!(matches!(
+            source_err,
+            SourceError::PositionUnavailable { requested, earliest_available, .. }
+                if requested.as_ref() == 0u64.to_be_bytes()
+                    && earliest_available.as_deref() == Some(10u64.to_be_bytes().as_slice())
         ));
     }
 
