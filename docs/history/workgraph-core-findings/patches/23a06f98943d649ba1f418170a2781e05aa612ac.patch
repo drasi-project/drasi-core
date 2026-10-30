@@ -1,0 +1,373 @@
+diff --git a/components/reactions/github-project-item-refresh/README.md b/components/reactions/github-project-item-refresh/README.md
+index 07a5a16219e54d57063be809404f195f41ffbf01..84cd9b454e2ba9c3a8a5c1e8a2ae9248c6461820 100644
+--- a/components/reactions/github-project-item-refresh/README.md
++++ b/components/reactions/github-project-item-refresh/README.md
+@@ -189,6 +189,12 @@ strict recovery replays that same deterministic update and requires a valid
+ HTTP Source acknowledgement before recording publication or advancing the
+ checkpoint.
+ 
++Terminal publication/reservation pruning is internal and bounded: the reaction
++attempts one prune pass on the first processed ADD after startup/restart, then
++at most once every 5 minutes. If a prune pass fails, the failure is logged and
++the next ADD remains eligible to retry pruning immediately (no public config
++field controls this interval).
++
+ ## Security Notes
+ 
+ - GitHub token, GraphQL header values, and destination bearer secret are never logged.
+diff --git a/components/reactions/github-project-item-refresh/src/processing.rs b/components/reactions/github-project-item-refresh/src/processing.rs
+index b33636b8f9ba3c41acff462d3400dd1c162c27f2..ebf855853cb05116bd48f33f181f2a755c8fe807 100644
+--- a/components/reactions/github-project-item-refresh/src/processing.rs
++++ b/components/reactions/github-project-item-refresh/src/processing.rs
+@@ -17,7 +17,10 @@ use chrono::{DateTime, Utc};
+ use log::warn;
+ use reqwest::Url;
+ use serde_json::Value;
++use std::sync::Arc;
+ use std::time::Duration;
++use std::time::Instant;
++use tokio::sync::Mutex;
+ 
+ use crate::config::{
+     validate_project_item_node_id, validate_project_node_id, GitHubProjectItemRefreshConfig,
+@@ -33,6 +36,66 @@ use crate::state_store::RefreshStateStore;
+ const MAX_FETCH_ATTEMPTS: u32 = 3;
+ const INITIAL_BACKOFF_MS: u64 = 100;
+ const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
++const PRUNE_INTERVAL: Duration = Duration::from_secs(5 * 60);
++
++#[derive(Clone)]
++struct PruneThrottle {
++    state: Arc<Mutex<PruneThrottleState>>,
++    interval: Duration,
++}
++
++#[derive(Clone, Copy, Debug, Default)]
++struct PruneThrottleState {
++    last_successful_prune: Option<Instant>,
++    in_progress: bool,
++}
++
++impl PruneThrottle {
++    fn new() -> Self {
++        Self::with_interval(PRUNE_INTERVAL)
++    }
++
++    fn with_interval(interval: Duration) -> Self {
++        Self {
++            state: Arc::new(Mutex::new(PruneThrottleState::default())),
++            interval,
++        }
++    }
++
++    async fn try_acquire(&self) -> Option<PrunePermit> {
++        let mut state = self.state.lock().await;
++        if state.in_progress {
++            return None;
++        }
++        if let Some(last_successful_prune) = state.last_successful_prune {
++            if last_successful_prune.elapsed() < self.interval {
++                return None;
++            }
++        }
++
++        state.in_progress = true;
++        Some(PrunePermit {
++            state: Arc::clone(&self.state),
++        })
++    }
++}
++
++struct PrunePermit {
++    state: Arc<Mutex<PruneThrottleState>>,
++}
++
++impl PrunePermit {
++    async fn mark_success(self) {
++        let mut state = self.state.lock().await;
++        state.last_successful_prune = Some(Instant::now());
++        state.in_progress = false;
++    }
++
++    async fn mark_failure(self) {
++        let mut state = self.state.lock().await;
++        state.in_progress = false;
++    }
++}
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum AddRowOutcome {
+@@ -48,6 +111,7 @@ pub struct RefreshProcessor {
+     state_store: RefreshStateStore,
+     graphql_client: GitHubGraphqlClient,
+     destination_client: DestinationSourceClient,
++    prune_throttle: PruneThrottle,
+ }
+ 
+ impl RefreshProcessor {
+@@ -62,6 +126,7 @@ impl RefreshProcessor {
+             state_store,
+             graphql_client,
+             destination_client,
++            prune_throttle: PruneThrottle::new(),
+         }
+     }
+ 
+@@ -74,13 +139,7 @@ impl RefreshProcessor {
+         &self,
+         input: InvalidationInput,
+     ) -> anyhow::Result<AddRowOutcome> {
+-        if let Err(err) = self
+-            .state_store
+-            .prune_terminal_records_older_than(self.config.delivery_record_ttl_secs, Utc::now())
+-            .await
+-        {
+-            warn!("failed to prune terminal delivery records: {err:#}");
+-        }
++        self.maybe_prune_terminal_records().await;
+ 
+         validate_project_item_node_id(&input.project_item_node_id)
+             .context("validating project item node id")?;
+@@ -331,6 +390,24 @@ impl RefreshProcessor {
+         Ok(AddRowOutcome::Published)
+     }
+ 
++    async fn maybe_prune_terminal_records(&self) {
++        let Some(permit) = self.prune_throttle.try_acquire().await else {
++            return;
++        };
++
++        match self
++            .state_store
++            .prune_terminal_records_older_than(self.config.delivery_record_ttl_secs, Utc::now())
++            .await
++        {
++            Ok(_) => permit.mark_success().await,
++            Err(err) => {
++                warn!("failed to prune terminal delivery records: {err:#}");
++                permit.mark_failure().await;
++            }
++        }
++    }
++
+     async fn mark_rejected(
+         &self,
+         input: &InvalidationInput,
+diff --git a/components/reactions/github-project-item-refresh/src/tests.rs b/components/reactions/github-project-item-refresh/src/tests.rs
+index cac0042f665a1e745d34dc391b37d4dfb2fbd625..35cdc2187cbabc889f17dd21764fd6287b437b5a 100644
+--- a/components/reactions/github-project-item-refresh/src/tests.rs
++++ b/components/reactions/github-project-item-refresh/src/tests.rs
+@@ -20,7 +20,10 @@ use reqwest::{
+ };
+ use serde_json::json;
+ use std::collections::HashMap;
++use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::Arc;
++use std::time::Duration as StdDuration;
++use tokio::sync::Barrier;
+ use wiremock::matchers::{body_string_contains, method};
+ use wiremock::{Mock, MockServer, ResponseTemplate};
+ 
+@@ -42,14 +45,26 @@ const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
+ 
+ struct DurableMemoryStateStore {
+     inner: drasi_lib::MemoryStateStoreProvider,
++    list_keys_calls: AtomicUsize,
++    list_keys_delay: Option<StdDuration>,
+ }
+ 
+ impl DurableMemoryStateStore {
+     fn new() -> Self {
++        Self::new_with_list_keys_delay(None)
++    }
++
++    fn new_with_list_keys_delay(list_keys_delay: Option<StdDuration>) -> Self {
+         Self {
+             inner: drasi_lib::MemoryStateStoreProvider::new(),
++            list_keys_calls: AtomicUsize::new(0),
++            list_keys_delay,
+         }
+     }
++
++    fn list_keys_calls(&self) -> usize {
++        self.list_keys_calls.load(Ordering::SeqCst)
++    }
+ }
+ 
+ #[async_trait]
+@@ -91,6 +106,10 @@ impl StateStoreProvider for DurableMemoryStateStore {
+     }
+ 
+     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
++        self.list_keys_calls.fetch_add(1, Ordering::SeqCst);
++        if let Some(delay) = self.list_keys_delay {
++            tokio::time::sleep(delay).await;
++        }
+         self.inner.list_keys(store_id).await
+     }
+ 
+@@ -733,6 +752,164 @@ async fn duplicate_delivery_is_deduplicated() {
+     assert_eq!(destination_requests.len(), 1);
+ }
+ 
++#[tokio::test]
++async fn successful_adds_within_interval_trigger_one_prune_scan() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store = Arc::new(DurableMemoryStateStore::new());
++
++    for (item, updated_at) in [
++        ("PVTI_prune_interval_1", "2026-08-13T19:00:00Z"),
++        ("PVTI_prune_interval_2", "2026-08-13T19:01:00Z"),
++        ("PVTI_prune_interval_3", "2026-08-13T19:02:00Z"),
++    ] {
++        Mock::given(method("POST"))
++            .and(body_string_contains(item))
++            .respond_with(
++                ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                    item,
++                    "PVT_project1",
++                    updated_at,
++                    "In Progress",
++                    "opt-ip",
++                )),
++            )
++            .mount(&graphql_server)
++            .await;
++    }
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store.clone(),
++        vec![],
++    )
++    .await;
++
++    for (delivery_id, item_id) in [
++        ("delivery-prune-interval-1", "PVTI_prune_interval_1"),
++        ("delivery-prune-interval-2", "PVTI_prune_interval_2"),
++        ("delivery-prune-interval-3", "PVTI_prune_interval_3"),
++    ] {
++        let outcome = processor
++            .process_add_row(&test_row(delivery_id, item_id, "PVT_project1"))
++            .await
++            .expect("invalidation should be published");
++        assert_eq!(outcome, AddRowOutcome::Published);
++    }
++
++    assert_eq!(
++        durable_store.list_keys_calls(),
++        1,
++        "multiple successful ADDs within interval should run one prune scan"
++    );
++}
++
++#[tokio::test]
++async fn concurrent_adds_across_clones_share_prune_throttle() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store = Arc::new(DurableMemoryStateStore::new_with_list_keys_delay(Some(
++        StdDuration::from_millis(150),
++    )));
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_prune_clone_1"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_prune_clone_1",
++                "PVT_project1",
++                "2026-08-13T19:10:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_prune_clone_2"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_prune_clone_2",
++                "PVT_project1",
++                "2026-08-13T19:11:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store.clone(),
++        vec![],
++    )
++    .await;
++    let processor_one = processor.clone();
++    let processor_two = processor;
++    let start_barrier = Arc::new(Barrier::new(3));
++
++    let row_one = test_row(
++        "delivery-prune-clone-1",
++        "PVTI_prune_clone_1",
++        "PVT_project1",
++    );
++    let row_two = test_row(
++        "delivery-prune-clone-2",
++        "PVTI_prune_clone_2",
++        "PVT_project1",
++    );
++
++    let barrier_one = Arc::clone(&start_barrier);
++    let task_one = tokio::spawn(async move {
++        barrier_one.wait().await;
++        processor_one.process_add_row(&row_one).await
++    });
++    let barrier_two = Arc::clone(&start_barrier);
++    let task_two = tokio::spawn(async move {
++        barrier_two.wait().await;
++        processor_two.process_add_row(&row_two).await
++    });
++
++    start_barrier.wait().await;
++    assert_eq!(
++        task_one
++            .await
++            .expect("task one join")
++            .expect("task one result"),
++        AddRowOutcome::Published
++    );
++    assert_eq!(
++        task_two
++            .await
++            .expect("task two join")
++            .expect("task two result"),
++        AddRowOutcome::Published
++    );
++
++    assert_eq!(
++        durable_store.list_keys_calls(),
++        1,
++        "concurrent cloned processors should dedupe prune scans"
++    );
++}
++
+ #[tokio::test]
+ async fn graphql_http_200_errors_are_explicit_failures() {
+     let graphql_server = MockServer::start().await;
