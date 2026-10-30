@@ -523,8 +523,8 @@ impl ReactionBase {
     /// # Arguments
     /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
     /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
-    ///   orchestration). The loop uses these for dedup and preserves each
-    ///   query's `config_hash` when advancing the sequence.
+    ///   orchestration). The loop refreshes these from the store after dequeue
+    ///   so host recovery can update the sequence and query epoch.
     /// * `policy` — resolved recovery policy (`ReactionBaseParams` override, or
     ///   the reaction's [`Reaction::default_recovery_policy`](crate::Reaction::default_recovery_policy)
     ///   when no override is set). Do not default this to `Strict` if the
@@ -559,6 +559,7 @@ impl ReactionBase {
 
             let query_id = &event.query_id;
             let seq = event.sequence;
+            checkpoints.refresh(self, query_id).await?;
 
             // Dedup: skip events at or before the checkpoint.
             if let Some(cp) = checkpoints.get(query_id) {
