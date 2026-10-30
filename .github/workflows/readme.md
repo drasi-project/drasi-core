@@ -125,6 +125,16 @@ catalog writes. Inspect the failed entry and retained partial-publication report
 do not interpret an upload message as a complete release or change versions just
 to repair a catalog. Existing signature-only repair remains a separate operation.
 
+Every successful push remains in `publication.json` with its reference and
+immutable digest, even when signing or verification subsequently fails.
+`signed` and `verified` report confirmed completion of those respective steps;
+`signature_error` records the failing `stage` (`signing` or `verification`) and
+its error message, or is null when no signature step failed. For example, a
+verification failure retains `signed: true` and `verified: false`. These partial
+records are recovery evidence, not successful publication: the command still
+exits nonzero, suppresses the batch's catalog updates, and cannot produce a
+successful candidate handoff.
+
 #### Shared dependency baseline and prepared candidates
 
 The root `Cargo.lock` is committed. Normal nightly and release preparation use
@@ -144,7 +154,7 @@ of the dependencies used in an older release.
 
 Before fan-out, the workflows retain `source.tar` and `candidate.json`. The
 candidate records the source commit, prepared-source SHA-256, baseline and
-prepared lock hashes, toolchain, mode, versions, and expected eight-target plugin
+prepared lock hashes, toolchain, mode, package and FFI ABI versions, and expected eight-target plugin
 inventory. Nightly snapshots the tree **after** release-plz prepares versions and
 changelogs. Production snapshots the release tree before crate publication.
 Standalone plugin dispatch snapshots once and accepts only refs from trusted
@@ -155,7 +165,9 @@ checking it out, and validates ancestry against the exact
 checked out (detached) and frozen. This avoids branch/tag names shadowing the
 trusted-main reference, mutable-ref races, and untrusted source checkout before
 validation. An empty `ref` keeps the triggering commit; older main-history
-revisions remain supported. Nightly, production publication, and repair must run from the
+revisions remain supported only when their built artifacts satisfy the current
+publication ABI contract. Pre-ABI-metadata revisions cannot be republished by
+selecting their old `xtask`. Nightly, production publication, and repair must run from the
 official repository's main; there is no branch-testing exception.
 
 Each target restores the same bundle and validates its hashes before building.
@@ -172,6 +184,24 @@ locks fail; targets never regenerate them. Different targets still compile their
 appropriate dependency subsets. This freezes Rust inputs, not OS packages or
 byte-for-byte output binaries, and does not impose our lock on downstream crate
 consumers.
+
+Plugin compilation runs from the restored candidate, but publication and dry-run
+preflight always run the **trusted workflow checkout's** `xtask`, using that
+checkout's committed lockfile and an explicit path to the candidate's built
+plugins. The publisher validates every artifact's required ABI metadata and
+binary marker before reading publication credentials or uploading any artifact.
+A selected historical publisher therefore cannot bypass the current checks.
+Missing or inconsistent ABI metadata fails before upload, even for a batch
+containing both valid and legacy artifacts. No marker or annotation is inferred,
+repaired, or synthesized for an old binary.
+
+The candidate retains the ABI declared by the selected source's
+`FFI_SDK_VERSION`, independently of the workflow tooling's own ABI and package
+versions. Target reports and the final handoff require that exact `abi_version`;
+absent ABI values or even patch-level report disagreements fail validation.
+Older prepared bundles without this field require a new explicit preparation.
+This report check is additional evidence, not a substitute for pre-upload
+artifact validation.
 
 Candidate artifacts are retained for 90 days and named by run ID and attempt.
 For a nightly retry, rerun **all jobs** so the attempt's candidate, packages, tags,
@@ -199,6 +229,16 @@ rather than duplicating it between callers.
 | Crates | `release-plz release` publishes crates and creates official release records; `publish_no_verify = true` skips the isolated verification build | `cargo package --locked` verifies extracted package sources and retains archives; no crates.io writes or official release records |
 | Plugins and catalog | Shared eight-target publisher, native/glibc checks, signing, verification, and public visibility checks | Same implementation and required checks, but plugins, catalog, and signatures use the isolated nightly namespace and unique run/attempt plugin tags |
 | Completion | Successful crate publication gates plugins; required plugin/catalog failures fail the workflow | Packaging and all publication/visibility checks gate the complete-inventory handoff; downstream runtime E2E remains separate |
+
+Both callers use the trusted workflow checkout's `xtask` for binary-backed ABI
+preflight and publication, regardless of the selected build revision. The SDK
+package annotation (`io.drasi.plugin.sdk-version`) and FFI ABI annotation
+(`io.drasi.plugin.abi-version`) remain distinct. Build metadata obtains the ABI
+from each binary's embedded marker, which also backs its exported FFI metadata.
+Publication rejects missing markers or disagreement with the JSON metadata
+before upload, including dry runs and cross-compiled targets. The same ABI is
+included in the OCI annotation and publication report. These shared producer
+checks do not replace released-host/runtime compatibility checks.
 
 For each changed release step, either rehearse it through the same implementation
 or document why it is production-only and how it is validated separately. Do not

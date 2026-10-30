@@ -150,6 +150,13 @@ def inventory(data, config):
     return sorted(crates, key=lambda p: p["name"]), sorted(plugins, key=lambda p: p["name"]), versions
 
 
+def ffi_abi_version(root):
+    source = (root / "components/plugin-sdk/src/ffi/metadata.rs").read_text(encoding="utf-8")
+    versions = re.findall(r'^pub const FFI_SDK_VERSION: &str = "([^"]+)";$', source, re.MULTILINE)
+    require(len(versions) == 1, "Selected source must declare one explicit FFI ABI version")
+    return versions[0]
+
+
 def freeze(root, destination):
     root = root.resolve()
     require(not destination.exists(), f"Candidate output already exists: {destination}")
@@ -157,6 +164,7 @@ def freeze(root, destination):
     config = tomllib.loads((root / "release-plz.toml").read_text(encoding="utf-8"))
     crates, plugins, versions = inventory(data, config)
     require(crates and plugins, "Candidate must contain release crates and plugins")
+    abi_version = ffi_abi_version(root)
     files = set(run("git", "ls-files", "-z", cwd=root).split("\0")) | {"Cargo.lock"}
     # release-plz can create the first changelog for a newly released package.
     for package in data["packages"]:
@@ -189,6 +197,7 @@ def freeze(root, destination):
         "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "local"),
         "toolchain": tomllib.loads((root / "rust-toolchain.toml").read_text())["toolchain"]["channel"],
         "crates": crates, "plugins": plugins, "versions": versions,
+        "abi_version": abi_version,
         "targets": TARGETS,
     }
     write_json(destination / "candidate.json", candidate)
@@ -201,6 +210,8 @@ def load(bundle, expected):
     require(sha(bundle / "candidate.json") == expected, "Candidate manifest hash mismatch")
     candidate = json.loads((bundle / "candidate.json").read_text())
     require(candidate["schema_version"] == 1, "Unsupported candidate schema")
+    require(isinstance(candidate.get("abi_version"), str) and candidate["abi_version"],
+            "Missing candidate FFI ABI version; prepare a new candidate")
     require(candidate["repository"] == "drasi-project/drasi-core", "Unexpected producer repository")
     require(isinstance(candidate["source_commit"], str)
             and re.fullmatch(r"[0-9a-f]{40}", candidate["source_commit"]),
@@ -294,7 +305,8 @@ def validate_report(candidate, report, target):
                 and artifact["target"] == target, "Plugin identity mismatch")
         for field, crate in (("sdk_version", "drasi-plugin-sdk"),
                              ("core_version", "drasi-core"), ("lib_version", "drasi-lib")):
-            require(artifact[field] == candidate["versions"][crate], "Plugin ABI version mismatch")
+            require(artifact[field] == candidate["versions"][crate], "Plugin package version mismatch")
+        require(artifact.get("abi_version") == candidate["abi_version"], "Plugin FFI ABI version mismatch")
         repository = artifact["reference"].rsplit(":", 1)[0]
         require(re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}",
                              artifact["digest_reference"]), "Missing immutable OCI digest")

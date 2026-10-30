@@ -12803,6 +12803,7 @@ dependencies = [
  "drasi-ffi-primitives",
  "oci-client",
  "oci-spec 0.8.4",
+ "semver",
  "serde",
  "serde_json",
  "tokio",

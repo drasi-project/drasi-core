@@ -459,12 +459,13 @@ fn read_plugin_metadata(lib: &Library) -> Option<String> {
                 let meta = &*meta_ptr;
                 let sdk_ver = meta.sdk_version.to_string();
                 let core_ver = meta.core_version.to_string();
+                let lib_ver = meta.lib_version.to_string();
                 let plugin_ver = meta.plugin_version.to_string();
                 let target = meta.target_triple.to_string();
                 let commit = meta.git_commit.to_string();
                 let built = meta.build_timestamp.to_string();
                 Some(format!(
-                    "sdk={sdk_ver} core={core_ver} plugin={plugin_ver} target={target} commit={commit} built={built}"
+                    "abi={sdk_ver} core={core_ver} lib={lib_ver} plugin={plugin_ver} target={target} commit={commit} built={built}"
                 ))
             } else {
                 None
@@ -497,7 +498,15 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     Some((v.major as u32, v.minor as u32, v.patch as u32))
 }
 
-/// Validate plugin metadata against the host SDK version.
+/// The ABI compatibility rule shared by registry resolution and binary loading.
+pub(crate) fn abi_versions_compatible(host: &str, plugin: &str) -> bool {
+    match (semver::Version::parse(host), semver::Version::parse(plugin)) {
+        (Ok(host), Ok(plugin)) => host.major == plugin.major && host.minor == plugin.minor,
+        _ => false,
+    }
+}
+
+/// Validate plugin metadata against the host FFI ABI version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
 /// For cdylib plugins, we check major.minor compatibility (patch differences are OK).
@@ -532,30 +541,14 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
     let plugin_sdk_version = unsafe { meta.sdk_version.to_string() };
     let host_sdk_version = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
 
-    // Check major.minor compatibility
-    let plugin_parts: Vec<&str> = plugin_sdk_version.split('.').collect();
-    let host_parts: Vec<&str> = host_sdk_version.split('.').collect();
-
-    let plugin_major_minor = format!(
-        "{}.{}",
-        plugin_parts.first().unwrap_or(&"0"),
-        plugin_parts.get(1).unwrap_or(&"0")
-    );
-    let host_major_minor = format!(
-        "{}.{}",
-        host_parts.first().unwrap_or(&"0"),
-        host_parts.get(1).unwrap_or(&"0")
-    );
-
-    if plugin_major_minor != host_major_minor {
+    if !abi_versions_compatible(host_sdk_version, &plugin_sdk_version) {
         anyhow::bail!(
-            "Plugin '{}' SDK version mismatch: plugin={}, host={}. \
-             Major.minor versions must match ({} != {}).",
+            "Plugin '{}' FFI ABI version mismatch: plugin={}, host={}. \
+             Valid semantic versions with matching major.minor are required; \
+             SDK Cargo package compatibility does not imply ABI compatibility.",
             path.display(),
             plugin_sdk_version,
             host_sdk_version,
-            plugin_major_minor,
-            host_major_minor,
         );
     }
 
@@ -573,7 +566,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
     }
 
     log::debug!(
-        "Plugin '{}' version check passed: sdk={} target={}",
+        "Plugin '{}' version check passed: abi={} target={}",
         path.display(),
         plugin_sdk_version,
         plugin_target
@@ -722,6 +715,7 @@ pub fn plugin_kind_from_filename(filename: &str) -> Option<String> {
 pub struct PluginMetadataSummary {
     pub plugin_id: String,
     pub version: String,
+    /// FFI ABI version; the legacy field name does not mean SDK Cargo package version.
     pub sdk_version: String,
     pub core_version: String,
     pub target_triple: String,

@@ -55,6 +55,27 @@ use super::types::FfiStr;
 ///   absent sequence.
 pub const FFI_SDK_VERSION: &str = "0.15.0";
 
+#[doc(hidden)]
+pub const FFI_ABI_VERSION_OFFSET: usize =
+    drasi_ffi_primitives::PLUGIN_ABI_VERSION_MARKER_PREFIX.len();
+
+/// Binary-inspectable storage for the same ABI string exported in `PluginMetadata`.
+#[doc(hidden)]
+pub const FFI_ABI_VERSION_MARKER: [u8; FFI_ABI_VERSION_OFFSET + FFI_SDK_VERSION.len() + 1] = {
+    let mut marker = [0; FFI_ABI_VERSION_OFFSET + FFI_SDK_VERSION.len() + 1];
+    let mut index = 0;
+    while index < FFI_ABI_VERSION_OFFSET {
+        marker[index] = drasi_ffi_primitives::PLUGIN_ABI_VERSION_MARKER_PREFIX[index];
+        index += 1;
+    }
+    let mut index = 0;
+    while index < FFI_SDK_VERSION.len() {
+        marker[FFI_ABI_VERSION_OFFSET + index] = FFI_SDK_VERSION.as_bytes()[index];
+        index += 1;
+    }
+    marker
+};
+
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
 
@@ -68,7 +89,7 @@ pub const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP");
 /// The host checks these fields before calling `drasi_plugin_init()`.
 #[repr(C)]
 pub struct PluginMetadata {
-    /// Version of the drasi-plugin-sdk crate (FFI envelope types).
+    /// FFI ABI version (`FFI_SDK_VERSION`), not the SDK Cargo package version.
     pub sdk_version: FfiStr,
     /// Version of drasi-core (opaque pointer types: SourceChange, Element, etc.).
     pub core_version: FfiStr,
