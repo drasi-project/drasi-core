@@ -43,15 +43,9 @@ pub use common::{QueryConfig, TemplateSpec};
 ///
 /// ```rust,ignore
 /// let default_template = QueryConfig {
-///     added: Some(TemplateSpec {
-///         template: "[NEW] {{after.id}}".to_string(),
-///     }),
-///     updated: Some(TemplateSpec {
-///         template: "[CHG] {{after.id}}".to_string(),
-///     }),
-///     deleted: Some(TemplateSpec {
-///         template: "[DEL] {{before.id}}".to_string(),
-///     }),
+///     added: Some(TemplateSpec::new("[NEW] {{after.id}}")),
+///     updated: Some(TemplateSpec::new("[CHG] {{after.id}}")),
+///     deleted: Some(TemplateSpec::new("[DEL] {{before.id}}")),
 /// };
 ///
 /// let config = LogReactionConfig {
@@ -69,6 +63,7 @@ pub use common::{QueryConfig, TemplateSpec};
 /// routes.insert("sensor-query".to_string(), QueryConfig {
 ///     added: Some(TemplateSpec {
 ///         template: "[SENSOR] New: {{after.id}}".to_string(),
+///         extension: (),
 ///     }),
 ///     updated: None,  // Falls back to default
 ///     deleted: None,  // Falls back to default
