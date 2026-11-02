@@ -3,7 +3,7 @@ description: >-
   Installs the pinned release tooling (release-plz + cargo-semver-checks) and its
   system prerequisites (jq/libjq, protobuf, JQ_LIB_DIR, rustup, git identity).
   Single source of truth for these versions, shared by release-plz.yml and the
-  nightly release-dry-run job.
+  nightly candidate-preparation job.
 
 runs:
   using: composite

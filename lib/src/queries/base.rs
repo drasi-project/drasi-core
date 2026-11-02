@@ -221,7 +221,8 @@ impl QueryBase {
         }
 
         // Wait for task to complete
-        if let Some(mut handle) = self.task_handle.write().await.take() {
+        let task = self.task_handle.write().await.take();
+        if let Some(mut handle) = task {
             match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
                     info!("Query '{}' task completed successfully", self.config.id);
@@ -235,6 +236,14 @@ impl QueryBase {
                         self.config.id
                     );
                     handle.abort();
+                    if let Err(error) = handle.await {
+                        if !error.is_cancelled() {
+                            error!(
+                                "Query '{}' task failed during stop: {error}",
+                                self.config.id
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -431,6 +440,20 @@ mod tests {
     // =============================================================================
     // stop_common() Tests
     // =============================================================================
+
+    #[tokio::test]
+    async fn stop_common_joins_aborted_task() {
+        let base = QueryBase::new(test_config("join-test", None)).unwrap();
+        let resource = Arc::new(());
+        let retained = Arc::downgrade(&resource);
+        base.set_task_handle(tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(resource);
+        }))
+        .await;
+        base.stop_common().await.unwrap();
+        assert!(retained.upgrade().is_none(), "aborted task must be joined");
+    }
 
     #[tokio::test]
     async fn test_stop_common_sends_shutdown_signal() {

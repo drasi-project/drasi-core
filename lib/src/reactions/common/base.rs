@@ -418,15 +418,24 @@ impl ReactionBase {
         }
 
         // Abort all subscription forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for task in subscription_tasks.drain(..) {
+        let subscription_tasks = std::mem::take(&mut *self.subscription_tasks.write().await);
+        for task in &subscription_tasks {
             task.abort();
         }
-        drop(subscription_tasks);
+        for task in subscription_tasks {
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    warn!(
+                        "[{}] Subscription task failed during stop: {error}",
+                        self.id
+                    );
+                }
+            }
+        }
 
         // Wait for the processing task to complete (with timeout), or abort it
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(mut task) = processing_task.take() {
+        let processing_task = self.processing_task.write().await.take();
+        if let Some(mut task) = processing_task {
             // Give the task a short time to respond to the shutdown signal
             match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
                 Ok(Ok(())) => {
@@ -443,11 +452,14 @@ impl ReactionBase {
                         self.id
                     );
                     task.abort();
+                    if let Err(error) = task.await {
+                        if !error.is_cancelled() {
+                            warn!("[{}] Processing task failed during stop: {error}", self.id);
+                        }
+                    }
                 }
             }
         }
-        drop(processing_task);
-
         // Drain the priority queue
         let drained_events = self.priority_queue.drain().await;
         if !drained_events.is_empty() {
@@ -523,8 +535,8 @@ impl ReactionBase {
     /// # Arguments
     /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
     /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
-    ///   orchestration). The loop uses these for dedup and preserves each
-    ///   query's `config_hash` when advancing the sequence.
+    ///   orchestration). The loop refreshes these from the store after dequeue
+    ///   so host recovery can update the sequence and query epoch.
     /// * `policy` — resolved recovery policy (`ReactionBaseParams` override, or
     ///   the reaction's [`Reaction::default_recovery_policy`](crate::Reaction::default_recovery_policy)
     ///   when no override is set). Do not default this to `Strict` if the
@@ -559,6 +571,7 @@ impl ReactionBase {
 
             let query_id = &event.query_id;
             let seq = event.sequence;
+            checkpoints.refresh(self, query_id).await?;
 
             // Dedup: skip events at or before the checkpoint.
             if let Some(cp) = checkpoints.get(query_id) {
@@ -851,6 +864,28 @@ mod tests {
         // Second receiver should get the signal
         let result = rx2.try_recv();
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stop_common_joins_aborted_tasks() {
+        let base = ReactionBase::new(ReactionBaseParams::new("join-test", vec![]));
+        let resource = Arc::new(());
+        let retained = Arc::downgrade(&resource);
+        let worker_resource = resource.clone();
+        let processing = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(worker_resource);
+        });
+        base.set_processing_task(processing).await;
+        base.subscription_tasks
+            .write()
+            .await
+            .push(tokio::spawn(async move {
+                std::future::pending::<()>().await;
+                drop(resource);
+            }));
+        base.stop_common().await.unwrap();
+        assert!(retained.upgrade().is_none(), "aborted tasks must be joined");
     }
 
     #[tokio::test]

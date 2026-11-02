@@ -70,52 +70,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-ffi-
 
-      - name: Build test plugins (cdylib)
+      - name: Build and verify test plugins (cdylib)
         shell: bash
         run: |
-          echo "=== Building cdylib test plugins ==="
-          cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
-          cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
-          cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
-          cargo build --lib -p drasi-reaction-snapshot-test
-          cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
-          cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
-
-      - name: Copy plugins to test directory
-        shell: bash
-        run: |
-          mkdir -p target/debug/plugins
-          PREFIX="${{ matrix.lib_prefix }}"
-          EXT="${{ matrix.lib_ext }}"
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile; do
-            SRC="target/debug/${PREFIX}${name}.${EXT}"
-            if [ -f "$SRC" ]; then
-              cp "$SRC" target/debug/plugins/
-              echo "  Copied: $SRC"
-            else
-              echo "  WARNING: Not found: $SRC"
-            fi
-          done
-
-      - name: Verify test plugins exist
-        shell: bash
-        run: |
-          PREFIX="${{ matrix.lib_prefix }}"
-          EXT="${{ matrix.lib_ext }}"
-          MISSING=0
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile; do
-            FILE="target/debug/plugins/${PREFIX}${name}.${EXT}"
-            if [ ! -f "$FILE" ]; then
-              echo "ERROR: Expected plugin not found: $FILE"
-              MISSING=1
-            fi
-          done
-          if [ "$MISSING" -eq 1 ]; then
-            echo "Available files in target/debug/plugins/:"
-            ls -la target/debug/plugins/ || true
-            exit 1
-          fi
-          echo "All 6 test plugins verified."
+          bash .github/scripts/build-test-plugins.sh "${{ matrix.lib_prefix }}" "${{ matrix.lib_ext }}"
 
       - name: Run host-sdk FFI integration tests
         shell: bash

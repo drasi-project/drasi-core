@@ -61,7 +61,7 @@ impl FfiStr {
     /// # Safety
     /// The pointer must be valid for `len` bytes and contain valid UTF-8.
     pub unsafe fn as_str(&self) -> &str {
-        let bytes = std::slice::from_raw_parts(self.ptr as *const u8, self.len);
+        let bytes = std::slice::from_raw_parts(self.ptr.cast::<u8>(), self.len);
         std::str::from_utf8_unchecked(bytes)
     }
 
@@ -99,7 +99,7 @@ impl FfiOwnedStr {
     /// # Safety
     /// Must only be called once; the pointer must have been created by `from_string`.
     pub unsafe fn into_string(self) -> String {
-        String::from_raw_parts(self.ptr as *mut u8, self.len, self.cap)
+        String::from_raw_parts(self.ptr.cast::<u8>(), self.len, self.cap)
     }
 
     pub fn as_ffi_str(&self) -> FfiStr {
@@ -628,3 +628,30 @@ impl FfiWalReadResult {
 }
 
 unsafe impl Send for FfiWalReadResult {}
+
+#[cfg(test)]
+mod string_tests {
+    use super::{FfiOwnedStr, FfiStr};
+
+    #[test]
+    fn borrowed_strings_preserve_utf8_bytes() {
+        for value in ["", "Drasi", "\u{00e9}\u{1f980}", "embedded\0nul"] {
+            let borrowed = FfiStr::from_str(value);
+            assert_eq!(unsafe { borrowed.as_str() }, value);
+        }
+    }
+
+    #[test]
+    fn owned_strings_preserve_utf8_bytes_and_capacity() {
+        for value in ["", "Drasi", "\u{00e9}\u{1f980}", "embedded\0nul"] {
+            let mut original = String::with_capacity(64);
+            original.push_str(value);
+            let capacity = original.capacity();
+            let owned = FfiOwnedStr::from_string(original);
+            assert_eq!(unsafe { owned.as_ffi_str().as_str() }, value);
+            let restored = unsafe { owned.into_string() };
+            assert_eq!(restored, value);
+            assert_eq!(restored.capacity(), capacity);
+        }
+    }
+}

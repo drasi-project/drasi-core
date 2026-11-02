@@ -348,6 +348,10 @@ impl ComponentGraph {
         self.runtimes.contains_key(id)
     }
 
+    pub(crate) fn take_all_runtimes(&mut self) -> HashMap<String, Box<dyn Any + Send + Sync>> {
+        std::mem::take(&mut self.runtimes)
+    }
+
     // ========================================================================
     // Node Operations
     // ========================================================================

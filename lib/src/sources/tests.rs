@@ -185,6 +185,10 @@ pub struct TestBootstrapMockSource {
 }
 
 impl TestBootstrapMockSource {
+    pub async fn set_bootstrap_receiver(&self, receiver: BootstrapEventReceiver) {
+        *self.bootstrap_rx.lock().await = Some(receiver);
+    }
+
     pub fn new(id: String, bootstrap_rx: BootstrapEventReceiver) -> Result<Self> {
         let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
         Ok(Self {

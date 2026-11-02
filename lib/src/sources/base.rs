@@ -1607,7 +1607,8 @@ impl SourceBase {
         }
 
         // Wait for task to complete
-        if let Some(mut handle) = self.task_handle.write().await.take() {
+        let task = self.task_handle.write().await.take();
+        if let Some(mut handle) = task {
             match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
                     info!("Source '{}' task completed successfully", self.id);
@@ -1621,6 +1622,11 @@ impl SourceBase {
                         self.id
                     );
                     handle.abort();
+                    if let Err(error) = handle.await {
+                        if !error.is_cancelled() {
+                            error!("Source '{}' task failed during stop: {error}", self.id);
+                        }
+                    }
                 }
             }
         }
@@ -1726,6 +1732,20 @@ impl SourceBase {
 mod tests {
     use super::*;
     use crate::sources::ByteLexPositionComparator;
+
+    #[tokio::test]
+    async fn stop_common_joins_aborted_task() {
+        let base = SourceBase::new(SourceBaseParams::new("join-test")).unwrap();
+        let resource = Arc::new(());
+        let retained = Arc::downgrade(&resource);
+        base.set_task_handle(tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(resource);
+        }))
+        .await;
+        base.stop_common().await.unwrap();
+        assert!(retained.upgrade().is_none(), "aborted task must be joined");
+    }
 
     #[tokio::test]
     async fn abort_and_join_task_releases_lock_before_joining() {

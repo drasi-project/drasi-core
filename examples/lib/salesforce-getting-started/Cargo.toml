@@ -1,0 +1,30 @@
+[package]
+name = "salesforce-getting-started"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Live Salesforce UI walkthrough with durable Drasi queries"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+apache-avro = { version = "0.20", default-features = false }
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+drasi-index-rocksdb = { path = "../../../components/indexes/rocksdb" }
+drasi-lib = { path = "../../../lib" }
+drasi-reaction-application = { path = "../../../components/reactions/application" }
+drasi-salesforce-common = { path = "../../../components/salesforce-common" }
+drasi-source-salesforce = { path = "../../../components/sources/salesforce" }
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.14", features = ["transport"] }
+
+[[bin]]
+name = "salesforce-getting-started"
+path = "main.rs"

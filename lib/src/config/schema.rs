@@ -198,7 +198,8 @@ pub struct SourceSubscriptionSettings {
     /// Only meaningful when the source returns `supports_replay() == true`.
     pub resume_from: Option<Bytes>,
     /// If set, the last source-local monotonic `sequence` the subscribing query
-    /// durably checkpointed for this source. On resubscribe the source raises its
+    /// durably checkpointed for this source, or zero when a completed bootstrap
+    /// or streaming-only recovery has no source checkpoint. On resubscribe the source raises its
     /// per-source sequence counter to at least `resume_sequence + 1` (via `fetch_max`,
     /// never lowering it), so filled-in sequences after a restart stay strictly above
     /// the query's dedup high-water and are not wrongly dropped.
@@ -206,10 +207,10 @@ pub struct SourceSubscriptionSettings {
     /// This is independent of `resume_from` (the store-native cursor position): native-
     /// cursor sources (postgres LSN, kafka offset, mysql binlog, …) restore their stream
     /// position from `resume_from` but do not otherwise recover the framework sequence,
-    /// which is what this field carries back. Sequence-as-position sources (e.g. http,
-    /// grpc, application) are unaffected: their WAL-head restore (`set_next_sequence`)
-    /// already advances the counter directly, and whichever floor — WAL-head restore or
-    /// this field — is higher wins.
+    /// which is what this field carries back. Sequence-as-position WAL sources
+    /// (e.g. HTTP, gRPC, and application) also use it as the replay position when
+    /// `resume_from` is absent. Their WAL-head restore (`set_next_sequence`) and
+    /// this field independently raise the counter; the higher floor wins.
     pub resume_sequence: Option<u64>,
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.

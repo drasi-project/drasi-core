@@ -31,11 +31,153 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::{BootstrapEventSender, ChangeReceiver};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
-use drasi_lib::wal::{CapacityPolicy, WalProvider};
+use drasi_lib::wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig};
 use drasi_lib::Source;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use drasi_wal_redb::RedbWalProvider;
 use tempfile::TempDir;
+
+struct BlockingPruneWal {
+    inner: Arc<RedbWalProvider>,
+    started: tokio::sync::Notify,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    completed: AtomicBool,
+}
+
+#[async_trait]
+impl WalProvider for BlockingPruneWal {
+    async fn register(&self, id: &str, config: WriteAheadLogConfig) -> Result<(), WalError> {
+        self.inner.register(id, config).await
+    }
+
+    async fn append(
+        &self,
+        id: &str,
+        event: &drasi_core::models::SourceChange,
+    ) -> Result<u64, WalError> {
+        self.inner.append(id, event).await
+    }
+
+    async fn read_from(
+        &self,
+        id: &str,
+        sequence: u64,
+    ) -> Result<Vec<(u64, drasi_core::models::SourceChange)>, WalError> {
+        self.inner.read_from(id, sequence).await
+    }
+
+    async fn prune_up_to(&self, id: &str, sequence: u64) -> Result<u64, WalError> {
+        let release = self.release.lock().unwrap().take().unwrap();
+        let inner = self.inner.clone();
+        let started = tokio::task::spawn_blocking(move || {
+            release.recv().unwrap();
+            drop(inner);
+        });
+        self.started.notify_one();
+        started.await.unwrap();
+        let pruned = self.inner.prune_up_to(id, sequence).await?;
+        self.completed.store(true, Ordering::SeqCst);
+        Ok(pruned)
+    }
+
+    async fn head_sequence(&self, id: &str) -> Result<u64, WalError> {
+        self.inner.head_sequence(id).await
+    }
+
+    async fn oldest_sequence(&self, id: &str) -> Result<Option<u64>, WalError> {
+        self.inner.oldest_sequence(id).await
+    }
+
+    async fn event_count(&self, id: &str) -> Result<u64, WalError> {
+        self.inner.event_count(id).await
+    }
+
+    async fn delete_wal(&self, id: &str) -> Result<(), WalError> {
+        self.inner.delete_wal(id).await
+    }
+}
+
+#[tokio::test]
+async fn stop_waits_for_in_flight_wal_pruning_before_reopen() {
+    let tmp = TempDir::new().unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let wal = Arc::new(BlockingPruneWal {
+        inner: Arc::new(RedbWalProvider::new(tmp.path())),
+        started: tokio::sync::Notify::new(),
+        release: std::sync::Mutex::new(Some(release_rx)),
+        completed: AtomicBool::new(false),
+    });
+    let config = app_config(Some(durability_config(
+        true,
+        100,
+        CapacityPolicy::RejectIncoming,
+    )));
+    let (source, handle) = ApplicationSource::new("pruning-source", config).unwrap();
+    init_source_with_wal(&source, wal.clone(), "pruning-source").await;
+    let subscription = source
+        .subscribe(fresh_settings("pruning-source", "query"))
+        .await
+        .unwrap();
+    subscription
+        .position_handle
+        .as_ref()
+        .unwrap()
+        .store(1, Ordering::Release);
+    source.start().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wal.started.notified())
+        .await
+        .unwrap();
+
+    let mut stop = Box::pin(source.stop());
+    let stopped_early = tokio::time::timeout(Duration::from_millis(50), stop.as_mut())
+        .await
+        .is_ok();
+    release_tx.send(()).unwrap();
+    if !stopped_early {
+        tokio::time::timeout(Duration::from_secs(2), stop.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        !stopped_early,
+        "stop returned while blocking WAL work was still running"
+    );
+    assert!(wal.completed.load(Ordering::SeqCst));
+    drop(stop);
+    drop(subscription);
+    drop(handle);
+    drop(source);
+    drop(wal);
+
+    let reopened = RedbWalProvider::new(tmp.path());
+    reopened
+        .register(
+            "pruning-source",
+            durability_config(true, 100, CapacityPolicy::RejectIncoming).to_wal_config(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stop_wakes_idle_wal_pruning() {
+    let tmp = TempDir::new().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(tmp.path()));
+    let config = app_config(Some(durability_config(
+        true,
+        100,
+        CapacityPolicy::RejectIncoming,
+    )));
+    let (source, _handle) = ApplicationSource::new("idle-pruning-source", config).unwrap();
+    init_source_with_wal(&source, wal, "idle-pruning-source").await;
+    source.start().await.unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(2), source.stop())
+        .await
+        .expect("stop must wake the pruning loop without waiting for its 30-second tick")
+        .unwrap();
+}
 
 /// Helper: create a DurabilityConfig with the given policy
 fn durability_config(

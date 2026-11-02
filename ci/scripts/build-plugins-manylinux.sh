@@ -65,4 +65,4 @@ JQ_LIB_DIR="$(dirname "${jq_library}")"
 toolchain_env="CMAKE_TOOLCHAIN_FILE_${target//-/_}"
 export "${toolchain_env}=${PWD}/ci/cmake/librdkafka-features.cmake"
 
-cargo run -p xtask -- build-plugins --release --target "${target}"
+cargo run --locked -p xtask -- build-plugins --release --target "${target}"

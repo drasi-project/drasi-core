@@ -134,6 +134,13 @@ pub extern "C" fn drasi_plugin_init() -> *mut FfiPluginRegistration
 | `target_triple` | Exact match | **REJECT** | Cannot load x86_64 `.so` on aarch64 |
 | `plugin_version` | Log only | **INFO** | Plugin's own version — no compatibility constraint |
 
+The 0.15 source subscription ABI carries a separate presence flag for the
+resume sequence. This lets plugins distinguish a completed bootstrap at
+sequence zero from a fresh subscription without a sequence. Hosts and plugins
+with metadata must both use the same ABI major.minor version; rebuild older
+plugins before loading them with a 0.15 host. Plugins without metadata skip
+the version check and therefore cannot be verified for compatibility.
+
 ## FFI Boundary Design
 
 ### Serialized Payload Pattern

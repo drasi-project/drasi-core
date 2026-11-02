@@ -1,0 +1,19 @@
+[package]
+name = "durable-task-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+drasi-index-rocksdb = { path = "../../../components/indexes/rocksdb" }
+drasi-lib = { path = "../../../lib" }
+drasi-plugin-sdk = { path = "../../../components/plugin-sdk" }
+drasi-reaction-durable-task = { path = "../../../components/reactions/durable-task" }
+drasi-source-postgres = { path = "../../../components/sources/postgres" }
+drasi-state-store-redb = { path = "../../../components/state_stores/redb" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "io-std", "io-util"] }
+tracing-subscriber = "0.3"

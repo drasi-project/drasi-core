@@ -18,6 +18,15 @@
 //!
 //! This crate provides a persistent storage backend for Drasi queries using RocksDB.
 //!
+//! # Storage upgrades
+//!
+//! This backend uses RocksDB 10.4.2 through the `rocksdb` 0.24 bindings.
+//! Stop all database users and back up query directories before upgrading.
+//! Compatibility with databases written by the previous engine (8.10.0) is not
+//! covered by cross-version regression tests. Downgrading a database after the
+//! new engine has opened or written it is not supported; restore the pre-upgrade
+//! backup instead.
+//!
 //! # Usage
 //!
 //! ```ignore

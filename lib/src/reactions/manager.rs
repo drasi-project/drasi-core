@@ -71,6 +71,11 @@ struct BroadcastGapContext<'a> {
     metrics: &'a Arc<ReactionMetrics>,
 }
 
+struct SubscriptionTasks {
+    forwarders: Vec<tokio::task::AbortHandle>,
+    supervisor: tokio::task::JoinHandle<()>,
+}
+
 pub struct ReactionManager {
     instance_id: String,
     /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
@@ -81,8 +86,8 @@ pub struct ReactionManager {
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
-    /// Abort handles to subscription forwarder + supervisor tasks per reaction
-    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
+    /// The supervisor owns and joins every forwarder before teardown returns.
+    subscription_tasks: Arc<RwLock<HashMap<String, SubscriptionTasks>>>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
     graph: Arc<RwLock<ComponentGraph>>,
@@ -782,6 +787,14 @@ impl ReactionManager {
     /// # Errors
     /// Returns an error if the reaction is not found or the stop operation fails.
     pub async fn stop_reaction(&self, id: String) -> Result<()> {
+        self.stop_reaction_inner(id, false).await
+    }
+
+    pub(crate) async fn stop_reaction_for_shutdown(&self, id: String) -> Result<()> {
+        self.stop_reaction_inner(id, true).await
+    }
+
+    async fn stop_reaction_inner(&self, id: String, permanent: bool) -> Result<()> {
         let reaction =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Reaction>>(&self.graph, &id)
                 .await
@@ -795,11 +808,18 @@ impl ReactionManager {
         // and transition to Error when forwarder tasks are aborted.
         {
             let mut g = self.graph.write().await;
-            g.validate_and_transition(
-                &id,
-                ComponentStatus::Stopping,
-                Some("Stopping reaction".to_string()),
-            )?;
+            let retry_failed = permanent
+                && g.get_component(&id)
+                    .is_some_and(|node| node.status == ComponentStatus::Error);
+            // Ordinary stop still rejects Error reactions. Permanent teardown
+            // must retry their cleanup without claiming they have recovered.
+            if !retry_failed {
+                g.validate_and_transition(
+                    &id,
+                    ComponentStatus::Stopping,
+                    Some("Stopping reaction".to_string()),
+                )?;
+            }
         }
 
         // Now abort subscription forwarder tasks
@@ -1366,13 +1386,13 @@ impl ReactionManager {
             }
         });
 
-        abort_handles.push(supervisor.abort_handle());
-
-        // Store abort handles so stop_reaction/teardown can cancel everything.
-        self.subscription_tasks
-            .write()
-            .await
-            .insert(reaction_id.to_string(), abort_handles);
+        self.subscription_tasks.write().await.insert(
+            reaction_id.to_string(),
+            SubscriptionTasks {
+                forwarders: abort_handles,
+                supervisor,
+            },
+        );
 
         Ok(subscribe_heads)
     }
@@ -1503,12 +1523,16 @@ impl ReactionManager {
     }
 
     async fn abort_subscription_tasks_static(
-        tasks: &Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
+        tasks: &Arc<RwLock<HashMap<String, SubscriptionTasks>>>,
         reaction_id: &str,
     ) {
-        if let Some(handles) = tasks.write().await.remove(reaction_id) {
-            for handle in handles {
+        let tasks = tasks.write().await.remove(reaction_id);
+        if let Some(tasks) = tasks {
+            for handle in tasks.forwarders {
                 handle.abort();
+            }
+            if let Err(error) = tasks.supervisor.await {
+                log::warn!("[{reaction_id}] Subscription supervisor failed during stop: {error}");
             }
         }
     }

@@ -64,6 +64,8 @@ def expression(source, context):
     for token in tokens:
         if token in ("&&", "||", "!"):
             translated.append({"&&": "and", "||": "or", "!": "not"}[token])
+        elif token in ("true", "false"):
+            translated.append(repr(token == "true"))
         elif token in ("==", "!=", "(", ")") or token.startswith("'"):
             translated.append(token)
         else:
@@ -497,6 +499,69 @@ class RepairTests(unittest.TestCase):
                 self.assertEqual("publish", outputs["mode"])
                 self.assertEqual([], self.fixture.calls)
 
+    def test_force_publish_is_only_caller_metadata_for_manual_release_publication(self):
+        self.fixture.env["GITHUB_WORKFLOW_REF"] = (
+            f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/main")
+        for value in (False, True):
+            with self.subTest(force_publish=value):
+                self.fixture.inputs = repair.PUBLISH_DEFAULTS | {"force_publish": value}
+                code, _, logs, outputs, _ = self.fixture.invoke("select")
+                self.assertEqual(0, code, logs)
+                self.assertEqual("publish", outputs["mode"])
+                self.assertEqual([], self.fixture.calls)
+
+    def test_removed_branch_test_input_is_rejected(self):
+        for value in (False, True):
+            with self.subTest(allow_branch_test=value):
+                self.fixture.inputs = repair.PUBLISH_DEFAULTS | {"allow_branch_test": value}
+                self.assert_failure("select", "Unsupported workflow input")
+                self.assertEqual([], self.fixture.calls)
+
+    def test_force_publish_rejects_wrong_types_contexts_and_unknown_inputs(self):
+        self.fixture.env["GITHUB_WORKFLOW_REF"] = (
+            f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/main")
+        self.fixture.inputs = repair.PUBLISH_DEFAULTS | {"force_publish": False}
+        for value in ("true", "false", "", None, 0, 1, [], {}):
+            with self.subTest(value=value), patch.dict(self.fixture.inputs, {"force_publish": value}):
+                self.assert_failure("select", "force_publish")
+                self.assertEqual([], self.fixture.calls)
+        for key, value in (
+            ("GITHUB_REPOSITORY", "someone/drasi-core"),
+            ("GITHUB_REF", "refs/heads/topic"),
+            ("GITHUB_REF", "refs/tags/v1"),
+            ("GITHUB_EVENT_NAME", "push"),
+            ("GITHUB_EVENT_NAME", "pull_request"),
+            ("GITHUB_EVENT_NAME", "workflow_call"),
+            ("GITHUB_WORKFLOW_REF", repair.WORKFLOW_REF),
+            ("GITHUB_WORKFLOW_REF",
+             f"{repair.REPOSITORY}/.github/workflows/nightly.yml@refs/heads/main"),
+            ("GITHUB_WORKFLOW_REF",
+             f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/topic"),
+        ):
+            with self.subTest(context=key, value=value), patch.dict(self.fixture.env, {key: value}):
+                self.assert_failure("select", "force_publish")
+                self.assertEqual([], self.fixture.calls)
+        with patch.dict(self.fixture.inputs, {"unknown_input": True}):
+            self.assert_failure("select", "Unsupported workflow input")
+            self.assertEqual([], self.fixture.calls)
+
+    def test_force_publish_never_relaxes_repair_selection(self):
+        self.fixture.env["GITHUB_WORKFLOW_REF"] = (
+            f"{repair.REPOSITORY}/.github/workflows/release-plz.yml@refs/heads/main")
+        for value in (False, True):
+            for selection in (
+                {"repair_batch": "none", "repair_action": "plan"},
+                {"repair_batch": BATCH, "repair_action": "plan"},
+                {"repair_batch": BATCH, "repair_action": "execute"},
+                {"repair_batch": BATCH}, {"repair_action": "execute"},
+            ):
+                with self.subTest(force_publish=value, selection=selection):
+                    self.fixture.inputs = repair.PUBLISH_DEFAULTS | {
+                        "force_publish": value,
+                    } | selection
+                    self.assert_failure("select", "force_publish")
+                    self.assertEqual([], self.fixture.calls)
+
     def test_bad_inventory_is_rejected_before_any_network_request(self):
         for field, value in (
             ("manifest_digest", "latest"), ("manifest_digest", "sha256:" + "Z" * 64),
@@ -835,7 +900,12 @@ class WorkflowTests(unittest.TestCase):
         call = self.document["on"]["workflow_call"]["inputs"]
         dispatch = self.document["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(set(repair.PUBLISH_DEFAULTS), set(call))
-        self.assertEqual(call, {key: dispatch[key] for key in call})
+        internal = {"candidate_artifact", "candidate_sha256"}
+        self.assertEqual({key: value for key, value in call.items() if key not in internal},
+                         {key: dispatch[key] for key in call if key not in internal})
+        self.assertTrue(internal.isdisjoint(dispatch))
+        self.assertNotIn("allow_branch_test", call)
+        self.assertNotIn("allow_branch_test", dispatch)
         self.assertEqual("none", dispatch["repair_batch"]["default"])
         self.assertEqual("plan", dispatch["repair_action"]["default"])
         self.assertEqual(["none", *REVIEWED["batches"]], dispatch["repair_batch"]["options"])
@@ -844,7 +914,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_selection_script_drives_actual_parsed_workflow_routes(self):
         normal = {
-            "select-mode", "visibility-preflight", "list-plugin-packages",
+            "select-mode", "prepare-candidate", "visibility-preflight", "list-plugin-packages",
             "build-and-publish", "verify-public-visibility",
         }
         for batch, action, expected in (
@@ -863,7 +933,7 @@ class WorkflowTests(unittest.TestCase):
                 ))
         for field in ("dry_run", "skip_visibility"):
             inputs = {**repair.PUBLISH_DEFAULTS, field: True}
-            self.assertEqual({"select-mode", "visibility-preflight", "build-and-publish"},
+            self.assertEqual({"select-mode", "prepare-candidate", "visibility-preflight", "build-and-publish"},
                              self.runnable(inputs, "publish"))
 
     def test_privileged_gate_rejects_untrusted_context_even_with_forged_selector_output(self):
@@ -892,8 +962,10 @@ class WorkflowTests(unittest.TestCase):
             "cancel-in-progress": False,
         }, self.jobs["repair-execute"]["concurrency"])
         self.assertNotIn("concurrency", self.document)
-        self.assertEqual("python3 .github/scripts/repair-plugin-signatures.py select",
-                         self.jobs["select-mode"]["steps"][1]["run"])
+        self.assertIn("python3 .github/scripts/repair-plugin-signatures.py select",
+                      self.jobs["select-mode"]["steps"][1]["run"])
+        self.assertIn("python3 .github/scripts/release-candidate.py publication-context",
+                      self.jobs["select-mode"]["steps"][1]["run"])
         self.assertEqual("${{ steps.select.outputs.mode }}",
                          self.jobs["select-mode"]["outputs"]["mode"])
         for name in ("repair-plan", "repair-execute"):
