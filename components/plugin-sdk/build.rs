@@ -13,10 +13,29 @@
 // limitations under the License.
 
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    let manifest_dir =
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by Cargo");
+    let manifest: toml::Value = fs::read_to_string(PathBuf::from(manifest_dir).join("Cargo.toml"))
+        .expect("Cannot read SDK Cargo.toml")
+        .parse()
+        .expect("Cannot parse SDK Cargo.toml");
+    let ffi_abi_version = manifest
+        .get("package")
+        .and_then(|value| value.get("metadata"))
+        .and_then(|value| value.get("drasi"))
+        .and_then(|value| value.get("ffi-abi-version"))
+        .and_then(toml::Value::as_str)
+        .expect("[package.metadata.drasi] ffi-abi-version must be a string in SDK Cargo.toml");
+    semver::Version::parse(ffi_abi_version)
+        .expect("[package.metadata.drasi] ffi-abi-version must be a valid semantic version");
+    println!("cargo:rustc-env=DRASI_FFI_ABI_VERSION={ffi_abi_version}");
+
     // Capture the rustc version at build time
     let rustc_version = Command::new("rustc")
         .arg("--version")
@@ -92,8 +111,9 @@ fn main() {
 
     println!("cargo:rustc-env=DRASI_BUILD_HASH={hash}");
 
-    // Rerun if the compiler or profile changes.
+    // Rerun if the manifest, compiler or profile changes.
     // In release builds, also rerun when git HEAD changes for accurate provenance.
+    println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=PROFILE");

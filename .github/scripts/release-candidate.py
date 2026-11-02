@@ -151,10 +151,14 @@ def inventory(data, config):
 
 
 def ffi_abi_version(root):
-    source = (root / "components/plugin-sdk/src/ffi/metadata.rs").read_text(encoding="utf-8")
-    versions = re.findall(r'^pub const FFI_SDK_VERSION: &str = "([^"]+)";$', source, re.MULTILINE)
-    require(len(versions) == 1, "Selected source must declare one explicit FFI ABI version")
-    return versions[0]
+    version = tomllib.loads(
+        (root / "components/plugin-sdk/Cargo.toml").read_text(encoding="utf-8"))
+    for key in ("package", "metadata", "drasi", "ffi-abi-version"):
+        version = version.get(key) if isinstance(version, dict) else None
+    require(isinstance(version, str) and version,
+            "Selected source must declare one explicit FFI ABI version in "
+            "SDK Cargo.toml [package.metadata.drasi] ffi-abi-version")
+    return version
 
 
 def freeze(root, destination):

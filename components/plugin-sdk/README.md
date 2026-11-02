@@ -243,6 +243,13 @@ The server performs a two-phase load:
 1. **Metadata validation** — calls `drasi_plugin_metadata()` to check the FFI ABI version and target triple.
 2. **Initialization** — calls `drasi_plugin_init()` only if metadata validation passes.
 
+The authoritative ABI declaration is `[package.metadata.drasi] ffi-abi-version`
+in the SDK's [Cargo.toml](Cargo.toml), not its Cargo package version.
+[build.rs](build.rs) validates it as a semantic version and emits
+`DRASI_FFI_ABI_VERSION`; the public `FFI_SDK_VERSION` constant reads that value.
+Cargo tracks manifest changes to rerun the build script, and the declaration
+and build script are included in the published SDK crate.
+
 #### Registry compatibility metadata
 
 Package versions and the FFI ABI serve different purposes and must not be

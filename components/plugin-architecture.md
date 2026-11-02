@@ -140,6 +140,12 @@ version; `io.drasi.plugin.abi-version` records the separate FFI ABI. The resolve
 and loader share the ABI rule. Missing ABI annotations are rejected rather than
 inferred from package versions, including for explicit pins.
 
+The authoritative ABI is `[package.metadata.drasi] ffi-abi-version` in the SDK's
+[Cargo.toml](plugin-sdk/Cargo.toml), independently of the package version.
+The SDK build script validates it and provides `DRASI_FFI_ABI_VERSION` to the
+public `FFI_SDK_VERSION` constant; release/nightly preparation reads the same
+manifest field from the selected source.
+
 `export_plugin!` stores the ABI in a binary-inspectable marker and points the
 existing metadata ABI field into that same storage. Shared build/publication
 tooling validates it without loading the binary, including cross-compiled

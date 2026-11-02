@@ -26,6 +26,9 @@ use super::types::FfiStr;
 /// release. **Bump the minor (pre-1.0) on any `#[repr(C)]` layout change or
 /// payload wire-format change.**
 ///
+/// Declared in the SDK's Cargo.toml as `[package.metadata.drasi] ffi-abi-version`.
+/// The build script validates it and exposes it as `DRASI_FFI_ABI_VERSION`.
+///
 /// History:
 /// - `0.10.0`: source change / bootstrap events now cross the boundary as
 ///   serialized (MessagePack) payloads instead of reinterpreted `repr(Rust)`
@@ -53,7 +56,7 @@ use super::types::FfiStr;
 /// - `0.15.0`: `SourceVtable::subscribe_fn` adds a presence flag so a completed
 ///   bootstrap can resume from sequence zero without being confused with an
 ///   absent sequence.
-pub const FFI_SDK_VERSION: &str = "0.15.0";
+pub const FFI_SDK_VERSION: &str = env!("DRASI_FFI_ABI_VERSION");
 
 #[doc(hidden)]
 pub const FFI_ABI_VERSION_OFFSET: usize =

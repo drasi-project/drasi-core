@@ -195,9 +195,14 @@ Missing or inconsistent ABI metadata fails before upload, even for a batch
 containing both valid and legacy artifacts. No marker or annotation is inferred,
 repaired, or synthesized for an old binary.
 
-The candidate retains the ABI declared by the selected source's
-`FFI_SDK_VERSION`, independently of the workflow tooling's own ABI and package
-versions. Target reports and the final handoff require that exact `abi_version`;
+The candidate retains the ABI declared in the selected source's SDK
+[Cargo.toml](../../components/plugin-sdk/Cargo.toml) as
+`[package.metadata.drasi] ffi-abi-version`, independently of the workflow
+tooling's own ABI and package versions. The SDK build script validates the same
+field and exposes it through the public `FFI_SDK_VERSION` constant. Selected
+revisions without this structured declaration fail preparation; there is no
+fallback to parsing Rust source or using the tooling's ABI.
+Target reports and the final handoff require that exact `abi_version`;
 absent ABI values or even patch-level report disagreements fail validation.
 Older prepared bundles without this field require a new explicit preparation.
 This report check is additional evidence, not a substitute for pre-upload
