@@ -1,0 +1,56 @@
+[package]
+name = "drasi-source-salesforce"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Durable-first Salesforce source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "salesforce", "source", "cdc"]
+categories = ["network-programming"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-core.workspace = true
+drasi-lib.workspace = true
+drasi-plugin-sdk = { workspace = true }
+drasi-salesforce-common = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+redb = "2.6.3"
+rmp-serde = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tonic = { version = "0.14", features = ["transport"] }
+uuid = { version = "1", features = ["v4"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+apache-avro = { version = "0.20", default-features = false }
+axum = "0.7"
+drasi-host-sdk.workspace = true
+drasi-index-rocksdb.workspace = true
+drasi-reaction-application.workspace = true
+tempfile = "3"
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-test = "0.4"
+wiremock = "0.6"
+
+[features]
+dynamic-plugin = []
+
+[[test]]
+name = "ffi"
+required-features = ["dynamic-plugin"]

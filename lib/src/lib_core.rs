@@ -161,6 +161,7 @@ pub struct DrasiLib {
     pub(crate) reaction_manager: Arc<ReactionManager>,
     pub(crate) running: Arc<RwLock<bool>>,
     pub(crate) is_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown_complete: Arc<tokio::sync::Mutex<bool>>,
     pub(crate) state_guard: StateGuard,
     // Inspection API for querying server state
     pub(crate) inspection: InspectionAPI,
@@ -196,6 +197,7 @@ impl Clone for DrasiLib {
             reaction_manager: Arc::clone(&self.reaction_manager),
             running: Arc::clone(&self.running),
             is_shutdown: Arc::clone(&self.is_shutdown),
+            shutdown_complete: Arc::clone(&self.shutdown_complete),
             state_guard: self.state_guard.clone(),
             inspection: self.inspection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
@@ -380,6 +382,7 @@ impl DrasiLib {
             reaction_manager,
             running: Arc::new(RwLock::new(false)),
             is_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            shutdown_complete: Arc::new(tokio::sync::Mutex::new(false)),
             state_guard,
             inspection,
             lifecycle,

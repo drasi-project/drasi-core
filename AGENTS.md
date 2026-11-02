@@ -14,7 +14,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 ## Done means (the main CI gates)
 - `cargo fmt -- --check` passes
 - `make clippy` passes - do NOT use `cargo clippy --all-features` (the bundled-jq feature has a flaky source build); warnings are errors
-- `cargo test --workspace --exclude drasi-host-sdk` and `make test-host-sdk` pass; a running Docker daemon is required (testcontainers)
+- `cargo test --workspace --exclude drasi-host-sdk`, `make test-host-sdk`, and `make test-salesforce-ffi` pass; a running Docker daemon is required (testcontainers)
 - Commits are signed off: `git commit -s` (DCO)
 - CI additionally gates PRs on: a typos check, cargo-audit, cargo-deny, FFI layout tests, and coverage
 
