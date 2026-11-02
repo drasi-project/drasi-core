@@ -276,7 +276,7 @@ fn assert_add(diff: &ResultDiff, expected: &[(&str, serde_json::Value)]) {
 #[tokio::test]
 #[ignore]
 async fn test_change_detection_through_collector() {
-    let _ = env_logger::try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let source_port = find_available_port().await;
     let source = OtelSource::builder("test-source")

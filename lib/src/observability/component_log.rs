@@ -368,6 +368,14 @@ pub struct ComponentLogRegistry {
     max_history: usize,
     /// Broadcast channel capacity
     channel_capacity: usize,
+    capture: std::sync::OnceLock<std::sync::Weak<super::log_runtime::RuntimeInner>>,
+}
+
+/// One host-assigned destination and key, independent of plugin-supplied fields.
+#[derive(Debug, Clone)]
+pub struct ComponentLogBinding {
+    pub registry: Arc<ComponentLogRegistry>,
+    pub key: ComponentLogKey,
 }
 
 impl std::fmt::Debug for ComponentLogRegistry {
@@ -392,6 +400,7 @@ impl ComponentLogRegistry {
             channels: RwLock::new(HashMap::new()),
             max_history: DEFAULT_MAX_LOGS_PER_COMPONENT,
             channel_capacity: DEFAULT_LOG_CHANNEL_CAPACITY,
+            capture: std::sync::OnceLock::new(),
         }
     }
 
@@ -401,6 +410,7 @@ impl ComponentLogRegistry {
             channels: RwLock::new(HashMap::new()),
             max_history,
             channel_capacity,
+            capture: std::sync::OnceLock::new(),
         }
     }
 
@@ -423,6 +433,11 @@ impl ComponentLogRegistry {
     /// Use this from synchronous contexts (e.g., FFI callbacks) where blocking
     /// on an async lock would stall the runtime scheduler.
     pub fn try_log(&self, message: LogMessage) -> bool {
+        if let Some(capture) = self.capture.get() {
+            return capture
+                .upgrade()
+                .is_some_and(|capture| capture.submit(message));
+        }
         match self.channels.try_write() {
             Ok(mut channels) => {
                 let key = message.key().to_string_key();
@@ -432,7 +447,52 @@ impl ComponentLogRegistry {
                 channel.log(message);
                 true
             }
+
             Err(_) => false,
+        }
+    }
+
+    pub(super) fn bind_capture(
+        &self,
+        capture: std::sync::Weak<super::log_runtime::RuntimeInner>,
+    ) -> super::LoggingResult<()> {
+        self.capture.set(capture).map_err(|_| {
+            super::LoggingError::Configuration("log registry already has a capture owner".into())
+        })
+    }
+
+    /// Conservative log-only forwarding limit for legacy callbacks.
+    pub fn log_level(&self) -> Option<log::LevelFilter> {
+        self.capture.get().map(|capture| {
+            capture
+                .upgrade()
+                .map_or(log::LevelFilter::Off, |capture| capture.max_level())
+        })
+    }
+
+    pub fn legacy_log_level(&self) -> super::LoggingResult<Option<log::LevelFilter>> {
+        self.capture
+            .get()
+            .map(|capture| {
+                capture
+                    .upgrade()
+                    .ok_or(super::LoggingError::Closed)?
+                    .legacy_max_level()
+            })
+            .transpose()
+    }
+
+    pub fn try_log_with_target(
+        &self,
+        target: &str,
+        message: LogMessage,
+    ) -> super::LoggingResult<bool> {
+        match self.capture.get() {
+            Some(capture) => capture
+                .upgrade()
+                .ok_or(super::LoggingError::Closed)?
+                .submit_target(target, message),
+            None => Ok(self.try_log(message)),
         }
     }
 
@@ -468,7 +528,17 @@ impl ComponentLogRegistry {
     /// Remove a component's log channel using composite key.
     ///
     /// Called when a component is deleted to clean up resources.
-    pub async fn remove_component_by_key(&self, key: &ComponentLogKey) {
+    pub async fn remove_component_by_key(&self, key: &ComponentLogKey) -> super::LoggingResult<()> {
+        if let Some(capture) = self.capture.get().and_then(std::sync::Weak::upgrade) {
+            return super::ComponentLogRuntime::from_inner(capture)
+                .remove_history(key)
+                .await;
+        }
+        self.remove_stored(key).await;
+        Ok(())
+    }
+
+    pub(super) async fn remove_stored(&self, key: &ComponentLogKey) {
         self.channels.write().await.remove(&key.to_string_key());
     }
 
@@ -486,6 +556,90 @@ impl ComponentLogRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn drain_ownership(cancel_waiter: bool) {
+        use crate::observability::{ComponentLogRuntime, LogPolicy};
+        use std::time::Duration;
+
+        let runtime =
+            ComponentLogRuntime::with_capacity(LogPolicy::new("info").unwrap(), 1).unwrap();
+        let registry = runtime.registry();
+        let held = registry.channels.write().await;
+        let _retained_layer = runtime.layer::<tracing_subscriber::Registry>();
+        let mut accepted = 0;
+        for index in 0..16 {
+            accepted += usize::from(runtime.try_log(LogMessage::with_instance(
+                LogLevel::Info,
+                format!("message {index}"),
+                "instance",
+                "component",
+                ComponentLogType::Source,
+            )));
+        }
+        assert!((1..=2).contains(&accepted));
+        assert_eq!(runtime.losses().full, 16 - accepted as u64);
+        if cancel_waiter {
+            let shutdown = runtime.shutdown(Duration::from_secs(2));
+            tokio::pin!(shutdown);
+            assert!(futures::poll!(&mut shutdown).is_pending());
+        } else {
+            assert!(runtime.shutdown(Duration::from_millis(20)).await.is_err());
+        }
+        drop(held);
+        runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+        let key = ComponentLogKey::new("instance", ComponentLogType::Source, "component");
+        assert_eq!(registry.log_count_by_key(&key).await, accepted);
+        assert!(!runtime.try_log(LogMessage::with_instance(
+            LogLevel::Info,
+            "late",
+            "instance",
+            "component",
+            ComponentLogType::Source,
+        )));
+        assert_eq!(runtime.losses().closed, 1);
+        runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_shutdown_retains_and_drains_capture() {
+        drain_ownership(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_shutdown_retains_and_drains_capture() {
+        drain_ownership(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_drain_is_runtime_flavor_independent() {
+        drain_ownership(false).await;
+    }
+
+    #[tokio::test]
+    async fn removal_is_ordered_after_accepted_log_messages() {
+        use crate::observability::{ComponentLogRuntime, LogPolicy};
+        let runtime = ComponentLogRuntime::new(LogPolicy::new("info").unwrap()).unwrap();
+        let registry = runtime.registry();
+        let key = ComponentLogKey::new("instance", ComponentLogType::Source, "component");
+        for _ in 0..32 {
+            assert!(runtime.try_log(LogMessage::with_instance(
+                LogLevel::Info,
+                "stopping",
+                "instance",
+                "component",
+                ComponentLogType::Source,
+            )));
+        }
+        registry.remove_component_by_key(&key).await.unwrap();
+        runtime.flush().await.unwrap();
+        assert_eq!(registry.log_count_by_key(&key).await, 0);
+        runtime
+            .shutdown(std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        registry.remove_component_by_key(&key).await.unwrap();
+    }
+
     fn make_key(instance: &str, component_type: ComponentType, component: &str) -> ComponentLogKey {
         ComponentLogKey::new(instance, component_type, component)
     }
@@ -598,7 +752,7 @@ mod tests {
         let key = make_key("instance1", ComponentType::Source, "source1");
         assert_eq!(registry.log_count_by_key(&key).await, 1);
 
-        registry.remove_component_by_key(&key).await;
+        registry.remove_component_by_key(&key).await.unwrap();
 
         assert_eq!(registry.log_count_by_key(&key).await, 0);
     }
@@ -834,7 +988,10 @@ mod tests {
             assert_eq!(registry.get_history_by_key(&key).await.len(), 1);
         }
         let transformer = ComponentLogKey::new("instance", ComponentRole::Transformer, "same-id");
-        registry.remove_component_by_key(&transformer).await;
+        registry
+            .remove_component_by_key(&transformer)
+            .await
+            .unwrap();
         assert_eq!(registry.log_count_by_key(&transformer).await, 0);
         for role in [
             ComponentRole::Source,

@@ -48,6 +48,7 @@ mod snapshot_consumer;
 mod source_schema;
 #[doc(hidden)]
 pub mod source_transaction;
+pub mod telemetry;
 pub mod workers;
 
 pub use binary_codec::*;

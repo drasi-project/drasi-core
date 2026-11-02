@@ -383,6 +383,7 @@ impl PersistentStockroom {
             .build()?;
         let core = DrasiLib::builder()
             .with_id(INSTANCE)
+            .with_component_logging(crate::component_logging()?)
             .with_components(batch)
             .build()
             .await?;

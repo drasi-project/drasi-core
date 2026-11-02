@@ -140,6 +140,20 @@ impl RuntimeComponent for SourceInstance {
             self.services.identity.clone(),
         );
         context.wal_provider = self.services.wal.clone();
+        context.log_binding = Some(crate::observability::ComponentLogBinding {
+            registry: self
+                .subscriptions
+                .owner
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("source logging owner is unavailable"))?
+                .logs
+                .clone(),
+            key: crate::observability::ComponentLogKey::new(
+                self.services.scope.as_ref(),
+                crate::observability::ComponentLogType::Source,
+                self.source.id(),
+            ),
+        });
         context.resource_observer = Some(Arc::new(GraphResourceObserver::new(
             self.parent_control.clone(),
             ComponentId::try_new(self.source.id())?,

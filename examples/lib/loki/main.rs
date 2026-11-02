@@ -9,7 +9,7 @@ use drasi_source_mock::{DataType, MockSource};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     let loki_endpoint =
         std::env::var("LOKI_ENDPOINT").unwrap_or_else(|_| "http://localhost:3100".to_string());

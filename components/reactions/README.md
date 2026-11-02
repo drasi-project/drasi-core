@@ -723,6 +723,7 @@ from the runtime:
 | `state_store`        | `Option<Arc<dyn StateStoreProvider>>`           | If configured        |
 | `identity_provider`  | `Option<Arc<dyn IdentityProvider>>`             | If configured        |
 | `snapshot_fetcher`   | `Option<Arc<dyn SnapshotFetcher>>`              | If query is loaded   |
+| `log_binding`        | `Option<ComponentLogBinding>`                  | Host-local capture; not serialized over FFI |
 
 > 🔴 **MUST** — Implement `initialize` by delegating to
 > `ReactionBase::initialize()`. It wires the status handle to the graph

@@ -26,7 +26,7 @@ use drasi_state_store_redb::RedbStateStoreProvider;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     let endpoint =
         std::env::var("A2A_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:9999/".to_string());

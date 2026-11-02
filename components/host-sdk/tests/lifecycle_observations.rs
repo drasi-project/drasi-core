@@ -41,8 +41,14 @@ impl Reaction for CallbackReaction {
         *self.callback.lock().expect("callback ownership") =
             Some(Arc::new(InstanceCallbackContext {
                 instance_id: context.instance_id.clone(),
+                component_id: context.reaction_id.clone(),
+                component_type: drasi_lib::observability::ComponentLogType::Reaction,
                 runtime_handle: tokio::runtime::Handle::current(),
-                log_registry: get_or_init_global_registry(),
+                log_registry: context
+                    .log_binding
+                    .as_ref()
+                    .map(|binding| binding.registry.clone())
+                    .unwrap_or_else(get_or_init_global_registry),
                 update_tx: context.update_tx.clone(),
             }));
         self.base.initialize(context).await;

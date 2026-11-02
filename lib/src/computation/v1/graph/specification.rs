@@ -676,9 +676,33 @@ pub struct ConstructionContext {
     resources: BTreeMap<ResourceId, ResourceHandle>,
     output_catalogue: crate::computation::v1::OutputCatalogue,
     input_bindings: Vec<InputBinding>,
+    observability: crate::observability::RuntimeObservability,
 }
 
 impl ConstructionContext {
+    pub fn telemetry(&self) -> &crate::observability::GraphTelemetry {
+        &self.observability.telemetry
+    }
+
+    pub fn component_logging(&self) -> Option<&crate::observability::ComponentLogRuntime> {
+        self.observability.logging.as_ref()
+    }
+
+    pub fn component_log_binding(&self) -> Option<crate::observability::ComponentLogBinding> {
+        self.component_logging()
+            .map(|logging| crate::observability::ComponentLogBinding {
+                registry: logging.registry(),
+                key: crate::observability::ComponentLogKey::new(
+                    self.instance_id.as_ref(),
+                    crate::observability::ComponentLogType::for_component(
+                        self.specification.role,
+                        self.specification.descriptor.semantic_kind(),
+                    ),
+                    self.component_id.as_str(),
+                ),
+            })
+    }
+
     /// The component's validated, declared incoming edges. Populated only for
     /// factories reporting [`ComponentFactory::binds_inputs`]; those are held
     /// until every incoming output has a declared stream and are reconstructed
@@ -724,9 +748,10 @@ impl ConstructionContext {
         specification: Arc<ComponentSpecification>,
         resources: BTreeMap<ResourceId, ResourceHandle>,
         schema: &ConfigurationSchema,
-        output_catalogue: crate::computation::v1::OutputCatalogue,
-        input_bindings: Vec<InputBinding>,
+        ports: (crate::computation::v1::OutputCatalogue, Vec<InputBinding>),
+        observability: crate::observability::RuntimeObservability,
     ) -> Result<Self, ComponentCreationError> {
+        let (output_catalogue, input_bindings) = ports;
         let configuration = schema
             .resolve_values(&specification.configuration, &resources)
             .await?;
@@ -740,6 +765,7 @@ impl ConstructionContext {
             resources,
             output_catalogue,
             input_bindings,
+            observability,
         })
     }
 }

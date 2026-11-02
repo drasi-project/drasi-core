@@ -134,9 +134,7 @@ async fn consume_next(consumer: &mut Consumer) -> Result<lapin::message::Deliver
 #[tokio::test]
 #[ignore]
 async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (_container, connection_string) = setup_rabbitmq().await?;
 
@@ -300,9 +298,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
 #[tokio::test]
 #[ignore]
 async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (_container, connection_string) = setup_rabbitmq().await?;
 

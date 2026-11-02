@@ -20,6 +20,20 @@ The runtime remains responsible for graph membership, actual storage ownership,
 query processing and recovery. Native plugins use explicit host capabilities,
 not concrete runtime objects.
 
+The `telemetry` module defines observation catalogues, stable scopes, profiles,
+trace-only parent sampling and bounded registration validation. Its types and
+state are independent of subscribers, recorders and graph ownership. The
+optional `metrics-facade` feature adds the shared facade adapter used by the
+library and static SDK, avoiding two implementations of recorder registration.
+It installs no recorder or exporter and does not add a runtime dependency.
+
+The host owns one `MetricRegistrationContext` per recorder and shares its clones
+across instances. Incompatible same-name definitions fail atomically before
+recorder calls; identity values are not part of schema identity. Definitions and
+series are bounded and retained rather than silently evicted. The default limits
+and migration contract are documented in the
+[library guide](../../lib/README.md#telemetry-foundations).
+
 Published envelopes have a maximum ancestry depth of 1,024
 (`MAX_LINEAGE_DEPTH`). JSON and binary decoding, encoding and binary size
 measurement enforce the same bound. `ChangeEnvelope::try_derive` checks it before

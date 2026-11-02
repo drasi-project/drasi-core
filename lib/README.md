@@ -292,7 +292,9 @@ Sources and reactions are **owned by DrasiLib** after calling `with_source()` / 
 
 | Method | Type | Default |
 |--------|------|---------|
-| `with_id(impl Into<String>)` | Instance name for logging | Auto-generated UUID |
+| `with_id(impl Into<String>)` | Stable instance namespace; use distinct IDs for coexisting instances | `drasi-lib` |
+| `with_telemetry(TelemetryOptions)` | Runtime-only trace/metric collection policy | `Off` |
+| `with_component_logging(ComponentLogRuntime)` | Supply host-composed capture instead of automatic setup | Automatic default logging |
 | `with_source(impl Source + 'static)` | Source plugin (chainable) | — |
 | `with_reaction(impl Reaction + 'static)` | Reaction plugin (chainable) | — |
 | `with_query(QueryConfig)` | Query config from `Query` builder | — |
@@ -740,6 +742,12 @@ async fn start(&self) -> Result<()> {
 
 DrasiLib provides component-aware logging built on [tracing](https://docs.rs/tracing/). Logging is **initialized automatically** when you call `build()` — no manual setup required.
 
+Logging is independent of new tracing/metrics collection. Both new signals
+default to `Off`; enabling them never changes the log filter. Automatic setup
+installs no metric recorder or exporter. Invalid log directives and conflicts
+with an unrelated host subscriber/logger are returned as initialization errors,
+not silently ignored.
+
 Control verbosity with `RUST_LOG`:
 
 ```bash
@@ -747,6 +755,54 @@ RUST_LOG=info cargo run              # Default level
 RUST_LOG=debug cargo run             # Verbose
 RUST_LOG=drasi_lib=debug cargo run   # Debug only drasi-lib
 ```
+
+### Ownership and custom hosts
+
+`init_default_subscriber()` explicitly initializes or borrows the same default
+service used by library construction. Use it before constructing components if
+their constructor-time logs matter. All default library instances share its
+owned worker; stopping one instance does not stop another's logging.
+
+For custom setup, `init_component_logging()` or
+`ComponentLogRuntime::new(LogPolicy::new("info")?)` creates capture without
+installing globals. Compose `logging.layer()` into the host subscriber, configure
+the host's `log` bridge, then supply `logging.clone()` to
+`DrasiLib::builder().with_component_logging(...)`. Apply formatting/export filters
+per layer, not as a global filter that hides component-routing spans.
+The [compiled Stockroom example](docs/developer-guide/stockroom/src/main.rs)
+demonstrates composition, setup-failure cleanup and awaited application shutdown.
+
+Keep the logging runtime until all its instances have finished. Await
+`logging.shutdown(timeout)` to close admission, drain accepted records and join
+its worker. Timeout or cancellation retains cleanup ownership so shutdown can
+be retried. Default-service shutdown is terminal: its installed global subscriber
+cannot be replaced, and subsequent automatic setup returns `LoggingError::Closed`.
+`logging.flush()` waits for earlier accepted messages without closing capture.
+Full/closed transport losses are exposed by `logging.losses()` and non-recursive,
+rate-limited stderr diagnostics. These logs are not a durable audit ledger.
+
+Migration notes:
+
+- `get_or_init_global_registry()` is passive; use a logging initializer when
+  setup is intended. Plain library construction still initializes defaults.
+- Standalone examples and component integration tests initialize the Drasi
+  default service instead of installing a competing `env_logger`. The examples
+  use the same INFO/stdout defaults as plain library construction; `RUST_LOG`
+  remains the verbosity override. Custom stderr output is demonstrated by
+  Stockroom's explicitly composed host.
+- `ComponentLogLayer::new` takes a runtime, not a registry. Prefer
+  `ComponentLogRuntime::layer()` for the independently filtered layer.
+- Source/reaction runtime contexts include an optional host-local `log_binding`.
+  Their constructors remain usable; struct literals must supply this field.
+  The binding does not cross the legacy ABI. Host callbacks use its actual key
+  and destination instead of a mandatory global registry or plugin-supplied key.
+- Log-history removal now returns a result and is ordered after accepted capture
+  messages, so queued stop logs do not recreate history that was just removed.
+- Legacy plugin forwarding uses log-only policy, never the subscriber's maximum
+  span level. Callbacks enforce target/level policy before history admission.
+  Span/field directives cannot be reconstructed at that boundary and are
+  reported as unsupported; use a static target/level capture policy for legacy
+  plugins. Forwarded console messages use the `drasi_plugin` target.
 
 ### Subscribing to Component Logs
 
@@ -773,11 +829,71 @@ pub struct LogMessage {
     pub message: String,
     pub instance_id: String,          // DrasiLib instance that owns the component
     pub component_id: String,         // e.g., "my-source"
-    pub component_type: ComponentType, // Source, Query, or Reaction
+    pub component_type: ComponentLogType, // Includes native execution roles
 }
 ```
 
 Standard `log::info!()` and `tracing::info!()` macros both work inside plugin code — logs are automatically routed to the component that spawned the task.
+
+## Telemetry foundations
+
+`observability` exposes shared catalogue descriptors, `TelemetryProfile`,
+`TelemetrySettings`, `TelemetryOptions`, parent-based sampling decisions and
+validated metric registration. The existing snapshot-oriented `metrics` module,
+inspection APIs and profiler are unchanged.
+
+| Profile | Eligible observations |
+|---|---|
+| `Off` | No new tracing or metrics; ordinary logging remains available |
+| `Basic` | Basic catalogue entries |
+| `Debug` | Basic plus debug operation detail |
+| `Persistence` | Basic plus supported persistence entries |
+
+This is the foundations slice: resolving a profile does **not** add production
+graph instrumentation. Native metric callbacks, portable trace propagation,
+exporters and handled-branch latency remain unimplemented. Explicit requests
+through `require_native_metrics()` or `require_distributed_tracing()` fail;
+the deferred latency instrument never registers. No zero-valued production
+series are fabricated.
+
+Use `TelemetrySettings::new(profile).with_metrics(false)` for tracing-only
+policy, or `.with_tracing(false)` for metrics-only policy. Metric exclusions are
+literal substrings, not globs; an empty substring excludes all metrics. Trace
+sampling never samples metrics. A child inherits its parent's decision; a new
+root consults the configured policy once. Sampling ratios must be finite and
+within `[0, 1]`.
+
+The host creates one `MetricRegistrationContext` per supplied
+`Arc<dyn metrics::Recorder + Send + Sync>` and clones it into all graphs and
+static SDK integrations targeting that recorder. Pass it through
+`TelemetryOptions::with_metric_context(...)` before components register/cache
+handles. No global installation is required when the recorder is supplied.
+Do not construct independent contexts to bypass cross-instance conflicts.
+Cached no-op handles are not rebound when a recorder is installed later.
+
+Registration is atomic across callers: the same emitted name must retain its
+type, unit and label schema. Label order is normalized; different permitted
+identity values form distinct series. Disabled/excluded registrations consume
+no state and do not call the recorder. Contexts for different recorders are
+independent. Definitions are retained for the recorder's lifetime, not evicted
+on component replacement.
+
+`RegistrationLimits::default()` permits 256 name bytes, 1,024 description bytes,
+16 labels (including identity), 64 bytes per label key, 1,024 bytes per label
+value, 1,024 instrument definitions and 16,384 distinct series per context.
+Limits must be positive; exhaustion and invalid enabled registrations return
+typed errors. Dimensionless catalogue units map to facade `Unit::Count`;
+durations use `Unit::Seconds`. Generation, trace IDs, sequences and raw errors
+are not metric labels.
+
+Library graphs use the library instance ID. Direct graphs with either signal
+enabled require `TelemetryOptions::with_instance_id(...)`; construction with
+telemetry off stays passive. Hosts own namespace uniqueness. Policies,
+registration contexts and logging bindings are runtime-only and never enter
+graph definitions, business payloads or replay hashes. Factories receive the
+actual owning graph's policy/scope through `ConstructionContext::telemetry()`,
+including additions and replacements; a temporary assembly graph is not the
+owner.
 
 ---
 

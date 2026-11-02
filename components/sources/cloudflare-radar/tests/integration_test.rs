@@ -173,9 +173,7 @@ fn empty_hijack_response() -> Value {
 #[tokio::test]
 #[ignore]
 async fn test_cloudflare_radar_hijack_changes() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (container, admin_base) = setup_wiremock().await?;
     let api_base_url = format!("{admin_base}/client/v4");

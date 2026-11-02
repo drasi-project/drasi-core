@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use drasi_lib::channels::events::{ComponentEvent, ComponentStatus, ComponentType};
 use drasi_lib::channels::{ComponentUpdate, ComponentUpdateSender};
-use drasi_lib::observability::{ComponentEventHistory, ComponentLogRegistry, LogLevel, LogMessage};
+use drasi_lib::observability::{
+    ComponentEventHistory, ComponentLogRegistry, ComponentLogType, LogLevel, LogMessage,
+};
 use drasi_plugin_sdk::ffi::{
     FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, FfiLogLevelFilter,
     LifecycleCallbackFn, LogCallbackFn,
@@ -43,7 +45,7 @@ pub struct CallbackContext {
     pub instance_id: String,
     /// Handle to the host tokio runtime for dispatching async callback work.
     pub runtime_handle: tokio::runtime::Handle,
-    /// The global log registry (shared across all DrasiLib instances).
+    /// The selected host-local log destination.
     pub log_registry: Arc<ComponentLogRegistry>,
     /// The event history for the owning DrasiLib instance's sources.
     pub source_event_history: Arc<RwLock<ComponentEventHistory>>,
@@ -79,9 +81,12 @@ impl CallbackContext {
 pub struct InstanceCallbackContext {
     /// The DrasiLib instance ID.
     pub instance_id: String,
+    /// Host-assigned identity and log category; plugin fields cannot reroute the record.
+    pub component_id: String,
+    pub component_type: ComponentLogType,
     /// Handle to the host tokio runtime for dispatching async callback work.
     pub runtime_handle: tokio::runtime::Handle,
-    /// The global log registry.
+    /// The selected host-local log destination.
     pub log_registry: Arc<ComponentLogRegistry>,
     /// Lifecycle mailbox supplied by the graph-owned adapter.
     pub update_tx: ComponentUpdateSender,
@@ -97,56 +102,140 @@ impl InstanceCallbackContext {
     }
 }
 
-/// Compute the host's effective log level for plugin log forwarding.
-///
-/// Passed to plugins at load time so they can drop filtered-out records
-/// before formatting them or crossing the FFI. Sources, in order:
-///
-/// 1. The tracing subscriber's max level, when a subscriber is installed.
-///    drasi-lib initializes tracing with an `EnvFilter`, so this reflects
-///    `RUST_LOG` (the `log` crate's max level does not: the LogTracer bridge
-///    pins it at `Trace`). `RUST_LOG=off` is honored: plugins are told `Off`
-///    and forward nothing.
-/// 2. The `log` crate's max level, when set to something other than `Off`
-///    (env_logger-style hosts; see the NOTE below on why `Off` cannot be
-///    honored from this source).
-/// 3. `Trace` when neither is configured (e.g. tests): forward everything.
-///
-/// The tracing max level collapses per-target directives to the most
-/// verbose one (`RUST_LOG=info,my_module=trace` reports `Trace`), so
-/// plugins may over-forward relative to the host filter but never
-/// under-forward.
+/// Conservative log-only forwarding limit. Never infer this from tracing's
+/// subscriber-wide maximum: operation-span layers can raise that independently.
+/// Custom hosts can supply a policy to `load_plugin_from_path_with_log_policy`.
 pub fn effective_host_log_level() -> FfiLogLevelFilter {
-    use tracing::level_filters::LevelFilter as TracingFilter;
-    // `LevelFilter::current()` alone cannot distinguish "no subscriber
-    // installed" from "subscriber installed with everything filtered off":
-    // both read OFF. Ask the dispatcher whether a real subscriber is active
-    // so a host configured for silence gets silence, not everything.
-    let tracing_installed =
-        tracing::dispatcher::get_default(|d| !d.is::<tracing::subscriber::NoSubscriber>());
-    if tracing_installed {
-        return match TracingFilter::current() {
-            TracingFilter::OFF => FfiLogLevelFilter::Off,
-            TracingFilter::ERROR => FfiLogLevelFilter::Error,
-            TracingFilter::WARN => FfiLogLevelFilter::Warn,
-            TracingFilter::INFO => FfiLogLevelFilter::Info,
-            TracingFilter::DEBUG => FfiLogLevelFilter::Debug,
-            _ => FfiLogLevelFilter::Trace,
-        };
+    match configured_host_log_level() {
+        Ok(level) => FfiLogLevelFilter::from_level_filter(level.unwrap_or(log::LevelFilter::Trace)),
+        Err(error) => {
+            eprintln!("drasi-host-sdk: cannot determine logging policy: {error:#}");
+            FfiLogLevelFilter::Off
+        }
+    }
+}
+
+pub(crate) fn configured_host_log_level() -> anyhow::Result<Option<log::LevelFilter>> {
+    if let Some(level) = drasi_lib::observability::default_log_level()? {
+        return Ok(Some(level));
     }
     let log_level = log::max_level();
     if log_level != log::LevelFilter::Off {
-        return FfiLogLevelFilter::from_level_filter(log_level);
+        return Ok(Some(log_level));
     }
-    // NOTE: the `log` crate reads `Off` both when no logger was ever
-    // installed (the default) and when a pure-`log` host explicitly
-    // configured silence (e.g. env_logger with RUST_LOG=off); its public
-    // API cannot distinguish the two. We bias toward forwarding so
-    // unconfigured hosts and bare test binaries still see plugin logs. A
-    // `log`-only host that wants silence should call
-    // `LoadedPlugin::set_log_level(FfiLogLevelFilter::Off)` after its
-    // logging setup.
-    FfiLogLevelFilter::Trace
+    // The log facade cannot distinguish an explicit Off from no logger.
+    Ok(None)
+}
+
+pub(crate) struct PluginLogForwarding {
+    setter: Option<extern "C" fn(FfiLogLevelFilter)>,
+    maximum: std::sync::Mutex<Option<log::LevelFilter>>,
+}
+
+impl PluginLogForwarding {
+    pub(crate) fn shared(
+        setter: Option<extern "C" fn(FfiLogLevelFilter)>,
+        initial: Option<log::LevelFilter>,
+    ) -> anyhow::Result<Arc<Self>> {
+        type Forwarders = std::collections::HashMap<usize, std::sync::Weak<PluginLogForwarding>>;
+        static FORWARDERS: std::sync::OnceLock<std::sync::Mutex<Forwarders>> =
+            std::sync::OnceLock::new();
+        let Some(setter) = setter else {
+            return Ok(Arc::new(Self::new(None, initial)));
+        };
+        // Aliased/repeated dlopen calls share plugin globals. Libraries are
+        // process-pinned, so the setter address identifies that shared state.
+        let key = setter as usize;
+        let mut forwarders = FORWARDERS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| anyhow::anyhow!("shared plugin log forwarding state poisoned"))?;
+        forwarders.retain(|_, state| state.strong_count() > 0);
+        if let Some(existing) = forwarders.get(&key).and_then(std::sync::Weak::upgrade) {
+            if let Some(level) = initial {
+                existing.include(level)?;
+            }
+            return Ok(existing);
+        }
+        let forwarding = Arc::new(Self::new(Some(setter), initial));
+        forwarders.insert(key, Arc::downgrade(&forwarding));
+        Ok(forwarding)
+    }
+
+    pub(crate) fn new(
+        setter: Option<extern "C" fn(FfiLogLevelFilter)>,
+        initial: Option<log::LevelFilter>,
+    ) -> Self {
+        let forwarding = Self {
+            setter,
+            maximum: std::sync::Mutex::new(initial),
+        };
+        forwarding.apply(initial.unwrap_or(log::LevelFilter::Trace));
+        forwarding
+    }
+
+    fn apply(&self, level: log::LevelFilter) {
+        if let Some(setter) = self.setter {
+            setter(FfiLogLevelFilter::from_level_filter(level));
+        }
+    }
+
+    /// Retain the most verbose bound scope, without an unbounded scope table.
+    /// Per-destination filtering still applies after a scope is retired.
+    pub(crate) fn include(&self, level: log::LevelFilter) -> anyhow::Result<()> {
+        let mut maximum = self
+            .maximum
+            .lock()
+            .map_err(|_| anyhow::anyhow!("plugin log forwarding state poisoned"))?;
+        let next = maximum.map_or(level, |current| current.max(level));
+        *maximum = Some(next);
+        self.apply(next);
+        Ok(())
+    }
+
+    pub(crate) fn set(&self, level: FfiLogLevelFilter) -> anyhow::Result<()> {
+        let level = match level {
+            FfiLogLevelFilter::Off => log::LevelFilter::Off,
+            FfiLogLevelFilter::Error => log::LevelFilter::Error,
+            FfiLogLevelFilter::Warn => log::LevelFilter::Warn,
+            FfiLogLevelFilter::Info => log::LevelFilter::Info,
+            FfiLogLevelFilter::Debug => log::LevelFilter::Debug,
+            FfiLogLevelFilter::Trace => log::LevelFilter::Trace,
+        };
+        let mut maximum = self
+            .maximum
+            .lock()
+            .map_err(|_| anyhow::anyhow!("plugin log forwarding state poisoned"))?;
+        *maximum = Some(level);
+        self.apply(level);
+        Ok(())
+    }
+}
+
+pub(crate) fn log_binding_failure(
+    updates: &ComponentUpdateSender,
+    component_id: &str,
+    error: anyhow::Error,
+) {
+    let message = format!("component log binding failed: {error:#}");
+    eprintln!("drasi-host-sdk: {message}");
+    if let Err(error) = updates.try_send(ComponentUpdate::Status {
+        component_id: component_id.into(),
+        status: ComponentStatus::Error,
+        message: Some(message),
+    }) {
+        eprintln!("drasi-host-sdk: failed to report log binding failure: {error}");
+    }
+}
+
+pub(crate) fn bind_log_policy(
+    registry: &ComponentLogRegistry,
+    forwarding: Option<&PluginLogForwarding>,
+) -> anyhow::Result<()> {
+    if let (Some(level), Some(forwarding)) = (registry.legacy_log_level()?, forwarding) {
+        forwarding.include(level)?;
+    }
+    Ok(())
 }
 
 fn ffi_log_level_to_log_level(level: FfiLogLevel) -> LogLevel {
@@ -210,12 +299,14 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
         let entry = unsafe { &*entry };
         let plugin_id = unsafe { entry.plugin_id.to_string() };
         let message = unsafe { entry.message.to_string() };
+        let target = unsafe { entry.target.to_string() };
         let instance_id = unsafe { entry.instance_id.to_string() };
         let component_id = unsafe { entry.component_id.to_string() };
         let level = entry.level;
 
         // Always forward to host's log framework
         log::log!(
+            target: drasi_lib::observability::PLUGIN_LOG_TARGET,
             ffi_log_level_to_std_level(level),
             "[plugin:{}] {}",
             if component_id.is_empty() {
@@ -240,7 +331,7 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
             // try_log may panic from inside tokio's RwLock::try_write under
             // certain race conditions; catch_unwind above absorbs that.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                registry.try_log(log_message);
+                report_log_admission(registry.try_log_with_target(&target, log_message));
             }));
         }
     }));
@@ -312,8 +403,7 @@ pub fn default_lifecycle_callback_fn() -> LifecycleCallbackFn {
 /// Per-instance log callback that routes logs using InstanceCallbackContext.
 ///
 /// This callback is set during SourceProxy.initialize() via FfiRuntimeContext.
-/// It uses the `instance_id` and `component_id` from the FfiLogEntry (set by
-/// the plugin's TLS-aware FfiLogger) to construct the correct ComponentLogKey.
+/// Host-assigned instance/component identity and category determine the log key.
 /// # Safety
 /// `entry` must be a valid pointer to an `FfiLogEntry`. `ctx` may be null or
 /// must point to a valid `InstanceCallbackContext`.
@@ -323,12 +413,13 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
         let entry = unsafe { &*entry };
         let plugin_id = unsafe { entry.plugin_id.to_string() };
         let message = unsafe { entry.message.to_string() };
-        let instance_id = unsafe { entry.instance_id.to_string() };
+        let target = unsafe { entry.target.to_string() };
         let component_id = unsafe { entry.component_id.to_string() };
         let level = entry.level;
 
         // Forward to host log framework
         log::log!(
+            target: drasi_lib::observability::PLUGIN_LOG_TARGET,
             ffi_log_level_to_std_level(level),
             "[plugin:{}] {}",
             if component_id.is_empty() {
@@ -342,24 +433,12 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
         // Route into ComponentLogRegistry
         if !ctx.is_null() {
             let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
-            // Use instance_id/component_id from the log entry (set by TLS in plugin)
-            // Fall back to context's instance_id if entry doesn't have them
-            let log_instance_id = if instance_id.is_empty() {
-                &context.instance_id
-            } else {
-                &instance_id
-            };
-            let log_component_id = if component_id.is_empty() {
-                &plugin_id
-            } else {
-                &component_id
-            };
             let log_message = LogMessage::with_instance(
                 ffi_log_level_to_log_level(level),
                 message,
-                log_instance_id,
-                log_component_id,
-                ComponentType::Source,
+                &context.instance_id,
+                &context.component_id,
+                context.component_type.clone(),
             );
             let registry = context.log_registry.clone();
             // Use try_log (non-blocking) to avoid spawning async tasks that can
@@ -367,10 +446,24 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             // try_log internally calls tokio's RwLock::try_write which can panic
             // with `unreachable!` under certain races; absorb that panic.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                registry.try_log(log_message);
+                report_log_admission(registry.try_log_with_target(&target, log_message));
             }));
         }
     }));
+}
+
+fn report_log_admission(result: drasi_lib::observability::LoggingResult<bool>) {
+    if !matches!(result, Ok(true)) {
+        static LOSSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = LOSSES
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        if count.is_power_of_two() {
+            eprintln!(
+                "drasi-host-sdk: component log destination rejected {count} records: {result:?}"
+            );
+        }
+    }
 }
 
 /// Per-instance lifecycle callback that sends events through the SourceManager's
@@ -424,4 +517,32 @@ pub fn instance_log_callback_fn() -> LogCallbackFn {
 /// Get the per-instance lifecycle callback function pointer.
 pub fn instance_lifecycle_callback_fn() -> LifecycleCallbackFn {
     instance_lifecycle_callback
+}
+
+#[cfg(test)]
+mod forwarding_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static LEVEL: AtomicU8 = AtomicU8::new(0);
+    extern "C" fn set_level(level: FfiLogLevelFilter) {
+        LEVEL.store(level as u8, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn scopes_and_repeated_library_loads_share_a_conservative_ceiling() {
+        let first = PluginLogForwarding::shared(Some(set_level), None).unwrap();
+        first.include(log::LevelFilter::Info).unwrap();
+        assert_eq!(LEVEL.load(Ordering::SeqCst), FfiLogLevelFilter::Info as u8);
+        let second =
+            PluginLogForwarding::shared(Some(set_level), Some(log::LevelFilter::Off)).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        second.include(log::LevelFilter::Off).unwrap();
+        assert_eq!(LEVEL.load(Ordering::SeqCst), FfiLogLevelFilter::Info as u8);
+        second.include(log::LevelFilter::Debug).unwrap();
+        first.include(log::LevelFilter::Info).unwrap();
+        assert_eq!(LEVEL.load(Ordering::SeqCst), FfiLogLevelFilter::Debug as u8);
+        first.set(FfiLogLevelFilter::Off).unwrap();
+        assert_eq!(LEVEL.load(Ordering::SeqCst), FfiLogLevelFilter::Off as u8);
+    }
 }

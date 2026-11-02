@@ -296,6 +296,7 @@ pub struct ReactionPluginHost {
     deferred_validation: bool,
     runtime_metrics: Option<RuntimeReactionMetrics>,
     resource_observer: Mutex<Option<Arc<dyn crate::context::ComponentResourceObserver>>>,
+    log_binding: Mutex<Option<crate::observability::ComponentLogBinding>>,
 }
 
 pub(crate) struct RuntimeReactionMetrics {
@@ -425,6 +426,7 @@ impl ReactionPluginHost {
             deferred_validation,
             runtime_metrics: None,
             resource_observer: Mutex::new(None),
+            log_binding: Mutex::new(None),
         }))
     }
     pub fn id(&self) -> &str {
@@ -916,6 +918,17 @@ impl ReactionPluginHost {
         }
         self.observations.wait_running().await
     }
+    pub(crate) fn set_log_binding(
+        &self,
+        binding: crate::observability::ComponentLogBinding,
+    ) -> anyhow::Result<()> {
+        *self
+            .log_binding
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reaction log binding poisoned"))? = Some(binding);
+        Ok(())
+    }
+
     pub(crate) fn set_resource_observer(
         &self,
         observer: Arc<dyn crate::context::ComponentResourceObserver>,
@@ -949,6 +962,11 @@ impl ReactionPluginHost {
                 .resource_observer
                 .lock()
                 .map_err(|_| anyhow::anyhow!("reaction resource observer binding poisoned"))?
+                .clone();
+            context.log_binding = self
+                .log_binding
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reaction log binding poisoned"))?
                 .clone();
             context.snapshot_fetcher = Some(Arc::new(Fetcher {
                 catalog: self.catalog.clone(),
@@ -1343,6 +1361,12 @@ impl ComponentFactory for ReactionPluginAdapterFactory {
             .ok_or_else(|| {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing reaction host"))
             })?;
+        if host.owned {
+            if let Some(binding) = context.component_log_binding() {
+                host.set_log_binding(binding)
+                    .map_err(ComponentCreationError::terminal)?;
+            }
+        }
         let catalog = context
             .resources::<QueryResultsCatalog>("catalog")
             .map_err(ComponentCreationError::terminal)?

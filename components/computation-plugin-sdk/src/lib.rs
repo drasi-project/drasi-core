@@ -6,6 +6,13 @@
 
 pub use drasi_computation_contracts::{PortFormatAlternative, PortFormatCatalogue, SinkBatching};
 pub use drasi_computation_plugin_abi as abi;
+/// Registration foundations for statically linked use. Native callback
+/// transport and generation-scoped metric handles are not implemented.
+pub mod telemetry {
+    pub use drasi_computation_contracts::telemetry::facade::*;
+    pub use drasi_computation_contracts::telemetry::*;
+    pub use metrics::{Counter, Gauge, Histogram, Recorder};
+}
 pub mod activation_credentials;
 pub mod admission;
 pub mod bootstrap;

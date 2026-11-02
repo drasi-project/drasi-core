@@ -84,6 +84,7 @@ pub struct SourcePluginHost {
     observations: PluginObservations,
     expected_subscriptions: AtomicUsize,
     subscription_observer: Option<Arc<dyn SourceSubscriptionObserver>>,
+    log_binding: Mutex<Option<crate::observability::ComponentLogBinding>>,
 }
 
 impl SourcePluginHost {
@@ -136,6 +137,7 @@ impl SourcePluginHost {
             observations,
             expected_subscriptions: AtomicUsize::new(1),
             subscription_observer: None,
+            log_binding: Mutex::new(None),
         })
     }
     pub fn id(&self) -> &str {
@@ -153,6 +155,17 @@ impl SourcePluginHost {
     }
     pub fn services(&self) -> &LegacyPluginServices {
         &self.services
+    }
+
+    pub(crate) fn set_log_binding(
+        &self,
+        binding: crate::observability::ComponentLogBinding,
+    ) -> anyhow::Result<()> {
+        *self
+            .log_binding
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source log binding poisoned"))? = Some(binding);
+        Ok(())
     }
     pub fn bootstrap_resource(&self) -> anyhow::Result<Option<ResourceHandle>> {
         Ok(self
@@ -268,6 +281,11 @@ impl SourcePluginHost {
                     self.services.identity.clone(),
                 );
                 context.wal_provider = self.services.wal.clone();
+                context.log_binding = self
+                    .log_binding
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("source log binding poisoned"))?
+                    .clone();
                 let source = self.source()?;
                 self.with_observations(async {
                     source.initialize(context).await;
@@ -1222,6 +1240,13 @@ impl ComponentFactory for SourcePluginAdapterFactory {
             .ok_or_else(|| {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing source host"))
             })?;
+        if source.owned {
+            if let Some(binding) = context.component_log_binding() {
+                source
+                    .set_log_binding(binding)
+                    .map_err(ComponentCreationError::terminal)?;
+            }
+        }
         let subscription = context
             .resources::<LegacySourceSubscription>("subscription")
             .map_err(ComponentCreationError::terminal)?

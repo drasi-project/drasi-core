@@ -48,9 +48,7 @@ const TEST_TABLE: &str = "users";
 const TEST_PUBLICATION: &str = "drasi_test_pub";
 
 fn init_logging() {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 }
 
 fn slot_name() -> String {

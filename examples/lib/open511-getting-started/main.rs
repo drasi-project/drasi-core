@@ -22,7 +22,7 @@ use drasi_source_open511::Open511Source;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     println!("╔══════════════════════════════════════════════════════╗");
     println!("║       Open511 Road Events — Drasi Live Monitor      ║");

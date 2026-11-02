@@ -10,6 +10,7 @@ readme = "README.md"
 [features]
 default = []
 test-support = []
+metrics-facade = ["dep:metrics"]
 
 [dependencies]
 drasi-core-types = { workspace = true }
@@ -30,6 +31,7 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+metrics = { workspace = true, optional = true }
 
 [lints]
 workspace = true

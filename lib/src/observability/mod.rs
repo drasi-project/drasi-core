@@ -19,10 +19,14 @@
 
 mod component_log;
 mod event_history;
+mod log_runtime;
 mod logging;
+mod telemetry;
 mod tracing_layer;
 
 pub use component_log::*;
 pub use event_history::*;
+pub use log_runtime::*;
 pub use logging::*;
+pub use telemetry::*;
 pub use tracing_layer::*;

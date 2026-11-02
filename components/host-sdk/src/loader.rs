@@ -66,7 +66,7 @@ pub struct LoadedPlugin {
     set_config_resolver_fn: extern "C" fn(*mut c_void, ConfigResolverFn),
     /// Log level injection function pointer (saved from FfiPluginRegistration).
     /// `None` for plugins built against an SDK older than 0.12.0.
-    set_log_level_fn: Option<extern "C" fn(FfiLogLevelFilter)>,
+    log_forwarding: Arc<crate::callbacks::PluginLogForwarding>,
     /// Keep the library loaded.
     _library: Arc<Library>,
 }
@@ -104,9 +104,14 @@ impl LoadedPlugin {
     /// their logging setup changes. No-op for plugins built against an SDK
     /// older than 0.12.0.
     pub fn set_log_level(&self, level: FfiLogLevelFilter) {
-        if let Some(f) = self.set_log_level_fn {
-            f(level);
+        if let Err(error) = self.try_set_log_level(level) {
+            eprintln!("drasi-host-sdk: failed to set plugin log policy: {error:#}");
         }
+    }
+
+    /// Explicit host override for all scopes using this loaded library.
+    pub fn try_set_log_level(&self, level: FfiLogLevelFilter) -> anyhow::Result<()> {
+        self.log_forwarding.set(level)
     }
 }
 
@@ -353,6 +358,29 @@ pub fn load_plugin_from_path(
         log_callback,
         lifecycle_ctx,
         lifecycle_callback,
+        None,
+    )
+}
+
+/// Load a legacy plugin with an explicit log-only policy, independent of trace
+/// layers. Later component bindings may raise the shared forwarding ceiling.
+pub fn load_plugin_from_path_with_log_policy(
+    path: &Path,
+    log_ctx: *mut c_void,
+    log_callback: LogCallbackFn,
+    lifecycle_ctx: *mut c_void,
+    lifecycle_callback: LifecycleCallbackFn,
+    policy: &drasi_lib::observability::LogPolicy,
+) -> anyhow::Result<LoadedPlugin> {
+    let library = Arc::new(unsafe { Library::new(path)? });
+    load_legacy_plugin_from_library(
+        path,
+        library,
+        log_ctx,
+        log_callback,
+        lifecycle_ctx,
+        lifecycle_callback,
+        Some(policy.legacy_max_level()?),
     )
 }
 
@@ -380,6 +408,7 @@ pub fn load_plugin_family_from_path(
         log_callback,
         lifecycle_ctx,
         lifecycle_callback,
+        None,
     )
     .map(LoadedPluginFamily::Legacy)
 }
@@ -391,7 +420,12 @@ fn load_legacy_plugin_from_library(
     log_callback: LogCallbackFn,
     lifecycle_ctx: *mut c_void,
     lifecycle_callback: LifecycleCallbackFn,
+    log_policy: Option<log::LevelFilter>,
 ) -> anyhow::Result<LoadedPlugin> {
+    let log_policy = match log_policy {
+        Some(policy) => Some(policy),
+        None => crate::callbacks::configured_host_log_level()?,
+    };
     // Step 1: Read and validate metadata
     let metadata_info = read_plugin_metadata(&lib);
     let plugin_sdk_version = validate_plugin_metadata(&lib, path)?;
@@ -529,9 +563,8 @@ fn load_legacy_plugin_from_library(
 
     // Report the host's effective log level so the plugin can drop
     // filtered-out records before formatting or crossing the FFI.
-    if let Some(f) = set_log_level_fn {
-        f(crate::callbacks::effective_host_log_level());
-    }
+    let log_forwarding =
+        crate::callbacks::PluginLogForwarding::shared(set_log_level_fn, log_policy)?;
 
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
@@ -544,11 +577,15 @@ fn load_legacy_plugin_from_library(
     let mut secret_store_plugins = Vec::new();
 
     for v in source_vtables.into_iter().flatten() {
-        source_plugins.push(SourcePluginProxy::new(v, lib.clone()));
+        source_plugins.push(
+            SourcePluginProxy::new(v, lib.clone()).with_log_forwarding(log_forwarding.clone()),
+        );
     }
 
     for v in reaction_vtables.into_iter().flatten() {
-        reaction_plugins.push(ReactionPluginProxy::new(v, lib.clone()));
+        reaction_plugins.push(
+            ReactionPluginProxy::new(v, lib.clone()).with_log_forwarding(log_forwarding.clone()),
+        );
     }
 
     for v in bootstrap_vtables.into_iter().flatten() {
@@ -572,7 +609,7 @@ fn load_legacy_plugin_from_library(
         metadata_info,
         file_path: path.to_path_buf(),
         set_config_resolver_fn,
-        set_log_level_fn,
+        log_forwarding,
         _library: lib,
     })
 }

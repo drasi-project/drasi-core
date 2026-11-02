@@ -138,7 +138,7 @@ async fn wait_running(core: &DrasiLib, id: &str) {
 /// Flow: HTTP server → HttpBootstrapProvider → SourceBase → Query engine → get_query_results()
 #[tokio::test]
 async fn test_bootstrapped_nodes_queryable_via_cypher() {
-    let _ = env_logger::try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     // Start a test HTTP server returning 3 User nodes
     let app = Router::new().route(
@@ -239,7 +239,7 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
 /// Uses offset/limit pagination across 3 pages to bootstrap 15 items total.
 #[tokio::test]
 async fn test_paginated_bootstrap_queryable_via_cypher() {
-    let _ = env_logger::try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     // Generate 15 items, serve in pages of 5
     let all_items: Vec<serde_json::Value> = (1..=15)
@@ -360,7 +360,7 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
 /// Bootstraps User nodes and KNOWS relationships, then queries the graph pattern.
 #[tokio::test]
 async fn test_bootstrapped_relationships_queryable_via_cypher() {
-    let _ = env_logger::try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let app = Router::new()
         .route(

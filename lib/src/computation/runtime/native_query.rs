@@ -559,7 +559,7 @@ impl Runtime {
             report.committed && report.summary == OperationSummary::Completed,
             "{kind} removal is incomplete: {report:?}"
         );
-        self.logs.remove_component_by_key(&log_key).await;
+        self.logs.remove_component_by_key(&log_key).await?;
         self.notify();
         Ok(())
     }

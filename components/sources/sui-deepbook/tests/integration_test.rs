@@ -209,9 +209,7 @@ fn mock_event_with_pkg(
 #[tokio::test]
 #[ignore] // Run with: cargo test -p drasi-source-sui-deepbook --test integration_test -- --ignored --nocapture
 async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -323,10 +321,7 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
 async fn test_grpc_transport_receives_events() -> Result<()> {
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init()
-        .ok();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let source = SuiDeepBookSource::builder(SOURCE_ID)
         .with_transport(Transport::Grpc)

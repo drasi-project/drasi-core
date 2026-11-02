@@ -84,7 +84,7 @@ name = "computation_runtime"
 
 [dependencies]
 drasi-core-types = { workspace = true }
-drasi-computation-contracts = { workspace = true }
+drasi-computation-contracts = { workspace = true, features = ["metrics-facade"] }
 drasi-reaction-common = { workspace = true }
 drasi-core = { workspace = true, features = ["computation"] }
 drasi-functions-cypher.workspace = true
@@ -113,6 +113,7 @@ log = { version = "0.4", features = ["std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-log = "0.2"
+metrics = { workspace = true }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"

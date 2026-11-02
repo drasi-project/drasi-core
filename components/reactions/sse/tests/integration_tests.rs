@@ -29,9 +29,7 @@ use tokio::time::sleep;
 #[tokio::test]
 async fn test_sse_basic_integration() -> Result<()> {
     // Initialize logging for test debugging
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     // Create mock source and handle
     let (mock_source, handle) = MockSource::new("test-source")?;
@@ -130,9 +128,7 @@ async fn test_sse_basic_integration() -> Result<()> {
 /// Test SSE with custom templates
 #[tokio::test]
 async fn test_sse_custom_templates_integration() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     // Create mock source
     let (mock_source, handle) = MockSource::new("test-source")?;
@@ -230,9 +226,7 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
 /// (including Aggregation variants) in the default JSON format.
 #[tokio::test]
 async fn test_sse_aggregation_default_format() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, handle) = MockSource::new("test-source")?;
 
@@ -320,9 +314,7 @@ async fn test_sse_aggregation_default_format() -> Result<()> {
 /// to format aggregation output with custom Handlebars templates.
 #[tokio::test]
 async fn test_sse_aggregation_custom_template() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, handle) = MockSource::new("test-source")?;
 
@@ -421,9 +413,7 @@ async fn test_sse_aggregation_custom_template() -> Result<()> {
 /// The second insert produces `Aggregation { before: { sensor_count: 1 }, after: { sensor_count: 2 } }`.
 #[tokio::test]
 async fn test_sse_aggregation_before_after() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, handle) = MockSource::new("test-source")?;
 
@@ -551,9 +541,7 @@ async fn test_sse_aggregation_before_after() -> Result<()> {
 /// Test SSE with multi-path routing
 #[tokio::test]
 async fn test_sse_multi_path_integration() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     // Create mock source
     let (mock_source, handle) = MockSource::new("test-source")?;
@@ -707,9 +695,7 @@ async fn test_sse_multi_path_integration() -> Result<()> {
 /// Test snapshot endpoint returns current query result set
 #[tokio::test]
 async fn test_sse_snapshot_endpoint() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, handle) = MockSource::new("test-source")?;
 
@@ -797,9 +783,7 @@ async fn test_sse_snapshot_endpoint() -> Result<()> {
 /// Test snapshot endpoint returns empty array when query has no results
 #[tokio::test]
 async fn test_sse_snapshot_empty_result() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, _handle) = MockSource::new("test-source")?;
 
@@ -851,9 +835,7 @@ async fn test_sse_snapshot_empty_result() -> Result<()> {
 /// Test snapshot endpoint with large result set streams correctly
 #[tokio::test]
 async fn test_sse_snapshot_large_result() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, handle) = MockSource::new("test-source")?;
 
@@ -1059,9 +1041,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 /// (either from outbox replay or live-results persistence).
 #[tokio::test]
 async fn test_sse_snapshot_recovery_after_restart() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, handle) = MockSource::new("test-source")?;
 

@@ -88,7 +88,7 @@ async fn ensure_topic(bootstrap_servers: &str, topic: &str, partitions: i32) {
 #[tokio::test]
 #[ignore] // Requires Docker
 async fn test_kafka_source_detects_changes() {
-    let _ = env_logger::try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (_kafka_container, bootstrap_servers) = start_kafka().await;
     let topic = "test-orders";
@@ -246,7 +246,7 @@ async fn test_kafka_source_detects_changes() {
 async fn test_kafka_source_custom_mapping() {
     use drasi_source_mapping::{ElementTemplate, ElementType, OperationType, SourceMapping};
 
-    let _ = env_logger::try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (_kafka_container, bootstrap_servers) = start_kafka().await;
     let topic = "test-events";
@@ -414,7 +414,7 @@ async fn produce_order(producer: &FutureProducer, topic: &str, id: &str, total: 
 #[tokio::test]
 #[ignore]
 async fn test_kafka_bootstrap_source_overlap_handover() {
-    let _ = env_logger::try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
     let (_kafka_container, bootstrap_servers) = start_kafka().await;
     let topic = format!(
         "test-handover-{}",

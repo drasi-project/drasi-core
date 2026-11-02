@@ -384,6 +384,7 @@ mod tests {
                 identity_provider: None,
                 wal_provider: None,
                 resource_observer: None,
+                log_binding: None,
             })
             .await;
         source.start().await.unwrap();
@@ -452,6 +453,7 @@ mod tests {
                 identity_provider: None,
                 wal_provider: None,
                 resource_observer: None,
+                log_binding: None,
             })
             .await;
         source.start().await.unwrap();
@@ -969,6 +971,7 @@ mod tests {
                 identity_provider: None,
                 wal_provider: None,
                 resource_observer: None,
+                log_binding: None,
             })
             .await;
         source.start().await.unwrap();

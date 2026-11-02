@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     let source = HyperliquidSource::builder("hl-source")
         .with_network(HyperliquidNetwork::Mainnet)

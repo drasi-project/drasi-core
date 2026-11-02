@@ -680,6 +680,9 @@ impl Component {
 /// independent queues would not preserve component-wide FIFO for that stream.
 pub struct ComputationGraphBuilder {
     id: Arc<str>,
+    telemetry: crate::observability::TelemetryOptions,
+    resolved_telemetry: Option<crate::observability::GraphTelemetry>,
+    logging: Option<crate::observability::ComponentLogRuntime>,
     components: Vec<Component>,
     edges: Vec<(EdgeDefinition, Box<dyn PipeProvider>)>,
     streams: Vec<(Endpoint, StreamId)>,
@@ -704,6 +707,33 @@ pub struct ComputationGraphBuilder {
 }
 
 impl ComputationGraphBuilder {
+    pub fn with_telemetry(
+        mut self,
+        settings: impl Into<crate::observability::TelemetryOptions>,
+    ) -> Self {
+        self.telemetry = settings.into();
+        self.resolved_telemetry = None;
+        self
+    }
+
+    /// Binds capture for factory contexts; never installs a subscriber or logger.
+    pub fn with_component_logging(
+        mut self,
+        logging: crate::observability::ComponentLogRuntime,
+    ) -> Self {
+        self.logging = Some(logging);
+        self
+    }
+
+    pub(crate) fn with_observability(
+        mut self,
+        observability: crate::observability::RuntimeObservability,
+    ) -> Self {
+        self.resolved_telemetry = Some(observability.telemetry);
+        self.logging = observability.logging;
+        self
+    }
+
     pub fn require_recovery(mut self, requirement: super::RecoveryRequirement) -> Self {
         self.recovery_requirements.push(requirement);
         self
@@ -903,6 +933,24 @@ impl ComputationGraphBuilder {
 
     pub fn build(mut self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
+        let telemetry = match self.resolved_telemetry.take() {
+            Some(telemetry) => telemetry,
+            None => self
+                .telemetry
+                .resolve(&self.id, None)
+                .map_err(|error| topology(error.to_string()))?,
+        };
+        if self
+            .logging
+            .as_ref()
+            .is_some_and(|logging| logging.is_closed())
+        {
+            return Err(topology("component logging is closed"));
+        }
+        let observability = crate::observability::RuntimeObservability {
+            logging: self.logging.take(),
+            telemetry,
+        };
         for (name, timeout) in [
             ("construction", self.construction_timeout),
             ("resource construction", self.resource_construction_timeout),
@@ -1368,6 +1416,7 @@ impl ComputationGraphBuilder {
             .clear();
         let graph = ComputationGraph {
             execution_scope: snapshot.id.clone(),
+            observability,
             inspector: super::ComputationInspector::new(
                 desired.clone(),
                 Arc::new(observed.clone()),
@@ -1613,6 +1662,7 @@ pub struct ComputationGraph {
     registry: watch::Sender<Arc<GraphRegistrySnapshot>>,
     inspector: super::ComputationInspector,
     execution_scope: Arc<str>,
+    observability: crate::observability::RuntimeObservability,
     peers: Arc<super::ControlPlane>,
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
     rejected_resources: Vec<Arc<addition::RejectedResources>>,
@@ -1680,9 +1730,17 @@ impl ComputationGraph {
     pub fn inspector(&self) -> super::ComputationInspector {
         self.inspector.clone()
     }
+
+    pub fn telemetry(&self) -> &crate::observability::GraphTelemetry {
+        &self.observability.telemetry
+    }
+
     pub fn builder(id: impl Into<Arc<str>>) -> ComputationGraphBuilder {
         ComputationGraphBuilder {
             id: id.into(),
+            telemetry: crate::observability::TelemetryOptions::default(),
+            resolved_telemetry: None,
+            logging: None,
             components: Vec::new(),
             edges: Vec::new(),
             streams: Vec::new(),

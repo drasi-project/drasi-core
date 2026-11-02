@@ -136,6 +136,7 @@ extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
 /// The host creates this proxy when the plugin factory produces a `SourceVtable`.
 /// All trait method calls dispatch through the vtable function pointers.
 pub struct SourceProxy {
+    log_forwarding: Option<Arc<crate::callbacks::PluginLogForwarding>>,
     vtable: SourceVtable,
     _library: Arc<Library>,
     cached_id: String,
@@ -247,6 +248,7 @@ impl SourceProxy {
         let cached_type_name =
             unsafe { (vtable.type_name_fn)(vtable.state as *const c_void).to_string() };
         Self {
+            log_forwarding: None,
             vtable,
             _library: library,
             cached_id,
@@ -257,6 +259,14 @@ impl SourceProxy {
             resource_report_failed: AtomicBool::new(false),
             plugin_origin: None,
         }
+    }
+
+    fn with_log_forwarding(
+        mut self,
+        forwarding: Option<Arc<crate::callbacks::PluginLogForwarding>>,
+    ) -> Self {
+        self.log_forwarding = forwarding;
+        self
     }
 
     fn with_plugin_origin(mut self, origin: Option<PluginOrigin>) -> Self {
@@ -606,6 +616,24 @@ impl Source for SourceProxy {
     }
 
     async fn initialize(&self, context: SourceRuntimeContext) {
+        let binding = context.log_binding.clone().unwrap_or_else(|| {
+            drasi_lib::observability::ComponentLogBinding {
+                registry: drasi_lib::observability::get_or_init_global_registry(),
+                key: drasi_lib::observability::ComponentLogKey::new(
+                    &context.instance_id,
+                    drasi_lib::observability::ComponentLogType::Source,
+                    &context.source_id,
+                ),
+            }
+        });
+        let log_registry = binding.registry;
+        if let Err(error) =
+            crate::callbacks::bind_log_policy(&log_registry, self.log_forwarding.as_deref())
+        {
+            self.resource_report_failed.store(true, Ordering::Release);
+            crate::callbacks::log_binding_failure(&context.update_tx, &context.source_id, error);
+            return;
+        }
         let identity_provider = crate::proxies::identity_resolution::resolve_identity_provider(
             &self.identity_provider,
             context.identity_provider.clone(),
@@ -650,9 +678,11 @@ impl Source for SourceProxy {
         // ComponentLogRegistry and lifecycle events through the SourceManager's
         // event channel (same path as static sources).
         let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
-            instance_id: instance_id_str.clone(),
+            instance_id: binding.key.instance_id,
+            component_id: binding.key.component_id,
+            component_type: binding.key.component_type,
             runtime_handle: tokio::runtime::Handle::current(),
-            log_registry: drasi_lib::observability::get_or_init_global_registry(),
+            log_registry,
             update_tx: context.update_tx.clone(),
         });
 
@@ -778,6 +808,7 @@ impl Drop for SourceProxy {
 ///
 /// The host uses this to create `SourceProxy` instances from configuration.
 pub struct SourcePluginProxy {
+    log_forwarding: Option<Arc<crate::callbacks::PluginLogForwarding>>,
     vtable: SourcePluginVtable,
     library: Arc<Library>,
     cached_kind: String,
@@ -799,6 +830,7 @@ impl SourcePluginProxy {
             unsafe { (vtable.config_schema_name_fn)(vtable.state as *const c_void).to_string() };
         let plugin_version = read_plugin_version(&library);
         Self {
+            log_forwarding: None,
             vtable,
             library,
             cached_kind,
@@ -807,6 +839,14 @@ impl SourcePluginProxy {
             plugin_id: String::new(),
             plugin_version,
         }
+    }
+
+    pub(crate) fn with_log_forwarding(
+        mut self,
+        forwarding: Arc<crate::callbacks::PluginLogForwarding>,
+    ) -> Self {
+        self.log_forwarding = Some(forwarding);
+        self
     }
 
     /// The unique identifier of the plugin that provided this descriptor.
@@ -868,10 +908,12 @@ impl SourcePluginDescriptor for SourcePluginProxy {
 
         let vtable = unsafe { *Box::from_raw(vtable_ptr) };
         Ok(Box::new(
-            SourceProxy::new(vtable, self.library.clone()).with_plugin_origin(known_plugin_origin(
-                &self.plugin_id,
-                self.plugin_version.as_deref(),
-            )),
+            SourceProxy::new(vtable, self.library.clone())
+                .with_log_forwarding(self.log_forwarding.clone())
+                .with_plugin_origin(known_plugin_origin(
+                    &self.plugin_id,
+                    self.plugin_version.as_deref(),
+                )),
         ))
     }
 }

@@ -238,6 +238,7 @@ async fn open(
     // ANCHOR: managed-builder
     let core = DrasiLib::builder()
         .with_id("stockroom-managed")
+        .with_component_logging(crate::component_logging()?)
         .with_component_factories(factories.clone())
         .with_management_resources(Arc::new(MemoryResources))
         .with_configuration_store(store)

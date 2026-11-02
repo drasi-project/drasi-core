@@ -222,6 +222,16 @@ impl LegacySourceAdapter {
         stream: StreamId,
         resource: Arc<LegacySourceResource>,
     ) -> anyhow::Result<Self> {
+        Self::bind_with_logging(graph_id, id, stream, resource, None).await
+    }
+
+    pub async fn bind_with_logging(
+        graph_id: &str,
+        id: ComponentId,
+        stream: StreamId,
+        resource: Arc<LegacySourceResource>,
+        logging: Option<crate::observability::ComponentLogBinding>,
+    ) -> anyhow::Result<Self> {
         if resource.source.dispatch_mode() != DispatchMode::Channel {
             anyhow::bail!("legacy adapter requires an isolated Channel subscription; Broadcast would hide source-side loss");
         }
@@ -233,13 +243,14 @@ impl LegacySourceAdapter {
             resource.needs_stop.store(true, Ordering::Release);
             let (sender, receiver) = mpsc::channel(64);
             updates = Some(receiver);
-            let context = SourceRuntimeContext::new(
+            let mut context = SourceRuntimeContext::new(
                 format!("computation:{graph_id}"),
                 resource.source.id(),
                 None,
                 sender,
                 None,
             );
+            context.log_binding = logging;
             with_observations(resource.source.id(), &mut updates, async {
                 resource.source.initialize(context).await;
                 Ok(())
@@ -441,10 +452,16 @@ impl ComponentFactory for LegacySourceFactory {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| ComponentCreationError::terminal(anyhow::anyhow!("missing stream")))?;
         let stream = StreamId::try_new(stream).map_err(ComponentCreationError::terminal)?;
-        let adapter =
-            LegacySourceAdapter::bind(&context.graph_id, context.component_id, stream, source)
-                .await
-                .map_err(ComponentCreationError::retryable)?;
+        let logging = context.component_log_binding();
+        let adapter = LegacySourceAdapter::bind_with_logging(
+            &context.graph_id,
+            context.component_id,
+            stream,
+            source,
+            logging,
+        )
+        .await
+        .map_err(ComponentCreationError::retryable)?;
         Ok(ConstructedComponent::source(Box::new(adapter)))
     }
 }

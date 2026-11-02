@@ -794,6 +794,8 @@ It is provided during `initialize()` and includes:
 - optional WAL provider
 - optional identity provider
 - runtime instance metadata used for log routing
+- optional host-local `log_binding`, containing the actual log destination/key;
+  this Rust value is not serialized across plugin FFI
 
 Use the context through `SourceBase`:
 

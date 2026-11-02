@@ -65,9 +65,7 @@ fn reserve_port() -> Result<u16> {
 
 #[tokio::test]
 async fn test_dashboard_reaction_end_to_end() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, source_handle) = MockSource::new("test-source")?;
 
@@ -252,9 +250,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
 /// can't keep talking to (or reuse a pooled connection against) the old server.
 #[tokio::test]
 async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let (mock_source, _source_handle) = MockSource::new("shutdown-source")?;
 

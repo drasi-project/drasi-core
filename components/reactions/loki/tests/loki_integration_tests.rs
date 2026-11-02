@@ -13,7 +13,7 @@ use loki_helpers::{setup_loki, wait_for_line_contains};
 #[tokio::test]
 #[ignore]
 async fn test_loki_reaction_insert_update_delete() {
-    let _ = env_logger::builder().is_test(true).try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let loki = setup_loki()
         .await

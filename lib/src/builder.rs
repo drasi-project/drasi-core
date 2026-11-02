@@ -122,6 +122,8 @@ use drasi_core::models::SourceMiddlewareConfig;
 /// ```
 pub struct DrasiLibBuilder {
     management: Option<crate::management::ManagementOptions>,
+    telemetry: crate::observability::TelemetryOptions,
+    component_logging: Option<crate::observability::ComponentLogRuntime>,
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
@@ -210,6 +212,8 @@ impl DrasiLibBuilder {
     pub fn new() -> Self {
         Self {
             management: None,
+            telemetry: crate::observability::TelemetryOptions::default(),
+            component_logging: None,
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -235,6 +239,25 @@ impl DrasiLibBuilder {
             default_index_backend: None,
             component_batches: Vec::new(),
         }
+    }
+
+    /// Configure new trace/metric collection independently of ordinary logging.
+    pub fn with_telemetry(
+        mut self,
+        settings: impl Into<crate::observability::TelemetryOptions>,
+    ) -> Self {
+        self.telemetry = settings.into();
+        self
+    }
+
+    /// Use host-composed capture instead of installing the default subscriber.
+    /// Attach this runtime's layer to the host subscriber before building.
+    pub fn with_component_logging(
+        mut self,
+        logging: crate::observability::ComponentLogRuntime,
+    ) -> Self {
+        self.component_logging = Some(logging);
+        self
     }
 
     /// Set the server ID.
@@ -778,12 +801,32 @@ impl DrasiLibBuilder {
             self.default_recovery_policy,
             self.default_index_backend,
         ));
+        let telemetry = self
+            .telemetry
+            .resolve("__drasi_lib_runtime__", Some(&runtime_config.id))
+            .map_err(|error| {
+                DrasiError::invalid_config("invalid telemetry settings").with_cause(error)
+            })?;
+        let logging = match self.component_logging {
+            Some(runtime) if runtime.is_closed() => {
+                return Err(DrasiError::invalid_state("component logging is closed")
+                    .with_cause(crate::observability::LoggingError::Closed));
+            }
+            Some(runtime) => runtime,
+            None => crate::observability::init_default_subscriber().map_err(|error| {
+                DrasiError::invalid_state("automatic component logging failed").with_cause(error)
+            })?,
+        };
         crate::computation::runtime::build(
             runtime_config,
             self.source_instances,
             self.reaction_instances,
             self.bootstrap_metadata,
             self.wal_provider,
+            crate::observability::RuntimeObservability {
+                logging: Some(logging),
+                telemetry,
+            },
             #[cfg(feature = "test-support")]
             test_controls,
         )

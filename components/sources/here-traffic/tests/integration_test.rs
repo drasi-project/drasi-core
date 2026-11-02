@@ -237,9 +237,7 @@ async fn mount_incident_mock(
 
 #[tokio::test]
 async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let mock_server = MockServer::start().await;
     let bbox = "52.5,13.3,52.6,13.5";

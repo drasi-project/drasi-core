@@ -64,12 +64,18 @@ pub(crate) async fn build(
     reactions: Vec<ReactionRegistration>,
     bootstraps: Vec<BootstrapRegistration>,
     wal: Option<Arc<dyn crate::wal::WalProvider>>,
+    observability: crate::observability::RuntimeObservability,
     #[cfg(feature = "test-support")] test_controls: BTreeMap<
         String,
         crate::test_support::QueryTestControl,
     >,
 ) -> crate::Result<DrasiLib> {
-    let mut core = DrasiLib::new_with_wal(config.clone(), wal);
+    let mut core = DrasiLib::new_with_observability(
+        config.clone(),
+        DrasiLib::default_middleware_registry(),
+        wal,
+        observability,
+    );
     #[cfg(feature = "test-support")]
     core.computation_runtime
         .test_controls
@@ -313,6 +319,7 @@ fn index_resource_id(name: &str) -> GraphResult<ResourceId> {
 }
 
 pub(crate) struct Runtime {
+    observability: crate::observability::RuntimeObservability,
     #[cfg(feature = "test-support")]
     test_controls: OnceLock<BTreeMap<String, crate::test_support::QueryTestControl>>,
     config: Arc<RuntimeConfig>,
@@ -339,6 +346,7 @@ impl Runtime {
         middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
         logs: Arc<crate::observability::ComponentLogRegistry>,
         wal: Option<Arc<dyn crate::wal::WalProvider>>,
+        observability: crate::observability::RuntimeObservability,
     ) -> Arc<Self> {
         let services = LegacyPluginServices {
             scope: Arc::from(config.id.as_str()),
@@ -349,6 +357,7 @@ impl Runtime {
         };
         let factory = Arc::new(RuntimeFactory::new(services.clone()));
         Arc::new(Self {
+            observability,
             #[cfg(feature = "test-support")]
             test_controls: OnceLock::new(),
             config,
@@ -378,6 +387,7 @@ impl Runtime {
     ) -> anyhow::Result<()> {
         let mut builder = self.services.declare(
             ComputationGraph::builder("__drasi_lib_runtime__")
+                .with_observability(self.observability.clone())
                 .activation_timeout(std::time::Duration::from_secs(
                     self.config
                         .activation_timeout_secs
@@ -1415,7 +1425,7 @@ impl Runtime {
                 },
                 id,
             ))
-            .await;
+            .await?;
         self.notify();
         Ok(())
     }

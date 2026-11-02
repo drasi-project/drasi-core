@@ -231,9 +231,7 @@ where
 
 #[tokio::test]
 async fn test_open511_change_detection_with_client_harness() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     timeout(Duration::from_secs(30), async {
         let server = start_mock_open511_server(vec![

@@ -416,6 +416,7 @@ Finally, the application gives the batch to its runtime owner:
 <!-- excerpt: stockroom/src/main.rs#instance-build -->
 ```rust
 let core = DrasiLib::builder()
+    .with_component_logging(component_logging()?)
     .with_id("stockroom")
     .with_components(batch.build()?)
     .build()
@@ -2421,9 +2422,13 @@ a second mutable owner of components.
 
 #### Install tracing once
 
-For a small host that lets Drasi initialize tracing, use
-`observability::get_or_init_global_registry`. If your application already
-owns the subscriber, integrate `ComponentLogLayer` into that setup instead.
+For a small host, plain library `build()` enables logging automatically.
+Use `observability::init_default_subscriber()` to initialize it earlier, such as
+before constructing components, and retain its returned shutdown handle.
+`get_or_init_global_registry()` is now a passive compatibility accessor.
+If your application owns the subscriber, create a `ComponentLogRuntime`, compose
+its `layer()`, and pass the same runtime through `with_component_logging(...)`
+on every library builder.
 An existing global subscriber cannot be retrofitted by installing another one.
 Install the host subscriber before constructing `DrasiLib`; otherwise Drasi may
 install its default, and a later infallible subscriber `.init()` can panic.
@@ -2436,8 +2441,8 @@ Its setup is:
 
 <!-- excerpt: stockroom/src/main.rs#host-tracing -->
 ```rust
-fn init_tracing() -> anyhow::Result<()> {
-    use drasi_lib::observability::{get_or_init_global_registry, ComponentLogLayer};
+async fn init_tracing() -> anyhow::Result<drasi_lib::ComponentLogRuntime> {
+    use drasi_lib::observability::{ComponentLogRuntime, LogPolicy};
     use tracing_subscriber::{prelude::*, EnvFilter};
 
     let filter = match std::env::var("RUST_LOG") {
@@ -2445,19 +2450,38 @@ fn init_tracing() -> anyhow::Result<()> {
         Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
         Err(error) => return Err(error.into()),
     };
-    let (layer, reload) = tracing_subscriber::reload::Layer::new(None::<ComponentLogLayer>);
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(layer)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .try_init()?;
-    reload.reload(Some(ComponentLogLayer::new(get_or_init_global_registry())))?;
-    Ok(())
+    let logging = ComponentLogRuntime::new(LogPolicy::new(&filter.to_string())?)?;
+    let setup: anyhow::Result<()> = (|| {
+        tracing_subscriber::registry()
+            .with(logging.layer())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(filter),
+            )
+            .try_init()?;
+        HOST_LOGGING
+            .set(logging.clone())
+            .map_err(|_| anyhow::anyhow!("host logging is already initialized"))?;
+        Ok(())
+    })();
+    match setup {
+        Ok(()) => Ok(logging),
+        Err(error) => finish_logging(&logging, Err(error)).await,
+    }
 }
 ```
 
-Call it once, before constructing components. The reload slot lets the host install
-its subscriber before initializing the shared Drasi log worker.
+Call it once, before constructing components. Stockroom retains this runtime in
+its own `HOST_LOGGING` slot; `component_logging()` supplies the same binding to
+each builder. The CLI awaits log shutdown after application cleanup, including
+error exits. No reload workaround or implicit registry initialization is needed.
+
+Log and operation-trace filters are independent. `TelemetryProfile::Off` leaves
+ordinary logging enabled, while an explicit log `off` does not disable an
+independently configured operation-span layer. Automatic setup never installs a
+metric recorder or exporter. See the [library telemetry foundations](../../README.md#telemetry-foundations)
+for registration ownership, profiles, and the still-deferred instrumentation.
 
 Component spans carry `component_id`, `component_type`, and `instance_id`.
 Preserve that span when spawning auxiliary work, for example by instrumenting
@@ -4605,6 +4629,7 @@ The builder also exposes the services separately:
 ```rust
 let core = DrasiLib::builder()
     .with_id("stockroom-managed")
+    .with_component_logging(crate::component_logging()?)
     .with_component_factories(factories.clone())
     .with_management_resources(Arc::new(MemoryResources))
     .with_configuration_store(store)

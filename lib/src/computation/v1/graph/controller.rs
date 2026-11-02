@@ -3542,6 +3542,21 @@ impl Operations {
         let resources = graph.resource_handles.clone();
         let scope = graph.execution_scope.clone();
         let graph_id = graph.snapshot.id.clone();
+        // Keep constructor-only context out of processing/continuation futures.
+        let observability =
+            matches!(operation, Operation::Create | Operation::Reconfigure).then(|| {
+                Box::new(crate::observability::RuntimeObservability {
+                    logging: graph.observability.logging.clone(),
+                    telemetry: graph.observability.telemetry.component(
+                        node.descriptor.id().clone(),
+                        node.role,
+                        drasi_computation_contracts::ComponentSemanticKind::for_component(
+                            node.role,
+                            &node.descriptor,
+                        ),
+                    ),
+                })
+            });
         let output_catalogue = crate::computation::v1::OutputCatalogue::from_publications(
             graph.registry.subscribe(),
             graph.state.subscribe(),
@@ -3686,6 +3701,9 @@ impl Operations {
                         } else {
                             Vec::new()
                         };
+                        let observability = *observability.ok_or_else(|| {
+                            component_error(&node, "construct", anyhow::anyhow!("missing construction observability owner"))
+                        })?;
                         let construction_deadline = tokio::time::Instant::now() + construction_timeout;
                         let context = tokio::time::timeout_at(construction_deadline, ConstructionContext::resolve(
                             scope,
@@ -3694,8 +3712,8 @@ impl Operations {
                             specification,
                             resources,
                             &factory.descriptor().configuration,
-                            output_catalogue,
-                            input_bindings,
+                            (output_catalogue, input_bindings),
+                            observability,
                         ))
                         .await
                         .map_err(|_| work_identity.interrupted("configuration resolution timeout"))?

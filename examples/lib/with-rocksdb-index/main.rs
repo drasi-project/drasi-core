@@ -52,7 +52,7 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging - set RUST_LOG=debug for more detail
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     println!("========================================");
     println!("  DrasiLib with RocksDB Index Example");

@@ -66,6 +66,27 @@ not establish compatibility with the current data definitions.
 Use `make check-native-dependencies` to ensure an independently selected native
 plugin build cannot regain an engine/runtime dependency through a helper crate.
 
+### Telemetry registration foundations
+
+`telemetry` re-exports the shared catalogue, policy, validation types and
+`MetricRegistrationContext`, with the `metrics` facade handles. Statically linked
+integrations use a context supplied by the host, shared with every other graph
+using that recorder. The host supplies component scope and plugin kind;
+`context.plugin(...)` derives the plugin namespace from that kind and a validated
+leaf name. Additional labels cannot override identity or introduce generation,
+trace IDs, sequences or raw error labels.
+
+Register/cache handles after host recorder setup, not from an unconfigured
+global facade. Disabled or excluded collection returns no-op handles without
+registration. Recorder callbacks run only after shared validation and atomic
+conflict/capacity checks, independent of trace sampling.
+
+This does not implement a native telemetry bridge. A cdylib does not share the
+host's Rust context, pointers or global recorder, and no new ABI capability is
+advertised. Native callbacks, generation-scoped absolute counter accounting,
+stale-handle revocation and replacement gauge resets remain follow-up work.
+Do not install a recorder/exporter inside a plugin as a substitute.
+
 Declare the dynamic library feature and explicit native family metadata in the
 plugin manifest so `xtask` can discover it independently of legacy crate categories:
 

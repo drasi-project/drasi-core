@@ -115,6 +115,7 @@ async fn init_source_with_wal(source: &dyn Source, wal: Arc<dyn WalProvider>, so
             identity_provider: None,
             wal_provider: Some(wal),
             resource_observer: None,
+            log_binding: None,
         })
         .await;
 }

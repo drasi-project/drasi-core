@@ -22,13 +22,10 @@
 //! 1. Components create tracing spans with `component_id` and `component_type` attributes
 //! 2. Log events (from `tracing::info!()` or `log::info!()` via bridge) occur within these spans
 //! 3. `ComponentLogLayer` extracts the component info from the span hierarchy
-//! 4. Logs are routed synchronously to `ComponentLogRegistry` for storage and broadcast
+//! 4. Logs are submitted to the selected runtime's bounded capture worker.
 //!
-//! # Global Registry
-//!
-//! Since `tracing` uses a single global subscriber per process, we use a shared global
-//! `ComponentLogRegistry` that all `DrasiLib` instances can access. Call `get_or_init_global_registry()`
-//! to get the shared registry, which will be initialized on first use.
+//! Use `ComponentLogRuntime::layer()` for composable, independently filtered
+//! capture. Plain library construction initializes the default service separately.
 //!
 //! # Example
 //!
@@ -51,119 +48,14 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
-
-use tokio::sync::mpsc;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
-use tracing_subscriber::layer::Context;
+use tracing_log::NormalizeEvent;
+use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
+use tracing_subscriber::{EnvFilter, Layer};
 
-use super::component_log::{ComponentLogRegistry, ComponentLogType, LogLevel, LogMessage};
-
-use std::sync::OnceLock;
-
-/// Default capacity for the log message channel.
-/// This provides backpressure when logging volume is high.
-const LOG_CHANNEL_CAPACITY: usize = 10_000;
-
-/// Global log registry shared by all DrasiLib instances.
-/// Since tracing uses a single global subscriber, we need a single shared registry.
-static GLOBAL_LOG_REGISTRY: OnceLock<Arc<ComponentLogRegistry>> = OnceLock::new();
-
-/// Global sender for the log worker. Initialized alongside the registry.
-static GLOBAL_LOG_SENDER: OnceLock<mpsc::Sender<LogMessage>> = OnceLock::new();
-
-/// Get or initialize the shared global log registry.
-///
-/// This returns a shared registry that all DrasiLib instances use. The tracing
-/// subscriber is global (per-process), so all logs from all DrasiLib instances
-/// go to the same registry.
-///
-/// On first call, this initializes the tracing subscriber with the registry
-/// and spawns a background worker to process log messages.
-pub fn get_or_init_global_registry() -> Arc<ComponentLogRegistry> {
-    GLOBAL_LOG_REGISTRY
-        .get_or_init(|| {
-            let registry = Arc::new(ComponentLogRegistry::new());
-
-            // Create bounded channel for log messages
-            let (tx, rx) = mpsc::channel::<LogMessage>(LOG_CHANNEL_CAPACITY);
-
-            // Store sender globally for the tracing layer to use
-            let _ = GLOBAL_LOG_SENDER.set(tx);
-
-            // Spawn the log worker in a dedicated thread with its own runtime.
-            // This ensures the worker is independent of any caller's runtime.
-            if let Err(e) = spawn_log_worker(registry.clone(), rx) {
-                eprintln!("drasi-lib: failed to spawn log worker thread: {e}. Component logs will not be captured.");
-            }
-
-            // Initialize tracing subscriber
-            init_tracing_internal(registry.clone());
-
-            registry
-        })
-        .clone()
-}
-
-/// Spawn the background worker that processes log messages.
-///
-/// This worker drains the channel and writes logs to the registry.
-/// Uses a dedicated thread with its own tokio runtime to ensure
-/// independence from the caller's async context.
-///
-/// Returns `Err` if the thread or runtime cannot be created.
-fn spawn_log_worker(
-    registry: Arc<ComponentLogRegistry>,
-    mut rx: mpsc::Receiver<LogMessage>,
-) -> std::result::Result<(), std::io::Error> {
-    std::thread::Builder::new()
-        .name("drasi-log-worker".to_string())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    eprintln!("drasi-lib: failed to create log worker runtime: {e}");
-                    return;
-                }
-            };
-
-            rt.block_on(async move {
-                while let Some(message) = rx.recv().await {
-                    registry.log(message).await;
-                }
-            });
-        })?;
-    Ok(())
-}
-
-/// Internal initialization - sets up tracing subscriber without channel/worker.
-fn init_tracing_internal(log_registry: Arc<ComponentLogRegistry>) {
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{fmt, EnvFilter};
-
-    // Try to install the log->tracing bridge
-    // Use init() which returns Result, ignore error if logger already set
-    let _ = tracing_log::LogTracer::init();
-
-    // Build the subscriber with our custom layer
-    // Use RUST_LOG if set, otherwise default to INFO level
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let subscriber = tracing_subscriber::registry()
-        .with(filter)
-        .with(ComponentLogLayer::new(log_registry))
-        .with(fmt::layer().with_target(true).with_level(true));
-
-    // Try to set as the global subscriber
-    // Use try_init to handle case where subscriber is already set
-    let _ = tracing::subscriber::set_global_default(subscriber);
-}
+use super::{ComponentLogRuntime, ComponentLogType, LogLevel, LogMessage, PLUGIN_LOG_TARGET};
 
 /// Tracing layer that routes log events to component-specific streams.
 ///
@@ -171,13 +63,71 @@ fn init_tracing_internal(log_registry: Arc<ComponentLogRegistry>) {
 /// a span that has `component_id` and `component_type` attributes. If so,
 /// the log is routed to that component's log stream in the registry.
 pub struct ComponentLogLayer {
-    registry: Arc<ComponentLogRegistry>,
+    runtime: ComponentLogRuntime,
 }
 
 impl ComponentLogLayer {
-    /// Create a new layer with the given log registry.
-    pub fn new(registry: Arc<ComponentLogRegistry>) -> Self {
-        Self { registry }
+    /// Create a raw capture layer bound to its owner. Prefer
+    /// `ComponentLogRuntime::layer()` to also apply the runtime's log filter.
+    pub fn new(runtime: ComponentLogRuntime) -> Self {
+        Self { runtime }
+    }
+}
+
+pub(crate) struct ComponentLogFilter(pub EnvFilter);
+
+impl<S> Filter<S> for ComponentLogFilter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn enabled(&self, metadata: &tracing::Metadata<'_>, context: &Context<'_, S>) -> bool {
+        metadata.is_span() || Filter::<S>::enabled(&self.0, metadata, context)
+    }
+
+    fn callsite_enabled(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        let interest = Filter::<S>::callsite_enabled(&self.0, metadata);
+        if metadata.is_span() {
+            tracing::subscriber::Interest::always()
+        } else {
+            interest
+        }
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, context: &Context<'_, S>) -> bool {
+        Filter::<S>::event_enabled(&self.0, event, context)
+    }
+
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        context: Context<'_, S>,
+    ) {
+        Filter::<S>::on_new_span(&self.0, attrs, id, context);
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        context: Context<'_, S>,
+    ) {
+        Filter::<S>::on_record(&self.0, id, values, context);
+    }
+
+    fn on_enter(&self, id: &tracing::span::Id, context: Context<'_, S>) {
+        Filter::<S>::on_enter(&self.0, id, context);
+    }
+
+    fn on_exit(&self, id: &tracing::span::Id, context: Context<'_, S>) {
+        Filter::<S>::on_exit(&self.0, id, context);
+    }
+
+    fn on_close(&self, id: tracing::span::Id, context: Context<'_, S>) {
+        Filter::<S>::on_close(&self.0, id, context);
     }
 }
 
@@ -198,12 +148,19 @@ where
         if let Some(info) = visitor.into_component_info() {
             if let Some(span) = ctx.span(id) {
                 let mut extensions = span.extensions_mut();
-                extensions.insert(info);
+                if extensions.get_mut::<ComponentInfo>().is_none() {
+                    extensions.insert(info);
+                }
             }
         }
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        let normalized = event.normalized_metadata();
+        let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
+        if metadata.target() == PLUGIN_LOG_TARGET {
+            return;
+        }
         // Try to find component context from current or parent spans
         let component_info = ctx.event_span(event).and_then(|span| {
             // Walk up the span tree to find component info
@@ -230,16 +187,7 @@ where
                 info.component_type,
             );
 
-            // Send to the log worker via bounded channel
-            // This provides backpressure instead of spawning unbounded tasks
-            if let Some(sender) = GLOBAL_LOG_SENDER.get() {
-                // Use try_send to avoid blocking in the tracing layer
-                // If channel is full, log is dropped (better than OOM)
-                if sender.try_send(log_message).is_err() {
-                    // Channel full or closed - log still goes to console via fmt layer
-                    // Could add a metric here for monitoring dropped logs
-                }
-            }
+            self.runtime.try_log(log_message);
         }
     }
 }

@@ -115,9 +115,7 @@ where
 #[ignore]
 #[serial]
 async fn test_oracle_change_detection_end_to_end() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         log::info!("starting oracle container");
@@ -246,9 +244,7 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
 #[ignore]
 #[serial]
 async fn test_oracle_start_position_beginning() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let oracle = setup_oracle()
@@ -360,9 +356,7 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
 #[ignore]
 #[serial]
 async fn test_oracle_checkpoint_resume() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let oracle = setup_oracle()
@@ -544,9 +538,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
     use drasi_lib::StorageBackendRef;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let result = tokio::time::timeout(Duration::from_secs(300), async {
@@ -706,9 +698,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_lib::StorageBackendRef;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let result = tokio::time::timeout(Duration::from_secs(300), async {
@@ -844,9 +834,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
 async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> Result<()> {
     use std::collections::HashMap;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     const SEED_COUNT: i64 = 200;
 

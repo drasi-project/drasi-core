@@ -42,6 +42,7 @@ use crate::state_store_bridge::StateStoreVtableBuilder;
 
 /// Wraps a `ReactionVtable` into a DrasiLib `Reaction` trait implementation.
 pub struct ReactionProxy {
+    log_forwarding: Option<Arc<crate::callbacks::PluginLogForwarding>>,
     vtable: ReactionVtable,
     _library: Arc<Library>,
     cached_id: String,
@@ -177,6 +178,7 @@ impl ReactionProxy {
         let cached_type_name =
             unsafe { (vtable.type_name_fn)(vtable.state as *const c_void).to_string() };
         Self {
+            log_forwarding: None,
             vtable,
             _library: library,
             cached_id,
@@ -188,6 +190,14 @@ impl ReactionProxy {
             resource_report_failed: AtomicBool::new(false),
             plugin_origin: None,
         }
+    }
+
+    fn with_log_forwarding(
+        mut self,
+        forwarding: Option<Arc<crate::callbacks::PluginLogForwarding>>,
+    ) -> Self {
+        self.log_forwarding = forwarding;
+        self
     }
 
     fn with_plugin_origin(mut self, origin: Option<PluginOrigin>) -> Self {
@@ -265,6 +275,24 @@ impl Reaction for ReactionProxy {
     }
 
     async fn initialize(&self, context: ReactionRuntimeContext) {
+        let binding = context.log_binding.clone().unwrap_or_else(|| {
+            drasi_lib::observability::ComponentLogBinding {
+                registry: drasi_lib::observability::get_or_init_global_registry(),
+                key: drasi_lib::observability::ComponentLogKey::new(
+                    &context.instance_id,
+                    drasi_lib::observability::ComponentLogType::Reaction,
+                    &context.reaction_id,
+                ),
+            }
+        });
+        let log_registry = binding.registry;
+        if let Err(error) =
+            crate::callbacks::bind_log_policy(&log_registry, self.log_forwarding.as_deref())
+        {
+            self.resource_report_failed.store(true, Ordering::Release);
+            crate::callbacks::log_binding_failure(&context.update_tx, &context.reaction_id, error);
+            return;
+        }
         let identity_provider = crate::proxies::identity_resolution::resolve_identity_provider(
             &self.identity_provider,
             context.identity_provider.clone(),
@@ -299,9 +327,11 @@ impl Reaction for ReactionProxy {
 
         // Create per-instance callback context for this reaction
         let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
-            instance_id: instance_id_str.clone(),
+            instance_id: binding.key.instance_id,
+            component_id: binding.key.component_id,
+            component_type: binding.key.component_type,
             runtime_handle: tokio::runtime::Handle::current(),
-            log_registry: drasi_lib::observability::get_or_init_global_registry(),
+            log_registry,
             update_tx: context.update_tx.clone(),
         });
 
@@ -990,6 +1020,7 @@ impl Drop for ReactionProxy {
 
 /// Wraps a `ReactionPluginVtable` (factory) into a `ReactionPluginDescriptor`.
 pub struct ReactionPluginProxy {
+    log_forwarding: Option<Arc<crate::callbacks::PluginLogForwarding>>,
     vtable: ReactionPluginVtable,
     library: Arc<Library>,
     cached_kind: String,
@@ -1011,6 +1042,7 @@ impl ReactionPluginProxy {
             unsafe { (vtable.config_schema_name_fn)(vtable.state as *const c_void).to_string() };
         let plugin_version = read_plugin_version(&library);
         Self {
+            log_forwarding: None,
             vtable,
             library,
             cached_kind,
@@ -1019,6 +1051,14 @@ impl ReactionPluginProxy {
             plugin_id: String::new(),
             plugin_version,
         }
+    }
+
+    pub(crate) fn with_log_forwarding(
+        mut self,
+        forwarding: Arc<crate::callbacks::PluginLogForwarding>,
+    ) -> Self {
+        self.log_forwarding = Some(forwarding);
+        self
     }
 
     /// The unique identifier of the plugin that provided this descriptor.
@@ -1083,9 +1123,12 @@ impl ReactionPluginDescriptor for ReactionPluginProxy {
 
         let vtable = unsafe { *Box::from_raw(vtable_ptr) };
         Ok(Box::new(
-            ReactionProxy::new(vtable, self.library.clone()).with_plugin_origin(
-                known_plugin_origin(&self.plugin_id, self.plugin_version.as_deref()),
-            ),
+            ReactionProxy::new(vtable, self.library.clone())
+                .with_log_forwarding(self.log_forwarding.clone())
+                .with_plugin_origin(known_plugin_origin(
+                    &self.plugin_id,
+                    self.plugin_version.as_deref(),
+                )),
         ))
     }
 }

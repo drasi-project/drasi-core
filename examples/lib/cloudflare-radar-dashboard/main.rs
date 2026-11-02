@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     let api_token =
         env::var("CF_RADAR_TOKEN").map_err(|_| anyhow::anyhow!("CF_RADAR_TOKEN is required"))?;

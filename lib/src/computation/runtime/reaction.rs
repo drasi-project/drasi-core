@@ -150,6 +150,14 @@ impl RuntimeComponent for ReactionInstance {
             ComponentId::try_new(self.reaction.id())?,
             generation,
         )))?;
+        host.set_log_binding(crate::observability::ComponentLogBinding {
+            registry: owner.logs.clone(),
+            key: crate::observability::ComponentLogKey::new(
+                &owner.config.id,
+                crate::observability::ComponentLogType::Reaction,
+                self.reaction.id(),
+            ),
+        })?;
         // Retain the owner before initialization can be interrupted.
         *self
             .host

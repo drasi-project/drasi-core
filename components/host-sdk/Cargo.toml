@@ -57,6 +57,7 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 drasi-computation-bootstrap-mssql = { workspace = true }
 drasi-computation-source-mssql = { workspace = true }
 drasi-computation-sink-storedproc-mssql = { workspace = true }
