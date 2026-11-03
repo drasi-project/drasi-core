@@ -564,6 +564,118 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn review_full_retained_channel_does_not_block_bootstrap_start() -> Result<()> {
+        use crate::sources::tests::TestBootstrapMockSource;
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let core = crate::DrasiLib::builder()
+            .with_source(TestBootstrapMockSource::new("source".into(), receiver)?)
+            .with_query(
+                crate::Query::cypher("query")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("source")
+                    .with_dispatch_mode(crate::DispatchMode::Channel)
+                    .with_dispatch_buffer_capacity(1)
+                    .build(),
+            )
+            .build()
+            .await?;
+        core.start().await?;
+        let instance = core
+            .query_manager()
+            .get_query_instance("query")
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let query = instance.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        let subscription = query.subscribe("retained".into()).await?;
+        core.stop_query("query").await?;
+        crate::component_graph::wait_for_status(
+            &core.component_graph(),
+            "query",
+            &[ComponentStatus::Stopped],
+            Duration::from_secs(2),
+        )
+        .await?;
+        query
+            .base
+            .dispatch_query_result(QueryResult::new(
+                "query".into(),
+                1,
+                chrono::Utc::now(),
+                vec![],
+                HashMap::new(),
+            ))
+            .await?;
+        let source = query
+            .source_manager
+            .get_source_instance("source")
+            .await
+            .unwrap();
+        let source = source
+            .as_any()
+            .downcast_ref::<TestBootstrapMockSource>()
+            .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        source.set_bootstrap_receiver(receiver).await;
+        drop(sender);
+        let started = timeout(Duration::from_secs(2), core.start_query("query")).await;
+        let stopped = timeout(Duration::from_secs(2), core.stop_query("query")).await;
+        drop(subscription);
+        core.shutdown().await?;
+        assert!(
+            started.is_ok(),
+            "bootstrapStarted blocked before the owned processor existed"
+        );
+        started??;
+        stopped??;
+        assert_eq!(query.status().await, ComponentStatus::Stopped);
+        assert!(query.base.task_handle.read().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_cancelled_stop_retains_subscription_join_ownership() -> Result<()> {
+        let core = crate::DrasiLib::builder()
+            .with_query(
+                crate::Query::cypher("query")
+                    .query("MATCH (n) RETURN n")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await?;
+        let instance = core
+            .query_manager()
+            .get_query_instance("query")
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let query = instance.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        query.base.set_status(ComponentStatus::Running, None).await;
+        for _ in 0..2 {
+            query
+                .subscription_tasks
+                .write()
+                .await
+                .push(tokio::spawn(std::future::pending()));
+        }
+        tokio::task::yield_now().await;
+        let mut stop = Box::pin(query.stop());
+        assert!(futures::poll!(stop.as_mut()).is_pending());
+        drop(stop);
+        assert!(
+            !query.subscription_tasks.read().await.is_empty(),
+            "cancelled stop detached drained subscription handles",
+        );
+        query.stop().await?;
+        assert!(query.subscription_tasks.read().await.is_empty());
+        assert_eq!(query.status().await, ComponentStatus::Stopped);
+        Ok(())
+    }
+
     #[rstest::rstest]
     #[case::processor("processor")]
     #[case::subscription("subscription")]
@@ -1075,14 +1187,15 @@ async fn dispatch_query_results(
     profiling: crate::profiling::ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
     staged_result: Option<QueryResult>,
-) {
+    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+) -> bool {
     let converted_results = if let Some(staged) = &staged_result {
         staged.results.clone()
     } else {
         evaluation_contexts_to_diffs(results)
     };
     if converted_results.is_empty() {
-        return;
+        return true;
     }
 
     let arc_result = {
@@ -1141,11 +1254,43 @@ async fn dispatch_query_results(
     // Publish after releasing output_state so a full Channel backpressures
     // the query instead of deadlocking snapshot/outbox fetches or dropping
     // the tail. Subscribe still samples the head and attaches under that lock.
-    let dispatcher_list = dispatchers.read().await;
-    for dispatcher in dispatcher_list.iter() {
-        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
-            debug!("Failed to dispatch result for query '{query_id}': {e}");
+    dispatch_unless_stopping(query_id, arc_result, dispatchers, shutdown).await
+}
+
+async fn dispatch_unless_stopping(
+    query_id: &str,
+    result: Arc<QueryResult>,
+    dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
+    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = &mut *shutdown => false,
+        _ = async {
+            for dispatcher in dispatchers.read().await.iter() {
+                if let Err(error) = dispatcher.dispatch_change(result.clone()).await {
+                    debug!("Query '{query_id}' result dispatch failed: {error}");
+                }
+            }
+        } => true,
+    }
+}
+
+async fn abort_subscription_tasks(
+    query_id: &str,
+    tasks: &RwLock<Vec<tokio::task::JoinHandle<()>>>,
+) {
+    let mut tasks = tasks.write().await;
+    for task in tasks.iter() {
+        task.abort();
+    }
+    while let Some(task) = tasks.last_mut() {
+        if let Err(error) = task.await {
+            if !error.is_cancelled() {
+                warn!("Query '{query_id}' subscription forwarder failed: {error}");
+            }
         }
+        tasks.pop();
     }
 }
 
@@ -1170,6 +1315,14 @@ fn bootstrap_published_hash(current_hash: u64) -> u64 {
 
 fn bootstrap_in_progress_hash(current_hash: u64) -> u64 {
     current_hash.wrapping_add(4)
+}
+
+fn rebuilt_config_hash(current_hash: u64, bootstrap: BootstrapRecovery) -> u64 {
+    if bootstrap == BootstrapRecovery::NotRequired {
+        current_hash
+    } else {
+        bootstrap_in_progress_hash(current_hash)
+    }
 }
 
 async fn persisted_output_generation(
@@ -1425,11 +1578,11 @@ struct PersistentIndexHandles<'a> {
     future_queue: &'a Option<Arc<dyn drasi_core::interface::FutureQueue>>,
 }
 
-/// Wipe graph indexes and source checkpoints, then persist `current_hash`.
+/// Wipe graph indexes and source checkpoints, then persist the rebuild marker.
 /// Used by config-hash mismatch and by AutoReset after output inconsistency.
 async fn wipe_indexes_and_checkpoints(
     query_id: &str,
-    current_hash: u64,
+    rebuilt_hash: u64,
     checkpoint_store: &Arc<dyn CheckpointStore>,
     indexes: PersistentIndexHandles<'_>,
 ) -> anyhow::Result<()> {
@@ -1464,7 +1617,7 @@ async fn wipe_indexes_and_checkpoints(
         .await
         .with_context(|| format!("Query '{query_id}' failed to clear checkpoints"))?;
     checkpoint_store
-        .write_config_hash(current_hash)
+        .write_config_hash(rebuilt_hash)
         .await
         .with_context(|| format!("Query '{query_id}' failed to write config hash after rebuild"))?;
     Ok(())
@@ -1495,7 +1648,13 @@ async fn autoreset_rebuild_after_output_inconsistency(
         .write()
         .await
         .reset_from_generation(plan.persisted);
-    wipe_indexes_and_checkpoints(query_id, current_hash, &stores.checkpoint_store, indexes).await
+    wipe_indexes_and_checkpoints(
+        query_id,
+        rebuilt_config_hash(current_hash, stores.bootstrap),
+        &stores.checkpoint_store,
+        indexes,
+    )
+    .await
 }
 
 /// Like [`autoreset_rebuild_after_output_inconsistency`], but the caller already
@@ -1541,7 +1700,7 @@ async fn rebuild_output_and_indexes_in_open_session(
         .with_context(|| format!("Query '{query_id}' failed to clear checkpoints"))?;
     stores
         .checkpoint_store
-        .write_config_hash(current_hash)
+        .write_config_hash(rebuilt_config_hash(current_hash, stores.bootstrap))
         .await
         .with_context(|| format!("Query '{query_id}' failed to write config hash after rebuild"))?;
     Ok(())
@@ -2097,7 +2256,7 @@ impl DrasiQuery {
             };
 
             let stores = DurableOutputStores {
-                bootstrap: BootstrapRecovery::NotRequired,
+                bootstrap: bootstrap_recovery,
                 checkpoint_store: checkpoint_store.clone(),
                 outbox_writer: self.outbox_writer.read().await.clone(),
                 live_results_writer: self.live_results_writer.read().await.clone(),
@@ -2173,8 +2332,10 @@ impl DrasiQuery {
                         || stored_hash == bootstrap_in_progress_hash(current_hash) =>
                 {
                     anyhow::ensure!(
-                        stored_hash != bootstrap_in_progress_hash(current_hash)
-                            || recovery_policy == crate::recovery::RecoveryPolicy::AutoReset,
+                        recovery_policy == crate::recovery::RecoveryPolicy::AutoReset
+                            || (stored_hash == output_reset_in_progress_hash(current_hash)
+                                && !self.base.config.enable_bootstrap
+                                && !require_complete),
                         "Query '{}' has an incomplete durable bootstrap; explicit AutoReset is required",
                         self.base.config.id
                     );
@@ -2439,9 +2600,12 @@ impl DrasiQuery {
                         }
                     }
                     Err(e) => {
-                        if existing_only || self.base.config.enable_bootstrap {
+                        if require_complete
+                            || self.base.config.enable_bootstrap
+                            || bootstrap_recovery == BootstrapRecovery::Published
+                        {
                             let msg = format!(
-                                "Query '{}' failed to read checkpoints (ExistingOnly policy): {e}",
+                                "Query '{}' failed to read required recovery checkpoints: {e}",
                                 self.base.config.id
                             );
                             error!("{msg}");
@@ -2893,7 +3057,7 @@ impl DrasiQuery {
                                                 let current_hash =
                                                     super::compute_config_hash(&self.base.config);
                                                 let stores = DurableOutputStores {
-                                                    bootstrap: BootstrapRecovery::NotRequired,
+                                                    bootstrap: bootstrap_recovery,
                                                     checkpoint_store: checkpoint_store.clone(),
                                                     outbox_writer: self
                                                         .outbox_writer
@@ -3157,26 +3321,6 @@ impl DrasiQuery {
         let bootstrap_run = if bootstrap_channels.is_empty() && !initialize_output {
             None
         } else {
-            if !bootstrap_channels.is_empty() {
-                let mut metadata = HashMap::new();
-                metadata.insert(
-                    "control_signal".to_string(),
-                    serde_json::json!("bootstrapStarted"),
-                );
-                metadata.insert(
-                    "source_count".to_string(),
-                    serde_json::json!(bootstrap_channels.len()),
-                );
-                self.base
-                    .dispatch_query_result(QueryResult::new(
-                        self.base.config.id.clone(),
-                        0,
-                        chrono::Utc::now(),
-                        vec![],
-                        metadata,
-                    ))
-                    .await?;
-            }
             Some(BootstrapRun {
                 query_id: self.base.config.id.clone(),
                 require_complete,
@@ -3276,6 +3420,25 @@ impl DrasiQuery {
             async move {
                 let bootstrapped = bootstrap_run.as_ref().is_some_and(|run| !run.inputs.is_empty());
                 if let Some(bootstrap_run) = bootstrap_run {
+                    if bootstrapped {
+                        let mut metadata = HashMap::new();
+                        metadata.insert(
+                            "control_signal".to_string(), serde_json::json!("bootstrapStarted"),
+                        );
+                        metadata.insert(
+                            "source_count".to_string(), serde_json::json!(bootstrap_run.inputs.len()),
+                        );
+                        if !dispatch_unless_stopping(
+                            &query_id,
+                            Arc::new(QueryResult::new(
+                                query_id.clone(), 0, chrono::Utc::now(), vec![], metadata,
+                            )),
+                            &base_dispatchers,
+                            &mut shutdown_rx,
+                        ).await {
+                            return;
+                        }
+                    }
                     let result = std::panic::AssertUnwindSafe(
                         bootstrap_run.run(&mut shutdown_rx)
                     ).catch_unwind().await;
@@ -3299,11 +3462,7 @@ impl DrasiQuery {
                         Err(error) => {
                             let message = format!("Query '{query_id}' bootstrap failed: {error:#}");
                             error!("{message}");
-                            let handles: Vec<_> = subscriptions_for_processor.write().await.drain(..).collect();
-                            for handle in handles {
-                                handle.abort();
-                                let _ = handle.await;
-                            }
+                            abort_subscription_tasks(&query_id, &subscriptions_for_processor).await;
                             priority_queue.drain().await;
                             let _publication = publication_for_processor.lock().await;
                             if reporter_for_processor.get_status().await == ComponentStatus::Starting {
@@ -3342,16 +3501,10 @@ impl DrasiQuery {
                     let result = Arc::new(QueryResult::new(
                         query_id.clone(), 0, chrono::Utc::now(), vec![], metadata,
                     ));
-                    tokio::select! {
-                        biased;
-                        _ = &mut shutdown_rx => return,
-                        _ = async {
-                            for dispatcher in base_dispatchers.read().await.iter() {
-                                if let Err(error) = dispatcher.dispatch_change(result.clone()).await {
-                                    debug!("Query '{query_id}' bootstrap control dispatch failed: {error}");
-                                }
-                            }
-                        } => {}
+                    if !dispatch_unless_stopping(
+                        &query_id, result, &base_dispatchers, &mut shutdown_rx,
+                    ).await {
+                        return;
                     }
                     let state = output_state.read().await;
                     output_metrics_for_processor.record_live_results_count(state.results_len());
@@ -3364,7 +3517,7 @@ impl DrasiQuery {
                 // checkpoint sequence are filtered on replay.
                 let mut dedup = super::SequenceDedup::new(checkpoint_sequences_per_source.clone());
 
-                loop {
+                'events: loop {
                     // Check if query is still running
                     let current_status = reporter_for_processor.get_status().await;
                     if !matches!(current_status, ComponentStatus::Running) {
@@ -3448,7 +3601,7 @@ impl DrasiQuery {
                                             Ok(Some(due_result)) => {
                                                 if !due_result.results.is_empty() {
                                                     let profiling = crate::profiling::ProfilingMetadata::new();
-                                                    dispatch_query_results(
+                                                    if !dispatch_query_results(
                                                         &due_result.results,
                                                         &due_result.source_id,
                                                         &query_id,
@@ -3457,8 +3610,11 @@ impl DrasiQuery {
                                                         profiling,
                                                         &output_metrics_for_processor,
                                                         staged_seq.take(),
+                                                        &mut shutdown_rx,
                                                     )
-                                                    .await;
+                                                    .await {
+                                                        break 'events;
+                                                    }
                                                 }
                                             }
                                             Ok(None) => break,
@@ -3550,7 +3706,7 @@ impl DrasiQuery {
 
                                             if !results.is_empty() {
                                                 profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
-                                                dispatch_query_results(
+                                                if !dispatch_query_results(
                                                     &results,
                                                     &source_id,
                                                     &query_id,
@@ -3559,8 +3715,11 @@ impl DrasiQuery {
                                                     profiling,
                                                     &output_metrics_for_processor,
                                                     staged_seq.take(),
+                                                    &mut shutdown_rx,
                                                 )
-                                                .await;
+                                                .await {
+                                                    break 'events;
+                                                }
                                             }
                                         }
                                         Err(e) => {
@@ -3643,16 +3802,7 @@ impl Query for DrasiQuery {
         }
         self.base.stop_task().await?;
 
-        // Drain and abort source subscription forwarders so they don't leak across restarts
-        let subscription_handles: Vec<_> = {
-            let mut tasks = self.subscription_tasks.write().await;
-            tasks.drain(..).collect()
-        };
-
-        for handle in subscription_handles {
-            handle.abort();
-            let _ = handle.await;
-        }
+        abort_subscription_tasks(&self.base.config.id, &self.subscription_tasks).await;
 
         // Stop the FutureQueueSource polling task
         if let Some(fq) = self.future_queue_source.write().await.take() {

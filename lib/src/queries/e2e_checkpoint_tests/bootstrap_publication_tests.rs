@@ -384,6 +384,302 @@ async fn add_bootstrap_source(core: &DrasiLib) -> Arc<AtomicU32> {
 }
 
 #[rstest::rstest]
+#[case::config_change(false)]
+#[case::output_corruption(true)]
+#[tokio::test]
+#[serial]
+async fn review_failed_replacement_remains_fenced(#[case] corrupt_output: bool) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = bootstrap_query(RecoveryPolicy::AutoReset);
+    let hash = crate::queries::compute_config_hash(&config);
+    let core = build_compatible_e2e_lib("replacement", &tmp, None)
+        .await
+        .unwrap();
+    add_bootstrap_source(&core).await;
+    core.add_query(config.clone()).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("bootstrap-src").await.unwrap();
+    core.start_query("bootstrap-q").await.unwrap();
+    let query = core
+        .query_manager()
+        .get_query_instance("bootstrap-q")
+        .await
+        .unwrap();
+    query.fetch_snapshot().await.unwrap();
+    drop(query);
+    core.shutdown().await.unwrap();
+    drop(core);
+    {
+        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
+        let indexes = provider.create_indexes("bootstrap-q").await.unwrap();
+        if corrupt_output {
+            indexes
+                .outbox_writer
+                .as_ref()
+                .unwrap()
+                .append("bootstrap-q", 1, b"corrupt")
+                .await
+                .unwrap();
+        } else {
+            indexes
+                .checkpoint_store
+                .as_ref()
+                .unwrap()
+                .write_config_hash(hash ^ 1)
+                .await
+                .unwrap();
+        }
+    }
+
+    let core = build_compatible_e2e_lib("replacement", &tmp, None)
+        .await
+        .unwrap();
+    core.add_source(E2eTestSource::new("bootstrap-src", false).unwrap())
+        .await
+        .unwrap();
+    core.add_query(config.clone()).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("bootstrap-src").await.unwrap();
+    let error = core.start_query("bootstrap-q").await.unwrap_err();
+    assert!(
+        error.to_string().contains("do not support replay"),
+        "{error}"
+    );
+    core.shutdown().await.unwrap();
+    drop(core);
+
+    let before = logical_rocks_state(tmp.path(), "bootstrap-q");
+    let core = build_compatible_e2e_lib("replacement", &tmp, None)
+        .await
+        .unwrap();
+    let subscriptions = add_bootstrap_source(&core).await;
+    let mut strict_config = config;
+    strict_config.recovery_policy = Some(RecoveryPolicy::Strict);
+    core.add_query(strict_config).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("bootstrap-src").await.unwrap();
+    let start = core.start_query("bootstrap-q").await;
+    core.shutdown().await.unwrap();
+    drop(core);
+    assert!(
+        start.is_err(),
+        "Strict accepted a replacement without its initial image"
+    );
+    assert_eq!(subscriptions.load(Ordering::Acquire), 0);
+    assert_eq!(logical_rocks_state(tmp.path(), "bootstrap-q"), before);
+}
+
+#[rstest::rstest]
+#[case::compatible_reset(false, false)]
+#[case::certified_reset(true, false)]
+#[case::compatible_publication(false, true)]
+#[case::certified_publication(true, true)]
+#[tokio::test]
+#[serial]
+async fn review_interrupted_bootstrap_reset_requires_auto_reset(
+    #[case] certified: bool,
+    #[case] publication_pending: bool,
+    #[values(RecoveryPolicy::Strict, RecoveryPolicy::AutoReset)] policy: RecoveryPolicy,
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = bootstrap_query(RecoveryPolicy::Strict);
+    let core = build_e2e_lib_with_certification("reset", &tmp, None, certified)
+        .await
+        .unwrap();
+    add_bootstrap_source(&core).await;
+    core.add_query(config.clone()).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("bootstrap-src").await.unwrap();
+    core.start_query("bootstrap-q").await.unwrap();
+    let query = core
+        .query_manager()
+        .get_query_instance("bootstrap-q")
+        .await
+        .unwrap();
+    query.fetch_snapshot().await.unwrap();
+    drop(query);
+    core.shutdown().await.unwrap();
+    drop(core);
+    {
+        let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
+        let indexes = provider.create_indexes("bootstrap-q").await.unwrap();
+        let hash = crate::queries::compute_config_hash(&config);
+        indexes
+            .checkpoint_store
+            .as_ref()
+            .unwrap()
+            .write_config_hash(if publication_pending {
+                hash.wrapping_add(4)
+            } else {
+                !hash
+            })
+            .await
+            .unwrap();
+    }
+    let before = logical_rocks_state(tmp.path(), "bootstrap-q");
+    let core = build_e2e_lib_with_certification("reset", &tmp, None, certified)
+        .await
+        .unwrap();
+    let subscriptions = add_bootstrap_source(&core).await;
+    let mut config = config;
+    config.recovery_policy = Some(policy);
+    core.add_query(config).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("bootstrap-src").await.unwrap();
+    let start = core.start_query("bootstrap-q").await;
+    if policy == RecoveryPolicy::AutoReset {
+        start.unwrap();
+        let query = core
+            .query_manager()
+            .get_query_instance("bootstrap-q")
+            .await
+            .unwrap();
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.to_vec(),
+            vec![serde_json::json!({"id": "seed", "value": 1})]
+        );
+        assert_eq!(snapshot.output_generation, 1);
+        assert_eq!(subscriptions.load(Ordering::Acquire), 1);
+    } else {
+        assert!(
+            start.is_err(),
+            "Strict completed an interrupted bootstrap reset"
+        );
+        assert_eq!(subscriptions.load(Ordering::Acquire), 0);
+    }
+    core.shutdown().await.unwrap();
+    drop(core);
+    if policy == RecoveryPolicy::Strict {
+        assert_eq!(logical_rocks_state(tmp.path(), "bootstrap-q"), before);
+    }
+}
+
+#[rstest::rstest]
+#[case::legacy_fallback(false, false)]
+#[case::requested_certification(false, true)]
+#[case::published_certification(true, false)]
+#[case::published_and_requested(true, true)]
+#[tokio::test]
+#[serial]
+async fn review_checkpoint_read_failure_respects_certification(
+    #[case] published: bool,
+    #[case] required: bool,
+    #[values(RecoveryPolicy::Strict, RecoveryPolicy::AutoReset)] policy: RecoveryPolicy,
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = make_persistent_query("stream", "source", Some(policy));
+    let core = build_e2e_lib_with_certification("checkpoint-read", &tmp, None, published)
+        .await
+        .unwrap();
+    let source = E2eTestSource::new("source", true).unwrap();
+    let events = source.event_sender();
+    core.add_source(source).await.unwrap();
+    core.add_query(config.clone()).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("source").await.unwrap();
+    core.start_query("stream").await.unwrap();
+    send_event(&events, "source", 1, b"retained-position").await;
+    wait_for_outbox_sequence(&core, "stream", 1).await;
+    core.shutdown().await.unwrap();
+    drop(core);
+    let before = logical_rocks_state(tmp.path(), "stream");
+    let core = DrasiLib::builder()
+        .with_bootstrap_certification(required)
+        .with_index_provider(
+            "persistent",
+            Arc::new(RecoveryTestProvider {
+                inner: RocksDbIndexProvider::new(tmp.path(), false, false),
+                failure: Arc::new(Mutex::new(RecoveryReadFailure::Checkpoints)),
+            }),
+        )
+        .build()
+        .await
+        .unwrap();
+    let source = E2eTestSource::new("source", true).unwrap();
+    let subscriptions = source.subscribe_count_handle();
+    core.add_source(source).await.unwrap();
+    core.add_query(config).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("source").await.unwrap();
+    let start = core.start_query("stream").await;
+    core.shutdown().await.unwrap();
+    drop(core);
+    if published || required {
+        assert!(
+            start.is_err(),
+            "certified recovery ignored an unreadable checkpoint"
+        );
+        assert_eq!(subscriptions.load(Ordering::Acquire), 0);
+    } else {
+        start.unwrap();
+        assert_eq!(subscriptions.load(Ordering::Acquire), 1);
+    }
+    assert_eq!(logical_rocks_state(tmp.path(), "stream"), before);
+}
+
+#[tokio::test]
+#[serial]
+async fn review_live_delivery_shutdown_preserves_committed_output() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("blocked-delivery", &tmp, None).await.unwrap();
+    let source = E2eTestSource::new("source", true).unwrap();
+    let events = source.event_sender();
+    core.add_source(source).await.unwrap();
+    let mut config = make_persistent_query("stream", "source", None);
+    config.dispatch_mode = Some(crate::DispatchMode::Channel);
+    config.dispatch_buffer_capacity = Some(1);
+    core.add_query(config).await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("source").await.unwrap();
+    core.start_query("stream").await.unwrap();
+    let query = core
+        .query_manager()
+        .get_query_instance("stream")
+        .await
+        .unwrap();
+    let subscription = query.subscribe("retained".into()).await.unwrap();
+    send_event(&events, "source", 1, b"position-1").await;
+    send_event(&events, "source", 2, b"position-2").await;
+    wait_for_outbox_sequence(&core, "stream", 2).await;
+    let stopped =
+        tokio::time::timeout(std::time::Duration::from_secs(2), core.stop_query("stream")).await;
+    drop(subscription);
+    core.shutdown().await.unwrap();
+    assert!(
+        stopped.is_ok(),
+        "an undrained result channel blocked shutdown"
+    );
+    stopped.unwrap().unwrap();
+    assert_eq!(query.status().await, ComponentStatus::Stopped);
+    drop(query);
+    drop(core);
+    let core = build_e2e_lib("blocked-delivery", &tmp, None).await.unwrap();
+    core.add_source(E2eTestSource::new("source", true).unwrap())
+        .await
+        .unwrap();
+    core.add_query(make_persistent_query(
+        "stream",
+        "source",
+        Some(RecoveryPolicy::ExistingOnly),
+    ))
+    .await
+    .unwrap();
+    core.start().await.unwrap();
+    core.start_source("source").await.unwrap();
+    core.start_query("stream").await.unwrap();
+    let recovered = wait_for_outbox_sequence(&core, "stream", 2).await;
+    assert_eq!(recovered.results.len(), 2);
+    let query = core
+        .query_manager()
+        .get_query_instance("stream")
+        .await
+        .unwrap();
+    assert_eq!(query.fetch_snapshot().await.unwrap().len(), 2);
+    core.shutdown().await.unwrap();
+}
+
+#[rstest::rstest]
 #[case::missing_stream(BootstrapFailure::MissingStream)]
 #[case::missing_completion(BootstrapFailure::MissingCompletion)]
 #[case::dropped_completion(BootstrapFailure::DroppedCompletion)]

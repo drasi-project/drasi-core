@@ -288,9 +288,11 @@ those checkpoints still preserve a committed sequence-zero result snapshot.
 `RecoveryPolicy::Strict` refuses a matching bootstrap-enabled query configuration
 that has no committed result sequence. Source checkpoints alone do not prove
 that the initial result snapshot was persisted. Replacement bootstraps after a
-configuration change or `AutoReset` retain the existing reset-in-progress marker
-until publication marks their handover complete. A reset-created result sequence zero alone does not
-prove completion: `Strict` rejects an interrupted replacement, while `AutoReset`
+configuration change or `AutoReset` retain an incomplete marker throughout the
+wipe and replacement publication, including failures before source subscription.
+Only a committed, verified replacement publishes its ordinary or certified hash.
+A reset-created result sequence zero alone does not prove completion:
+`Strict` rejects an interrupted replacement, while `AutoReset`
 clears partial indexes and bootstraps again.
 The explicit `AutoReset` policy rebuilds output, indexes and checkpoints from
 available source snapshots/replay. Before upgrading an existing persistent
@@ -453,8 +455,10 @@ are returned after the remaining cleanup is attempted. Repeated calls are safe;
 concurrent shutdown calls wait for teardown to complete.
 
 Application sources finish any in-flight WAL pruning before stopping. Queries
-join the bootstrap-owning processor but cancel blocked bootstrap-completion dispatch
-during stop, so an undrained result subscription cannot hold shutdown open.
+join the bootstrap-owning processor but cancel blocked bootstrap-control and live
+result dispatch during stop, so an undrained subscription cannot hold shutdown
+open. Durable commits and their in-memory output updates finish before delivery
+can be cancelled; the committed outbox remains available for replay.
 
 After shutdown, drop all `DrasiLib` clones and caller-held component/provider
 handles before reopening injected state stores or WAL providers at the same
@@ -1096,9 +1100,13 @@ the existing checkpoint-based admission of legacy bootstrap snapshots.
 Changing a source from streaming-only
 to bootstrap-enabled can refuse recovery if its saved handover has no opaque
 position.
+Unreadable source checkpoints refuse certified recovery, including streaming-only
+queries and default-mode reopen of an already certified image. Only the legacy,
+non-certified streaming-only path retains its existing read-error fallback.
 
 Stopping joins the owned processor before releasing source positions or reporting
-`Stopped`. A join timeout retains the task and returns an error; a failed task join
+`Stopped`. Subscription handles remain owned until each join completes, even if a
+stop caller is cancelled. A join timeout retains the task and returns an error; a failed task join
 continues to fail later stops. Permanent shutdown propagates stop failures and
 retains the graph loop and persistent handles. Retrying shutdown after a cancelled
 or timed-out attempt joins unfinished work before releasing those handles.
