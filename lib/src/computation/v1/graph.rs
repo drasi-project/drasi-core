@@ -2414,6 +2414,7 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 
 struct Incoming {
     edge: usize,
+    queue_id: Arc<str>,
     producer_role: super::ComponentRole,
     port: PortId,
     receiver: Box<dyn EnvelopeReceiver>,
@@ -3142,7 +3143,14 @@ async fn run_node(
                         "acceptance-only sink cannot acknowledge completed handling",
                     ));
                 }
-                acknowledgement = completion.map(|completion| (incoming.edge, completion));
+                acknowledgement = completion.map(|completion| {
+                    (
+                        incoming.edge,
+                        incoming.queue_id.clone(),
+                        incoming.port.clone(),
+                        completion,
+                    )
+                });
                 consumed = Some(work);
                 let input = InputEnvelope {
                     execution_context,
@@ -3302,12 +3310,14 @@ async fn run_node(
         if let (Some(progress), Some(input)) = (input_progress.as_mut(), handled_input) {
             progress.confirm([*input]);
         }
-        if let Some((edge, acknowledgement)) = acknowledgement {
+        if let Some((edge, queue_id, input_port, acknowledgement)) = acknowledgement {
             observe(
                 node,
                 crate::observability::ObservedOperation::Acknowledge,
                 processing_scope.context(),
                 crate::observability::OperationFields {
+                    queue_id: Some(&queue_id),
+                    input_port: Some(input_port.as_str()),
                     handling_outcome: Some("handled"),
                     ..Default::default()
                 },

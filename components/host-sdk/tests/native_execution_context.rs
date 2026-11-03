@@ -207,35 +207,7 @@ async fn pipeline(plugin: &NativePlugin, instance: &str, seed: u8, sampled: bool
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()?;
-    let run = graph.run()?;
-    let control = run.control();
-    let request_scope = ExecutionScope::new(context(93, true))
-        .with_adapter(Some(Arc::new(OpenTelemetryContextAdapter)));
-    let (driver, applied) = tokio::time::timeout(Duration::from_secs(10), async {
-        tokio::join!(run, async {
-            control.deployment_report().await?;
-            request_scope
-                .scope(
-                    control
-                        .start_components(control.desired_snapshot().revision, GraphSelection::All),
-                )
-                .await?;
-            let mut observed = control.subscribe_observed();
-            observed
-                .wait_for(|graph| {
-                    graph
-                        .components
-                        .values()
-                        .all(|component| component.exhausted)
-                })
-                .await?;
-            control.cancel();
-            Ok::<_, anyhow::Error>(())
-        })
-    })
-    .await?;
-    applied?;
-    assert!(matches!(driver, Err(GraphError::Cancelled)));
+    tokio::time::timeout(Duration::from_secs(10), graph.start()?).await??;
     graph.dispose().await?;
     let contexts = contexts.lock().unwrap();
     assert_eq!(contexts.len(), 1);
@@ -411,7 +383,36 @@ async fn graph_created_native_batch(plugin: &NativePlugin, sampled: bool) -> Res
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
             .build()?;
-        tokio::time::timeout(Duration::from_secs(10), graph.start()?).await??;
+        let run = graph.run()?;
+        let control = run.control();
+        let request_scope = ExecutionScope::new(context(93, true))
+            .with_adapter(Some(Arc::new(OpenTelemetryContextAdapter)));
+        let (driver, applied) =
+            tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(run, async {
+                    control.deployment_report().await?;
+                    request_scope
+                        .scope(control.start_components(
+                            control.desired_snapshot().revision,
+                            GraphSelection::All,
+                        ))
+                        .await?;
+                    let mut observed = control.subscribe_observed();
+                    observed
+                        .wait_for(|graph| {
+                            graph
+                                .components
+                                .values()
+                                .all(|component| component.exhausted)
+                        })
+                        .await?;
+                    control.cancel();
+                    Ok::<_, anyhow::Error>(())
+                })
+            })
+            .await?;
+        applied?;
+        assert!(matches!(driver, Err(GraphError::Cancelled)));
         graph.dispose().await?;
         Ok::<_, anyhow::Error>(())
     }

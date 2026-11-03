@@ -501,13 +501,16 @@ impl AdmissionLease {
                                 },
                             )
                             .map_err(|error| PipeError::Backend(error.into()))?;
-                        send.run(
-                            channel.admit_validated(&session, sequence, &input, |envelope| {
+                        send.run_acceptance(channel.admit_validated(
+                            &session,
+                            sequence,
+                            &input,
+                            |envelope| {
                                 validate(envelope)?;
                                 produced = true;
                                 Ok(())
-                            }),
-                        )
+                            },
+                        ))
                         .await
                     })
                     .await;

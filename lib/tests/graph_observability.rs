@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![cfg(test)]
+
 #[allow(dead_code)]
 mod computation_support;
 
@@ -264,14 +266,21 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
                 tokio::join!(run, async {
                     entered.notified().await;
                     if cancel {
-                    tokio::time::advance(Duration::from_millis(17)).await;
+                        tokio::time::advance(Duration::from_millis(17)).await;
                     } else {
                         let mut observed = control.subscribe_observed();
-                        observed.wait_for(|graph| graph.components[&component("pending")].failure.is_some()).await.unwrap();
+                        observed
+                            .wait_for(|graph| {
+                                graph.components[&component("pending")].failure.is_some()
+                            })
+                            .await
+                            .unwrap();
                     }
                     control.cancel();
                 })
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(result.is_err());
             graph.shutdown().await.unwrap();
         }
@@ -398,6 +407,260 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         metrics.matching("drasi.component.up", &[("component_id", "service")])[0].gauge,
         0.0
     );
+}
+
+#[tokio::test]
+async fn supported_acknowledgements_record_physical_queue_and_input_identity() {
+    let metrics = RecordingMetrics::default();
+    let spans = RecordingSpans::default();
+    let resource = ResourceId::try_new("retained").unwrap();
+    let capacity = std::num::NonZeroUsize::new(2).unwrap();
+    let store = Arc::new(MemoryEnvelopeStore::new(
+        capacity,
+        RetentionPolicy::Backpressure,
+    ));
+    async {
+        let mut graph = ComputationGraph::builder("acknowledgements")
+            .with_telemetry(settings(TelemetryProfile::Debug, true, &metrics))
+            .declare_resource(ResourceSpecification {
+                id: resource.clone(),
+                role: ResourceRole::StateStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "retained".into(),
+            })
+            .unwrap()
+            .provide_resource(
+                resource.clone(),
+                ResourceHandle::new(ResourceRole::StateStore, Arc::new(RetainedStoreResource(store))),
+            )
+            .unwrap()
+            .source(Box::new(FiniteSource::new(
+                "source",
+                vec![output(root("source", 1, &[1]))],
+            )))
+            .sink(Box::new(CollectSink::new("sink", &["in"], Arc::default())))
+            .bind_stream(endpoint("source", "out"), stream("source"))
+            .connect(
+                edge("source", "sink"),
+                Box::new(RetainedPipeConfig {
+                    resource,
+                    capacity,
+                    durable: false,
+                    retention: RetentionPolicy::Backpressure,
+                    gap_policy: ReplayGapPolicy::Strict,
+                }),
+            )
+            .build()
+            .unwrap();
+        graph.start().unwrap().await.unwrap();
+        graph.dispose().await.unwrap();
+    }
+    .with_subscriber(tracing_subscriber::registry().with(spans.clone()))
+    .await;
+    let spans = spans.0.lock().unwrap();
+    let acknowledgements: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "pipe.acknowledge")
+        .collect();
+    assert_eq!(acknowledgements.len(), 1);
+    for (field, expected) in [
+        ("queue_id", "resource:retained"),
+        ("input_port", "in"),
+        ("handling_outcome", "handled"),
+        ("outcome", "success"),
+    ] {
+        assert_eq!(
+            acknowledgements[0].fields.get(field).map(String::as_str),
+            Some(expected)
+        );
+    }
+}
+
+#[cfg(feature = "computation-rocksdb-tests")]
+#[tokio::test]
+async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_output() {
+    use drasi_core::{computation::ComputationIndexProvider, interface::FailureMode};
+    use drasi_index_rocksdb::{
+        computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
+    };
+    use std::num::NonZeroUsize;
+    struct Admitted {
+        descriptor: ComponentDescriptor,
+        admission: Arc<SourceAdmission>,
+    }
+    #[async_trait]
+    impl ComputationComponent for Admitted {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl EnvelopeSource for Admitted {
+        fn admission(&self) -> Option<Arc<SourceAdmission>> {
+            Some(self.admission.clone())
+        }
+        async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+            anyhow::bail!("admission must not poll next")
+        }
+    }
+    let directory = tempfile::TempDir::new().unwrap();
+    let provider = RocksDbComputationProvider::new(
+        directory.path(),
+        RocksIndexOptions::new(
+            false,
+            false,
+            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).unwrap(),
+        ),
+    );
+    let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).unwrap());
+    codec
+        .register_schema(Arc::new(Schema::new(
+            schema_descriptor(),
+            Arc::new(ReadingValidator(schema_descriptor())),
+        )))
+        .unwrap();
+    let channel = QosChannel::persistent_with_recovery(
+        QosChannelDefinition {
+            stream: stream("source"),
+            capacity: NonZeroUsize::new(4).unwrap(),
+            durable: true,
+            retention: RetentionPolicy::Backpressure,
+            subscribers: BTreeMap::from([("sink".into(), SubscriptionStart::Earliest)]),
+        },
+        provider
+            .create_indexes("admission-observations", "ingress")
+            .await
+            .unwrap(),
+        codec,
+        "ingress",
+        QosRecoveryOptions::Admission(AdmissionOptions {
+            construction_scope: "admission-observations".into(),
+            graph_id: "admission-observations".into(),
+            component_id: component("source"),
+            failure_scope: FailureMode::ProcessRestart,
+            max_producers: NonZeroUsize::new(2).unwrap(),
+            receipts_per_producer: NonZeroUsize::new(4).unwrap(),
+        }),
+    )
+    .await
+    .unwrap();
+    let admission = SourceAdmission::new(channel.clone(), port("out"))
+        .await
+        .unwrap();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let resource = ResourceId::try_new("ingress").unwrap();
+    let metrics = RecordingMetrics::default();
+    let spans = RecordingSpans::default();
+    async {
+        let mut graph = ComputationGraph::builder("admission-observations")
+            .with_telemetry(settings(TelemetryProfile::Debug, true, &metrics))
+            .declare_resource(ResourceSpecification {
+                id: resource.clone(),
+                role: ResourceRole::StateStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "ingress".into(),
+            })
+            .unwrap()
+            .provide_resource(resource.clone(), channel.resource())
+            .unwrap()
+            .source(Box::new(Admitted {
+                descriptor: descriptor("source", &[], &["out"]),
+                admission: admission.clone(),
+            }))
+            .sink(Box::new(CollectSink::new(
+                "sink",
+                &["in"],
+                received.clone(),
+            )))
+            .bind_stream(endpoint("source", "out"), stream("source"))
+            .connect(
+                edge("source", "sink"),
+                Box::new(channel.definition().pipe(resource, "sink")),
+            )
+            .build()
+            .unwrap();
+        let run = graph.start().unwrap();
+        let control = run.control();
+        let (driver, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(run, async {
+                admission.wait_active().await.unwrap();
+                let session = admission
+                    .register_producer(component("client"))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    metrics.count("drasi.component.calls", &[("operation", "publish")]),
+                    0
+                );
+                let input = root("client", 1, &[1]);
+                let receipt = admission.admit(&session, 1, &input).await.unwrap();
+                let duplicate = admission.admit(&session, 1, &input).await.unwrap();
+                assert_eq!(receipt, duplicate);
+                assert!(admission
+                    .admit(&session, 1, &root("client", 1, &[2]))
+                    .await
+                    .is_err());
+                admission.producer_status(&session).await.unwrap();
+                admission.admission_receipt(&session, 1).await.unwrap();
+                while channel.progress().await.unwrap().processed["sink"] < receipt.position {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(received.lock().unwrap().len(), 1);
+                control.cancel();
+            })
+        })
+        .await
+        .unwrap();
+        assert!(driver.is_err());
+        graph.shutdown().await.unwrap();
+    }
+    .with_subscriber(tracing_subscriber::registry().with(spans.clone()))
+    .await;
+    assert_eq!(
+        metrics.count(
+            "drasi.component.calls",
+            &[("component_id", "source"), ("operation", "publish")]
+        ),
+        3
+    );
+    assert_eq!(metrics.count("drasi.source.events_dispatched", &[]), 2);
+    assert_eq!(
+        metrics.count(
+            "drasi.component.outputs_emitted",
+            &[("component_id", "source")]
+        ),
+        1
+    );
+    assert_eq!(metrics.count("drasi.errors", &[]), 1);
+    let spans = spans.0.lock().unwrap();
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.name == "source.publish")
+            .count(),
+        3
+    );
+    let sends: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "pipe.send")
+        .collect();
+    assert_eq!(sends.len(), 3);
+    assert_eq!(
+        sends
+            .iter()
+            .filter(|span| span.fields.get("acceptance").map(String::as_str) == Some("accepted"))
+            .count(),
+        2
+    );
+    assert_eq!(sends.iter().filter(|span| span.fields.get("acceptance").map(String::as_str) == Some("not_accepted")).count(), 1);
+    drop(spans);
+    channel.shutdown().await.unwrap();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

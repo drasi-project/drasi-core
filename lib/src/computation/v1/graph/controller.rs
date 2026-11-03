@@ -2334,7 +2334,7 @@ fn construct_pipe(
                                 })?;
                                 let progress = Arc::new(super::FlowProgress::default());
                                 let outgoing = Outgoing {
-                                    queue_id,
+                                    queue_id: queue_id.clone(),
                                     edge: index,
                                     port: edge.definition.from.port.clone(),
                                     sender: provided.pipe.sender(),
@@ -2357,7 +2357,7 @@ fn construct_pipe(
                                     })?,
                                 };
                                 let incoming = Incoming {
-                    edge: index, producer_role, port: edge.definition.to.port.clone(), receiver,
+                    edge: index, queue_id, producer_role, port: edge.definition.to.port.clone(), receiver,
                     acknowledgement_required: edge.capabilities.supported()
                         .contains(&crate::computation::v1::PipeCapability::ExplicitAcknowledgement),
                     pending: None, exhausted: false, progress,
@@ -3741,6 +3741,7 @@ impl Operations {
                 .policy()
                 .distributed_tracing_required(),
         );
+        let lifecycle_parent = execution_scope.context().clone();
         let admission_activation = if operation == Operation::Process
             && matches!(&lease.component, Component::Source(_))
         {
@@ -3859,7 +3860,7 @@ impl Operations {
                         })?;
                         if operation == Operation::Reconfigure {
                             let observation = super::observe(&node, crate::observability::ObservedOperation::Reconfigure,
-                                &crate::observability::ExecutionContext::current(), Default::default())?;
+                                &lifecycle_parent, Default::default())?;
                             tokio::time::timeout_at(construction_deadline, observation.run(lease.component.reconfigure(context)))
                                 .await
                                 .map_err(|_| work_identity.interrupted("reconfiguration timeout"))?
@@ -4004,7 +4005,7 @@ impl Operations {
                     }
                     super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
                     super::observe(&node, crate::observability::ObservedOperation::Start,
-                        &crate::observability::ExecutionContext::current(), Default::default())?
+                        &lifecycle_parent, Default::default())?
                         .run(lease.component.start())
                         .await
                         .map_err(|source| component_error(&node, "start", source))?;
@@ -4134,7 +4135,7 @@ impl Operations {
                         .map(|progress| progress.fence());
                     if lease.attempted {
                         super::observe(&node, crate::observability::ObservedOperation::Stop,
-                            &crate::observability::ExecutionContext::current(), Default::default())?
+                            &lifecycle_parent, Default::default())?
                             .run(lease.component.stop())
                             .await
                             .map_err(|source| component_error(&node, "stop", source))?;
@@ -6960,7 +6961,13 @@ mod command_tests {
             };
             drop(closed);
             assert!(receiver.recv().now_or_never().is_none());
-            remaining.send(ContextualCommand { command: Command::AutoStart, context: Default::default() }).await.unwrap();
+            remaining
+                .send(ContextualCommand {
+                    command: Command::AutoStart,
+                    context: Default::default(),
+                })
+                .await
+                .unwrap();
             assert!(matches!(receiver.recv().await, Some(Command::AutoStart)));
             drop(remaining);
             assert!(receiver.recv().await.is_none());

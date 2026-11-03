@@ -599,6 +599,30 @@ impl OperationObservation {
         result
     }
 
+    pub(crate) async fn run_acceptance<T>(
+        mut self,
+        future: impl Future<Output = Result<T, crate::computation::v1::PipeError>>,
+    ) -> Result<T, crate::computation::v1::PipeError> {
+        use crate::computation::v1::PipeError;
+        self.record("acceptance", "unknown");
+        let result = self
+            .owner
+            .scope(self.scope.scope(future.instrument(self.span.clone())))
+            .await;
+        self.record(
+            "acceptance",
+            match &result {
+                Ok(_) => "accepted",
+                Err(PipeError::AcceptanceUnknown { .. }) => {
+                    "unknown"
+                }
+                Err(_) => "not_accepted",
+            },
+        );
+        self.finish(if result.is_ok() { 0 } else { 1 });
+        result
+    }
+
     pub(crate) fn finish(&mut self, outcome: usize) {
         if self.finished {
             return;

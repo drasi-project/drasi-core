@@ -10,6 +10,7 @@ mod tests;
 
 struct RetainedInput {
     edge: usize,
+    queue_id: Arc<str>,
     producer_role: super::super::ComponentRole,
     input: InputEnvelope,
     acknowledgement: Option<Box<dyn Acknowledgement>>,
@@ -25,6 +26,7 @@ pub(super) struct SinkBatchState {
     deadline: Option<Instant>,
     flushing: bool,
     completed: usize,
+    completion_context: ExecutionContext,
     acknowledging: Option<BoxFuture<'static, Result<(), PipeError>>>,
     acknowledgement_failed: bool,
 }
@@ -47,6 +49,7 @@ impl SinkBatchState {
         // Retain ownership before any validation that may fail.
         self.inputs.push_back(RetainedInput {
             edge: incoming.edge,
+            queue_id: incoming.queue_id.clone(),
             producer_role: incoming.producer_role,
             input,
             acknowledgement,
@@ -133,6 +136,7 @@ impl SinkBatchState {
             ));
         }
         while self.completed > 0 {
+            let completion_context = self.completion_context.clone();
             let first = self.inputs.front_mut().expect("completed input");
             if self.acknowledging.is_none() {
                 self.acknowledging = first
@@ -143,8 +147,9 @@ impl SinkBatchState {
                             crate::observability::ComponentObservations::current_or_disabled()
                                 .begin(
                                     crate::observability::ObservedOperation::Acknowledge,
-                                    &first.input.execution_context,
+                                    &completion_context,
                                     crate::observability::OperationFields {
+                                        queue_id: Some(&first.queue_id),
                                         input_port: Some(first.input.port.as_str()),
                                         handling_outcome: Some("handled"),
                                         ..Default::default()
@@ -249,6 +254,7 @@ impl SinkBatchState {
                     .as_ref()
                     .map_or(true, |inputs| !inputs[index].duplicate)
             };
+            self.completion_context = first.input.execution_context.clone();
             if use_batch {
                 let batch: Vec<_> = self
                     .inputs
@@ -287,13 +293,14 @@ impl SinkBatchState {
                             .map_err(|error| {
                                 component_error(node, "observe batch", error.into())
                             })?;
+                    self.completion_context = observation.context().clone();
                     observation
                         .run(sink.handle_batch(batch))
                         .await
                         .map_err(|error| component_error(node, "handle batch", error))?;
                 }
             } else if is_new(0) {
-                observe(
+                let observation = observe(
                     node,
                     crate::observability::ObservedOperation::Handle,
                     &first.input.execution_context,
@@ -308,10 +315,12 @@ impl SinkBatchState {
                         }),
                         ..Default::default()
                     },
-                )?
-                .run(sink.handle(first.input.clone()))
-                .await
-                .map_err(|error| component_error(node, "handle", error))?;
+                )?;
+                self.completion_context = observation.context().clone();
+                observation
+                    .run(sink.handle(first.input.clone()))
+                    .await
+                    .map_err(|error| component_error(node, "handle", error))?;
             }
             check_descriptor(component, node)?;
             if let (Some(progress), Some(prepared)) = (input_progress.as_mut(), prepared) {
