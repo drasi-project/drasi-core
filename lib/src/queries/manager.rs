@@ -477,11 +477,13 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::stop_query(false)]
-    #[case::terminal_shutdown(true)]
+    #[case::stop_query(false, false)]
+    #[case::terminal_shutdown(true, false)]
+    #[case::cancelled_stop(false, true)]
     #[tokio::test]
     async fn retained_subscription_does_not_block_bootstrap_stop(
         #[case] terminal_shutdown: bool,
+        #[case] cancel_stop: bool,
     ) -> Result<()> {
         use crate::sources::tests::TestBootstrapMockSource;
         use std::time::Duration;
@@ -547,6 +549,36 @@ mod tests {
         })
         .await?;
         assert_eq!(query.status().await, ComponentStatus::Running);
+
+        if cancel_stop {
+            let future_source = query.future_queue_source.read().await.clone().unwrap();
+            let mut stop = Box::pin(query.stop());
+            assert!(futures::poll!(stop.as_mut()).is_pending());
+            drop(stop);
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    if query
+                        .base
+                        .task_handle
+                        .read()
+                        .await
+                        .as_ref()
+                        .is_some_and(tokio::task::JoinHandle::is_finished)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            let restart = future_source.start().await;
+            future_source.stop().await;
+            query.stop().await?;
+            assert!(
+                restart.is_ok(),
+                "processor exited without joining its future-queue source"
+            );
+        }
 
         timeout(Duration::from_secs(2), async {
             if terminal_shutdown {
@@ -3504,6 +3536,7 @@ impl DrasiQuery {
                     if !dispatch_unless_stopping(
                         &query_id, result, &base_dispatchers, &mut shutdown_rx,
                     ).await {
+                        fq_source_for_processor.stop().await;
                         return;
                     }
                     let state = output_state.read().await;
