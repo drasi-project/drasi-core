@@ -619,6 +619,7 @@ impl Receiver {
                 position: request.sequence,
             };
             permit.send(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out").expect("constant port"),
                 envelope: output,
             });

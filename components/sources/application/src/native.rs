@@ -231,6 +231,7 @@ impl EnvelopeSource for ApplicationSource {
         input.sequence = sequence;
         input.pending = None;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: self.descriptor.ports()[0].id().clone(),
             envelope,
         }))

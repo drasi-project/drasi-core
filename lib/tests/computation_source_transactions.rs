@@ -114,6 +114,7 @@ fn envelope(sequence: u64, changes: Vec<SourceChange>) -> ChangeEnvelope {
 
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("input"),
         envelope,
     }
@@ -608,6 +609,7 @@ impl ComputationComponent for Source {
 impl EnvelopeSource for Source {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         Ok(self.events.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("output"),
             envelope,
         }))

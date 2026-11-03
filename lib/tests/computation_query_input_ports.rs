@@ -212,6 +212,7 @@ impl Fixture {
         );
         GraphProducerProgress::annotate(&mut envelope, &state.producer, state.sequence)?;
         Ok(OutputEnvelope {
+            execution_context: Default::default(),
             port: port(event.port),
             envelope,
         })

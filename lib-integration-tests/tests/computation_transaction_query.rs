@@ -185,8 +185,9 @@ async fn consume(receiver: &mut dyn EnvelopeReceiver, sink: &mut CheckpointedSin
     let delivery = tokio::time::timeout(Duration::from_secs(3), receiver.receive())
         .await??
         .context("expected output delivery")?;
-    let (envelope, acknowledgement) = delivery.into_parts();
+    let (envelope, _, acknowledgement) = delivery.into_parts();
     sink.handle(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })
@@ -211,9 +212,10 @@ async fn query_handoff_worker() -> Result<()> {
     let mut query = query(&root).await?;
     if phase == "seed" {
         incoming.publish(&input(1)?).await?;
-        let (envelope, _unacknowledged) = input_receiver.receive().await?.unwrap().into_parts();
+        let (envelope, _, _unacknowledged) = input_receiver.receive().await?.unwrap().into_parts();
         let output = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope,
             })
@@ -250,9 +252,10 @@ async fn query_handoff_worker() -> Result<()> {
     }
     // The input acknowledgement was never committed, so the pipe redelivers.
     // Its query checkpoint must suppress reevaluation of the already committed input.
-    let (envelope, acknowledgement) = input_receiver.receive().await?.unwrap().into_parts();
+    let (envelope, _, acknowledgement) = input_receiver.receive().await?.unwrap().into_parts();
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope
         })
@@ -348,6 +351,7 @@ async fn scheduled_query_worker() -> Result<()> {
     if phase == "seed" {
         assert!(query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: input(1)?
             })
@@ -360,6 +364,7 @@ async fn scheduled_query_worker() -> Result<()> {
             assert_eq!(
                 query
                     .transform(InputEnvelope {
+                        execution_context: Default::default(),
                         port: PortId::try_new("in")?,
                         envelope: notification.envelope
                     })
@@ -383,6 +388,7 @@ async fn scheduled_query_worker() -> Result<()> {
             .unwrap();
         query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: notification.envelope,
             })
@@ -398,6 +404,7 @@ async fn scheduled_query_worker() -> Result<()> {
     )?;
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: repeated_hint
         })
@@ -466,6 +473,7 @@ fn scheduled_named_input(
         ),
     };
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             if insert {
@@ -567,6 +575,7 @@ async fn timer_burst_reconstruction() -> Result<()> {
             .context("recovered due work")?;
         let mut pending = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: hint.envelope,
             })
@@ -605,6 +614,7 @@ async fn timer_burst_reconstruction() -> Result<()> {
     )?;
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: stale
         })
@@ -664,6 +674,7 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
         assert!(
             query
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: stale.envelope
                 })
@@ -682,6 +693,7 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
             .context("replacement hint")?;
         let added = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: due.envelope,
             })
@@ -741,7 +753,7 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
         assert_eq!(QueryChangeCodec::query_sequence(first.envelope())?, 1);
         first
             .into_parts()
-            .1
+            .2
             .context("timer output ack")?
             .complete(HandlingOutcome::Handled)
             .await?;
@@ -751,7 +763,7 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
         assert_eq!(QueryChangeCodec::query_sequence(second.envelope())?, 2);
         second
             .into_parts()
-            .1
+            .2
             .context("deletion ack")?
             .complete(HandlingOutcome::Handled)
             .await?;
@@ -762,6 +774,7 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
         )?;
         assert!(query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: repeated
             })

@@ -60,6 +60,7 @@ fn runtime_descriptor(metadata: &FactoryMetadata) -> FactoryDescriptor {
 pub(super) mod recovery_tests;
 
 pub struct NativeFactory {
+    telemetry: Option<abi::telemetry::PluginTelemetryV1>,
     metadata: FactoryMetadata,
     configuration_details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
     descriptor: FactoryDescriptor,
@@ -135,6 +136,7 @@ impl NativeFactory {
             .then(|| metadata.port_catalogue())
             .transpose()?;
         Ok(Self {
+            telemetry: None,
             descriptor,
             port_formats,
             metadata,
@@ -158,6 +160,17 @@ impl NativeFactory {
     }
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
+    }
+    pub(super) fn with_telemetry(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV1>,
+    ) -> Self {
+        self.telemetry = extension;
+        self
+    }
+
+    pub fn supports_execution_context(&self) -> bool {
+        self.telemetry.is_some()
     }
     pub(super) fn with_activation_credentials(
         mut self,
@@ -824,6 +837,24 @@ impl NativeFactory {
         } else {
             wire::encode(&request)?
         };
+        let execution_scope = drasi_lib::observability::ExecutionScope::capture();
+        if execution_scope.transport_required() && self.telemetry.is_none() {
+            return Err(drasi_lib::observability::TelemetryError::Unsupported(
+                "native execution context transport",
+            )
+            .into());
+        }
+        let context_enabled =
+            execution_scope.has_adapter() || !execution_scope.context().is_empty();
+        let bytes = if self.telemetry.is_some() {
+            drasi_computation_plugin_sdk::telemetry_transport::encode_creation(&bytes)?
+        } else {
+            anyhow::ensure!(
+                execution_scope.context().is_empty(),
+                "native construction context transport is unsupported"
+            );
+            bytes
+        };
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
         let output_snapshots = output_snapshots
@@ -843,6 +874,7 @@ impl NativeFactory {
             .transpose()?;
         let binding = admission.as_ref().map(|admission| {
             super::admission::AdmissionBinding::new(admission, self.codec.clone())
+                .with_context_transport(self.telemetry.is_some())
         });
         anyhow::ensure!(
             admission.is_none() || progress.is_none(),
@@ -957,6 +989,8 @@ impl NativeFactory {
                     consumer_progress,
                     input_progress,
                 },
+                self.telemetry,
+                context_enabled && self.telemetry.is_some(),
             )?
         };
         let component = match self.batching {
@@ -1120,6 +1154,13 @@ impl ComponentFactory for NativeFactory {
         &self,
         context: ConstructionContext,
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        if context.telemetry().policy().distributed_tracing_required() && self.telemetry.is_none() {
+            return Err(ComponentCreationError::terminal(
+                drasi_lib::observability::TelemetryError::Unsupported(
+                    "native execution context transport",
+                ),
+            ));
+        }
         self.validate(&context.specification)
             .map_err(ComponentCreationError::terminal)?;
         if self.consumer.is_some() {

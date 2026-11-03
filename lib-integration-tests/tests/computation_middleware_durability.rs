@@ -72,6 +72,7 @@ fn source_input(sequence: u64, update: bool, raw_metadata: bool) -> Result<Input
     let timestamp = chrono::DateTime::from_timestamp_millis(sequence as i64).expect("time");
     if !raw_metadata {
         return Ok(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_change(
                 change,
@@ -89,6 +90,7 @@ fn source_input(sequence: u64, update: bool, raw_metadata: bool) -> Result<Input
         None,
     );
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(source),
@@ -164,6 +166,7 @@ async fn deliver(
     for output in outputs {
         emitted += query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: output.envelope.clone(),
             })
@@ -185,6 +188,7 @@ async fn persistent_query_must_not_silently_accept_volatile_stateful_middleware(
     assert_eq!(output.len(), 1);
     let accepted = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: output.remove(0).envelope,
         })

@@ -188,6 +188,7 @@ impl RowEmission {
             )
             .with_source_position(serde_json::to_vec(&position)?.into());
             output.push_back(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_source_event(
                     Arc::new(event),

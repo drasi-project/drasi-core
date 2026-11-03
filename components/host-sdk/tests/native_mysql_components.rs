@@ -568,6 +568,7 @@ async fn procedure_lifecycle(
         json!({"settings":settings})
     };
     let input = || InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("input"),
         envelope: envelope.clone(),
     };

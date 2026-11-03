@@ -182,6 +182,7 @@ async fn result_nodes_chain_into_another_query(second_time: u64) {
     {
         let output = first
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: GraphChangeCodec::encode_change(
                     SourceChange::Insert {
@@ -215,6 +216,7 @@ async fn result_nodes_chain_into_another_query(second_time: u64) {
                 .is_empty());
             second
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: port("in"),
                     envelope: event.envelope,
                 })
@@ -293,6 +295,7 @@ async fn generic_snapshot_watermark_binds_epoch_before_live_deduplication() {
             .unwrap();
             GraphProducerProgress::annotate(&mut envelope, producer, sequence).unwrap();
             InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope,
             }
@@ -349,6 +352,7 @@ async fn canonical_replacement_removes_omitted_properties_without_intermediate_r
     };
     query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: GraphChangeCodec::encode_change(
                 SourceChange::Insert {
@@ -379,6 +383,7 @@ async fn canonical_replacement_removes_omitted_properties_without_intermediate_r
     .unwrap();
     let output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: ChangeEnvelope::new(
                 emission_id(&stream("source/out"), 2).unwrap(),
@@ -465,6 +470,7 @@ async fn one_ordered_batch_applies_add_removal_null_and_replacement_in_order() {
     ];
     let output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: ChangeEnvelope::new(
                 emission_id(&stream("source/out"), 1).unwrap(),
@@ -557,6 +563,7 @@ fn source(changes: Vec<SourceChange>) -> Source {
             .into_iter()
             .enumerate()
             .map(|(index, change)| OutputEnvelope {
+                execution_context: Default::default(),
                 port: port("out"),
                 envelope: GraphChangeCodec::encode_change(
                     change,
@@ -986,6 +993,7 @@ impl Transformer for GraphRelay {
         self.sequence += 1;
         let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: GraphChangeCodec::derive_changes(
                 &input.envelope,
@@ -1029,6 +1037,7 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
         )
         .with_source_position(bytes::Bytes::copy_from_slice(&u64::to_be_bytes(position)));
         OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: GraphChangeCodec::encode_source_event(
                 Arc::new(event),
@@ -1280,6 +1289,7 @@ async fn graph_query_atomically_persists_and_recovers_typed_output_without_legac
     .expect("input");
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: duplicate
         })
@@ -1429,6 +1439,7 @@ mod atomic_failure {
         let results = query.results();
         query.start().await.expect("start");
         let input = || InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: GraphChangeCodec::encode_change(
                 person("Alice", false, 1000),
@@ -1490,6 +1501,7 @@ mod atomic_failure {
             query.start().await.expect("start");
             assert!(query
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: port("in"),
                     envelope: GraphChangeCodec::encode_change(
                         person("Alice", false, 1000),
@@ -1539,6 +1551,7 @@ async fn labelled_room_total(label: Option<&str>) -> anyhow::Result<ContinuousQu
 
 fn room_input(time: u64) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: port("in"),
         envelope: GraphChangeCodec::encode_change(
             SourceChange::Insert {
@@ -1606,6 +1619,7 @@ async fn labelled_result_nodes_chain_into_a_query_matching_that_label() {
     for event in first.transform(room_input(2000)).await.unwrap() {
         second
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: event.envelope,
             })

@@ -232,6 +232,7 @@ impl EnvelopeSource for WalReplaySource {
                 self.cursor = sequence;
                 self.producer_sequence = producer_sequence;
                 return Ok(Some(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope,
                 }));

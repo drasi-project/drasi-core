@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Runtime-only collection settings. These never install logging, a recorder,
-//! an exporter, or context propagation, and are not part of graph snapshots.
+//! an exporter, or a global context adapter, and are not part of graph snapshots.
 
 pub use drasi_computation_contracts::telemetry::facade::*;
 pub use drasi_computation_contracts::telemetry::*;
@@ -29,6 +29,7 @@ pub struct TelemetryOptions {
     instance_id: Option<Arc<str>>,
     metrics: Option<MetricRegistrationContext>,
     trace_directives: Option<String>,
+    context_adapter: Option<Arc<dyn TraceContextAdapter>>,
 }
 
 impl From<TelemetrySettings> for TelemetryOptions {
@@ -66,12 +67,22 @@ impl TelemetryOptions {
         self
     }
 
+    pub fn with_context_adapter(mut self, adapter: Arc<dyn TraceContextAdapter>) -> Self {
+        self.context_adapter = Some(adapter);
+        self
+    }
+
     pub(crate) fn resolve(
         &self,
         graph_id: &str,
         instance_id: Option<&str>,
     ) -> Result<GraphTelemetry> {
         let policy = Arc::new(self.settings.resolve()?);
+        if policy.distributed_tracing_required() && self.context_adapter.is_none() {
+            return Err(TelemetryError::Unsupported(
+                "distributed trace context adapter",
+            ));
+        }
         if policy.metrics_enabled() && self.metrics.is_none() {
             return Err(TelemetryError::Invalid(
                 "enabled metrics require a host-owned MetricRegistrationContext".into(),
@@ -103,6 +114,7 @@ impl TelemetryOptions {
             scope,
             metrics: self.metrics.clone(),
             filter: Arc::new(filter),
+            context_adapter: self.context_adapter.clone(),
         })
     }
 }
@@ -113,6 +125,7 @@ pub struct GraphTelemetry {
     scope: Option<TelemetryScope>,
     metrics: Option<MetricRegistrationContext>,
     filter: Arc<EnvFilter>,
+    context_adapter: Option<Arc<dyn TraceContextAdapter>>,
 }
 
 impl Default for GraphTelemetry {
@@ -122,11 +135,16 @@ impl Default for GraphTelemetry {
             scope: None,
             metrics: None,
             filter: Arc::new(EnvFilter::new("trace")),
+            context_adapter: None,
         }
     }
 }
 
 impl GraphTelemetry {
+    pub fn context_adapter(&self) -> Option<&Arc<dyn TraceContextAdapter>> {
+        self.context_adapter.as_ref()
+    }
+
     pub fn policy(&self) -> &ResolvedTelemetry {
         &self.policy
     }
@@ -176,6 +194,11 @@ mod tests {
 
     #[test]
     fn default_and_signal_specific_requirements() {
+        assert!(matches!(
+            TelemetryOptions::new(TelemetrySettings::default().require_distributed_tracing())
+                .resolve("graph", None),
+            Err(TelemetryError::Unsupported(_))
+        ));
         assert!(!TelemetryOptions::default()
             .resolve("graph", None)
             .unwrap()

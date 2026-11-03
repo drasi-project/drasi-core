@@ -398,6 +398,7 @@ impl EnvelopeSource for NativeSource {
         };
         self.sequence += 1;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: GraphChangeCodec::encode_change(
                 change,

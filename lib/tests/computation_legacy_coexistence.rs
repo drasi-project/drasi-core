@@ -406,6 +406,7 @@ async fn assert_coexistence(instance_id: &str) {
         .source(Box::new(NativeSource {
             descriptor: descriptor(&output, PortDirection::Output),
             event: Some(OutputEnvelope {
+                execution_context: Default::default(),
                 port: output.port.clone(),
                 envelope: Envelope::new(
                     envelope_id.clone(),

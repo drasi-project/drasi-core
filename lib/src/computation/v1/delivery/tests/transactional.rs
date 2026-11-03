@@ -586,6 +586,7 @@ async fn transactional_delivery_crash_child() -> anyhow::Result<()> {
         options(),
     )?;
     let batch = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: codec().decode(&std::fs::read(path.join("input.json"))?)?,
     };

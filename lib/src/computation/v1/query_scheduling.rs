@@ -188,6 +188,7 @@ impl QueryScheduledSource {
             self.sequence.store(sequence, Ordering::Release);
             self.not_before = Some(tokio::time::Instant::now() + Duration::from_millis(50));
             return Ok(Some(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_futures_due(
                     self.stream.clone(),
@@ -511,6 +512,7 @@ mod tests {
                 .is_empty());
             assert!(native
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").unwrap(),
                     envelope: GraphChangeCodec::encode_source_event(
                         Arc::new(SourceEventWrapper::with_sequence(
@@ -630,9 +632,10 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            let (envelope, _) = delivered.into_parts();
+            let (envelope, _, _) = delivered.into_parts();
             let mut output = native
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").unwrap(),
                     envelope,
                 })

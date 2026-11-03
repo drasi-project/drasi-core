@@ -497,8 +497,9 @@ impl LinearTransaction {
         Ok(())
     }
 
-    fn outputs(envelope: ChangeEnvelope) -> Vec<OutputEnvelope> {
+    fn outputs(envelope: ChangeEnvelope, context: super::ExecutionContext) -> Vec<OutputEnvelope> {
         vec![OutputEnvelope {
+            execution_context: context,
             port: PortId::try_new("out").expect("port"),
             envelope,
         }]
@@ -583,7 +584,9 @@ impl LinearTransaction {
         if let Some(progress) = &self.progress {
             progress.publish(self.store.progress()?);
         }
-        Ok(output.map_or_else(Vec::new, Self::outputs))
+        Ok(output.map_or_else(Vec::new, |envelope| {
+            Self::outputs(envelope, input.execution_context.clone())
+        }))
     }
 
     async fn continue_pending(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -592,11 +595,15 @@ impl LinearTransaction {
             self.pending.pop_front();
             self.wakeup
                 .set(!self.pending.is_empty() || self.deferred.is_some());
-            return Ok(Self::outputs(envelope));
+            return Ok(Self::outputs(envelope, super::ExecutionContext::default()));
         }
         self.wakeup.set(false);
         match self.deferred.take() {
-            Some(input) => self.process(input).await,
+            Some(input) => {
+                let scope = crate::observability::ExecutionScope::capture()
+                    .with_context(input.execution_context.clone());
+                scope.scope(self.process(input)).await
+            }
             None => Ok(Vec::new()),
         }
     }

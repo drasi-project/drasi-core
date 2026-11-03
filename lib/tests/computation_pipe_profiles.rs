@@ -101,7 +101,7 @@ async fn explicitly_lossy_broadcast_policy_continues_after_recorded_gap() {
     sender.send(root("source", 1, &[1])).await.expect("one");
     let original = root("source", 2, &[2]);
     sender.send(original.clone()).await.expect("two");
-    let (mut envelope, ack) = receiver
+    let (mut envelope, _, ack) = receiver
         .receive()
         .await
         .expect("explicitly skip lag")
@@ -127,14 +127,14 @@ struct LimitedSender {
 
 #[async_trait]
 impl EnvelopeSender for LimitedSender {
-    async fn send(
+    async fn send_message(
         &self,
-        envelope: ChangeEnvelope,
+        message: EnvelopeMessage,
     ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         if self.attempts.fetch_add(1, Ordering::SeqCst) == 2 {
             self.control.close();
         }
-        self.inner.send(envelope).await
+        self.inner.send_message(message).await
     }
 }
 
@@ -163,7 +163,7 @@ async fn batch_failure_preserves_accepted_receipts_failed_event_and_unattempted_
         failure
             .not_attempted
             .iter()
-            .map(|event| event.system().sequence())
+            .map(|event| event.envelope.system().sequence())
             .collect::<Vec<_>>(),
         [4, 5]
     );

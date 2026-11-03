@@ -889,6 +889,7 @@ fn stable_input(sequence: u64, change: SourceChange) -> Result<InputEnvelope> {
     // This host-owned input identity/sequence is stable across reconstruction.
     // Never use the volatile counter as a durable transaction replay source.
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             change,
@@ -968,6 +969,7 @@ async fn actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifec
     );
     assert!(capture
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: other
         })
@@ -1496,6 +1498,7 @@ impl ComputationComponent for StableSource {
 impl EnvelopeSource for StableSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         Ok(self.input.take().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("port"),
             envelope,
         }))
@@ -1779,7 +1782,7 @@ async fn managed_qos_recipes_replay_real_native_records_and_isolate_instances() 
     assert_eq!(values(&[delivery.envelope().clone()])?, [7]);
     delivery
         .into_parts()
-        .1
+        .2
         .context("acknowledgement")?
         .complete(HandlingOutcome::Handled)
         .await?;

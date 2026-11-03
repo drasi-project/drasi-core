@@ -53,11 +53,12 @@ pub use topology::*;
 use super::{
     data::{validate_identifier, validate_schema},
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentGeneration,
-    ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender,
-    EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy,
-    ObservedGraph, OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError,
-    PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy,
-    ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
+    ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeMessage, EnvelopeReceiver,
+    EnvelopeSender, EnvelopeSink, EnvelopeSource, ExecutionContext, GraphRevision, InputEnvelope,
+    InputMergePolicy, LifecyclePolicy, ObservedGraph, OutputEnvelope, PipeCapabilities,
+    PipeCapability, PipeControl, PipeError, PipeProvider, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, RelationshipPolicy, ResourceId, SendFailure, SinkCompletion, StreamId,
+    Transformer,
 };
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
@@ -2866,6 +2867,7 @@ async fn run_admitted_source(
                     node,
                     &mut pending,
                     &[OutputEnvelope {
+                        execution_context: Default::default(),
                         port: admission.port().clone(),
                         envelope: envelope.clone(),
                     }],
@@ -2896,6 +2898,8 @@ async fn run_node(
     sink_batch: &mut Option<Box<sink_batching::SinkBatchState>>,
     input_progress: &mut Option<Box<input_progress::InputProgress>>,
 ) -> GraphResult<()> {
+    let execution_scope =
+        crate::observability::ExecutionScope::capture().with_context(ExecutionContext::default());
     validate_source_progress(
         component,
         routing.graph_id,
@@ -2965,12 +2969,13 @@ async fn run_node(
         let mut acknowledgement = None;
         let mut consumed = None;
         let mut handled_input = None;
+        let mut processing_scope = execution_scope.clone();
         let mut emissions = match component {
             Component::Source(source) => {
                 match tokio::select! {
                     biased;
                     _ = cancelled(quiesce) => return Ok(()),
-                    result = source.next() => result.map_err(|source| component_error(node, "next", source))?,
+                    result = execution_scope.scope(source.next()) => result.map_err(|source| component_error(node, "next", source))?,
                 } {
                     Some(output) => vec![output],
                     None => {
@@ -2984,9 +2989,12 @@ async fn run_node(
                     component
                 {
                     if transformer.has_pending_emissions() {
-                        break 'input_work transformer.continue_transform().await.map_err(
-                            |source| component_error(node, "recovered processing", source),
-                        )?;
+                        break 'input_work execution_scope
+                            .scope(transformer.continue_transform())
+                            .await
+                            .map_err(|source| {
+                                component_error(node, "recovered processing", source)
+                            })?;
                     }
                 }
                 if ready.is_empty() {
@@ -3024,9 +3032,12 @@ async fn run_node(
                     if scheduled {
                         match component {
                             Component::Transformer(transformer) | Component::Query(transformer) => {
-                                break 'input_work transformer.on_wakeup().await.map_err(
-                                    |source| component_error(node, "scheduled processing", source),
-                                )?;
+                                break 'input_work execution_scope
+                                    .scope(transformer.on_wakeup())
+                                    .await
+                                    .map_err(|source| {
+                                        component_error(node, "scheduled processing", source)
+                                    })?;
                             }
                             _ => return Err(topology("non-transformer received scheduled work")),
                         }
@@ -3071,7 +3082,8 @@ async fn run_node(
                 let incoming = ready.remove(chosen);
                 let PendingInput { delivery, work } =
                     incoming.pending.take().expect("ready delivery");
-                let (envelope, completion) = delivery.into_parts();
+                let (envelope, execution_context, completion) = delivery.into_parts();
+                processing_scope = execution_scope.with_context(execution_context.clone());
                 if completion.is_some() != incoming.acknowledgement_required {
                     return Err(topology(
                         "pipe delivery acknowledgement differs from its negotiated capability",
@@ -3092,6 +3104,7 @@ async fn run_node(
                 acknowledgement = completion.map(|completion| (incoming.edge, completion));
                 consumed = Some(work);
                 let input = InputEnvelope {
+                    execution_context,
                     port: incoming.port.clone(),
                     envelope,
                 };
@@ -3113,13 +3126,14 @@ async fn run_node(
                 }
                 match component {
                     Component::Transformer(transformer) | Component::Query(transformer) => {
-                        transformer
-                            .transform(input)
+                        processing_scope
+                            .scope(transformer.transform(input))
                             .await
                             .map_err(|source| component_error(node, "transform", source))?
                     }
                     Component::Sink(sink) => {
-                        sink.handle(input)
+                        processing_scope
+                            .scope(sink.handle(input))
                             .await
                             .map_err(|source| component_error(node, "handle", source))?;
                         Vec::new()
@@ -3161,9 +3175,12 @@ async fn run_node(
                     {
                         continue;
                     }
-                    output
-                        .sender
-                        .send(emission.envelope.clone())
+                    execution_scope
+                        .with_context(emission.execution_context.clone())
+                        .scope(output.sender.send_message(EnvelopeMessage::new(
+                            emission.envelope.clone(),
+                            emission.execution_context.clone(),
+                        )))
                         .await
                         .map_err(|source| GraphError::Forward {
                             edge: output.edge,
@@ -3184,27 +3201,31 @@ async fn run_node(
             }
             match component {
                 Component::Transformer(transformer) | Component::Query(transformer) => {
-                    transformer
-                        .delivery_completed(&emissions)
+                    processing_scope
+                        .scope(transformer.delivery_completed(&emissions))
                         .await
                         .map_err(|source| component_error(node, "complete delivery", source))?;
                 }
                 _ => {}
             }
-            let continuation =
-                match component {
-                    Component::Transformer(transformer) | Component::Query(transformer)
-                        if transformer.has_pending_emissions() =>
-                    {
-                        if let Some(yield_node) = budget.checkpoint() {
-                            yield_node.await;
-                        }
-                        Some(transformer.continue_transform().await.map_err(|source| {
-                            component_error(node, "continue transform", source)
-                        })?)
+            let continuation = match component {
+                Component::Transformer(transformer) | Component::Query(transformer)
+                    if transformer.has_pending_emissions() =>
+                {
+                    if let Some(yield_node) = budget.checkpoint() {
+                        yield_node.await;
                     }
-                    _ => None,
-                };
+                    Some(
+                        processing_scope
+                            .scope(transformer.continue_transform())
+                            .await
+                            .map_err(|source| {
+                                component_error(node, "continue transform", source)
+                            })?,
+                    )
+                }
+                _ => None,
+            };
             match continuation {
                 Some(next) => emissions = next,
                 None => break,

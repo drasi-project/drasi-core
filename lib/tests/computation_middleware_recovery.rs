@@ -264,6 +264,7 @@ fn event(
 }
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("input port"),
         envelope,
     }
@@ -2244,6 +2245,7 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
             )
             .unwrap(),
             output: Some(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out").unwrap(),
                 envelope: event("source", 3, 3, deletion, false),
             }),

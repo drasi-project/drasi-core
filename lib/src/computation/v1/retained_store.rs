@@ -28,7 +28,9 @@ use drasi_core::interface::OutboxPageLimits;
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Notify};
 
 use super::journal_budget::JournalBudget;
-use super::{ChangeEnvelope, EnvelopeCodec, PipeError, ResourceCleanup};
+use super::{
+    ChangeEnvelope, EnvelopeCodec, EnvelopeMessage, ExecutionContext, PipeError, ResourceCleanup,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RetentionPolicy {
@@ -40,6 +42,7 @@ pub enum RetentionPolicy {
 pub struct StoredEnvelope {
     pub position: u64,
     pub envelope: ChangeEnvelope,
+    pub execution_context: ExecutionContext,
 }
 
 /// One bounded journal and consumer-progress boundary. Sharing one journal
@@ -64,7 +67,15 @@ pub trait RetainedEnvelopeStore: ResourceCleanup + Send + Sync {
     fn revoke_generation(&self, generation: u64);
     fn generation(&self) -> u64;
     fn notify(&self) -> &Notify;
-    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError>;
+    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError> {
+        self.append_message(generation, &envelope.clone().into())
+            .await
+    }
+    async fn append_message(
+        &self,
+        generation: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<u64, PipeError>;
     async fn next(&self, generation: u64, after: u64) -> Result<Option<StoredEnvelope>, PipeError>;
     async fn progress(&self, generation: u64) -> Result<u64, PipeError>;
     async fn acknowledge(&self, generation: u64, position: u64) -> Result<(), PipeError>;
@@ -90,6 +101,7 @@ fn check_generation(counter: &AtomicU64, generation: u64) -> Result<(), PipeErro
 #[derive(Default)]
 struct MemoryState {
     entries: BTreeMap<u64, ChangeEnvelope>,
+    contexts: BTreeMap<u64, ExecutionContext>,
     head: u64,
     progress: u64,
     budget: Option<JournalBudget>,
@@ -202,7 +214,12 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
         &self.notify
     }
 
-    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError> {
+    async fn append_message(
+        &self,
+        generation: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<u64, PipeError> {
+        let envelope = &message.envelope;
         let mut state = self.lock()?;
         self.check(generation)?;
         let position = state
@@ -227,7 +244,9 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
             }
         }
         for _ in 0..remove {
-            state.entries.pop_first();
+            if let Some((position, _)) = state.entries.pop_first() {
+                state.contexts.remove(&position);
+            }
         }
         if let Some(append) = budget {
             state
@@ -237,6 +256,11 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
                 .apply(append);
         }
         state.entries.insert(position, envelope.clone());
+        if !message.execution_context.is_empty() {
+            state
+                .contexts
+                .insert(position, message.execution_context.clone());
+        }
         state.head = position;
         drop(state);
         self.notify.notify_waiters();
@@ -264,6 +288,7 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
             .map(|(position, envelope)| StoredEnvelope {
                 position: *position,
                 envelope: envelope.clone(),
+                execution_context: state.contexts.get(position).cloned().unwrap_or_default(),
             }))
     }
 
@@ -297,6 +322,7 @@ impl ResourceCleanup for MemoryEnvelopeStore {
         }
         self.generation.store(0, Ordering::Release);
         state.entries.clear();
+        state.contexts.clear();
         state.budget = None;
         self.notify.notify_waiters();
         Ok(())
@@ -324,6 +350,7 @@ pub struct IndexedEnvelopeStore {
 
 struct IndexedState {
     entries: BTreeMap<u64, Bytes>,
+    contexts: BTreeMap<u64, ExecutionContext>,
     oldest: Option<u64>,
     retained: usize,
     head: u64,
@@ -523,6 +550,7 @@ impl IndexedEnvelopeStore {
             )));
         }
         Ok(IndexedState {
+            contexts: BTreeMap::new(),
             entries,
             oldest,
             retained,
@@ -628,7 +656,12 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
         &self.notify
     }
 
-    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError> {
+    async fn append_message(
+        &self,
+        generation: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<u64, PipeError> {
+        let envelope = &message.envelope;
         let bytes = self
             .codec
             .encode(envelope)
@@ -730,6 +763,14 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
         }) {
             state.entries.insert(position, bytes);
         }
+        state
+            .contexts
+            .retain(|position, _| *position >= retain_from);
+        if !message.execution_context.is_empty() {
+            state
+                .contexts
+                .insert(position, message.execution_context.clone());
+        }
         state.retained = state.retained - remove + 1;
         state.oldest = Some(retain_from);
         state.head = position;
@@ -796,6 +837,7 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .map(|(position, bytes)| {
                 Ok(StoredEnvelope {
                     position: *position,
+                    execution_context: state.contexts.get(position).cloned().unwrap_or_default(),
                     envelope: self
                         .codec
                         .decode(bytes)

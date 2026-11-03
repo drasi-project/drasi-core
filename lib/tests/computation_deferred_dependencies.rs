@@ -564,6 +564,7 @@ async fn verify_late_connection(late_stream: bool) {
         )
         .expect("source descriptor"),
         output: Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: output.clone(),
             envelope: GraphChangeCodec::encode_change(change.clone(), stream.clone(), 1, None)
                 .expect("change"),
@@ -878,6 +879,7 @@ async fn verify_declared_connection_before_producer() {
                 )
                 .expect("producer descriptor"),
                 output: Some(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: output.clone(),
                     envelope: GraphChangeCodec::encode_change(
                         change.clone(),

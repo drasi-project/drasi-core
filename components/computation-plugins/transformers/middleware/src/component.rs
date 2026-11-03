@@ -189,6 +189,7 @@ impl NativeTransformer for Middleware {
         self.sequence = sequence;
         guard.complete = true;
         Ok(vec![OutputEnvelope {
+            execution_context: input.execution_context,
             port: PortId::try_new("out")?,
             envelope,
         }])

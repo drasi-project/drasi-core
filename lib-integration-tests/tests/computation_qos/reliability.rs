@@ -184,7 +184,7 @@ async fn membership_crashes_and_rejected_capacity_reductions_preserve_exact_obli
             let mut pipe = endpoint(&channel, &desired, name, false)?;
             let mut receiver = pipe.pipe.take_receiver()?;
             for sequence in cut + 1..=head {
-                let (envelope, ack) = receiver
+                let (envelope, _, ack) = receiver
                     .receive()
                     .await?
                     .expect("pending journal entry")

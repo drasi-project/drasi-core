@@ -113,6 +113,7 @@ pub struct NativeAdmission {
     raw: Arc<RetainedAdmission>,
     codec: Arc<BinaryEnvelopeCodec>,
     identity: Arc<GraphProducerIdentity>,
+    contextual: bool,
 }
 
 impl NativeAdmission {
@@ -150,11 +151,17 @@ impl NativeAdmission {
             raw: Arc::new(RetainedAdmission(raw)),
             codec,
             identity: Arc::new(identity),
+            contextual: false,
         })
     }
 
     pub fn identity(&self) -> &GraphProducerIdentity {
         &self.identity
+    }
+
+    pub(crate) fn with_context_transport(mut self, contextual: bool) -> Self {
+        self.contextual = contextual;
+        self
     }
 
     pub fn report_failure(&self, reason: &str) -> Result<(), Failure> {
@@ -270,14 +277,53 @@ impl NativeAdmission {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, AdmissionError> {
-        let envelope = self.codec.encode(input).map_err(invalid)?;
+        self.admit_message(
+            session,
+            sequence,
+            &drasi_computation_contracts::EnvelopeMessage::new(
+                input.clone(),
+                crate::telemetry::ExecutionContext::current(),
+            ),
+        )
+        .await
+    }
+
+    pub async fn admit_message(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &drasi_computation_contracts::EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, AdmissionError> {
+        let envelope = self.codec.encode(&input.envelope).map_err(invalid)?;
+        let payload = encode(&AdmitRequest {
+            session: session.clone(),
+            sequence,
+            envelope: envelope.into(),
+        })?;
+        let operation = crate::telemetry::ExecutionContext::current();
+        let contextual = !input.execution_context.is_empty() || !operation.is_empty();
+        if contextual && !self.contextual {
+            return Err(invalid(
+                "native admission execution context transport was not negotiated",
+            ));
+        }
+        let payload = if contextual {
+            crate::telemetry_transport::encode_request(
+                &operation,
+                std::slice::from_ref(&input.execution_context),
+                &payload,
+            )
+            .map_err(invalid)?
+        } else {
+            payload
+        };
         self.call(
-            abi::services::admission::ADMIT,
-            &encode(&AdmitRequest {
-                session: session.clone(),
-                sequence,
-                envelope: envelope.into(),
-            })?,
+            if contextual {
+                abi::telemetry::ADMIT
+            } else {
+                abi::services::admission::ADMIT
+            },
+            &payload,
             AdmissionErrorKind::AcceptanceUnknown,
         )
         .await

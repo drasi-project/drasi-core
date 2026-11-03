@@ -144,6 +144,7 @@ async fn deliver(
         Err(error) => return failure(StatusCode::BAD_REQUEST, error.into()),
     };
     let input = InputEnvelope {
+        execution_context: Default::default(),
         port: batch.port,
         envelope,
     };

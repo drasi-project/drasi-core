@@ -759,6 +759,7 @@ mod query_row_provenance {
         query.start().await?;
         let outputs = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: GraphChangeCodec::encode_change(
                     SourceChange::Insert {

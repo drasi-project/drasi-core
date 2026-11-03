@@ -543,6 +543,7 @@ fn named_change(name: &str, sequence: u64, delete: bool) -> InputEnvelope {
         }
     };
     InputEnvelope {
+        execution_context: Default::default(),
         port: port("in"),
         envelope: GraphChangeCodec::encode_change(
             change,

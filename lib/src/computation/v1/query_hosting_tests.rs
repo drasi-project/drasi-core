@@ -119,6 +119,7 @@ fn input(sequence: u64, update: bool, name: &str) -> anyhow::Result<InputEnvelop
         SourceChange::Insert { element }
     };
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             change,

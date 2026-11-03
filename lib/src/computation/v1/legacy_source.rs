@@ -349,6 +349,7 @@ impl EnvelopeSource for LegacySourceAdapter {
         )?;
         self.sequence = sequence;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         }))

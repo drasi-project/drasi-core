@@ -403,6 +403,7 @@ fn renumber_transaction(
         builder.push(change)?;
     }
     Ok(OutputEnvelope {
+        execution_context: Default::default(),
         port: input.port.clone(),
         envelope: builder
             .commit(transaction_id, serde_json::to_vec(&position)?.into())?

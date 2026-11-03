@@ -224,6 +224,7 @@ impl ComponentFactory for FormatFactory {
         Ok(match self.descriptor.role {
             ComponentRole::Source => ConstructedComponent::source(Box::new(FormatSource {
                 output: Some(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: port("out"),
                     envelope: envelope(schema, context.component_id.as_str(), &[7]),
                 }),

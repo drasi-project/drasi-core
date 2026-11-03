@@ -434,7 +434,8 @@ async fn memory_rows() -> Result<()> {
                     "added":{"template":template},"updated":{"template":template},"deleted":{"template":template}
                 }
             }));
-            let input = || InputEnvelope { port:PortId::try_new("in").unwrap(), envelope:envelope.clone() };
+            let input = || InputEnvelope {
+                execution_context: Default::default(), port:PortId::try_new("in").unwrap(), envelope:envelope.clone() };
             let mut sink = MySqlStoredProcSink::new(id("owned-call"),config("CALL wait_effect({{param output.alias}})",50)?,&procedure_inputs(&["left","right"]))?;
             sink.start().await?;
             let mut handle = Box::pin(sink.handle(input()));

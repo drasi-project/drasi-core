@@ -1817,8 +1817,19 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
         .cursor()
         .ensure_same_epoch(replayed.cursor())
         .unwrap();
-    let mut rows = core.get_query_results("derived").await.unwrap();
-    rows.sort_by_key(|row| row["count"].as_i64());
+    // Both replays leave two rows after the first insertion; wait for the update too.
+    let rows = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut rows = core.get_query_results("derived").await.unwrap();
+            rows.sort_by_key(|row| row["count"].as_i64());
+            if rows == [serde_json::json!({"count":2}), serde_json::json!({"count":3})] {
+                break rows;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all missed changes must be replayed");
     assert_eq!(
         rows,
         [serde_json::json!({"count":2}), serde_json::json!({"count":3})]

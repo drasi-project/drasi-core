@@ -216,6 +216,7 @@ impl EnvelopeSource for Inventory {
         };
         self.sequence = self.sequence.checked_add(1).context("sequence exhausted")?;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: GraphChangeCodec::encode_change(
                 change,
@@ -262,6 +263,7 @@ impl Transformer for Audit {
             ContextValue::String("stockroom".into()),
         )?)?;
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         }])

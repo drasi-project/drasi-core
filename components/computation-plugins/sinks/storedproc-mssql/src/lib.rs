@@ -425,6 +425,7 @@ mod tests {
         properties.insert("name", ElementValue::String("one".into()));
         let input = |stream: &str| -> Result<InputEnvelope> {
             Ok(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: drasi_computation_contracts::GraphChangeCodec::encode_changes(
                     &[

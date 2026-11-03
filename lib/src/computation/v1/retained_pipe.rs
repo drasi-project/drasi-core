@@ -21,7 +21,7 @@ use std::{
 use async_trait::async_trait;
 
 use super::{
-    Acknowledgement, ChangeEnvelope, Delivery, EnqueueReceipt, EnvelopeReceiver, EnvelopeSender,
+    Acknowledgement, Delivery, EnqueueReceipt, EnvelopeMessage, EnvelopeReceiver, EnvelopeSender,
     HandlingOutcome, Pipe, PipeCapabilities, PipeCapability, PipeControl, PipeError, PipeProvider,
     ProvidedPipe, ResourceCleanup, ResourceHandle, ResourceId, ResourceRole, RetainedEnvelopeStore,
     RetentionPolicy, SendFailure,
@@ -224,17 +224,14 @@ struct Sender(Arc<Shared>);
 
 #[async_trait]
 impl EnvelopeSender for Sender {
-    async fn send(&self, envelope: ChangeEnvelope) -> Result<EnqueueReceipt, SendFailure> {
+    async fn send_message(&self, message: EnvelopeMessage) -> Result<EnqueueReceipt, SendFailure> {
         {
             let mut state = match self.0.lock() {
                 Ok(state) => state,
-                Err(error) => return Err(SendFailure { envelope, error }),
+                Err(error) => return Err(SendFailure::new(message, error)),
             };
             if state.closed || !self.0.current() {
-                return Err(SendFailure {
-                    envelope,
-                    error: PipeError::Closed,
-                });
+                return Err(SendFailure::new(message, PipeError::Closed));
             }
             state.sends += 1;
         }
@@ -246,31 +243,33 @@ impl EnvelopeSender for Sender {
             {
                 let state = match self.0.lock() {
                     Ok(state) => state,
-                    Err(error) => return Err(SendFailure { envelope, error }),
+                    Err(error) => return Err(SendFailure::new(message, error)),
                 };
                 if state.closed || !self.0.current() {
-                    return Err(SendFailure {
-                        envelope,
-                        error: PipeError::Closed,
-                    });
+                    return Err(SendFailure::new(message, PipeError::Closed));
                 }
             }
-            match self.0.store.append(self.0.generation, &envelope).await {
+            match self
+                .0
+                .store
+                .append_message(self.0.generation, &message)
+                .await
+            {
                 Ok(_) => {
                     if !self.0.current() {
-                        return Err(SendFailure {
-                            envelope,
-                            error: PipeError::AcceptanceUnknown {
+                        return Err(SendFailure::new(
+                            message,
+                            PipeError::AcceptanceUnknown {
                                 source: anyhow::anyhow!(
                                     "send completed across a revoked pipe generation"
                                 ),
                             },
-                        });
+                        ));
                     }
-                    return Ok(EnqueueReceipt::new(envelope.id().clone()));
+                    return Ok(EnqueueReceipt::new(message.envelope.id().clone()));
                 }
                 Err(PipeError::CapacityExhausted) => notified.await,
-                Err(error) => return Err(SendFailure { envelope, error }),
+                Err(error) => return Err(SendFailure::new(message, error)),
             }
         }
     }
@@ -447,8 +446,11 @@ impl EnvelopeReceiver for Receiver {
             match self.shared.store.next(self.shared.generation, after).await {
                 Ok(Some(stored)) => {
                     let bytes = match &self.batch {
-                        Some(batch) => batch.buffer.size(&stored.envelope)?,
+                        Some(batch) => batch
+                            .buffer
+                            .size(&stored.envelope, &stored.execution_context)?,
                         None => super::SinkBatching::input_size(&super::InputEnvelope {
+                            execution_context: stored.execution_context.clone(),
                             port: port.clone(),
                             envelope: stored.envelope.clone(),
                         })
@@ -482,7 +484,8 @@ impl EnvelopeReceiver for Receiver {
                             lease: batch.lease.clone(),
                             position: stored.position,
                         })),
-                    );
+                    )
+                    .with_execution_context(stored.execution_context);
                     batch.buffer.push(stored.position, delivery, bytes);
                 }
                 Err(PipeError::PositionUnavailable { .. }) if self.batch.is_some() => {
@@ -561,13 +564,16 @@ impl EnvelopeReceiver for Receiver {
                         return Ok(None);
                     }
                     state.delivery_pending = true;
-                    return Ok(Some(Delivery::new(
-                        stored.envelope,
-                        Some(Box::new(Ack {
-                            shared: self.shared.clone(),
-                            position: stored.position,
-                        })),
-                    )));
+                    return Ok(Some(
+                        Delivery::new(
+                            stored.envelope,
+                            Some(Box::new(Ack {
+                                shared: self.shared.clone(),
+                                position: stored.position,
+                            })),
+                        )
+                        .with_execution_context(stored.execution_context),
+                    ));
                 }
                 Err(PipeError::PositionUnavailable { requested, oldest })
                     if self.gap_policy == ReplayGapPolicy::SkipWithNotification =>

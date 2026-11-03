@@ -204,6 +204,7 @@ impl NativeTransformer for Arithmetic {
         GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
         self.sequence = sequence;
         Ok(vec![OutputEnvelope {
+            execution_context: input.execution_context,
             port: PortId::try_new("out")?,
             envelope,
         }])

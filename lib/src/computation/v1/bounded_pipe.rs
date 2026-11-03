@@ -26,8 +26,8 @@ use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 
 use super::{pipe_metrics::PipeMetrics, PipeMetricsSnapshot};
 use super::{
-    ChangeEnvelope, Delivery, EnqueueReceipt, EnvelopeReceiver, EnvelopeSender, Pipe,
-    PipeCapabilities, PipeError, SendFailure,
+    ChangeEnvelope, Delivery, EnqueueReceipt, EnvelopeMessage, EnvelopeReceiver, EnvelopeSender,
+    Pipe, PipeCapabilities, PipeError, SendFailure,
 };
 
 /// Out-of-band pipe lifecycle. Implementations must wake pending operations.
@@ -223,11 +223,11 @@ trait QueuedEnvelope: Send + Sync + 'static {
         metrics: &PipeMetrics,
         counted_wait: bool,
     ) -> impl Future<Output = Result<Self::Reservation, PipeError>> + Send;
-    fn queued(envelope: ChangeEnvelope, reservation: Self::Reservation) -> Self;
-    fn into_envelope(self) -> ChangeEnvelope;
+    fn queued(message: EnvelopeMessage, reservation: Self::Reservation) -> Self;
+    fn into_message(self) -> EnvelopeMessage;
 }
 
-impl QueuedEnvelope for ChangeEnvelope {
+impl QueuedEnvelope for EnvelopeMessage {
     type Budget = ();
     type Reservation = ();
 
@@ -239,10 +239,10 @@ impl QueuedEnvelope for ChangeEnvelope {
     ) -> impl Future<Output = Result<(), PipeError>> + Send {
         std::future::ready(Ok(()))
     }
-    fn queued(envelope: ChangeEnvelope, _: ()) -> Self {
-        envelope
+    fn queued(message: EnvelopeMessage, _: ()) -> Self {
+        message
     }
-    fn into_envelope(self) -> ChangeEnvelope {
+    fn into_message(self) -> EnvelopeMessage {
         self
     }
 }
@@ -253,7 +253,7 @@ struct ByteBudget {
 }
 
 struct ByteEnvelope {
-    envelope: ChangeEnvelope,
+    message: EnvelopeMessage,
     reservation: OwnedSemaphorePermit,
 }
 
@@ -282,15 +282,15 @@ impl QueuedEnvelope for ByteEnvelope {
             .await
             .map_err(|_| PipeError::Closed)
     }
-    fn queued(envelope: ChangeEnvelope, reservation: Self::Reservation) -> Self {
+    fn queued(message: EnvelopeMessage, reservation: Self::Reservation) -> Self {
         Self {
-            envelope,
+            message,
             reservation,
         }
     }
-    fn into_envelope(self) -> ChangeEnvelope {
+    fn into_message(self) -> EnvelopeMessage {
         drop(self.reservation);
-        self.envelope
+        self.message
     }
 }
 
@@ -338,9 +338,9 @@ struct Sender<T: QueuedEnvelope> {
 
 #[async_trait]
 impl<T: QueuedEnvelope> EnvelopeSender for Sender<T> {
-    async fn send(
+    async fn send_message(
         &self,
-        envelope: ChangeEnvelope,
+        message: EnvelopeMessage,
     ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         let mut closure = self.control.0.subscribe();
         let counted_wait = self.sender.capacity() == 0 && *self.control.0.borrow() == Closure::Open;
@@ -351,7 +351,7 @@ impl<T: QueuedEnvelope> EnvelopeSender for Sender<T> {
             biased;
             _ = closure.wait_for(|state| *state != Closure::Open) => Err(PipeError::Closed),
             permit = async {
-                let reservation = T::reserve(&envelope, &self.budget, &self.control.1, counted_wait).await?;
+                let reservation = T::reserve(&message.envelope, &self.budget, &self.control.1, counted_wait).await?;
                 // A count reservation must never survive an await: it would keep
                 // a closed receiver from finishing its drain.
                 let permit = self.sender.reserve().await.map_err(|_| PipeError::Closed)?;
@@ -363,16 +363,16 @@ impl<T: QueuedEnvelope> EnvelopeSender for Sender<T> {
         let state = self.control.0.borrow();
         match permit {
             Ok((permit, reservation)) if *state == Closure::Open => {
-                let receipt = EnqueueReceipt::new(envelope.id().clone());
+                let receipt = EnqueueReceipt::new(message.envelope.id().clone());
                 self.control.1.accepted();
                 self.control.2.fetch_add(1, Ordering::AcqRel);
-                permit.send(T::queued(envelope, reservation));
+                permit.send(T::queued(message, reservation));
                 Ok(receipt)
             }
-            result => Err(SendFailure {
-                envelope,
-                error: result.err().unwrap_or(PipeError::Closed),
-            }),
+            result => Err(SendFailure::new(
+                message,
+                result.err().unwrap_or(PipeError::Closed),
+            )),
         }
     }
 }
@@ -410,7 +410,7 @@ impl<T: QueuedEnvelope> EnvelopeReceiver for Receiver<T> {
                     return Ok(envelope.map(|envelope| {
                         self.control.1.delivered();
                         self.control.2.fetch_sub(1, Ordering::AcqRel);
-                        Delivery::new(envelope.into_envelope(), None)
+                        Delivery::from_message(envelope.into_message(), None)
                     }));
                 }
             }
@@ -441,7 +441,7 @@ impl<T: QueuedEnvelope> Drop for Receiver<T> {
 /// discards buffered events when the receiver is next polled/dropped. Neither
 /// reverses already delivered processing or external effects. The pipe itself
 /// owns a sender: drop it after transferring endpoints for natural end-of-stream.
-pub struct BoundedPipe(Queue<ChangeEnvelope>);
+pub struct BoundedPipe(Queue<EnvelopeMessage>);
 
 struct Queue<T: QueuedEnvelope> {
     capabilities: PipeCapabilities,

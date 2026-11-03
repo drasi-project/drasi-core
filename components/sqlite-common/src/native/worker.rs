@@ -728,6 +728,7 @@ impl Database {
         payload
             .map(|payload| {
                 Ok(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope: match payload {
                         Pending::Changes(envelope) => envelope,
@@ -778,6 +779,7 @@ impl Database {
         };
         let transport = next_sequence(sequence)?;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: transaction.into_replay_envelope(
                 stream.clone(),

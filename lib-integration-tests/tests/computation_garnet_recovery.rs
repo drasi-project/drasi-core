@@ -37,6 +37,7 @@ fn input(sequence: u64) -> InputEnvelope {
         ),
     };
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_change(
             if sequence == 1 {

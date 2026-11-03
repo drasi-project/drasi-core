@@ -12,7 +12,8 @@ enum Request {
     Admit {
         session: ProducerSession,
         sequence: u64,
-        input: ChangeEnvelope,
+        input: EnvelopeMessage,
+        operation_context: ExecutionContext,
         reply: Reply<AdmissionReceipt>,
     },
     Register(ComponentId, Reply<ProducerSession>),
@@ -223,18 +224,33 @@ impl SourceAdmission {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, PipeError> {
+        self.admit_message(
+            session,
+            sequence,
+            &EnvelopeMessage::new(input.clone(), ExecutionContext::current()),
+        )
+        .await
+    }
+
+    pub async fn admit_message(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, PipeError> {
         self.submit(
             |reply| {
                 self.channel
                     .storage()?
                     .ok_or(AdmissionRejection::NotEnabled)?
                     .codec
-                    .encode(input)
+                    .encode(&input.envelope)
                     .map_err(|error| PipeError::Backend(error.into()))?;
                 Ok(Request::Admit {
                     session: session.clone(),
                     sequence,
                     input: input.clone(),
+                    operation_context: ExecutionContext::current(),
                     reply,
                 })
             },
@@ -448,10 +464,13 @@ impl AdmissionLease {
                 session,
                 sequence,
                 input,
+                operation_context,
                 reply,
             } => {
-                let result = channel
-                    .admit_validated(&session, sequence, &input, validate)
+                let scope = drasi_computation_contracts::telemetry::ExecutionScope::capture()
+                    .with_context(operation_context);
+                let result = scope
+                    .scope(channel.admit_validated(&session, sequence, &input, validate))
                     .await;
                 accepted = result.is_ok();
                 let _ = reply.send(result);

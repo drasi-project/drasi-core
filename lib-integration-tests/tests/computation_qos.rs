@@ -75,7 +75,7 @@ async fn received(
     let delivery = tokio::time::timeout(Duration::from_secs(3), receiver.receive())
         .await??
         .expect("expected a delivery");
-    let (envelope, ack) = delivery.into_parts();
+    let (envelope, _, ack) = delivery.into_parts();
     assert_eq!(envelope.system().sequence(), sequence);
     assert_eq!(
         envelope.system().source_position(),
@@ -648,6 +648,7 @@ impl EnvelopeSource for FiniteSource {
         }
         self.sequence += 1;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: event(self.sequence)?,
         }))
@@ -856,7 +857,7 @@ async fn seeded_qos_schedules_match_an_independent_acceptance_and_completion_led
                                     .receive()
                                     .await?
                                     .expect("ledger has pending work");
-                                let (envelope, acknowledgement) = delivery.into_parts();
+                                let (envelope, _, acknowledgement) = delivery.into_parts();
                                 assert_eq!(envelope.id(), accepted[position as usize - 1].id());
                                 assert_eq!(
                                     envelope.system().source_position(),
@@ -1318,7 +1319,7 @@ async fn handle_admitted(
         assert_eq!(delivery.envelope().system().sequence(), sequence);
         delivery
             .into_parts()
-            .1
+            .2
             .expect("completion")
             .complete(HandlingOutcome::Handled)
             .await?;
@@ -1361,9 +1362,28 @@ async fn producer_admission_atomically_replays_receipts_and_bounds_retired_sessi
             expected: Some(1),
         },
     );
-    let receipt = channel.admit(&session, 1, &event(1)?).await?;
+    let context = drasi_lib::observability::ExecutionContext::new(
+        drasi_lib::observability::TraceContextV1::new([1; 16], [2; 8], 1, None)?,
+    );
+    let receipt = channel
+        .admit_message(&session, 1, &EnvelopeMessage::new(event(1)?, context))
+        .await?;
     assert_eq!(receipt.position, 1);
     assert_eq!(channel.admit(&session, 1, &event(1)?).await?, receipt);
+    let retry_context = drasi_lib::observability::ExecutionContext::new(
+        drasi_lib::observability::TraceContextV1::new(
+            [3; 16],
+            [4; 8],
+            0,
+            Some("vendor=retry".into()),
+        )?,
+    );
+    assert_eq!(
+        channel
+            .admit_message(&session, 1, &EnvelopeMessage::new(event(1)?, retry_context))
+            .await?,
+        receipt
+    );
     rejected(
         channel.admit(&session, 1, &event(2)?).await.unwrap_err(),
         AdmissionRejection::PayloadConflict(1),
@@ -1745,7 +1765,7 @@ async fn admission_preserves_lineage_without_confusing_client_and_journal_sequen
     let receipt = channel.admit(&session, 1, &input).await?;
     let mut pipe = endpoint(&channel, &desired, "fast", false)?;
     let mut receiver = pipe.pipe.take_receiver()?;
-    let (output, acknowledgement) = receiver
+    let (output, _, acknowledgement) = receiver
         .receive()
         .await?
         .expect("admitted input")

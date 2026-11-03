@@ -273,6 +273,7 @@ async fn bootstrap_is_separate_from_creation_and_filters_covered_live_input() {
     );
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: envelope(1, "Alice", false)
         })
@@ -281,6 +282,7 @@ async fn bootstrap_is_separate_from_creation_and_filters_covered_live_input() {
         .is_empty());
     let output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: envelope(2, "Alicia", true),
         })
@@ -398,12 +400,14 @@ async fn checkpointed_batches_record_each_handled_prefix_and_deduplicate_replay(
     for (sequence, name) in [(2, "Alicia"), (3, "Carol")] {
         let outputs = producer
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: envelope(sequence, name, true),
             })
             .await
             .unwrap();
         inputs.extend(outputs.into_iter().map(|output| InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").unwrap(),
             envelope: output.envelope,
         }));
@@ -417,6 +421,7 @@ async fn checkpointed_batches_record_each_handled_prefix_and_deduplicate_replay(
     let retry = inputs
         .iter()
         .map(|input| InputEnvelope {
+            execution_context: Default::default(),
             port: input.port.clone(),
             envelope: input.envelope.clone(),
         })
@@ -486,6 +491,7 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         .expect("snapshot envelope");
     assert!(sink
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: initial.envelope
         })
@@ -501,6 +507,7 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         .pop()
         .expect("snapshot");
     sink.handle(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: initial.envelope,
     })
@@ -520,6 +527,7 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
     );
     let live = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: envelope(2, "Alicia", true),
         })
@@ -529,6 +537,7 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         .expect("output");
     let forwarded = replay
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: live.envelope.clone(),
         })
@@ -536,6 +545,7 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         .expect("handoff");
     assert_eq!(forwarded.len(), 1);
     sink.handle(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: forwarded[0].envelope.clone(),
     })
@@ -543,6 +553,7 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
     .expect("handle live");
     assert!(replay
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: live.envelope
         })
@@ -579,6 +590,7 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
     for sequence in 2..=5 {
         query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").expect("port"),
                 envelope: envelope(sequence, &format!("name-{sequence}"), true),
             })
@@ -700,6 +712,7 @@ impl ComputationComponent for LiveSource {
 impl EnvelopeSource for LiveSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         Ok(self.events.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("port"),
             envelope,
         }))
@@ -728,6 +741,7 @@ impl ComputationComponent for LateBindingSource {
 impl EnvelopeSource for LateBindingSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         Ok(self.receiver.recv().await.map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("port"),
             envelope,
         }))
@@ -1071,6 +1085,7 @@ mod persistent {
         assert_eq!(first.results().snapshot().unwrap().rows.len(), 2);
         first
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: envelope(3, "Alicia", true),
             })
@@ -1131,6 +1146,7 @@ mod persistent {
         first.start().await.unwrap();
         first
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: envelope(2, "Alicia", true),
             })
@@ -1373,6 +1389,7 @@ mod persistent {
                 first.start().await.expect("bootstrap");
                 first
                     .transform(InputEnvelope {
+                        execution_context: Default::default(),
                         port: PortId::try_new("in").expect("port"),
                         envelope: envelope(2, "Alicia", true),
                     })
@@ -1607,6 +1624,7 @@ mod persistent {
                 .unwrap_or_else(|error| panic!("incarnation {incarnation} starts: {error:#}"));
             let output = query
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").expect("port"),
                     envelope: envelope(2, "Alicia", true),
                 })
@@ -1651,6 +1669,7 @@ mod persistent {
             first.start().await.expect("start");
             let output = first
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").expect("port"),
                     envelope: envelope(2, "Alicia", true),
                 })
@@ -1716,6 +1735,7 @@ mod persistent {
                 CheckpointedSink::new(Box::new(RecoverySink::new(state.clone())), progress.clone())
                     .expect("sink");
             sink.handle(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").expect("port"),
                 envelope: output.envelope,
             })
@@ -1750,6 +1770,7 @@ mod persistent {
             );
             let output = recovered
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").expect("port"),
                     envelope: envelope(2, "Alicia", true),
                 })
@@ -1800,6 +1821,7 @@ mod persistent {
         );
         let output = reset
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").expect("port"),
                 envelope: envelope(2, "Alicia", true),
             })
@@ -1942,6 +1964,7 @@ mod persistent {
                 );
                 assert!(query
                     .transform(InputEnvelope {
+                        execution_context: Default::default(),
                         port: PortId::try_new("in").expect("port"),
                         envelope: input,
                     })

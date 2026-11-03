@@ -1,0 +1,274 @@
+// Copyright 2026 The Drasi Authors.
+// Licensed under the Apache License, Version 2.0.
+
+use super::{Result, TelemetryError};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+pub const MAX_TRACE_STATE_BYTES: usize = 512;
+pub const MAX_TRACE_STATE_MEMBERS: usize = 32;
+pub const MAX_EXECUTION_CONTEXT_BYTES: usize = 1024;
+
+/// Portable identity of the sending span, not a live span or a component identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "TraceContextFields")]
+pub struct TraceContextV1 {
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    trace_flags: u8,
+    trace_state: Option<Arc<str>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceContextFields {
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    trace_flags: u8,
+    trace_state: Option<Arc<str>>,
+}
+
+impl TryFrom<TraceContextFields> for TraceContextV1 {
+    type Error = TelemetryError;
+
+    fn try_from(value: TraceContextFields) -> Result<Self> {
+        Self::new(
+            value.trace_id,
+            value.span_id,
+            value.trace_flags,
+            value.trace_state,
+        )
+    }
+}
+
+impl TraceContextV1 {
+    pub fn new(
+        trace_id: [u8; 16],
+        span_id: [u8; 8],
+        trace_flags: u8,
+        trace_state: Option<Arc<str>>,
+    ) -> Result<Self> {
+        if trace_id == [0; 16] || span_id == [0; 8] {
+            return Err(TelemetryError::Invalid(
+                "trace and span IDs must be nonzero".into(),
+            ));
+        }
+        if let Some(state) = &trace_state {
+            validate_trace_state(state)?;
+        }
+        Ok(Self {
+            trace_id,
+            span_id,
+            trace_flags,
+            trace_state,
+        })
+    }
+
+    pub fn trace_id(&self) -> [u8; 16] {
+        self.trace_id
+    }
+
+    pub fn span_id(&self) -> [u8; 8] {
+        self.span_id
+    }
+
+    pub fn trace_flags(&self) -> u8 {
+        self.trace_flags
+    }
+
+    pub fn sampled(&self) -> bool {
+        self.trace_flags & 1 != 0
+    }
+
+    pub fn trace_state(&self) -> Option<&str> {
+        self.trace_state.as_deref()
+    }
+}
+
+fn validate_trace_state(state: &str) -> Result<()> {
+    let invalid = || TelemetryError::Invalid("invalid or oversized W3C trace state".into());
+    if state.is_empty() || state.len() > MAX_TRACE_STATE_BYTES {
+        return Err(invalid());
+    }
+    let mut keys = Vec::new();
+    for member in state.split(',') {
+        let member = member.trim_matches([' ', '\t']);
+        let (key, value) = member.split_once('=').ok_or_else(invalid)?;
+        if keys.len() == MAX_TRACE_STATE_MEMBERS
+            || !valid_trace_state_key(key)
+            || keys.contains(&key)
+            || value.is_empty()
+            || value.len() > 256
+            || value.ends_with(' ')
+            || !value
+                .bytes()
+                .all(|byte| (0x20..=0x7e).contains(&byte) && byte != b',' && byte != b'=')
+        {
+            return Err(invalid());
+        }
+        keys.push(key);
+    }
+    Ok(())
+}
+
+fn valid_trace_state_key(key: &str) -> bool {
+    let key_char = |byte: u8| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'_' | b'-' | b'*' | b'/')
+    };
+    if key.is_empty() || key.len() > 256 {
+        return false;
+    }
+    if let Some((tenant, system)) = key.split_once('@') {
+        !tenant.is_empty()
+            && tenant.len() <= 241
+            && tenant.as_bytes()[0].is_ascii_alphanumeric()
+            && tenant.bytes().all(key_char)
+            && !system.is_empty()
+            && system.len() <= 14
+            && system.as_bytes()[0].is_ascii_lowercase()
+            && system.bytes().all(key_char)
+    } else {
+        key.as_bytes()[0].is_ascii_lowercase() && key.bytes().all(key_char)
+    }
+}
+
+/// Transient execution metadata. Persist the event, never this carrier.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecutionContext {
+    trace: Option<Arc<TraceContextV1>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionContextRecord {
+    version: u32,
+    trace: Option<TraceContextV1>,
+}
+
+impl ExecutionContext {
+    pub fn new(trace: TraceContextV1) -> Self {
+        Self {
+            trace: Some(Arc::new(trace)),
+        }
+    }
+
+    pub fn trace(&self) -> Option<&TraceContextV1> {
+        self.trace.as_deref()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.trace.is_none()
+    }
+
+    /// Explicit transport encoding; this is not an event or persistence codec.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        crate::encode_bounded_messagepack(
+            &ExecutionContextRecord {
+                version: 1,
+                trace: self.trace.as_deref().cloned(),
+            },
+            MAX_EXECUTION_CONTEXT_BYTES,
+        )
+        .map_err(|error| TelemetryError::Invalid(error.to_string()))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let record: ExecutionContextRecord =
+            crate::decode_bounded_messagepack(bytes, MAX_EXECUTION_CONTEXT_BYTES)
+                .map_err(|error| TelemetryError::Invalid(error.to_string()))?;
+        if record.version != 1 {
+            return Err(TelemetryError::Unsupported("execution context version"));
+        }
+        Ok(Self {
+            trace: record.trace.map(Arc::new),
+        })
+    }
+
+    /// Maximum additional transport bytes for a nonempty context and its framing.
+    pub fn transport_size(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            MAX_EXECUTION_CONTEXT_BYTES + 32
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context(state: Option<&str>, flags: u8) -> Result<ExecutionContext> {
+        TraceContextV1::new([1; 16], [2; 8], flags, state.map(Arc::from)).map(ExecutionContext::new)
+    }
+
+    #[test]
+    fn portable_context_preserves_flags_and_distinguishes_absence() {
+        for original in [
+            ExecutionContext::default(),
+            context(None, 0).unwrap(),
+            context(Some("vendor=value,1tenant@system=other"), 0xff).unwrap(),
+        ] {
+            let encoded = original.encode().unwrap();
+            assert!(encoded.len() <= MAX_EXECUTION_CONTEXT_BYTES);
+            assert_eq!(ExecutionContext::decode(&encoded).unwrap(), original);
+        }
+        assert!(!context(None, 0).unwrap().is_empty());
+        assert!(!context(None, 0).unwrap().trace().unwrap().sampled());
+        assert!(context(None, 1).unwrap().trace().unwrap().sampled());
+    }
+
+    #[test]
+    fn trace_state_validates_w3c_bounds_and_duplicate_keys() {
+        for invalid in [
+            "",
+            "a=",
+            "a=b,a=c",
+            "A=b",
+            "a=b=c",
+            "a=b,,c=d",
+            "a=b\n",
+            "a@123=b",
+            "a@toolongtoolongtoolong=b",
+            "a=\u{00e9}",
+        ] {
+            assert!(context(Some(invalid), 1).is_err(), "{invalid:?}");
+        }
+        let members = (0..32)
+            .map(|n| format!("a{n}=b"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(context(Some(&members), 1).is_ok());
+        assert!(context(Some(&format!("{members},last=b")), 1).is_err());
+        let boundary = format!("a={},b={}", "x".repeat(256), "y".repeat(251));
+        assert_eq!(boundary.len(), 512);
+        assert!(context(Some(&boundary), 1).is_ok());
+        assert!(context(Some(&format!("{boundary}z")), 1).is_err());
+        assert!(context(Some(&format!("a={}", "x".repeat(257))), 1).is_err());
+    }
+
+    #[test]
+    fn decoding_cannot_bypass_validation_or_record_limits() {
+        assert!(TraceContextV1::new([0; 16], [1; 8], 1, None).is_err());
+        assert!(TraceContextV1::new([1; 16], [0; 8], 1, None).is_err());
+        let invalid = serde_json::json!({
+            "trace_id": vec![0u8; 16], "span_id": vec![1u8; 8], "trace_flags": 1, "trace_state": null
+        });
+        assert!(serde_json::from_value::<TraceContextV1>(invalid).is_err());
+        let bytes = crate::encode_bounded_messagepack(
+            &serde_json::json!({"version": 2, "trace": null}),
+            MAX_EXECUTION_CONTEXT_BYTES,
+        )
+        .unwrap();
+        assert!(ExecutionContext::decode(&bytes).is_err());
+        let bytes = crate::encode_bounded_messagepack(
+            &serde_json::json!({"version": 1, "trace": null, "extra": 1}),
+            MAX_EXECUTION_CONTEXT_BYTES,
+        )
+        .unwrap();
+        assert!(ExecutionContext::decode(&bytes).is_err());
+        assert!(ExecutionContext::decode(&vec![0; MAX_EXECUTION_CONTEXT_BYTES + 1]).is_err());
+    }
+}

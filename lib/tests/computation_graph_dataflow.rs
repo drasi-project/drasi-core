@@ -634,6 +634,7 @@ fn invalid_emission(producer: &str, fault: Fault, input: &Envelope) -> OutputEnv
         SystemMetadata::new(stream, sequence),
     );
     OutputEnvelope {
+        execution_context: Default::default(),
         port: port(match fault {
             Fault::UnknownPort => "missing",
             Fault::InputPort => "in",

@@ -379,7 +379,7 @@ impl QueryInput {
             Some(read_json(&path.join("processor-identity.json"))?)
         };
         for sequence in first..=last {
-            let (envelope, acknowledgement) = match self {
+            let (envelope, _, acknowledgement) = match self {
                 Self::Qos(_, _) => receiver
                     .as_mut()
                     .expect("shared audit receiver")
@@ -387,14 +387,13 @@ impl QueryInput {
                     .await?
                     .context("accepted shared input")?
                     .into_parts(),
-                Self::Retained(store) => (
-                    store
+                Self::Retained(store) => {
+                    let stored = store
                         .next(store.generation(), sequence - 1)
                         .await?
-                        .context("accepted retained input")?
-                        .envelope,
-                    None,
-                ),
+                        .context("accepted retained input")?;
+                    (stored.envelope, stored.execution_context, None)
+                }
             };
             assert_eq!(
                 GraphChangeCodec::decode_changes(&envelope)?,
@@ -817,7 +816,7 @@ async fn audit(journal: &Arc<QosChannel>, session: &ProducerSession) -> Result<(
         assert!(producer.identity().persistent());
         delivery
             .into_parts()
-            .1
+            .2
             .context("audit acknowledgement")?
             .complete(HandlingOutcome::Handled)
             .await?;

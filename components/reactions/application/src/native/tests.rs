@@ -22,6 +22,7 @@ fn input(sequence: u64) -> InputEnvelope {
     )
     .unwrap();
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new(INPUT_PORT).unwrap(),
         envelope: ChangeEnvelope::new(
             EnvelopeId::try_new("native-application", sequence.to_be_bytes().to_vec().into())

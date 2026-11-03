@@ -6,9 +6,13 @@ license.workspace = true
 description = "SDK for native asynchronous ComputationGraph plugins"
 readme = "README.md"
 
+[features]
+default = []
+otel-context = ["drasi-computation-contracts/otel-context"]
+
 [dependencies]
 drasi-computation-plugin-abi = { workspace = true }
-drasi-computation-contracts = { workspace = true, features = ["metrics-facade"] }
+drasi-computation-contracts = { workspace = true, features = ["metrics-facade", "tracing-context"] }
 drasi-core-types = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
@@ -24,6 +28,25 @@ metrics = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+tracing-opentelemetry = { version = "0.32", default-features = false }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "testing"] }
+
+[[example]]
+name = "execution_context_fixture"
+path = "tests/fixtures/execution_context_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["otel-context"]
+test = false
+
+[[example]]
+name = "execution_context_base_fixture"
+path = "tests/fixtures/execution_context_base_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["otel-context"]
+test = false
 
 [lints]
 workspace = true

@@ -1,6 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::telemetry::ExecutionContext;
 use crate::{ChangeEnvelope, PortId};
 
 /// Stable event identity derived from a producer stream and its sequence.
@@ -79,6 +80,7 @@ impl SinkBatching {
         crate::BinaryEnvelopeCodec::encoded_size(&input.envelope)?
             .checked_add(input.port.as_str().len())
             .and_then(|size| size.checked_add(25))
+            .and_then(|size| size.checked_add(input.execution_context.transport_size()))
             .ok_or_else(|| anyhow::anyhow!("sink input byte count overflow"))
     }
 
@@ -94,6 +96,7 @@ impl SinkBatching {
 pub struct InputEnvelope {
     pub port: PortId,
     pub envelope: ChangeEnvelope,
+    pub execution_context: ExecutionContext,
 }
 
 /// New emission on a declared output port. The producing component owns its
@@ -102,4 +105,62 @@ pub struct InputEnvelope {
 pub struct OutputEnvelope {
     pub port: PortId,
     pub envelope: ChangeEnvelope,
+    pub execution_context: ExecutionContext,
+}
+
+impl InputEnvelope {
+    pub fn new(port: PortId, envelope: ChangeEnvelope) -> Self {
+        Self {
+            port,
+            envelope,
+            execution_context: ExecutionContext::default(),
+        }
+    }
+
+    pub fn with_execution_context(mut self, context: ExecutionContext) -> Self {
+        self.execution_context = context;
+        self
+    }
+}
+
+impl OutputEnvelope {
+    pub fn new(port: PortId, envelope: ChangeEnvelope) -> Self {
+        Self {
+            port,
+            envelope,
+            execution_context: ExecutionContext::default(),
+        }
+    }
+
+    pub fn with_execution_context(mut self, context: ExecutionContext) -> Self {
+        self.execution_context = context;
+        self
+    }
+
+    #[cfg(feature = "tracing-context")]
+    pub fn with_current_context(self) -> Self {
+        self.with_execution_context(ExecutionContext::current())
+    }
+}
+
+/// A runtime pipe message. Context never enters the envelope's codecs or digest.
+#[derive(Debug, Clone)]
+pub struct EnvelopeMessage {
+    pub envelope: ChangeEnvelope,
+    pub execution_context: ExecutionContext,
+}
+
+impl EnvelopeMessage {
+    pub fn new(envelope: ChangeEnvelope, execution_context: ExecutionContext) -> Self {
+        Self {
+            envelope,
+            execution_context,
+        }
+    }
+}
+
+impl From<ChangeEnvelope> for EnvelopeMessage {
+    fn from(envelope: ChangeEnvelope) -> Self {
+        Self::new(envelope, ExecutionContext::default())
+    }
 }

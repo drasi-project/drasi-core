@@ -7,6 +7,7 @@ license = "Apache-2.0"
 
 [features]
 default = []
+otel-context = ["drasi-lib/otel-context", "drasi-computation-plugin-sdk/otel-context"]
 registry = ["oci-client", "tokio/fs", "x509-parser", "p256", "p384", "pem", "base64"]
 fetcher = ["reqwest", "url", "tokio/fs"]
 watcher = ["notify", "notify-debouncer-mini"]
@@ -102,6 +103,11 @@ name = "native_activation_credentials"
 path = "tests/fixtures/native_activation_credentials.rs"
 crate-type = ["cdylib"]
 test = false
+
+[[test]]
+name = "native_execution_context"
+path = "tests/native_execution_context.rs"
+required-features = ["otel-context"]
 
 [[example]]
 name = "native_recovery"

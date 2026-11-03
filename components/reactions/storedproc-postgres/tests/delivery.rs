@@ -184,6 +184,7 @@ fn input(sequence: u64, count: usize) -> Result<InputEnvelope> {
     QueryRecoveryIdentity::try_new("graph", component.clone(), 42, None)?
         .annotate(&mut envelope, &component)?;
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })

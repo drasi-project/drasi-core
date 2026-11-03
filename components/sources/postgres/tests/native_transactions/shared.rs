@@ -63,12 +63,12 @@ struct RecordedSender {
 
 #[async_trait]
 impl EnvelopeSender for RecordedSender {
-    async fn send(
+    async fn send_message(
         &self,
-        envelope: ChangeEnvelope,
+        message: EnvelopeMessage,
     ) -> std::result::Result<EnqueueReceipt, SendFailure> {
-        let recorded = envelope.clone();
-        let receipt = self.inner.send(envelope).await?;
+        let recorded = message.envelope.clone();
+        let receipt = self.inner.send_message(message).await?;
         self.accepted
             .lock()
             .expect("accepted input log")
@@ -643,6 +643,7 @@ fn renumber(row: &OutputEnvelope, logical: u64, transport: u64) -> Result<Output
     )
     .with_source_position(serde_json::to_vec(&position)?.into());
     Ok(OutputEnvelope {
+        execution_context: Default::default(),
         port: row.port.clone(),
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(event),

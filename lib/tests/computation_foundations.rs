@@ -233,7 +233,7 @@ fn all_port_direction_pairs_and_schema_dimensions_are_checked() {
 }
 
 async fn finish(delivery: Delivery, expected: &ChangeEnvelope, acknowledgement: bool) {
-    let (envelope, ack) = delivery.into_parts();
+    let (envelope, _, ack) = delivery.into_parts();
     assert!(Arc::ptr_eq(envelope.event(), expected.event()));
     assert_eq!(ack.is_some(), acknowledgement);
     if let Some(ack) = ack {
@@ -370,7 +370,7 @@ async fn lossless_profiles_release_capacity_only_at_their_declared_boundary() {
                     futures::poll!(&mut pending).is_pending(),
                     "delivery is not handling"
                 );
-                let (_, ack) = first.into_parts();
+                let (_, _, ack) = first.into_parts();
                 ack.expect("explicit acknowledgement")
                     .complete(HandlingOutcome::Failed {
                         reason: "retry this event".into(),
@@ -386,13 +386,13 @@ async fn lossless_profiles_release_capacity_only_at_their_declared_boundary() {
                 assert_eq!(replay.envelope().system().sequence(), 1);
                 replay
                     .into_parts()
-                    .1
+                    .2
                     .expect("explicit acknowledgement")
                     .complete(HandlingOutcome::Handled)
                     .await
                     .expect("handled");
             } else {
-                assert!(first.into_parts().1.is_none());
+                assert!(first.into_parts().2.is_none());
             }
             assert_eq!(
                 pending.await.expect("capacity freed").envelope_id(),

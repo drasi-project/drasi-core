@@ -16,8 +16,9 @@ use async_trait::async_trait;
 
 use super::{ChangeEnvelope, ComponentDescriptor, PortId};
 
+pub use drasi_computation_contracts::telemetry::ExecutionContext;
 pub use drasi_computation_contracts::{
-    InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, SnapshotConsumer,
+    EnvelopeMessage, InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, SnapshotConsumer,
     SourceSchemaReader, WakeupSource,
 };
 

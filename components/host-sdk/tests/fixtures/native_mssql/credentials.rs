@@ -195,6 +195,7 @@ pub(super) async fn actual_override_and_refresh(dynamic: bool) -> Result<()> {
         )?
         .context("fixture query envelope")?;
         sink.handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope,
         })

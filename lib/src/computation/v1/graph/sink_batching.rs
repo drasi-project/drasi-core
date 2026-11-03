@@ -36,10 +36,11 @@ impl SinkBatchState {
 
     fn push(&mut self, incoming: &mut Incoming, node: &NodeSnapshot) -> GraphResult<()> {
         let PendingInput { delivery, work } = incoming.pending.take().expect("ready input");
-        let (envelope, acknowledgement) = delivery.into_parts();
+        let (envelope, execution_context, acknowledgement) = delivery.into_parts();
         let matches_acknowledgement =
             acknowledgement.is_some() == incoming.acknowledgement_required;
         let input = InputEnvelope {
+            execution_context,
             port: incoming.port.clone(),
             envelope,
         };
@@ -233,12 +234,16 @@ impl SinkBatchState {
                     .map(|(_, input)| input.input.clone())
                     .collect();
                 if !batch.is_empty() {
-                    sink.handle_batch(batch)
+                    crate::observability::ExecutionScope::capture()
+                        .with_context(ExecutionContext::default())
+                        .scope(sink.handle_batch(batch))
                         .await
                         .map_err(|error| component_error(node, "handle batch", error))?;
                 }
             } else if is_new(0) {
-                sink.handle(first.input.clone())
+                crate::observability::ExecutionScope::capture()
+                    .with_context(first.input.execution_context.clone())
+                    .scope(sink.handle(first.input.clone()))
                     .await
                     .map_err(|error| component_error(node, "handle", error))?;
             }
@@ -431,6 +436,13 @@ pub(super) async fn run(
         };
         let incoming = &mut inputs[selected];
         let candidate = InputEnvelope {
+            execution_context: incoming
+                .pending
+                .as_ref()
+                .expect("ready input")
+                .delivery
+                .execution_context()
+                .clone(),
             port: incoming.port.clone(),
             envelope: incoming
                 .pending

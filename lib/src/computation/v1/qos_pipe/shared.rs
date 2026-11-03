@@ -127,6 +127,7 @@ impl QosReservation {
             channel: self.channel.clone(),
             action: Action::Append {
                 envelope,
+                execution_context: ExecutionContext::current(),
                 candidate,
                 endpoint: None,
                 _reservation: self,
@@ -149,6 +150,7 @@ impl Drop for QosReservation {
 enum Action {
     Append {
         envelope: ChangeEnvelope,
+        execution_context: ExecutionContext,
         candidate: replay::Candidate,
         endpoint: Option<(String, Arc<Binding>)>,
         _reservation: QosReservation,
@@ -192,7 +194,7 @@ impl Drop for SubscriberWrite {
 
 struct Update {
     metadata: Metadata,
-    append: Option<(u64, ChangeEnvelope, u64)>,
+    append: Option<(u64, EnvelopeMessage, u64)>,
 }
 
 type Reply = Arc<StdMutex<Option<EnqueueReceipt>>>;
@@ -248,6 +250,7 @@ impl SharedMutation {
         let append = match &self.action {
             Action::Append {
                 envelope,
+                execution_context,
                 candidate,
                 endpoint,
                 ..
@@ -298,7 +301,11 @@ impl SharedMutation {
                 metadata.producer_sequence = Some(envelope.system().sequence());
                 self.receipt =
                     Some(EnqueueReceipt::new(envelope.id().clone()).with_position(position));
-                Some((position, envelope.clone(), retain_from))
+                Some((
+                    position,
+                    EnvelopeMessage::new(envelope.clone(), execution_context.clone()),
+                    retain_from,
+                ))
             }
             Action::Complete {
                 subscriber,
@@ -353,10 +360,10 @@ impl SharedMutation {
         if bytes.len() > admission::MAX_METADATA_BYTES {
             return Err(backend("receipt metadata exceeds its 4 MiB bound"));
         }
-        if let Some((position, envelope, floor)) = &append {
+        if let Some((position, message, floor)) = &append {
             let record = store
                 .codec
-                .encode(envelope)
+                .encode(&message.envelope)
                 .map_err(|error| PipeError::Backend(error.into()))?;
             store
                 .transaction
@@ -575,9 +582,10 @@ impl QosChannel {
 
     pub(super) async fn publish_shared(
         &self,
-        envelope: &ChangeEnvelope,
+        message: &EnvelopeMessage,
         endpoint: Option<&Endpoint>,
     ) -> Result<EnqueueReceipt, PipeError> {
+        let envelope = &message.envelope;
         let store = self.storage()?.ok_or(PipeError::Closed)?;
         let candidate = replay::Candidate::new(envelope, &store.codec)?;
         {
@@ -606,6 +614,7 @@ impl QosChannel {
                 channel: reservation.channel.clone(),
                 action: Action::Append {
                     envelope: envelope.clone(),
+                    execution_context: message.execution_context.clone(),
                     candidate,
                     endpoint: endpoint
                         .map(|endpoint| (endpoint.subscriber.clone(), endpoint.binding.clone())),

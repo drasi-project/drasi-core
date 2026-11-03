@@ -510,6 +510,7 @@ async fn native_storedproc_resumes_partial_batches_and_deduplicates_destination_
     let group = next(&mut source).await?;
     let outputs = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: group.envelope,
         })
@@ -529,6 +530,7 @@ async fn native_storedproc_resumes_partial_batches_and_deduplicates_destination_
         .execute("UPDATE failure_gate SET failed_id=$1", &[&failed_id])
         .await?;
     let input = || InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope: outputs[0].envelope.clone(),
     };
@@ -590,6 +592,7 @@ async fn captured(
     let group = next(&mut source).await?;
     let outputs = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: group.envelope,
         })
@@ -635,6 +638,7 @@ async fn native_storedproc_retries_only_rolled_back_retryable_sql_outcomes() -> 
     consumer.start().await?;
     consumer
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: outputs[0].envelope.clone(),
         })
@@ -682,6 +686,7 @@ async fn native_storedproc_cancellation_rolls_back_and_requires_joined_cleanup()
     )
     .await?;
     let input = || InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope: outputs[0].envelope.clone(),
     };

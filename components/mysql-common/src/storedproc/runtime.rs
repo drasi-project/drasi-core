@@ -369,6 +369,7 @@ mod tests {
 
     fn input(stream: &str) -> Result<InputEnvelope> {
         Ok(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_changes(
                 &[
@@ -413,6 +414,7 @@ mod tests {
     fn unbound_streams_and_scheduling_controls_fail_instead_of_being_dropped() -> Result<()> {
         assert!(sink()?.commands(&input("other/out")?).is_err());
         let due = InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_futures_due(
                 StreamId::try_new("facilities-db/out")?,

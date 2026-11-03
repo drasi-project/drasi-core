@@ -77,6 +77,7 @@ struct Entry {
     key: (Option<chrono::DateTime<chrono::Utc>>, usize, u64),
     generation: u64,
     envelope: ChangeEnvelope,
+    execution_context: ExecutionContext,
 }
 
 impl crate::channels::priority_queue::QueueOrder for Entry {
@@ -327,7 +328,11 @@ impl Drop for Sender {
 
 #[async_trait]
 impl EnvelopeSender for Sender {
-    async fn send(&self, envelope: ChangeEnvelope) -> Result<EnqueueReceipt, SendFailure> {
+    async fn send_message(&self, message: EnvelopeMessage) -> Result<EnqueueReceipt, SendFailure> {
+        let EnvelopeMessage {
+            envelope,
+            execution_context,
+        } = message;
         let key = match &self.config.source_id {
             Some(source) => GraphChangeCodec::source_metadata(&envelope)
                 .map_err(anyhow::Error::from)
@@ -357,6 +362,7 @@ impl EnvelopeSender for Sender {
             Err(error) => {
                 return Err(SendFailure {
                     envelope,
+                    execution_context,
                     error: PipeError::Backend(error),
                 })
             }
@@ -372,6 +378,7 @@ impl EnvelopeSender for Sender {
                     Err(_) => {
                         return Err(SendFailure {
                             envelope,
+                            execution_context,
                             error: poisoned(),
                         })
                     }
@@ -380,6 +387,7 @@ impl EnvelopeSender for Sender {
                 {
                     return Err(SendFailure {
                         envelope,
+                        execution_context,
                         error: PipeError::Closed,
                     });
                 }
@@ -388,6 +396,7 @@ impl EnvelopeSender for Sender {
                     let Some(next) = admission.checked_add(1) else {
                         return Err(SendFailure {
                             envelope,
+                            execution_context,
                             error: exhausted(),
                         });
                     };
@@ -399,6 +408,7 @@ impl EnvelopeSender for Sender {
                             key,
                             generation: self.binding.generation,
                             envelope,
+                            execution_context,
                         }),
                         admission,
                     );
@@ -451,7 +461,10 @@ impl EnvelopeReceiver for Receiver {
                     self.binding.metrics.delivered();
                     drop(state);
                     self.queue.changed.notify_waiters();
-                    return Ok(Some(Delivery::new(entry.envelope.clone(), None)));
+                    return Ok(Some(
+                        Delivery::new(entry.envelope.clone(), None)
+                            .with_execution_context(entry.execution_context.clone()),
+                    ));
                 }
                 if closure == Closure::Draining
                     && !state.heap.iter().any(|entry| {

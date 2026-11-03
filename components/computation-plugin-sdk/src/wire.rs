@@ -88,12 +88,14 @@ impl Envelope<'_> {
     }
     pub fn into_input(self, codec: &BinaryEnvelopeCodec) -> anyhow::Result<InputEnvelope> {
         Ok(InputEnvelope {
+            execution_context: Default::default(),
             port: self.port,
             envelope: codec.decode(&self.envelope)?,
         })
     }
     pub fn into_output(self, codec: &BinaryEnvelopeCodec) -> anyhow::Result<OutputEnvelope> {
         Ok(OutputEnvelope {
+            execution_context: Default::default(),
             port: self.port,
             envelope: codec.decode(&self.envelope)?,
         })
@@ -167,6 +169,7 @@ mod tests {
         assert_eq!(abi::WIRE_VERSION, BinaryEnvelopeCodec::VERSION);
         let codec = codec(&[GraphChangeCodec::schema()]).unwrap();
         let output = OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").unwrap(),
             envelope: GraphChangeCodec::encode_changes(
                 &[],

@@ -226,6 +226,7 @@ struct Metadata {
 struct State {
     metadata: Metadata,
     entries: BTreeMap<u64, ChangeEnvelope>,
+    contexts: BTreeMap<u64, ExecutionContext>,
     oldest: Option<u64>,
     retained: usize,
     source_position: Option<Bytes>,
@@ -299,10 +300,18 @@ impl State {
     fn append_committed(
         &mut self,
         position: u64,
-        envelope: ChangeEnvelope,
+        message: EnvelopeMessage,
         retain_from: u64,
         budget: Option<JournalAppend>,
     ) {
+        let EnvelopeMessage {
+            envelope,
+            execution_context,
+        } = message;
+        self.contexts.retain(|position, _| *position >= retain_from);
+        if !execution_context.is_empty() {
+            self.contexts.insert(position, execution_context);
+        }
         self.source_position = envelope.system().source_position().cloned();
         if self.page_limits.is_some() {
             if self
@@ -463,6 +472,7 @@ impl QosChannel {
             max_bytes,
             durability: drasi_core::interface::StorageDurability::VOLATILE,
             state: Mutex::new(State {
+                contexts: BTreeMap::new(),
                 metadata,
                 entries: BTreeMap::new(),
                 oldest: None,
@@ -955,6 +965,7 @@ impl QosChannel {
             max_bytes,
             durability,
             state: Mutex::new(State {
+                contexts: BTreeMap::new(),
                 metadata,
                 entries,
                 oldest,
@@ -1239,17 +1250,25 @@ impl QosChannel {
     /// Commit one immutable event to every required subscriber's journal.
     /// The producer must serialize its stream and retain an event while retrying.
     pub async fn publish(&self, envelope: &ChangeEnvelope) -> Result<EnqueueReceipt, PipeError> {
-        self.publish_bound(envelope, None).await
+        self.publish_message(&envelope.clone().into()).await
+    }
+
+    pub async fn publish_message(
+        &self,
+        message: &EnvelopeMessage,
+    ) -> Result<EnqueueReceipt, PipeError> {
+        self.publish_bound(message, None).await
     }
 
     async fn publish_bound(
         &self,
-        envelope: &ChangeEnvelope,
+        message: &EnvelopeMessage,
         endpoint: Option<&Endpoint>,
     ) -> Result<EnqueueReceipt, PipeError> {
         if self.shared.is_some() {
-            return self.publish_shared(envelope, endpoint).await;
+            return self.publish_shared(message, endpoint).await;
         }
+        let envelope = &message.envelope;
         if envelope.system().stream() != &self.definition.stream {
             return Err(backend("QoS channel received an event from another stream"));
         }
@@ -1351,7 +1370,7 @@ impl QosChannel {
             let _wake = WakeOnDrop(&self.changed);
             self.persist(&metadata, Some((position, envelope, retain_from)))
                 .await?;
-            state.append_committed(position, envelope.clone(), retain_from, budget);
+            state.append_committed(position, message.clone(), retain_from, budget);
             state.metadata = metadata;
             if endpoint.is_some_and(|endpoint| endpoint.check().is_err()) {
                 return Err(PipeError::AcceptanceUnknown {
@@ -1473,10 +1492,11 @@ impl ResourceCleanup for QosChannel {
         if let Some(store) = self.storage()? {
             store.transaction.cancel_retirement()?;
         }
-        let _state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         if let Some(store) = self.storage()? {
             store.transaction.shutdown().await?;
         }
+        state.contexts.clear();
         self.persistent
             .lock()
             .map_err(|_| backend("QoS storage poisoned"))?
@@ -1502,7 +1522,8 @@ impl Endpoint {
                 endpoint: self.clone(),
                 position: *position,
             })),
-        );
+        )
+        .with_execution_context(state.contexts.get(position).cloned().unwrap_or_default());
         self.binding.pending.store(true, Ordering::Release);
         Some(delivery)
     }
@@ -1588,9 +1609,9 @@ impl Drop for Sender {
 }
 #[async_trait]
 impl EnvelopeSender for Sender {
-    async fn send(&self, envelope: ChangeEnvelope) -> Result<EnqueueReceipt, SendFailure> {
-        let result = self.0.channel.publish_bound(&envelope, Some(&self.0)).await;
-        result.map_err(|error| SendFailure { envelope, error })
+    async fn send_message(&self, message: EnvelopeMessage) -> Result<EnqueueReceipt, SendFailure> {
+        let result = self.0.channel.publish_bound(&message, Some(&self.0)).await;
+        result.map_err(|error| SendFailure::new(message, error))
     }
 }
 
@@ -1774,9 +1795,11 @@ impl EnvelopeReceiver for Receiver {
                 .next()
                 .map(|(position, envelope)| (*position, envelope.clone()));
             if let Some((position, envelope)) = candidate {
+                let execution_context = state.contexts.get(&position).cloned().unwrap_or_default();
                 let bytes = match &self.batch {
-                    Some(batch) => batch.buffer.size(&envelope)?,
+                    Some(batch) => batch.buffer.size(&envelope, &execution_context)?,
                     None => super::SinkBatching::input_size(&super::InputEnvelope {
+                        execution_context: execution_context.clone(),
                         port: port.clone(),
                         envelope: envelope.clone(),
                     })
@@ -1804,7 +1827,8 @@ impl EnvelopeReceiver for Receiver {
                         lease: batch.lease.clone(),
                         position,
                     })),
-                );
+                )
+                .with_execution_context(execution_context);
                 batch.buffer.push(position, delivery, bytes);
                 continue;
             }
@@ -2033,7 +2057,7 @@ mod foundation_tests {
             .expect("receive")
             .expect("event")
             .into_parts()
-            .1
+            .2
             .expect("ack")
             .complete(HandlingOutcome::Handled)
             .await

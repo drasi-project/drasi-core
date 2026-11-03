@@ -222,6 +222,7 @@ impl sdk::NativeSource for TestComponent {
         tokio::time::sleep(Duration::from_millis(2)).await;
         self.seen += 1;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: envelope(self.descriptor.id(), self.seen),
         }))
@@ -243,6 +244,7 @@ impl sdk::NativeTransformer for TestComponent {
             self.seen,
         )?;
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: output,
         }])
@@ -542,6 +544,7 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
         let original = source.next().await.unwrap().unwrap();
         let outputs = transformer
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: original.envelope.clone(),
             })
@@ -554,6 +557,7 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
         );
         assert_eq!(outputs[0].envelope.annotations().entries().count(), 1);
         sink.handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").unwrap(),
             envelope: outputs[0].envelope.clone(),
         })
@@ -654,6 +658,7 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
     transformer.start().await.unwrap();
     assert!(transformer
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").unwrap(),
             envelope: original
         })
@@ -670,6 +675,7 @@ async fn deferred_native_operation_owns_input_after_the_begin_call_returns() {
         .unwrap();
     sink.start().await.unwrap();
     let input = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope: envelope(&ComponentId::try_new("input").unwrap(), 1),
     };

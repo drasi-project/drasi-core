@@ -654,6 +654,7 @@ mod tests {
             runner
                 .deliver_transactional(
                     &InputEnvelope {
+                        execution_context: Default::default(),
                         port: PortId::try_new("in")?,
                         envelope,
                     },

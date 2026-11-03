@@ -189,6 +189,7 @@ async fn declared_factory_uses_the_supplied_shared_registry_in_a_complete_graph(
         .source(Box::new(Source {
             descriptor: port_descriptor("source", "out", PortDirection::Output),
             output: Some(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out").expect("port"),
                 envelope: input,
             }),
@@ -366,6 +367,7 @@ fn raw_source_input(sequence: u64, skip: bool) -> InputEnvelope {
         None,
     );
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(event),
@@ -414,6 +416,7 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     assert_eq!(expanded[0].envelope.changes().operations().len(), 2);
     let result = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: expanded.remove(0).envelope,
         })
@@ -437,6 +440,7 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     let filtered = &filtered[0].envelope;
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: filtered.clone(),
         })
@@ -453,6 +457,7 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     .expect("payload-bearing duplicate of the filtered producer position");
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: duplicate,
         })

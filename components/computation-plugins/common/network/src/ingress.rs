@@ -86,6 +86,7 @@ impl Ingress {
                 // while waiting for capacity cannot consume an event sequence.
                 *sequence = next;
                 permit.send(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope,
                 });

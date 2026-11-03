@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 
 use super::{
-    pipe_metrics::PipeMetrics, ChangeEnvelope, Delivery, EnqueueReceipt, EnvelopeReceiver,
+    pipe_metrics::PipeMetrics, Delivery, EnqueueReceipt, EnvelopeMessage, EnvelopeReceiver,
     EnvelopeSender, Pipe, PipeCapabilities, PipeCapability, PipeControl, PipeError,
     PipeMetricsSnapshot, PipeProvider, ProvidedPipe, SendFailure,
 };
@@ -65,7 +65,7 @@ impl PipeProvider for BroadcastPipeConfig {
 }
 
 struct Queue {
-    values: VecDeque<ChangeEnvelope>,
+    values: VecDeque<EnvelopeMessage>,
     lagged: u64,
     closed: bool,
     cancelled: bool,
@@ -128,24 +128,21 @@ struct Sender(Arc<Shared>);
 
 #[async_trait]
 impl EnvelopeSender for Sender {
-    async fn send(&self, envelope: ChangeEnvelope) -> Result<EnqueueReceipt, SendFailure> {
+    async fn send_message(&self, message: EnvelopeMessage) -> Result<EnqueueReceipt, SendFailure> {
         let mut queue = match self.0.lock() {
             Ok(queue) => queue,
-            Err(error) => return Err(SendFailure { envelope, error }),
+            Err(error) => return Err(SendFailure::new(message, error)),
         };
         if queue.closed {
-            return Err(SendFailure {
-                envelope,
-                error: PipeError::Closed,
-            });
+            return Err(SendFailure::new(message, PipeError::Closed));
         }
         if queue.values.len() == self.0.capacity {
             queue.values.pop_front();
             queue.lagged = queue.lagged.saturating_add(1);
             self.0.metrics.discarded(1);
         }
-        let receipt = EnqueueReceipt::new(envelope.id().clone());
-        queue.values.push_back(envelope);
+        let receipt = EnqueueReceipt::new(message.envelope.id().clone());
+        queue.values.push_back(message);
         self.0.metrics.accepted();
         drop(queue);
         self.0.notify.notify_one();
@@ -182,7 +179,7 @@ impl EnvelopeReceiver for Receiver {
                 }
                 if let Some(envelope) = queue.values.pop_front() {
                     self.shared.metrics.delivered();
-                    return Ok(Some(Delivery::new(envelope, None)));
+                    return Ok(Some(Delivery::from_message(envelope, None)));
                 }
                 if queue.closed {
                     return Ok(None);

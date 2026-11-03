@@ -67,6 +67,7 @@ async fn apply(
 ) -> anyhow::Result<Vec<OutputEnvelope>> {
     let output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope,
         })

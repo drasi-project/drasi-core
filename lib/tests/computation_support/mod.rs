@@ -199,6 +199,7 @@ pub fn root(producer: &str, sequence: u64, readings: &[u16]) -> Envelope {
 
 pub fn output(envelope: Envelope) -> OutputEnvelope {
     OutputEnvelope {
+        execution_context: Default::default(),
         port: port("out"),
         envelope,
     }
@@ -394,8 +395,11 @@ struct AuditedSender {
 
 #[async_trait]
 impl EnvelopeSender for AuditedSender {
-    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure> {
+    async fn send_message(
+        &self,
+        message: EnvelopeMessage,
+    ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         self.sends.fetch_add(1, Ordering::SeqCst);
-        self.inner.send(envelope).await
+        self.inner.send_message(message).await
     }
 }

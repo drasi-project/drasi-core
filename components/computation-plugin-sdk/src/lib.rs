@@ -29,6 +29,7 @@ pub mod output_reads;
 pub mod output_snapshots;
 mod port_formats;
 pub mod progress;
+pub mod telemetry_transport;
 mod transaction;
 pub mod transport;
 pub mod wire;
@@ -106,6 +107,17 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.services(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_telemetry_v1(
+        ) -> *const $crate::abi::telemetry::PluginTelemetryV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.telemetry(),
                     Err(_) => std::ptr::null(),
                 }
             }))

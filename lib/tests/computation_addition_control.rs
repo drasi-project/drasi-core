@@ -359,6 +359,7 @@ impl EnvelopeSink for BlockedSink {
 
 fn event(sequence: u64) -> OutputEnvelope {
     OutputEnvelope {
+        execution_context: Default::default(),
         port: port("out"),
         envelope: GraphChangeCodec::encode_change(
             SourceChange::Delete {
@@ -545,6 +546,7 @@ impl Transformer for Passthrough {
             None,
         )?;
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope,
         }])

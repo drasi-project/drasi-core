@@ -277,6 +277,7 @@ impl SourceTimeMergeTransformer {
                 (time, rank, progress.sequence),
                 Buffered {
                     envelope,
+                    execution_context: super::super::ExecutionContext::default(),
                     bytes: bytes.len(),
                     deadline: now + Duration::from_millis(self.definition.max_wait_ms),
                 },

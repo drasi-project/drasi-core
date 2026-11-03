@@ -155,6 +155,7 @@ fn input(source: &str, label: &str, properties: serde_json::Value) -> InputEnvel
 
 fn change_input(source: &str, change: SourceChange, sequence: u64) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_change(
             change,

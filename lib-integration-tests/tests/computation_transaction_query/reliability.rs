@@ -60,6 +60,7 @@ fn source_input(
         properties: ElementPropertyMap::from(properties),
     };
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             if insert {

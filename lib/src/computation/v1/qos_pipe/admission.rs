@@ -400,7 +400,17 @@ impl QosChannel {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, PipeError> {
-        self.admit_validated(session, sequence, input, |_| Ok(()))
+        self.admit_message(session, sequence, &input.clone().into())
+            .await
+    }
+
+    pub async fn admit_message(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, PipeError> {
+        self.admit_validated(session, sequence, message, |_| Ok(()))
             .await
     }
 
@@ -408,9 +418,10 @@ impl QosChannel {
         &self,
         session: &ProducerSession,
         sequence: u64,
-        input: &ChangeEnvelope,
+        message: &EnvelopeMessage,
         validate: impl FnOnce(&ChangeEnvelope) -> anyhow::Result<()> + Send,
     ) -> Result<AdmissionReceipt, PipeError> {
+        let input = &message.envelope;
         let mut state = self
             .state
             .try_lock()
@@ -513,7 +524,12 @@ impl QosChannel {
         let _wake = WakeOnDrop(&self.changed);
         self.persist(&metadata, Some((position, &envelope, retain_from)))
             .await?;
-        state.append_committed(position, envelope, retain_from, budget);
+        state.append_committed(
+            position,
+            EnvelopeMessage::new(envelope, message.execution_context.clone()),
+            retain_from,
+            budget,
+        );
         state.metadata = metadata;
         Ok(AdmissionReceipt {
             session: session.clone(),

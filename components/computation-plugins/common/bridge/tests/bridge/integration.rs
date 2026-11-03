@@ -172,6 +172,7 @@ impl ComputationComponent for InputSource {
 impl EnvelopeSource for InputSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         Ok(self.receive.recv().await.map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("output port ID"),
             envelope,
         }))

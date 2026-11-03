@@ -191,7 +191,7 @@ async fn live_same_path_journal_replacement_preserves_unhandled_data_and_closes_
         assert_eq!(delivery.envelope().system().sequence(), sequence);
         delivery
             .into_parts()
-            .1
+            .2
             .unwrap()
             .complete(HandlingOutcome::Handled)
             .await?;
@@ -294,7 +294,7 @@ async fn process_crashes_during_resource_handover_restore_target_and_pending_dat
             .create_with_resources(&BTreeMap::from([(resource, channel.resource())]))?;
         let mut receiver = connection.pipe.take_receiver()?;
         for sequence in 1..=2 {
-            let (envelope, acknowledgement) = receiver.receive().await?.unwrap().into_parts();
+            let (envelope, _, acknowledgement) = receiver.receive().await?.unwrap().into_parts();
             assert_eq!(envelope.id(), event(sequence)?.id());
             assert_eq!(envelope.system().sequence(), sequence);
             acknowledgement
@@ -931,6 +931,7 @@ impl EnvelopeSource for TrafficNode {
         next.map(|envelope| {
             self.probe.pulled.send_replace(envelope.system().sequence());
             Ok(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope,
             })

@@ -604,6 +604,7 @@ fn result_inputs(sequence: u64, values: &[i64]) -> Result<InputEnvelope> {
         })
         .collect::<Vec<_>>();
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
@@ -883,6 +884,7 @@ fn source_graph_input(sequence: u64) -> Result<InputEnvelope> {
         "a source envelope has no query annotation"
     );
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })
@@ -936,6 +938,7 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
     }
     // A scheduling control is not data and fails instead of being dropped.
     let due = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_futures_due(
             stream("facilities-db/out"),

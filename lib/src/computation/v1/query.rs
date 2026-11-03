@@ -1183,6 +1183,7 @@ impl ContinuousQueryTransformer {
                 }
                 self.sync_metrics()?;
                 Ok(vec![OutputEnvelope {
+                    execution_context: crate::observability::ExecutionContext::current(),
                     port: PortId::try_new("out")?,
                     envelope: self.live_delivery(output)?,
                 }])
@@ -1819,51 +1820,57 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
-        anyhow::ensure!(
-            self.pending_output.is_empty(),
-            "drain recovered query output before accepting input"
-        );
-        let futures_due = self.execution.source_transactions.is_none()
-            && GraphChangeCodec::is_futures_due(&input.envelope);
-        let progress = if futures_due {
-            super::GraphProducerProgress::from_envelope(&input.envelope)?
-        } else {
-            None
-        };
-        if futures_due
-            && progress.as_ref().map_or(true, |progress| {
-                !progress.identity().persistent() && self.provider.is_volatile()
-            })
-        {
-            self.draining_futures = true;
-            return self.on_wakeup().await;
-        }
-        let _timer = TransactionTimer {
-            metrics: self.metrics.clone(),
-            started: std::time::Instant::now(),
-        };
-        let mut guard = ProcessingGuard {
-            failure: self.failure.clone(),
-            complete: false,
-            progress: self.source_progress.clone(),
-        };
-        let mut result = match self.execution.source_transactions {
-            Some(limits) => {
-                tokio::time::timeout(limits.duration(), Box::pin(self.process::<true>(input)))
+        let scope = crate::observability::ExecutionScope::for_input(&input.execution_context);
+        scope
+            .scope(async {
+                anyhow::ensure!(
+                    self.pending_output.is_empty(),
+                    "drain recovered query output before accepting input"
+                );
+                let futures_due = self.execution.source_transactions.is_none()
+                    && GraphChangeCodec::is_futures_due(&input.envelope);
+                let progress = if futures_due {
+                    super::GraphProducerProgress::from_envelope(&input.envelope)?
+                } else {
+                    None
+                };
+                if futures_due
+                    && progress.as_ref().map_or(true, |progress| {
+                        !progress.identity().persistent() && self.provider.is_volatile()
+                    })
+                {
+                    self.draining_futures = true;
+                    return self.on_wakeup().await;
+                }
+                let _timer = TransactionTimer {
+                    metrics: self.metrics.clone(),
+                    started: std::time::Instant::now(),
+                };
+                let mut guard = ProcessingGuard {
+                    failure: self.failure.clone(),
+                    complete: false,
+                    progress: self.source_progress.clone(),
+                };
+                let mut result = match self.execution.source_transactions {
+                    Some(limits) => tokio::time::timeout(
+                        limits.duration(),
+                        Box::pin(self.process::<true>(input)),
+                    )
                     .await
-                    .map_err(|_| super::SourceTransactionError::Deadline)?
-            }
-            None => self.process::<false>(input).await,
-        };
-        if futures_due && result.is_ok() {
-            // The empty batch commits the middleware's logical input progress.
-            // Due work already belongs to the query's durable future queue, so
-            // an interruption between this checkpoint and draining is replayable.
-            self.draining_futures = true;
-            result = self.on_wakeup().await;
-        }
-        guard.complete = result.is_ok();
-        result
+                    .map_err(|_| super::SourceTransactionError::Deadline)?,
+                    None => self.process::<false>(input).await,
+                };
+                if futures_due && result.is_ok() {
+                    // The empty batch commits the middleware's logical input progress.
+                    // Due work already belongs to the query's durable future queue, so
+                    // an interruption between this checkpoint and draining is replayable.
+                    self.draining_futures = true;
+                    result = self.on_wakeup().await;
+                }
+                guard.complete = result.is_ok();
+                result
+            })
+            .await
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
@@ -1913,6 +1920,7 @@ impl Transformer for ContinuousQueryTransformer {
         if let Some(envelope) = self.pending_input_replay.front().cloned() {
             let output = self
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope,
                 })
@@ -2834,6 +2842,7 @@ mod profiling_tests {
             let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024).unwrap());
             codec.register_schema(QueryChangeCodec::schema()).unwrap();
             let input = InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: GraphChangeCodec::encode_source_event(
                     Arc::new(crate::channels::SourceEventWrapper::with_sequence(

@@ -81,11 +81,54 @@ global facade. Disabled or excluded collection returns no-op handles without
 registration. Recorder callbacks run only after shared validation and atomic
 conflict/capacity checks, independent of trace sampling.
 
-This does not implement a native telemetry bridge. A cdylib does not share the
-host's Rust context, pointers or global recorder, and no new ABI capability is
-advertised. Native callbacks, generation-scoped absolute counter accounting,
+Native context transport is available through the optional `telemetry-v1`
+extension. This is not a completed-span/log collection or metrics bridge.
+A cdylib does not share the host's Rust context, pointers or global recorder.
+Native metric callbacks, generation-scoped absolute counter accounting,
 stale-handle revocation and replacement gauge resets remain follow-up work.
 Do not install a recorder/exporter inside a plugin as a substitute.
+
+### Portable execution context
+
+The SDK re-exports `ExecutionContext`, `TraceContextV1` and `ExecutionScope` under
+`telemetry`. Inputs and outputs have a transient `execution_context` field.
+Use constructors instead of old two-field struct literals; explicitly preserve
+an input's context when forwarding, or call `with_current_context()` on an output
+produced under the current operation. An empty output context is intentional,
+not an instruction to borrow a later caller's trace.
+
+Capture an `ExecutionScope` before spawning and pass `scope.scope(future)` to the
+shared owned-worker helper. For blocking work use `scope.in_scope(closure)`.
+Worker queues must retain each item's `ExecutionContext` and restore it using
+the receiving worker's binding, not one context captured at worker startup.
+The helpers restore state on suspension and cancellation/drop; never hold an
+entered-span or context guard across an await.
+
+With the SDK's `otel-context` feature, the context adapter uses the plugin's
+locally composed `tracing-opentelemetry` layer. Keep its default context
+activation enabled. This does not install that layer or export plugin spans;
+production native span/log collection remains separate work.
+
+`export_computation_plugin!` advertises the context-only
+`drasi_computation_plugin_telemetry_v1` extension. The host negotiates it
+independently of frozen ABI 1.0/base wire version 1. Contextual creation and
+operation capsules contain unchanged base payload bytes and separate bounded
+context records. Batch operation context is distinct from every input context.
+Admission and handled-consumer callbacks use the same negotiated context family.
+No new metric capability is advertised.
+
+Trace state is limited to 512 bytes/32 members, an encoded context to 1 KiB,
+and a capsule to the existing native message limit. Sparse sidecars include only
+nonempty contexts and validate count, ordering and uniqueness. Batch sizing
+charges per-input context conservatively; the host reserves bounded operation
+framing space at the native message ceiling. Invalid frames fail explicitly.
+Old/base-only plugins continue to work without requested propagation; supplied
+context or required native propagation must not silently disappear.
+
+Rebuild actual cdylibs after SDK changes. `make test-native-context` builds two
+SDK-only libraries (context-capable and base-only) and tests real parentage,
+unsampled propagation, operation/input separation, cancellation and compatibility.
+It does not build the network/database plugin families.
 
 Declare the dynamic library feature and explicit native family metadata in the
 plugin manifest so `xtask` can discover it independently of legacy crate categories:

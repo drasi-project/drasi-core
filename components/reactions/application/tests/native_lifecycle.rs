@@ -40,6 +40,7 @@ impl OneEvent {
             )
             .expect("source descriptor"),
             event: Some(OutputEnvelope {
+                execution_context: Default::default(),
                 port,
                 envelope: ChangeEnvelope::new(
                     EnvelopeId::try_new("event", vec![1].into()).expect("envelope ID"),

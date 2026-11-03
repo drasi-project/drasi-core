@@ -751,6 +751,7 @@ impl Binlog {
                                     "MySQL decoded batch exceeds protocol byte limit"
                                 );
                                 output.push(OutputEnvelope {
+                                    execution_context: Default::default(),
                                     port: PortId::try_new("out")?,
                                     envelope,
                                 });
@@ -817,6 +818,7 @@ impl Binlog {
         };
         self.admitted = logical;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         }))

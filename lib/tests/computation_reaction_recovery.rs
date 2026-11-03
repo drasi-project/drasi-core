@@ -73,6 +73,7 @@ async fn emit(query: &mut ContinuousQueryTransformer, sequence: u64, value: u64)
     .unwrap();
     let mut results = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: input,
         })
@@ -167,6 +168,7 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
         );
         adapter
             .handle(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: retained,
             })
@@ -174,6 +176,7 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
             .unwrap();
         adapter
             .handle(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: during_start,
             })
@@ -216,6 +219,7 @@ async fn accepted_but_unhandled_results_replay_on_every_restart() {
     assert_eq!(baseline.sequence, 0);
     adapter
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: emit(&mut query, 1, 1).await,
         })
@@ -253,6 +257,7 @@ async fn strict_recovers_transport_loss_from_accepted_tail_without_checkpointing
     adapter.start().await.unwrap();
     adapter
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: emit(&mut query, 1, 1).await,
         })
@@ -266,6 +271,7 @@ async fn strict_recovers_transport_loss_from_accepted_tail_without_checkpointing
     );
     adapter
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: after_lag,
         })
@@ -305,6 +311,7 @@ async fn strict_rejects_unretained_transport_loss_without_later_deliveries() {
     adapter.start().await.unwrap();
     adapter
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: emit(&mut query, 1, 1).await,
         })
@@ -314,6 +321,7 @@ async fn strict_rejects_unretained_transport_loss_without_later_deliveries() {
     for sequence in 3..=4 {
         let error = adapter
             .handle(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: emit(&mut query, sequence, sequence).await,
             })
@@ -368,6 +376,7 @@ async fn an_explicit_gap_skip_does_not_acknowledge_later_queued_results() {
 
     adapter
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: emit(&mut query, 3, 3).await,
         })
@@ -446,6 +455,7 @@ async fn handler_failure_does_not_advance_progress_and_is_redelivered() {
     adapter.start().await.unwrap();
     if let Err(error) = adapter
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: emit(&mut query, 1, 1).await,
         })
@@ -614,6 +624,7 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
             assert!(probe.accepted.lock().unwrap().is_empty());
             adapter
                 .handle(InputEnvelope {
+                    execution_context: Default::default(),
                     port: port("in"),
                     envelope: emit(&mut query, 2, 2).await,
                 })

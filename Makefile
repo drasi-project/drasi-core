@@ -6,6 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
+       build-native-context-fixtures test-native-context \
        build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
@@ -18,6 +19,7 @@ help:
 	@echo "  clippy                    - Run cargo clippy with same configuration as CI"
 	@echo "  build-test-plugins        - Build cdylib plugins needed for host-sdk integration tests"
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
+	@echo "  test-native-context       - Build SDK-only context fixtures and qualify the native context ABI"
 	@echo "  build-native-plugins      - Build all native plugin libraries (host-loaded, no query engine dependency)"
 	@echo "  build-native-standard-plugins - Build native counter, middleware, capture and arithmetic libraries"
 	@echo "  build-native-network-plugins - Build native HTTP/gRPC/SSE and HTTP bootstrap libraries"
@@ -108,9 +110,10 @@ build-test-plugins: build-native-plugins
 	@echo "=== Test plugins built ==="
 
 # Build test plugins, then run host-sdk integration tests.
-test-host-sdk: build-test-plugins
+test-host-sdk: build-test-plugins build-native-context-fixtures
 	@echo "=== Running host-sdk integration tests ==="
 	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test native_sqlite_components -- --test-threads=1
+	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --locked -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-mssql-plugins build-native-postgres-plugins build-native-sqlite-plugins
@@ -120,6 +123,12 @@ check-native-dependencies:
 
 build-native-standard-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_STANDARD_PACKAGES),-p $(package)) --features dynamic-plugin
+
+build-native-context-fixtures:
+	cargo build -p drasi-computation-plugin-sdk --example execution_context_fixture --example execution_context_base_fixture --features otel-context --locked
+
+test-native-context: build-native-context-fixtures
+	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --locked -- --test-threads=1
 
 build-native-network-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_NETWORK_PACKAGES),-p $(package)) --features dynamic-plugin

@@ -3606,6 +3606,33 @@ impl Operations {
             component_type = crate::observability::ComponentLogType::for_component(
                 node.role, node.descriptor.semantic_kind()).as_str(),
             generation = generation.0);
+        let execution_scope = crate::observability::ExecutionScope::new(
+            crate::observability::ExecutionContext::default(),
+        )
+        .with_component(
+            crate::observability::TelemetryScope::graph(
+                graph.execution_scope.clone(),
+                graph.snapshot.id.clone(),
+            )
+            .map_err(|error| component_error(&node, "bind execution scope", error.into()))?
+            .component(
+                node.descriptor.id().clone(),
+                node.role,
+                drasi_computation_contracts::ComponentSemanticKind::for_component(
+                    node.role,
+                    &node.descriptor,
+                ),
+            ),
+            generation.0,
+        )
+        .with_adapter(graph.observability.telemetry.context_adapter().cloned())
+        .with_required_transport(
+            graph
+                .observability
+                .telemetry
+                .policy()
+                .distributed_tracing_required(),
+        );
         let admission_activation = if operation == Operation::Process
             && matches!(&lease.component, Component::Source(_))
         {
@@ -4038,7 +4065,7 @@ impl Operations {
             .spawn(identity.clone(), abort.clone(), async move {
                 let result = identity
                     .run(async {
-                        Abortable::new(future.instrument(span), registration)
+                        Abortable::new(execution_scope.scope(future.instrument(span)), registration)
                             .await
                             .unwrap_or_else(|_| {
                                 Err(if operation == Operation::Reconfigure {

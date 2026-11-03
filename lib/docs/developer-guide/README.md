@@ -733,6 +733,7 @@ branch is:
 if let Some(change) = self.pending.pop_front() {
     self.sequence = self.sequence.checked_add(1).context("sequence exhausted")?;
     return Ok(Some(OutputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("out")?,
         envelope: GraphChangeCodec::encode_change(
             change,
@@ -1570,6 +1571,7 @@ impl Transformer for Audit {
             ContextValue::String("stockroom".into()),
         )?)?;
         Ok(vec![OutputEnvelope {
+            execution_context: input.execution_context,
             port: PortId::try_new("out")?,
             envelope,
         }])

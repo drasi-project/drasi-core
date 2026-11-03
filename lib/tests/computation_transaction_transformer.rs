@@ -197,6 +197,7 @@ impl Transformer for Arithmetic {
     async fn transform(&mut self, input: InputEnvelope) -> TestResult<Vec<OutputEnvelope>> {
         self.probe.standalone_calls.fetch_add(1, Ordering::SeqCst);
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: self.change(&input.envelope, 0)?,
         }])
@@ -326,6 +327,7 @@ fn registry(probe: Arc<Probe>) -> Arc<TransactionalTransformerRegistry> {
 
 fn input(sequence: u64, value: i64) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: port("in"),
         envelope: GraphChangeCodec::encode_change(
             SourceChange::Insert {
@@ -682,6 +684,7 @@ async fn equal_sequence_numbers_from_different_inputs_get_distinct_step_and_outp
     );
     let second = subject
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: other,
         })
@@ -1233,6 +1236,7 @@ impl EnvelopeSource for JournalSource {
         };
         self.position = stored.position;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: stored.envelope,
         }))
@@ -1268,6 +1272,7 @@ impl ComputationComponent for ReplayRelay {
 impl Transformer for ReplayRelay {
     async fn transform(&mut self, input: InputEnvelope) -> TestResult<Vec<OutputEnvelope>> {
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: GraphChangeCodec::derive_changes(
                 &input.envelope,
@@ -1753,6 +1758,7 @@ impl ComputationComponent for FiniteSource {
 impl EnvelopeSource for FiniteSource {
     async fn next(&mut self) -> TestResult<Option<OutputEnvelope>> {
         Ok(self.inputs.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope,
         }))
@@ -1959,6 +1965,7 @@ async fn builtin_middleware_participates_and_unwind_state_survives_reconstructio
         }),
     }];
     let parent_input = |sequence: u64, update| InputEnvelope {
+        execution_context: Default::default(),
         port: port("in"),
         envelope: GraphChangeCodec::encode_change(
             {
@@ -2079,6 +2086,7 @@ async fn documented_decoder_then_parser_configuration_runs_as_two_transactional_
     .expect("input");
     let output = subject
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope,
         })
@@ -2182,6 +2190,7 @@ impl ComputationComponent for NumberStep {
 impl Transformer for NumberStep {
     async fn transform(&mut self, input: InputEnvelope) -> TestResult<Vec<OutputEnvelope>> {
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: input.envelope,
         }])
@@ -2277,6 +2286,7 @@ impl ComputationComponent for QueryRows {
 impl Transformer for QueryRows {
     async fn transform(&mut self, input: InputEnvelope) -> TestResult<Vec<OutputEnvelope>> {
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: input.envelope,
         }])
@@ -2376,6 +2386,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     let mut second = open(configured.clone(), registry.clone(), storage.clone()).await;
     let first_output = first
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: input_from_query.clone(),
         })
@@ -2383,6 +2394,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
         .expect("first");
     let second_output = second
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: first_output[0].envelope.clone(),
         })
@@ -2405,6 +2417,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     let repeated = input_from_query.reemit(99).expect("reemit");
     let replay = first
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: repeated,
         })
@@ -2428,6 +2441,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
         let mut gap = open(gap_definition.clone(), registry.clone(), storage.clone()).await;
         let output = gap
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: input_from_query.clone(),
             })
@@ -2436,6 +2450,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
         gap.delivery_completed(&output).await.expect("confirm");
         let error = gap
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: third_query_output[0].envelope.clone(),
             })
@@ -2450,6 +2465,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     let mut gap = open(gap_definition, registry.clone(), storage.clone()).await;
     let output = gap
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: second_query_output[0].envelope.clone(),
         })
@@ -2483,6 +2499,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     assert!(
         first
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: reset[0].envelope.clone()
             })
@@ -2507,6 +2524,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     let mut reject = open(configured, registry, storage).await;
     let error = reject
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: output[0].envelope.clone(),
         })
@@ -2551,6 +2569,7 @@ async fn custom_schemas_flow_directly_and_incompatible_or_branched_steps_are_rej
     let first = number_event(5, 1);
     let output = subject
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: first,
         })

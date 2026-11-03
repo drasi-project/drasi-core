@@ -128,6 +128,7 @@ async fn fixture(
             )
             .expect("actual source descriptor"),
             live: live.then(|| OutputEnvelope {
+                execution_context: Default::default(),
                 port: output.clone(),
                 envelope: envelope(2, "Alicia", true),
             }),

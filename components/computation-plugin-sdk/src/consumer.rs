@@ -182,6 +182,7 @@ impl ConsumerState {
         input: &[u8],
         codec: &BinaryEnvelopeCodec,
         descriptor: &drasi_computation_contracts::ComponentDescriptor,
+        execution_context: crate::telemetry::ExecutionContext,
     ) -> anyhow::Result<Vec<u8>> {
         let input: BeginBatch = wire::decode(input)?;
         let envelope = codec.decode(&input.envelope)?;
@@ -194,6 +195,7 @@ impl ConsumerState {
         let batch = DeliveryBatch::new(
             self.scope.clone(),
             InputEnvelope {
+                execution_context,
                 port: input.port,
                 envelope,
             },

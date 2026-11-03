@@ -30,6 +30,7 @@ fn completed(fail: bool) -> (SinkBatchState, Arc<FlowProgress>, Arc<Probe>) {
     let progress = Arc::new(FlowProgress::default());
     let probe = Arc::new(Probe::default());
     let input = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope: crate::computation::v1::GraphChangeCodec::encode_changes(
             &[],

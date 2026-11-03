@@ -797,6 +797,7 @@ mod tests {
             query.start().await?;
             let input = |sequence, name: &str| -> anyhow::Result<InputEnvelope> {
                 Ok(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: GraphChangeCodec::encode_change(
                         SourceChange::Insert {
@@ -963,6 +964,7 @@ mod tests {
         for sequence in 1..=2 {
             query
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").unwrap(),
                     envelope: GraphChangeCodec::encode_change(
                         SourceChange::Insert {

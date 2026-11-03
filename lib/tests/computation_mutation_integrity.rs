@@ -56,6 +56,7 @@ fn node(source: &str, id: &str, time: u64, value: i64) -> Element {
 
 fn input(sequence: u64, change: SourceChange) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope: GraphChangeCodec::encode_change(change, stream(), sequence, None).unwrap(),
     }
@@ -454,6 +455,7 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
             let mut batch = SourceTransactionBuilder::new("a", limits).unwrap();
             batch.push(change).unwrap();
             InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: batch
                     .commit(

@@ -119,6 +119,7 @@ fn input(query: &str, sequence: u64, routes: &[&str]) -> Result<InputEnvelope> {
         })
         .collect();
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,

@@ -83,6 +83,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
         );
         let output = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: delivery.into_parts().0,
             })

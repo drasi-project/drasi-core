@@ -849,11 +849,11 @@ inspection APIs and profiler are unchanged.
 | `Debug` | Basic plus debug operation detail |
 | `Persistence` | Basic plus supported persistence entries |
 
-This is the foundations slice: resolving a profile does **not** add production
-graph instrumentation. Native metric callbacks, portable trace propagation,
-exporters and handled-branch latency remain unimplemented. Explicit requests
-through `require_native_metrics()` or `require_distributed_tracing()` fail;
-the deferred latency instrument never registers. No zero-valued production
+Resolving a profile does **not** add production graph instrumentation.
+Portable context propagation is supported separately, as described below.
+Native metric callbacks, exporters and handled-branch latency remain
+unimplemented: `require_native_metrics()` fails, and the deferred latency
+instrument never registers. No zero-valued production
 series are fabricated.
 
 Use `TelemetrySettings::new(profile).with_metrics(false)` for tracing-only
@@ -894,6 +894,63 @@ graph definitions, business payloads or replay hashes. Factories receive the
 actual owning graph's policy/scope through `ConstructionContext::telemetry()`,
 including additions and replacements; a temporary assembly graph is not the
 owner.
+
+## Portable execution context
+
+Execution context is transient metadata accompanying work, not the envelope's
+persisted `ProcessingContext`/annotations. It holds an optional sending trace ID,
+span ID, flags and bounded W3C trace state. Unsampled contexts remain valid.
+No live span, arbitrary baggage, transaction, acknowledgement or timing token
+travels in the carrier.
+
+The runtime restores the receiving component's execution/logging scope on every
+poll and transports context through inputs, outputs, pipes, batches and admission.
+Bounded live sidecars preserve journal context across page-cache eviction.
+Persistent reconstruction has no historical execution context. Event codecs,
+query results, receipt digests and acknowledgement semantics are unchanged.
+Default logging and existing metrics behavior are unchanged too.
+
+Use `TelemetryOptions::with_context_adapter(...)` to supply a host-owned
+`TraceContextAdapter`. `require_distributed_tracing()` validates that an adapter
+is present and requires native context capability where native components are
+bound. The optional `otel-context` feature supplies `OpenTelemetryContextAdapter`;
+the host composes its `tracing-opentelemetry` layer with context activation enabled
+and owns collection/export/shutdown. No helper installs a subscriber or exporter.
+An adapter alone does not add production operation spans or native span collection.
+
+`ExecutionScope::capture()` captures local execution bindings for explicitly
+spawned work. Wrap its future with `scope.scope(future)` and pass that future to
+the existing owned-worker helper; use `scope.in_scope(closure)` for blocking work.
+For a queue, retain each item's `ExecutionContext`, then use the receiving scope's
+`with_context(...)`. An explicitly empty scope clears inherited context.
+The component identity is the actual runtime construction/logging identity:
+an ordinary instance uses its instance ID, while a standalone graph's execution
+scope remains its graph ID. A separate configured telemetry namespace does not
+rename existing component log keys.
+
+### Rust API migration
+
+- `InputEnvelope` and `OutputEnvelope` now have `execution_context`. Prefer
+  `new(port, envelope)` and `with_execution_context(...)` to two-field literals.
+- Constructors are context-free. Forward an input's context explicitly, or use
+  `OutputEnvelope::with_current_context()` inside a restored producing scope.
+  Empty output contexts are not automatically filled from ambient work: this
+  prevents replayed or deliberately detached work from acquiring another trace.
+- `EnvelopeSender` implementors must implement `send_message(EnvelopeMessage)`.
+  `send`/`send_batch` remain context-free conveniences; `send_messages` preserves
+  context through accepted-prefix failures and unattempted suffixes.
+- `Delivery::into_parts()` returns `(envelope, execution_context, acknowledgement)`.
+  Failure ownership includes the carrier; dropping it is not an acknowledgement.
+- Custom `RetainedEnvelopeStore` implementations must implement `append_message`
+  and return context in `StoredEnvelope`, retaining it only in bounded live state.
+  Never change persisted event bytes to carry it.
+- `SourceAdmission::admit` captures the current execution context at publication;
+  `admit_message` accepts an explicit carrier. Retry identity remains event-only.
+
+Native context transport uses a negotiated extension, not appended fields in
+frozen vtables or legacy Source/Reaction payloads. Missing required capabilities
+fail explicitly. Broader component-worker adoption, production spans, native
+completed-span/log collection and metric callbacks remain follow-up work.
 
 ---
 

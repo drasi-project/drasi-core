@@ -413,6 +413,7 @@ fn input(sequence: u64) -> InputEnvelope {
         ),
     };
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_change(
             if sequence == 1 {
@@ -450,6 +451,7 @@ fn scheduling_input(sequence: u64, active: bool) -> InputEnvelope {
         })),
     };
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope: GraphChangeCodec::encode_change(
             if sequence == 1 {
@@ -1268,6 +1270,7 @@ fn replayed_source_input(transport: u64) -> InputEnvelope {
         1,
     );
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(source),

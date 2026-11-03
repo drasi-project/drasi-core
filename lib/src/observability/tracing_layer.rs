@@ -161,18 +161,33 @@ where
         if metadata.target() == PLUGIN_LOG_TARGET {
             return;
         }
-        // Try to find component context from current or parent spans
-        let component_info = ctx.event_span(event).and_then(|span| {
-            // Walk up the span tree to find component info
-            let mut current = Some(span);
-            while let Some(span_ref) = current {
-                if let Some(info) = extract_component_info(&span_ref) {
-                    return Some(info);
-                }
-                current = span_ref.parent();
-            }
-            None
-        });
+        let bound = drasi_computation_contracts::telemetry::ExecutionScope::current_component();
+        let component_info = bound
+            .as_ref()
+            .and_then(|bound| {
+                let identity = &bound.identity;
+                Some(ComponentInfo {
+                    instance_id: identity.instance_id().into(),
+                    component_id: identity.component_id()?.to_string(),
+                    component_type: ComponentLogType::for_component(
+                        identity.role()?,
+                        identity.semantic_kind(),
+                    ),
+                })
+            })
+            .or_else(|| {
+                ctx.event_span(event).and_then(|span| {
+                    // Walk up the span tree to find component info
+                    let mut current = Some(span);
+                    while let Some(span_ref) = current {
+                        if let Some(info) = extract_component_info(&span_ref) {
+                            return Some(info);
+                        }
+                        current = span_ref.parent();
+                    }
+                    None
+                })
+            });
 
         // If we found component context, route the log
         if let Some(info) = component_info {

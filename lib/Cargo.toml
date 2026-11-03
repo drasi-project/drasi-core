@@ -41,6 +41,7 @@ computation-rocksdb-tests = ["drasi-index-rocksdb/computation"]
 
 # Per-query clocks and awaited processing frontiers for managed-query tests.
 test-support = []
+otel-context = ["drasi-computation-contracts/otel-context"]
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
@@ -84,7 +85,7 @@ name = "computation_runtime"
 
 [dependencies]
 drasi-core-types = { workspace = true }
-drasi-computation-contracts = { workspace = true, features = ["metrics-facade"] }
+drasi-computation-contracts = { workspace = true, features = ["metrics-facade", "tracing-context"] }
 drasi-reaction-common = { workspace = true }
 drasi-core = { workspace = true, features = ["computation"] }
 drasi-functions-cypher.workspace = true

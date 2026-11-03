@@ -3,10 +3,16 @@
 
 import unittest
 
-from check_native_dependencies import forbidden_dependencies
+from check_native_dependencies import dependency_selections, forbidden_dependencies
 
 
 class NativeDependencyTests(unittest.TestCase):
+    def test_native_context_is_checked_without_workspace_feature_unification(self):
+        selections = list(dependency_selections(["native-fixture"]))
+        self.assertIn(("drasi-computation-plugin-sdk", []), selections)
+        self.assertIn(("drasi-computation-plugin-sdk", ["otel-context"]), selections)
+        self.assertIn(("native-fixture", ["dynamic-plugin"]), selections)
+
     def test_model_and_ast_packages_are_not_the_engine(self):
         self.assertEqual(
             forbidden_dependencies("drasi-core-types v1\ndrasi-query-ast v1\n"),

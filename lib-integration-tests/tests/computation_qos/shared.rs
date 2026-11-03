@@ -154,7 +154,7 @@ async fn paged_ack(
         .await??
         .expect("shared output");
     assert_eq!(delivery.envelope().system().sequence(), sequence);
-    Ok(delivery.into_parts().1.expect("handling acknowledgement"))
+    Ok(delivery.into_parts().2.expect("handling acknowledgement"))
 }
 
 #[tokio::test]
@@ -245,7 +245,7 @@ async fn paged_shared_refill_waits_without_holding_channel_state() -> Result<()>
     assert_eq!(delivery.envelope().system().sequence(), 1);
     delivery
         .into_parts()
-        .1
+        .2
         .expect("ack")
         .complete(HandlingOutcome::Handled)
         .await?;
@@ -1174,7 +1174,7 @@ async fn admitted_inputs(path: &Path) -> Result<Vec<ChangeEnvelope>> {
     for sequence in 1..=2 {
         source.admit(&session, sequence, &event(sequence)?).await?;
         let delivery = receiver.receive().await?.expect("admitted input");
-        let (envelope, acknowledgement) = delivery.into_parts();
+        let (envelope, _, acknowledgement) = delivery.into_parts();
         output.push(envelope);
         acknowledgement
             .expect("acknowledgement")
@@ -1465,7 +1465,7 @@ async fn shared_acknowledgement_and_retirement_resolve_interrupted_commits() -> 
                     .await?
                     .expect("input")
                     .into_parts()
-                    .1
+                    .2
                     .expect("acknowledgement");
                 fail.store(true, Ordering::Release);
                 let mut operation = Box::pin(async {
@@ -1741,7 +1741,7 @@ async fn shared_group_failure_wakes_queued_writes_and_reconstruction_before_clea
     channels[0].publish(&inputs[0]).await?;
     let mut pipe = shared_endpoint(&group, &channels[0], "fast")?;
     let mut receiver = pipe.pipe.take_receiver()?;
-    let (_, acknowledgement) = receiver
+    let (_, _, acknowledgement) = receiver
         .receive()
         .await?
         .expect("retained input")
@@ -2129,7 +2129,7 @@ async fn shared_progress_crash_child() -> Result<()> {
         } else {
             let mut pipe = shared_endpoint(&group, &channels[0], "fast")?;
             let mut receiver = pipe.pipe.take_receiver()?;
-            let (_, acknowledgement) = receiver
+            let (_, _, acknowledgement) = receiver
                 .receive()
                 .await?
                 .expect("retained event")
@@ -2217,7 +2217,7 @@ async fn shared_progress_survives_process_exit_at_commit() -> Result<()> {
             } else if before_commit {
                 let mut pipe = shared_endpoint(&group, &channels[0], "fast")?;
                 let mut receiver = pipe.pipe.take_receiver()?;
-                let (_, acknowledgement) =
+                let (_, _, acknowledgement) =
                     tokio::time::timeout(Duration::from_secs(3), receiver.receive())
                         .await??
                         .expect("unconfirmed delivery")

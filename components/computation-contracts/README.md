@@ -21,8 +21,8 @@ query processing and recovery. Native plugins use explicit host capabilities,
 not concrete runtime objects.
 
 The `telemetry` module defines observation catalogues, stable scopes, profiles,
-trace-only parent sampling and bounded registration validation. Its types and
-state are independent of subscribers, recorders and graph ownership. The
+trace-only parent sampling and bounded registration validation. The catalogue,
+policy, portable carrier and registration types are backend-neutral. The
 optional `metrics-facade` feature adds the shared facade adapter used by the
 library and static SDK, avoiding two implementations of recorder registration.
 It installs no recorder or exporter and does not add a runtime dependency.
@@ -33,6 +33,26 @@ recorder calls; identity values are not part of schema identity. Definitions and
 series are bounded and retained rather than silently evicted. The default limits
 and migration contract are documented in the
 [library guide](../../lib/README.md#telemetry-foundations).
+
+`ExecutionContext` carries an optional validated `TraceContextV1`: trace/span IDs,
+sampling flags and bounded W3C trace state. It contains no live span, transaction
+or component identity and is not serializable as event data. `InputEnvelope`,
+`OutputEnvelope` and `EnvelopeMessage` carry it separately from `ChangeEnvelope`.
+Never put tracing metadata in `ProcessingContext`, annotations, rows or receipts.
+
+The `tracing-context` feature supplies `ExecutionScope` for poll-safe restoration
+and explicit worker capture. A scope owns local dispatch/component bindings;
+only its portable execution context belongs on a work-item queue. The optional
+`otel-context` adapter integrates with a host-composed `tracing-opentelemetry`
+layer using its default context activation. It installs no subscriber/exporter.
+The adapter feature brings the tracing integration's OpenTelemetry dependencies;
+DTO-only builds do not enable them.
+
+Rust callers must migrate input/output struct literals to include
+`execution_context`, or use the new context-free constructors. Forward the input
+context explicitly, or use `OutputEnvelope::with_current_context()` when producing
+work inside a restored scope. Empty outputs stay empty; replay must not acquire
+an unrelated caller's trace. See the [runtime migration guide](../../lib/README.md#portable-execution-context).
 
 Published envelopes have a maximum ancestry depth of 1,024
 (`MAX_LINEAGE_DEPTH`). JSON and binary decoding, encoding and binary size

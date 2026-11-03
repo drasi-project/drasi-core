@@ -59,6 +59,7 @@ fn id(value: &str) -> ComponentId {
 
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope,
     }

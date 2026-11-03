@@ -325,6 +325,7 @@ fn declaration(id: &str, role: ResourceRole) -> ResourceSpecification {
 
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("input port ID"),
         envelope,
     }

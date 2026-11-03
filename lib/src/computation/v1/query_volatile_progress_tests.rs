@@ -31,6 +31,7 @@ fn event(logical: u64, transport: u64, position: &'static [u8]) -> anyhow::Resul
     )
     .with_source_position(Bytes::from_static(position));
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(source),
@@ -130,6 +131,7 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
         .is_empty());
     assert_eq!(owner.snapshot().transport_sequences[&stream], 90);
     let invalid = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,

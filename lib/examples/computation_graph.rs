@@ -203,6 +203,7 @@ impl EnvelopeSource for FiniteReadings {
         )?)?;
         self.cursor += 1;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         }))
@@ -263,6 +264,7 @@ impl Transformer for Arithmetic {
                 .checked_add(1)
                 .context("transform sequence exhausted")?;
             outputs.push(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: annotated.derive(
                     emission_id(&self.stream, self.sequence)?,

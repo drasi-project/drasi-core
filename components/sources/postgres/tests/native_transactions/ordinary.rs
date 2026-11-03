@@ -364,6 +364,7 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
         assert_eq!(raw.sequence, Some(expected));
         let outputs = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: row.envelope,
             })
@@ -437,6 +438,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
         .context("first row")?;
     let output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: first.envelope,
         })
@@ -482,6 +484,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
     );
     let output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: held.envelope,
         })
@@ -498,6 +501,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
             .context("logical sequence")?;
         let output = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: next.envelope,
             })
@@ -696,6 +700,7 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
         properties.insert("label", ElementValue::String("external update".into()));
         sender
             .send(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_change(
                     SourceChange::Update {

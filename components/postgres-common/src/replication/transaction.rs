@@ -96,6 +96,7 @@ impl Transactions {
                 )?;
                 self.resume = info.commit_lsn;
                 return Ok(Some(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope,
                 }));

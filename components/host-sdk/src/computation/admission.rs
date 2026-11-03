@@ -24,6 +24,8 @@ struct State {
     outstanding: AtomicUsize,
     admission: Weak<SourceAdmission>,
     codec: Arc<BinaryEnvelopeCodec>,
+    contextual: bool,
+    execution_scope: drasi_lib::observability::ExecutionScope,
 }
 
 pub(super) struct AdmissionBinding {
@@ -38,8 +40,18 @@ impl AdmissionBinding {
                 outstanding: AtomicUsize::new(0),
                 admission: Arc::downgrade(admission),
                 codec,
+                contextual: false,
+                execution_scope: drasi_lib::observability::ExecutionScope::capture()
+                    .with_context(drasi_lib::observability::ExecutionContext::default()),
             }),
         }
+    }
+
+    pub(super) fn with_context_transport(mut self, contextual: bool) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("unpublished admission binding")
+            .contextual = contextual;
+        self
     }
 
     pub(super) fn table(&self) -> abi::services::SourceAdmissionV1 {
@@ -127,7 +139,10 @@ unsafe extern "C" fn request(
         if !state.active.load(Ordering::Acquire) {
             return Err(Failure::closed());
         }
-        if !(abi::services::admission::REGISTER..=abi::services::admission::ADMIT).contains(&code) {
+        let supported = (abi::services::admission::REGISTER..=abi::services::admission::ADMIT)
+            .contains(&code)
+            || (state.contextual && code == abi::telemetry::ADMIT);
+        if !supported {
             return Err(Failure::new(
                 abi::status::UNSUPPORTED,
                 "unknown admission request",
@@ -155,7 +170,11 @@ unsafe extern "C" fn request(
                 let admission = guard.0.admission.upgrade().ok_or_else(Failure::closed)?;
                 // Only mailbox operations are polled here. Storage stays on the host
                 // graph's runtime, never under the calling plugin's Tokio context.
-                apply(&admission, &guard.0.codec, code, &input).await
+                guard
+                    .0
+                    .execution_scope
+                    .scope(apply(&admission, &guard.0.codec, code, &input))
+                    .await
             },
             None,
         );
@@ -175,6 +194,23 @@ async fn apply(
 ) -> Result<Vec<u8>, Failure> {
     use abi::services::admission::*;
     match code {
+        abi::telemetry::ADMIT => {
+            let frame = drasi_computation_plugin_sdk::telemetry_transport::decode_request(input)?;
+            let request: AdmitRequest<'_> = wire::decode(&frame.payload)?;
+            let message = drasi_lib::computation::v1::EnvelopeMessage::new(
+                codec
+                    .decode(&request.envelope)
+                    .map_err(anyhow::Error::from)?,
+                frame.contexts.input(0, 1)?,
+            );
+            let scope = drasi_lib::observability::ExecutionScope::capture()
+                .with_context(frame.contexts.operation);
+            response(
+                scope
+                    .scope(admission.admit_message(&request.session, request.sequence, &message))
+                    .await,
+            )
+        }
         REGISTER => response(admission.register_producer(wire::decode(input)?).await),
         RETIRE => response(admission.retire_producer(&wire::decode(input)?).await),
         STATUS => response(admission.producer_status(&wire::decode(input)?).await),
@@ -215,6 +251,10 @@ mod tests {
                 outstanding: AtomicUsize::new(0),
                 admission: Weak::new(),
                 codec: Arc::new(wire::codec(&[GraphChangeCodec::schema()]).unwrap()),
+                contextual: false,
+                execution_scope: drasi_lib::observability::ExecutionScope::new(
+                    drasi_lib::observability::ExecutionContext::default(),
+                ),
             }),
         };
         let table = binding.table();

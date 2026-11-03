@@ -290,6 +290,7 @@ impl Harness {
             .get_mut(id)
             .unwrap()
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: input,
             })

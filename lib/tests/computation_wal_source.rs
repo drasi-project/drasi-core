@@ -476,6 +476,7 @@ mod persistent_progress {
         for query in &mut queries {
             query
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").expect("port"),
                     envelope: first.envelope.clone(),
                 })
@@ -484,6 +485,7 @@ mod persistent_progress {
         }
         queries[0]
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").expect("port"),
                 envelope: second.envelope,
             })
@@ -521,6 +523,7 @@ mod persistent_progress {
         );
         assert_eq!(replay.envelope.system().sequence(), 3);
         let input = InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: replay.envelope,
         };
@@ -539,6 +542,7 @@ mod persistent_progress {
         for query in &mut queries {
             assert!(!query
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").expect("port"),
                     envelope: third.envelope.clone(),
                 })
@@ -779,6 +783,7 @@ mod persistent_progress {
         );
         let output = query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").expect("port"),
                 envelope: next.envelope,
             })

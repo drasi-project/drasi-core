@@ -159,6 +159,7 @@ async fn scenario(invalid_emission: bool) {
     if invalid_emission {
         inputs[0]
             .send(Event::Data(OutputEnvelope {
+                execution_context: Default::default(),
                 port: port("undeclared"),
                 envelope: root("bad", 1, &[1]),
             }))

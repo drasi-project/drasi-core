@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{ChangeEnvelope, ContractError, EnvelopeId, PipeCapabilities, PipeMetricsSnapshot};
+use super::{
+    ChangeEnvelope, ContractError, EnvelopeId, EnvelopeMessage, ExecutionContext, PipeCapabilities,
+    PipeMetricsSnapshot,
+};
 
 /// Enqueue acceptance ONLY. Not downstream handling, acknowledgement, checkpoint
 /// advancement, or durability (unless DurableAcceptance was explicitly negotiated).
@@ -62,6 +65,7 @@ pub use drasi_computation_contracts::PipeError;
 #[error("no acceptance receipt: {error}")]
 pub struct SendFailure {
     pub envelope: ChangeEnvelope,
+    pub execution_context: ExecutionContext,
     #[source]
     pub error: PipeError,
 }
@@ -83,6 +87,14 @@ pub enum InputMergePolicy {
 }
 
 impl SendFailure {
+    pub fn new(message: EnvelopeMessage, error: PipeError) -> Self {
+        Self {
+            envelope: message.envelope,
+            execution_context: message.execution_context,
+            error,
+        }
+    }
+
     pub fn acceptance(&self) -> AcceptanceState {
         if matches!(self.error, PipeError::AcceptanceUnknown { .. }) {
             AcceptanceState::Unknown
@@ -98,7 +110,7 @@ pub struct BatchSendFailure {
     pub accepted: Vec<EnqueueReceipt>,
     #[source]
     pub failed: SendFailure,
-    pub not_attempted: Vec<ChangeEnvelope>,
+    pub not_attempted: Vec<EnvelopeMessage>,
 }
 
 /// One-shot, local-only handling acknowledgement, NOT part of a ChangeEnvelope.
@@ -118,6 +130,7 @@ pub trait Acknowledgement: Send + Sync {
 /// Intentionally not Clone or serializable. A volatile pipe uses no ack handle.
 pub struct Delivery {
     envelope: ChangeEnvelope,
+    execution_context: ExecutionContext,
     acknowledgement: Option<Box<dyn Acknowledgement>>,
 }
 
@@ -128,8 +141,29 @@ impl Delivery {
     ) -> Self {
         Self {
             envelope,
+            execution_context: ExecutionContext::default(),
             acknowledgement,
         }
+    }
+
+    pub fn from_message(
+        message: EnvelopeMessage,
+        acknowledgement: Option<Box<dyn Acknowledgement>>,
+    ) -> Self {
+        Self {
+            envelope: message.envelope,
+            execution_context: message.execution_context,
+            acknowledgement,
+        }
+    }
+
+    pub fn with_execution_context(mut self, context: ExecutionContext) -> Self {
+        self.execution_context = context;
+        self
+    }
+
+    pub fn execution_context(&self) -> &ExecutionContext {
+        &self.execution_context
     }
 
     pub fn envelope(&self) -> &ChangeEnvelope {
@@ -138,8 +172,14 @@ impl Delivery {
 
     /// The host retains the handle separately while invoking a sink/transformer;
     /// neither processing success nor dropping the handle implicitly completes it.
-    pub fn into_parts(self) -> (ChangeEnvelope, Option<Box<dyn Acknowledgement>>) {
-        (self.envelope, self.acknowledgement)
+    pub fn into_parts(
+        self,
+    ) -> (
+        ChangeEnvelope,
+        ExecutionContext,
+        Option<Box<dyn Acknowledgement>>,
+    ) {
+        (self.envelope, self.execution_context, self.acknowledgement)
     }
 }
 
@@ -153,10 +193,18 @@ pub trait EnvelopeSender: Send + Sync {
         &self,
         envelopes: Vec<ChangeEnvelope>,
     ) -> std::result::Result<Vec<EnqueueReceipt>, BatchSendFailure> {
-        let mut pending = envelopes.into_iter();
+        self.send_messages(envelopes.into_iter().map(EnvelopeMessage::from).collect())
+            .await
+    }
+
+    async fn send_messages(
+        &self,
+        messages: Vec<EnvelopeMessage>,
+    ) -> std::result::Result<Vec<EnqueueReceipt>, BatchSendFailure> {
+        let mut pending = messages.into_iter();
         let mut accepted = Vec::new();
         for envelope in pending.by_ref() {
-            match self.send(envelope).await {
+            match self.send_message(envelope).await {
                 Ok(receipt) => accepted.push(receipt),
                 Err(failed) => {
                     return Err(BatchSendFailure {
@@ -178,6 +226,13 @@ pub trait EnvelopeSender: Send + Sync {
     async fn send(
         &self,
         envelope: ChangeEnvelope,
+    ) -> std::result::Result<EnqueueReceipt, SendFailure> {
+        self.send_message(envelope.into()).await
+    }
+
+    async fn send_message(
+        &self,
+        message: EnvelopeMessage,
     ) -> std::result::Result<EnqueueReceipt, SendFailure>;
 }
 

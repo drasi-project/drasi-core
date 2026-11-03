@@ -5,11 +5,21 @@
 //! No subscriber, recorder, exporter, graph owner or native transport is installed.
 
 mod catalogue;
+mod execution;
+#[cfg(feature = "tracing-context")]
+mod execution_scope;
 #[cfg(feature = "metrics-facade")]
 pub mod facade;
+#[cfg(feature = "otel-context")]
+mod otel;
 mod registration;
 
 pub use catalogue::*;
+pub use execution::*;
+#[cfg(feature = "tracing-context")]
+pub use execution_scope::*;
+#[cfg(feature = "otel-context")]
+pub use otel::*;
 pub use registration::*;
 
 use crate::{ComponentId, ComponentRole, ComponentSemanticKind};
@@ -65,6 +75,7 @@ impl TelemetryProfile {
             metrics: self != Self::Off,
             exclusions: Arc::from([]),
             sampling: RootSampling::Always,
+            distributed_tracing: false,
         }
     }
 }
@@ -168,9 +179,6 @@ impl TelemetrySettings {
     }
 
     pub fn resolve(&self) -> Result<ResolvedTelemetry> {
-        if self.distributed_tracing {
-            return Err(TelemetryError::Unsupported("distributed trace context"));
-        }
         if self.native_metrics {
             return Err(TelemetryError::Unsupported("native metric callbacks"));
         }
@@ -184,6 +192,7 @@ impl TelemetrySettings {
         policy.metrics &= self.metrics;
         policy.exclusions = self.exclusions.clone().into();
         policy.sampling = self.sampling;
+        policy.distributed_tracing = self.distributed_tracing;
         Ok(policy)
     }
 }
@@ -195,6 +204,7 @@ pub struct ResolvedTelemetry {
     metrics: bool,
     exclusions: Arc<[String]>,
     sampling: RootSampling,
+    distributed_tracing: bool,
 }
 
 impl Default for ResolvedTelemetry {
@@ -204,6 +214,10 @@ impl Default for ResolvedTelemetry {
 }
 
 impl ResolvedTelemetry {
+    pub fn distributed_tracing_required(&self) -> bool {
+        self.distributed_tracing
+    }
+
     pub fn profile(&self) -> TelemetryProfile {
         self.profile
     }
@@ -300,6 +314,10 @@ impl TelemetryScope {
 
     pub fn role(&self) -> Option<ComponentRole> {
         self.component.as_ref().map(|(_, role, _)| *role)
+    }
+
+    pub fn semantic_kind(&self) -> Option<ComponentSemanticKind> {
+        self.component.as_ref().map(|(_, _, kind)| *kind)
     }
 
     pub fn labels(&self) -> Vec<(String, String)> {
@@ -418,13 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_capabilities_are_not_success_shaped() {
-        assert!(matches!(
-            TelemetrySettings::default()
-                .require_distributed_tracing()
-                .resolve(),
-            Err(TelemetryError::Unsupported(_))
-        ));
+    fn required_context_is_explicit_and_native_metrics_remain_unsupported() {
+        assert!(TelemetrySettings::default()
+            .require_distributed_tracing()
+            .resolve()
+            .unwrap()
+            .distributed_tracing_required());
         assert!(matches!(
             TelemetrySettings::default()
                 .require_native_metrics()

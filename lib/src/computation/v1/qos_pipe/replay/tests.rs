@@ -196,7 +196,7 @@ async fn handle(channel: &Arc<QosChannel>, expected: u64) {
         assert_eq!(candidate.sequence, expected);
         delivery
             .into_parts()
-            .1
+            .2
             .unwrap()
             .complete(HandlingOutcome::Handled)
             .await
@@ -227,6 +227,7 @@ impl ComputationComponent for ReplaySource {
 impl EnvelopeSource for ReplaySource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         Ok(self.outputs.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").unwrap(),
             envelope,
         }))

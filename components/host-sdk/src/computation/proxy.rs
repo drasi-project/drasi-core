@@ -18,6 +18,97 @@ use super::{
     control::{self, ControlBinding},
     loader::PluginOwner,
 };
+use drasi_computation_plugin_sdk::telemetry_transport;
+use std::{
+    future::Future,
+    ops::Deref,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+enum ReplyPayload {
+    Base(ReceivedBytes),
+    Contextual(Vec<u8>),
+}
+
+pub(super) struct NativeReply {
+    payload: ReplyPayload,
+    contexts: Option<Vec<ExecutionContext>>,
+}
+
+impl std::fmt::Debug for NativeReply {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeReply")
+            .field("payload_bytes", &self.len())
+            .field("contexts", &self.contexts.as_ref().map(Vec::len))
+            .finish()
+    }
+}
+
+impl NativeReply {
+    fn decode(bytes: ReceivedBytes, contextual: bool) -> std::result::Result<Self, Failure> {
+        if contextual {
+            let decoded = telemetry_transport::decode_reply(&bytes)
+                .map_err(|error| Failure::protocol(error.to_string()))?;
+            Ok(Self {
+                payload: ReplyPayload::Contextual(decoded.payload),
+                contexts: Some(decoded.outputs),
+            })
+        } else {
+            Ok(Self {
+                payload: ReplyPayload::Base(bytes),
+                contexts: None,
+            })
+        }
+    }
+
+    fn check_contexts(&self, count: usize) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.contexts
+                .as_ref()
+                .is_none_or(|contexts| contexts.len() == count),
+            "native output context count mismatch"
+        );
+        Ok(())
+    }
+
+    fn context(&self, index: usize, count: usize) -> anyhow::Result<ExecutionContext> {
+        self.check_contexts(count)?;
+        match &self.contexts {
+            Some(contexts) => contexts
+                .get(index)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("native output context index out of range")),
+            None => Ok(ExecutionContext::default()),
+        }
+    }
+}
+
+impl Deref for NativeReply {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match &self.payload {
+            ReplyPayload::Base(bytes) => bytes,
+            ReplyPayload::Contextual(bytes) => bytes,
+        }
+    }
+}
+
+pub(super) struct NativeOperation {
+    operation: OperationFuture,
+    contextual: bool,
+}
+
+impl Future for NativeOperation {
+    type Output = std::result::Result<NativeReply, Failure>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let contextual = self.contextual;
+        Pin::new(&mut self.operation)
+            .poll(cx)
+            .map(|result| result.and_then(|bytes| NativeReply::decode(bytes, contextual)))
+    }
+}
 
 pub(super) fn native_failure_disposition(error: &Failure) -> FailureDisposition {
     if error.code == abi::status::FAILED && error.retryable {
@@ -91,6 +182,8 @@ pub(super) struct RemoteComponent {
     _plugin: Arc<PluginOwner>,
     pub(super) control: Mutex<ControlBinding>,
     stopping: AtomicBool,
+    telemetry: Option<abi::telemetry::PluginTelemetryV1>,
+    context_enabled: bool,
 }
 unsafe impl Send for RemoteComponent {}
 unsafe impl Sync for RemoteComponent {}
@@ -98,7 +191,12 @@ impl RemoteComponent {
     pub(super) fn state(&self) -> *mut std::ffi::c_void {
         self.raw.state
     }
-    unsafe fn new(raw: abi::ComponentHandle, plugin: Arc<PluginOwner>) -> anyhow::Result<Self> {
+    unsafe fn new(
+        raw: abi::ComponentHandle,
+        plugin: Arc<PluginOwner>,
+        telemetry: Option<abi::telemetry::PluginTelemetryV1>,
+        context_enabled: bool,
+    ) -> anyhow::Result<Self> {
         let table = unsafe { checked_table(raw.vtable)? };
         anyhow::ensure!(
             !raw.state.is_null()
@@ -114,6 +212,8 @@ impl RemoteComponent {
             _plugin: plugin,
             control: Mutex::new(ControlBinding::default()),
             stopping: AtomicBool::new(false),
+            telemetry,
+            context_enabled,
         })
     }
     fn table(&self) -> &abi::ComponentVTable {
@@ -148,35 +248,131 @@ impl RemoteComponent {
         code: u32,
         input: &[u8],
         transaction: Option<&abi::Transaction>,
-    ) -> anyhow::Result<OperationFuture> {
+    ) -> anyhow::Result<NativeOperation> {
+        self.begin_inputs(code, input, &[], transaction)
+    }
+
+    pub(super) fn begin_inputs(
+        &self,
+        code: u32,
+        input: &[u8],
+        contexts: &[ExecutionContext],
+        transaction: Option<&abi::Transaction>,
+    ) -> anyhow::Result<NativeOperation> {
         if code != abi::operation::STOP && self.stopping.load(Ordering::Acquire) {
             return Err(operation_failure(Failure::closed()));
         }
+        self.begin_with(
+            code,
+            input,
+            contexts,
+            transaction,
+            self.table().begin.expect("validated"),
+            self.telemetry.and_then(|extension| extension.begin),
+        )
+    }
+
+    pub(super) fn begin_consumer(
+        &self,
+        extension: abi::consumer::PluginConsumerV1,
+        code: u32,
+        input: &[u8],
+        contexts: &[ExecutionContext],
+        transaction: Option<&abi::Transaction>,
+    ) -> anyhow::Result<NativeOperation> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(operation_failure(Failure::closed()));
+        }
+        self.begin_with(
+            code,
+            input,
+            contexts,
+            transaction,
+            extension.begin.expect("validated"),
+            self.telemetry
+                .and_then(|extension| extension.begin_consumer),
+        )
+    }
+
+    fn begin_with(
+        &self,
+        code: u32,
+        input: &[u8],
+        contexts: &[ExecutionContext],
+        transaction: Option<&abi::Transaction>,
+        base: abi::telemetry::Begin,
+        extension: Option<abi::telemetry::Begin>,
+    ) -> anyhow::Result<NativeOperation> {
         anyhow::ensure!(
             input.len() <= abi::MAX_MESSAGE_BYTES,
             "native operation input exceeds size limit"
         );
+        let current = ExecutionContext::current();
+        let requested = self.context_enabled
+            || !current.is_empty()
+            || contexts.iter().any(|context| !context.is_empty());
+        anyhow::ensure!(
+            !requested || extension.is_some(),
+            "native execution context transport is unsupported"
+        );
+        let encoded = requested
+            .then(|| telemetry_transport::encode_request(&current, contexts, input))
+            .transpose()?;
+        let callback = if requested {
+            extension.expect("validated")
+        } else {
+            base
+        };
         let mut operation = abi::OperationHandle::null();
         unsafe {
-            take_status(self.table().begin.expect("validated")(
+            take_status(callback(
                 self.raw.state,
                 code,
-                abi::BorrowedBytes::new(input),
+                abi::BorrowedBytes::new(encoded.as_deref().unwrap_or(input)),
                 transaction.map_or(std::ptr::null(), |value| value),
                 &mut operation,
             ))
             .map_err(operation_failure)?;
-            OperationFuture::new(operation).map_err(operation_failure)
+            Ok(NativeOperation {
+                operation: OperationFuture::new(operation).map_err(operation_failure)?,
+                contextual: requested,
+            })
         }
     }
-    pub(super) async fn call(&self, code: u32, input: &[u8]) -> anyhow::Result<ReceivedBytes> {
+    pub(super) async fn call(&self, code: u32, input: &[u8]) -> anyhow::Result<NativeReply> {
         self.begin(code, input, None)?
             .await
             .map_err(operation_failure)
     }
+    async fn call_inputs(
+        &self,
+        code: u32,
+        input: &[u8],
+        contexts: &[ExecutionContext],
+    ) -> anyhow::Result<NativeReply> {
+        self.begin_inputs(code, input, contexts, None)?
+            .await
+            .map_err(operation_failure)
+    }
     pub(super) async fn unit(&self, code: u32, input: &[u8]) -> anyhow::Result<()> {
+        let reply = self.call(code, input).await?;
+        reply.check_contexts(0)?;
         anyhow::ensure!(
-            self.call(code, input).await?.is_empty(),
+            reply.is_empty(),
+            "native unit operation returned unexpected data"
+        );
+        Ok(())
+    }
+    async fn unit_inputs(
+        &self,
+        code: u32,
+        input: &[u8],
+        contexts: &[ExecutionContext],
+    ) -> anyhow::Result<()> {
+        let reply = self.call_inputs(code, input, contexts).await?;
+        reply.check_contexts(0)?;
+        anyhow::ensure!(
+            reply.is_empty(),
             "native unit operation returned unexpected data"
         );
         Ok(())
@@ -218,7 +414,7 @@ pub struct NativeComponentProxy {
 
 #[derive(Default)]
 struct StopState {
-    operation: Option<OperationFuture>,
+    operation: Option<NativeOperation>,
     completed: bool,
 }
 
@@ -308,6 +504,7 @@ mod consumer_position_tests {
                 );
                 proxy.start().await?;
                 let input = InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: GraphChangeCodec::encode_change(
                         drasi_core::models::SourceChange::Delete {
@@ -408,6 +605,7 @@ mod consumer_position_tests {
 }
 
 impl NativeComponentProxy {
+    #[allow(clippy::too_many_arguments)]
     pub(super) unsafe fn new(
         raw: abi::ComponentHandle,
         metadata: FactoryMetadata,
@@ -416,8 +614,11 @@ impl NativeComponentProxy {
         schemas: Vec<Arc<Schema>>,
         plugin: Arc<PluginOwner>,
         bindings: SourceBindings,
+        telemetry: Option<abi::telemetry::PluginTelemetryV1>,
+        context_enabled: bool,
     ) -> anyhow::Result<Self> {
-        let inner = Arc::new(unsafe { RemoteComponent::new(raw, plugin)? });
+        let inner =
+            Arc::new(unsafe { RemoteComponent::new(raw, plugin, telemetry, context_enabled)? });
         let mut bindings = bindings;
         let actual = inner.inspect()?;
         anyhow::ensure!(
@@ -555,17 +756,29 @@ impl NativeComponentProxy {
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
     }
-    async fn outputs(&mut self, code: u32, input: &[u8]) -> anyhow::Result<Vec<OutputEnvelope>> {
-        let reply = self.inner.call(code, input).await?;
+    async fn outputs(
+        &mut self,
+        code: u32,
+        input: &[u8],
+        contexts: &[ExecutionContext],
+    ) -> anyhow::Result<Vec<OutputEnvelope>> {
+        let reply = self.inner.call_inputs(code, input, contexts).await?;
         let result: wire::OutputBatch<'_> = wire::decode(&reply)?;
         anyhow::ensure!(
             !result.pending || self.metadata.capabilities.continuations,
             "native component returned undeclared continuation work"
         );
+        reply.check_contexts(result.outputs.len())?;
+        let total = result.outputs.len();
         let outputs = result
             .outputs
             .into_iter()
-            .map(|output| output.into_output(&self.codec))
+            .enumerate()
+            .map(|(index, output)| {
+                Ok(output
+                    .into_output(&self.codec)?
+                    .with_execution_context(reply.context(index, total)?))
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
         for output in &outputs {
             wire::check_port(
@@ -800,8 +1013,15 @@ impl EnvelopeSource for NativeComponentProxy {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         let reply = self.inner.call(abi::operation::NEXT, &[]).await?;
         let output: Option<wire::Envelope<'_>> = wire::decode(&reply)?;
+        reply.check_contexts(usize::from(output.is_some()))?;
         let output = output
-            .map(|output| output.into_output(&self.codec))
+            .map(|output| {
+                Ok::<_, anyhow::Error>(
+                    output
+                        .into_output(&self.codec)?
+                        .with_execution_context(reply.context(0, 1)?),
+                )
+            })
             .transpose()?;
         if let Some(output) = &output {
             wire::check_port(
@@ -817,23 +1037,38 @@ impl EnvelopeSource for NativeComponentProxy {
 #[async_trait]
 impl Transformer for NativeComponentProxy {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
-        let input = self.input(&input)?;
-        self.outputs(abi::operation::TRANSFORM, &input).await
+        let scope = drasi_lib::observability::ExecutionScope::for_input(&input.execution_context);
+        let bytes = self.input(&input)?;
+        scope
+            .scope(self.outputs(
+                abi::operation::TRANSFORM,
+                &bytes,
+                &[input.execution_context],
+            ))
+            .await
     }
     async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
+        let contexts = outputs
+            .iter()
+            .map(|output| output.execution_context.clone())
+            .collect::<Vec<_>>();
         let outputs = outputs
             .iter()
             .map(|output| wire::Envelope::output(output, &self.codec))
             .collect::<anyhow::Result<Vec<_>>>()?;
         self.inner
-            .unit(abi::operation::DELIVERY_COMPLETED, &wire::encode(&outputs)?)
+            .unit_inputs(
+                abi::operation::DELIVERY_COMPLETED,
+                &wire::encode(&outputs)?,
+                &contexts,
+            )
             .await
     }
     fn has_pending_emissions(&self) -> bool {
         self.pending
     }
     async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
-        self.outputs(abi::operation::CONTINUE, &[]).await
+        self.outputs(abi::operation::CONTINUE, &[], &[]).await
     }
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
         self.metadata
@@ -842,7 +1077,7 @@ impl Transformer for NativeComponentProxy {
             .then(|| Arc::new(NativeWakeup(self.inner.clone())) as Arc<dyn WakeupSource>)
     }
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
-        self.outputs(abi::operation::ON_WAKEUP, &[]).await
+        self.outputs(abi::operation::ON_WAKEUP, &[], &[]).await
     }
 }
 #[async_trait]
@@ -855,13 +1090,22 @@ impl EnvelopeSink for NativeComponentProxy {
             take_reply(extension.policy.expect("validated")(self.inner.state()))
                 .map_err(operation_failure)?
         };
-        let policy: Option<SinkBatching> = wire::decode(&bytes)?;
-        if let Some(policy) = policy {
+        let mut policy: Option<SinkBatching> = wire::decode(&bytes)?;
+        if let Some(policy) = &mut policy {
             policy.validate()?;
+            if self.inner.context_enabled || !ExecutionContext::current().is_empty() {
+                policy.max_bytes = policy
+                    .max_bytes
+                    .min(abi::MAX_MESSAGE_BYTES - telemetry_transport::CONTEXT_FRAME_OVERHEAD);
+            }
         }
         Ok(policy)
     }
     async fn handle_batch(&mut self, inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
+        let contexts = inputs
+            .iter()
+            .map(|input| input.execution_context.clone())
+            .collect::<Vec<_>>();
         let policy = self
             .batching()?
             .ok_or_else(|| anyhow::anyhow!("native batching is disabled"))?;
@@ -879,7 +1123,11 @@ impl EnvelopeSink for NativeComponentProxy {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         self.inner
-            .unit(abi::operation::HANDLE_BATCH, &wire::encode(&batch)?)
+            .unit_inputs(
+                abi::operation::HANDLE_BATCH,
+                &wire::encode(&batch)?,
+                &contexts,
+            )
             .await
     }
     /// Exposed only for the input ports the factory metadata lists, which the
@@ -895,8 +1143,13 @@ impl EnvelopeSink for NativeComponentProxy {
         self.metadata.completion.expect("native sink role")
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        self.inner
-            .unit(abi::operation::HANDLE, &self.input(&input)?)
+        let scope = drasi_lib::observability::ExecutionScope::for_input(&input.execution_context);
+        scope
+            .scope(self.inner.unit_inputs(
+                abi::operation::HANDLE,
+                &self.input(&input)?,
+                &[input.execution_context],
+            ))
             .await
     }
 }
@@ -912,7 +1165,11 @@ impl SnapshotConsumer for NativeComponentProxy {
             input.port
         );
         self.inner
-            .unit(abi::operation::SNAPSHOT, &self.input(&input)?)
+            .unit_inputs(
+                abi::operation::SNAPSHOT,
+                &self.input(&input)?,
+                &[input.execution_context],
+            )
             .await
     }
 }

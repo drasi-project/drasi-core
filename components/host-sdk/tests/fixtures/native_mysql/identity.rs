@@ -83,6 +83,7 @@ pub(super) async fn rotation(
     assert_eq!(declared["settings"]["user"], "");
     assert_eq!(declared["settings"]["password"], "");
     let input = || InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("input"),
         envelope: envelope.clone(),
     };

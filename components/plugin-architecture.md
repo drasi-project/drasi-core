@@ -191,7 +191,7 @@ the same two symbols.
 
 | Family | Base metadata / entry point | Additional interfaces |
 |---|---|---|
-| Native | `drasi_computation_plugin_metadata` / `drasi_computation_plugin_entry` | Separately negotiated configuration, admission, recovery, bootstrap, consumer, batching, query-snapshot, output-read and output-follow extensions |
+| Native | `drasi_computation_plugin_metadata` / `drasi_computation_plugin_entry` | Separately negotiated configuration, admission, recovery, bootstrap, consumer, batching, query-snapshot, output-read, output-follow and execution-context telemetry extensions |
 | Ordinary compatibility | `drasi_plugin_metadata` / `drasi_plugin_init` | The selected ordinary SDK's registration and callback interfaces |
 
 Use the corresponding SDK export macro rather than writing these interfaces by
@@ -286,6 +286,7 @@ or arbitrary storage owners. Current native extension contracts include:
 | Source data schema | Bounded reads of the active source's actual catalog, independent of pending data processing | SQL reads/writes or substitution of factory configuration metadata |
 | Output snapshot/replay/follow | Per-output providers over the component's own state, bounded typed answers and leases that end on stop, restart and release | A shared row store, streaming of unbounded data, crash-durable handover or a generic live-follow coordinator |
 | Handled consumers | Existing delivery runner, retries and completion state; borrowed transactional state when selected | An independent plugin commit or atomic remote effects |
+| Telemetry context V1 | Bounded portable operation/input/output context, receiver scope restoration and context-bearing admission/consumer calls | Completed-span/log collection, exporters or native metric callbacks |
 
 The current transactional participant has no commit operation. The actual
 transaction owner controls commit/rollback. Managed consumer/bootstrap retirement
