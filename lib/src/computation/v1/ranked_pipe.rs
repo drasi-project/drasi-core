@@ -105,6 +105,7 @@ struct State {
 /// unprocessed work. Untimed native heads delimit groups by admission order;
 /// their envelopes retain the absent timestamp. No idle source is awaited.
 pub struct RankedInputQueue {
+    observations: Arc<crate::observability::QueueObservations>,
     capacity: usize,
     state: Mutex<State>,
     changed: Notify,
@@ -114,6 +115,7 @@ impl RankedInputQueue {
     pub fn new(capacity: usize) -> anyhow::Result<Arc<Self>> {
         anyhow::ensure!(capacity > 0, "ranked input capacity must be nonzero");
         Ok(Arc::new(Self {
+            observations: Arc::default(),
             capacity,
             state: Mutex::new(State::default()),
             changed: Notify::new(),
@@ -181,6 +183,8 @@ impl RankedInputQueue {
                 entry.key.1 != binding.rank || entry.generation != binding.generation
             });
             binding.metrics.discarded(before - state.heap.len());
+            self.observations.discarded(before - state.heap.len());
+            self.observations.set_depth(state.heap.len());
             state.bindings.remove(&binding.rank);
         } else if let Some((_, closure)) = state.bindings.get_mut(&binding.rank) {
             *closure = Closure::Draining;
@@ -207,6 +211,8 @@ impl ResourceCleanup for RankedInputQueue {
             .lock()
             .map_err(|_| anyhow::anyhow!("ranked input ownership poisoned"))?;
         state.closed = true;
+        self.observations.discarded(state.heap.len());
+        self.observations.set_depth(0);
         for entry in std::mem::take(&mut state.heap).drain() {
             if let Some((binding, _)) = state.bindings.get(&entry.key.1) {
                 binding.metrics.discarded(1);
@@ -313,6 +319,9 @@ impl PipeControl for Control {
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         Some(self.binding.metrics.snapshot())
     }
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        self.queue.upgrade().map(|queue| queue.observations.clone())
+    }
 }
 
 struct Sender {
@@ -412,6 +421,7 @@ impl EnvelopeSender for Sender {
                         }),
                         admission,
                     );
+                    self.queue.observations.set_depth(state.heap.len());
                     drop(state);
                     self.queue.changed.notify_waiters();
                     return Ok(receipt);
@@ -420,10 +430,12 @@ impl EnvelopeSender for Sender {
                     // Acceptance by a declared lossy input is not delivery.
                     self.binding.metrics.accepted();
                     self.binding.metrics.discarded(1);
+                    self.queue.observations.discarded(1);
                     return Ok(EnqueueReceipt::new(envelope.id().clone()));
                 }
                 if !blocked {
                     self.binding.metrics.blocked();
+                    self.queue.observations.blocked();
                     blocked = true;
                 }
             }
@@ -459,6 +471,7 @@ impl EnvelopeReceiver for Receiver {
                 }) {
                     let entry = state.heap.pop().expect("ranked head");
                     self.binding.metrics.delivered();
+                    self.queue.observations.set_depth(state.heap.len());
                     drop(state);
                     self.queue.changed.notify_waiters();
                     return Ok(Some(

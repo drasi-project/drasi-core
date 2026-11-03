@@ -59,6 +59,9 @@ workspace = true
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = { version = "0.32", default-features = false }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "testing"] }
 drasi-computation-bootstrap-mssql = { workspace = true }
 drasi-computation-source-mssql = { workspace = true }
 drasi-computation-sink-storedproc-mssql = { workspace = true }

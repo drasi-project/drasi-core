@@ -48,6 +48,18 @@ pub enum ComponentRole {
     Service,
 }
 
+impl ComponentRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Transformer => "transformer",
+            Self::Query => "query",
+            Self::Sink => "sink",
+            Self::Service => "service",
+        }
+    }
+}
+
 /// A component's semantic category, separate from its port/lifecycle execution
 /// role. Hosts can annotate wrappers through [`ComponentDescriptor::with_semantic_kind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +85,17 @@ impl From<ComponentRole> for ComponentSemanticKind {
 }
 
 impl ComponentSemanticKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Transformer => "transformer",
+            Self::Query => "query",
+            Self::Sink => "sink",
+            Self::Reaction => "reaction",
+            Self::Service => "service",
+        }
+    }
+
     pub fn for_component(role: ComponentRole, descriptor: &ComponentDescriptor) -> Self {
         descriptor.semantic_kind().unwrap_or_else(|| role.into())
     }

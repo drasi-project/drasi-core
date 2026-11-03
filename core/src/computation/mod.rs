@@ -27,6 +27,7 @@
 mod group_outbox;
 mod indexes;
 mod io_scope;
+mod observation;
 pub(crate) mod operation;
 mod query_adapter;
 mod query_results;
@@ -34,6 +35,7 @@ mod scoped_index;
 pub use io_scope::{
     BlockingFailures as ComputationIoFailures, BlockingScope as ComputationIoScope,
 };
+pub use observation::{QueryObservation, QueryObserver, QueryOperation};
 pub use operation::{ComputationTransaction, ComputationTransactionRetirement};
 pub use scoped_index::ScopedIndex;
 mod transaction;

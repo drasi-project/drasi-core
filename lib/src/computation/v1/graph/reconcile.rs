@@ -213,18 +213,22 @@ impl GraphControl {
         preview: ReconciliationPreview,
         bindings: TopologyBindings,
     ) -> GraphResult<ReconciliationReport> {
-        self.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Reconcile {
-                preview,
-                bindings,
-                management_access: self.management_access,
-                reply,
+        self.observe_control("reconcile")?
+            .run_control(async {
+                self.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::Reconcile {
+                        preview,
+                        bindings,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 }
 

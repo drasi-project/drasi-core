@@ -18,12 +18,16 @@ use drasi_lib::{
         TelemetrySettings, TraceContextV1,
     },
 };
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracerProvider};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::prelude::*;
 
 fn fixture(base: bool) -> PathBuf {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -203,7 +207,35 @@ async fn pipeline(plugin: &NativePlugin, instance: &str, seed: u8, sampled: bool
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()?;
-    tokio::time::timeout(Duration::from_secs(10), graph.start()?).await??;
+    let run = graph.run()?;
+    let control = run.control();
+    let request_scope = ExecutionScope::new(context(93, true))
+        .with_adapter(Some(Arc::new(OpenTelemetryContextAdapter)));
+    let (driver, applied) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(run, async {
+            control.deployment_report().await?;
+            request_scope
+                .scope(
+                    control
+                        .start_components(control.desired_snapshot().revision, GraphSelection::All),
+                )
+                .await?;
+            let mut observed = control.subscribe_observed();
+            observed
+                .wait_for(|graph| {
+                    graph
+                        .components
+                        .values()
+                        .all(|component| component.exhausted)
+                })
+                .await?;
+            control.cancel();
+            Ok::<_, anyhow::Error>(())
+        })
+    })
+    .await?;
+    applied?;
+    assert!(matches!(driver, Err(GraphError::Cancelled)));
     graph.dispose().await?;
     let contexts = contexts.lock().unwrap();
     assert_eq!(contexts.len(), 1);
@@ -262,6 +294,185 @@ async fn batch_and_cancellation(plugin: &NativePlugin) -> Result<()> {
             .any(|call| call["phase"] == "drop"
                 && call["operation"]["trace"] == json!(vec![51u8; 16]))
     );
+    Ok(())
+}
+
+async fn graph_created_native_batch(plugin: &NativePlugin, sampled: bool) -> Result<()> {
+    struct BatchSource {
+        descriptor: ComponentDescriptor,
+        outputs: std::collections::VecDeque<OutputEnvelope>,
+    }
+    #[async_trait]
+    impl ComputationComponent for BatchSource {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        async fn start(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl EnvelopeSource for BatchSource {
+        async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+            Ok(self.outputs.pop_front())
+        }
+    }
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .with_sampler(drasi_lib::observability::TelemetrySampler(
+            Sampler::AlwaysOn,
+        ))
+        .build();
+    let sink = factory(plugin, "sink");
+    let instance = if sampled {
+        "batch-sampled"
+    } else {
+        "batch-unsampled"
+    };
+    async {
+        let outputs = [81u8, 82]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let input = input(id);
+                let mut envelope = input.envelope;
+                envelope = envelope.derive(
+                    emission_id(
+                        &StreamId::try_new("batch-source/out").unwrap(),
+                        index as u64 + 1,
+                    )
+                    .unwrap(),
+                    envelope.changes().clone(),
+                    SystemMetadata::new(
+                        StreamId::try_new("batch-source/out").unwrap(),
+                        index as u64 + 1,
+                    ),
+                );
+                OutputEnvelope::new(PortId::try_new("out").unwrap(), envelope)
+                    .with_execution_context(context(id, index == 0))
+            })
+            .collect();
+        let mut graph = ComputationGraph::builder(instance)
+            .with_telemetry(
+                TelemetryOptions::new(
+                    TelemetrySettings::new(TelemetryProfile::Debug)
+                        .with_metrics(false)
+                        .with_sampling(if sampled {
+                            drasi_lib::observability::RootSampling::Always
+                        } else {
+                            drasi_lib::observability::RootSampling::Never
+                        })
+                        .require_distributed_tracing(),
+                )
+                .with_instance_id(instance)
+                .with_context_adapter(Arc::new(OpenTelemetryContextAdapter)),
+            )
+            .source(Box::new(BatchSource {
+                descriptor: ComponentDescriptor::try_new(
+                    ComponentId::try_new("batch-source")?,
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out")?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                outputs,
+            }))
+            .component(
+                sink.specification(
+                    ComponentId::try_new("native-batch")?,
+                    json!({"trace": true}),
+                )?,
+                sink,
+            )
+            .bind_stream(
+                Endpoint::new(
+                    ComponentId::try_new("batch-source")?,
+                    PortId::try_new("out")?,
+                ),
+                StreamId::try_new("batch-source/out")?,
+            )
+            .connect(
+                EdgeDefinition::new(
+                    Endpoint::new(
+                        ComponentId::try_new("batch-source")?,
+                        PortId::try_new("out")?,
+                    ),
+                    Endpoint::new(
+                        ComponentId::try_new("native-batch")?,
+                        PortId::try_new("in")?,
+                    ),
+                ),
+                Box::new(BoundedPipeConfig { capacity: 8 }),
+            )
+            .build()?;
+        tokio::time::timeout(Duration::from_secs(10), graph.start()?).await??;
+        graph.dispose().await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .with_subscriber(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("host-operations"))),
+    )
+    .await?;
+    provider.force_flush()?;
+    let observations = observations()?;
+    let call = observations["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|call| call["phase"] == "sink" && call["graph"] == instance)
+        .context("graph-owned native batch call")?;
+    assert_eq!(call["inputs"].as_array().unwrap().len(), 2);
+    assert_eq!(call["operation"]["sampled"], sampled);
+    assert_ne!(call["operation"]["trace"], call["inputs"][0]["trace"]);
+    assert_ne!(call["operation"]["trace"], call["inputs"][1]["trace"]);
+    let spans = exporter.get_finished_spans()?;
+    let controls: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "control.apply")
+        .collect();
+    assert_eq!(controls.len(), 1);
+    assert_eq!(controls[0].parent_span_id.to_bytes(), [93; 8]);
+    let starts: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "component.start")
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert!(starts
+        .iter()
+        .all(|span| span.parent_span_id == controls[0].span_context.span_id()));
+    let batches: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "sink.handle_batch")
+        .collect();
+    if sampled {
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].links.links.len(), 2);
+        assert_eq!(
+            call["operation"]["span"],
+            json!(batches[0].span_context.span_id().to_bytes())
+        );
+        assert!(observations["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|span| {
+                span["name"] == "fixture.sink" && span["parent"] == call["operation"]["span"]
+            }));
+    } else {
+        assert!(batches.is_empty());
+        assert!(!observations["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|span| span["trace"] == call["operation"]["trace"]));
+    }
     Ok(())
 }
 
@@ -325,6 +536,9 @@ fn actual_native_libraries_preserve_context_parentage_and_owned_cancellation() -
             .any(|span| span["trace"] == json!(vec![41u8; 16])),
         "unsampled trace was exported"
     );
+
+    runtime.block_on(graph_created_native_batch(&plugin, true))?;
+    runtime.block_on(graph_created_native_batch(&plugin, false))?;
 
     let base = load(true)?;
     assert!(base

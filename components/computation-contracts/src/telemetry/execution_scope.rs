@@ -21,6 +21,26 @@ pub trait TraceContextAdapter: std::fmt::Debug + Send + Sync {
     fn span_context(&self, span: &tracing::Span) -> ExecutionContext;
     fn set_parent(&self, span: &tracing::Span, parent: &ExecutionContext) -> Result<()>;
     fn add_link(&self, span: &tracing::Span, context: &TraceContextV1) -> Result<()>;
+
+    /// Called before context extraction or the first span entry.
+    fn prepare_operation(
+        &self,
+        span: &tracing::Span,
+        parent: &ExecutionContext,
+        links: &[TraceContextV1],
+        sampling: super::RootSampling,
+    ) -> Result<()> {
+        if sampling != super::RootSampling::Always {
+            return Err(super::TelemetryError::Unsupported(
+                "configured operation root sampling",
+            ));
+        }
+        self.set_parent(span, parent)?;
+        for link in links {
+            self.add_link(span, link)?;
+        }
+        Ok(())
+    }
 }
 
 /// The receiver's host-assigned identity, independent of the sending trace.

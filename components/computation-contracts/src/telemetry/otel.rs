@@ -2,20 +2,86 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
-    ExecutionContext, Result, TelemetryError, TraceContextAdapter, TraceContextGuard,
+    ExecutionContext, Result, RootSampling, TelemetryError, TraceContextAdapter, TraceContextGuard,
     TraceContextV1,
 };
 use opentelemetry::{
     trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState},
     Context,
 };
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Adapts a host-composed `tracing-opentelemetry` layer with its default context
 /// activation enabled. Installs nothing.
 #[derive(Debug, Default)]
 pub struct OpenTelemetryContextAdapter;
+
+#[derive(Debug)]
+struct OperationSampling {
+    policy: RootSampling,
+    observed: AtomicBool,
+}
+
+/// Compose around the host's root sampler to support per-graph root policies.
+/// Parent decisions are always inherited; bounded links are available to `inner`.
+#[derive(Debug, Clone)]
+pub struct TelemetrySampler<S>(pub S);
+
+impl<S: opentelemetry_sdk::trace::ShouldSample + Clone + 'static>
+    opentelemetry_sdk::trace::ShouldSample for TelemetrySampler<S>
+{
+    fn should_sample(
+        &self,
+        parent: Option<&Context>,
+        trace_id: TraceId,
+        name: &str,
+        kind: &opentelemetry::trace::SpanKind,
+        attributes: &[opentelemetry::KeyValue],
+        links: &[opentelemetry::trace::Link],
+    ) -> opentelemetry::trace::SamplingResult {
+        use opentelemetry::trace::{SamplingDecision, SamplingResult};
+        use opentelemetry_sdk::trace::{Sampler, ShouldSample};
+        let request = parent.and_then(|context| context.get::<Arc<OperationSampling>>());
+        if let Some(request) = request {
+            request.observed.store(true, Ordering::Relaxed);
+        }
+        if let Some(parent) = parent {
+            let span = parent.span();
+            let context = span.span_context();
+            if context.is_valid() {
+                return SamplingResult {
+                    decision: if context.is_sampled() {
+                        SamplingDecision::RecordAndSample
+                    } else {
+                        SamplingDecision::Drop
+                    },
+                    attributes: vec![],
+                    trace_state: context.trace_state().clone(),
+                };
+            }
+        }
+        match request
+            .map(|request| request.policy)
+            .unwrap_or(RootSampling::Always)
+        {
+            RootSampling::Always => self
+                .0
+                .should_sample(parent, trace_id, name, kind, attributes, links),
+            RootSampling::Never => {
+                Sampler::AlwaysOff.should_sample(parent, trace_id, name, kind, attributes, links)
+            }
+            RootSampling::Ratio(ratio) => Sampler::TraceIdRatioBased(ratio.value())
+                .should_sample(parent, trace_id, name, kind, attributes, links),
+        }
+    }
+}
 
 impl TraceContextGuard for opentelemetry::ContextGuard {}
 
@@ -82,6 +148,44 @@ impl TraceContextAdapter for OpenTelemetryContextAdapter {
         span.add_link(span_context(trace));
         Ok(())
     }
+
+    fn prepare_operation(
+        &self,
+        span: &tracing::Span,
+        parent: &ExecutionContext,
+        links: &[TraceContextV1],
+        sampling: RootSampling,
+    ) -> Result<()> {
+        let request = Arc::new(OperationSampling {
+            policy: sampling,
+            observed: AtomicBool::new(false),
+        });
+        span.set_parent(context(parent).with_value(request.clone()))
+            .map_err(|error| {
+                TelemetryError::Invalid(format!("cannot prepare operation parent: {error}"))
+            })?;
+        for link in links {
+            self.add_link(span, link)?;
+        }
+        let _context = span.context();
+        if let (Some(parent), Some(child)) = (parent.trace(), portable(&_context).trace()) {
+            if parent.sampled() != child.sampled() {
+                return Err(TelemetryError::Unsupported(
+                    "parent-based host operation sampler",
+                ));
+            }
+        }
+        if parent.is_empty()
+            && sampling != RootSampling::Always
+            && _context.span().span_context().is_valid()
+            && !request.observed.load(Ordering::Relaxed)
+        {
+            return Err(TelemetryError::Unsupported(
+                "host TelemetrySampler for configured root sampling",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +197,127 @@ mod tests {
     use std::sync::Arc;
     use tracing::Instrument;
     use tracing_subscriber::prelude::*;
+
+    #[derive(Debug, Clone, Default)]
+    struct RecordingSampler(Arc<std::sync::Mutex<Vec<(String, usize, bool)>>>);
+
+    impl opentelemetry_sdk::trace::ShouldSample for RecordingSampler {
+        fn should_sample(
+            &self,
+            parent: Option<&Context>,
+            trace_id: TraceId,
+            name: &str,
+            kind: &opentelemetry::trace::SpanKind,
+            attributes: &[opentelemetry::KeyValue],
+            links: &[opentelemetry::trace::Link],
+        ) -> opentelemetry::trace::SamplingResult {
+            self.0.lock().unwrap().push((
+                name.to_owned(),
+                links.len(),
+                attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "links_truncated"
+                        && attribute.value == opentelemetry::Value::Bool(true)
+                }),
+            ));
+            opentelemetry_sdk::trace::ShouldSample::should_sample(
+                &Sampler::AlwaysOn,
+                parent,
+                trace_id,
+                name,
+                kind,
+                attributes,
+                links,
+            )
+        }
+    }
+
+    #[test]
+    fn operation_links_and_attributes_precede_one_root_decision_and_unsampled_context_propagates() {
+        use crate::telemetry::{BatchTraceParent, TraceLinkLimits};
+        let exporter = InMemorySpanExporter::default();
+        let sampler = RecordingSampler::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .with_sampler(TelemetrySampler(sampler.clone()))
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("operations")));
+        tracing::subscriber::with_default(subscriber, || {
+            let one = ExecutionContext::new(TraceContextV1::new([1; 16], [1; 8], 1, None).unwrap());
+            let two = ExecutionContext::new(TraceContextV1::new([2; 16], [2; 8], 0, None).unwrap());
+            let selected = BatchTraceParent::select(
+                [&one, &two],
+                TraceLinkLimits {
+                    max_links: 1,
+                    max_bytes: 4096,
+                },
+            );
+            let span = tracing::info_span!(parent: None, "sink.handle_batch", links_truncated = selected.links_truncated);
+            OpenTelemetryContextAdapter
+                .prepare_operation(
+                    &span,
+                    &selected.parent,
+                    &selected.links,
+                    RootSampling::Always,
+                )
+                .unwrap();
+            let batch = OpenTelemetryContextAdapter.span_context(&span);
+            assert!(batch.trace().unwrap().sampled());
+            assert_ne!(batch.trace().unwrap().trace_id(), [1; 16]);
+            assert_eq!(
+                sampler.0.lock().unwrap().as_slice(),
+                &[("sink.handle_batch".into(), 1, true)]
+            );
+            let child = tracing::info_span!(parent: None, "child");
+            OpenTelemetryContextAdapter
+                .prepare_operation(&child, &batch, &[], RootSampling::Never)
+                .unwrap();
+            assert!(OpenTelemetryContextAdapter
+                .span_context(&child)
+                .trace()
+                .unwrap()
+                .sampled());
+            assert_eq!(
+                sampler.0.lock().unwrap().len(),
+                1,
+                "child must not consult the root sampler"
+            );
+            for policy in [
+                RootSampling::Never,
+                RootSampling::Ratio(crate::telemetry::SamplingRatio::new(0.0).unwrap()),
+            ] {
+                let root = tracing::info_span!(parent: None, "unsampled");
+                OpenTelemetryContextAdapter
+                    .prepare_operation(&root, &ExecutionContext::default(), &selected.links, policy)
+                    .unwrap();
+                let context = OpenTelemetryContextAdapter.span_context(&root);
+                assert!(!context.is_empty());
+                assert!(!context.trace().unwrap().sampled());
+                let child = tracing::info_span!(parent: None, "unsampled.child");
+                OpenTelemetryContextAdapter
+                    .prepare_operation(&child, &context, &[], RootSampling::Always)
+                    .unwrap();
+                assert!(!OpenTelemetryContextAdapter
+                    .span_context(&child)
+                    .trace()
+                    .unwrap()
+                    .sampled());
+            }
+        });
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(
+            spans
+                .iter()
+                .find(|span| span.name == "sink.handle_batch")
+                .unwrap()
+                .links
+                .links
+                .len(),
+            1
+        );
+    }
 
     #[tokio::test]
     async fn real_otel_parentage_unsampled_and_explicit_empty_scope() {

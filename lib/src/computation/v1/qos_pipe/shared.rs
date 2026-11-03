@@ -224,7 +224,7 @@ impl TransactionGroupMutation for SharedMutation {
             if let Some((position, envelope, floor)) = update.append {
                 state.append_committed(position, envelope, floor, None);
             }
-            state.metadata = update.metadata;
+            state.publish_metadata(update.metadata);
         }
         if let Some(reply) = &self.reply {
             *reply
@@ -515,6 +515,7 @@ impl QosChannel {
                 changed = self.wait_changed(notified) => changed?,
             }
         };
+        let mut blocked = false;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -529,6 +530,10 @@ impl QosChannel {
                     channel: shared.owner.clone(),
                     _publisher: publisher,
                 });
+            }
+            if !blocked {
+                self.observations.blocked();
+                blocked = true;
             }
             drop(state);
             self.wait_changed(notified).await?;

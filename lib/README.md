@@ -849,12 +849,46 @@ inspection APIs and profiler are unchanged.
 | `Debug` | Basic plus debug operation detail |
 | `Persistence` | Basic plus supported persistence entries |
 
-Resolving a profile does **not** add production graph instrumentation.
-Portable context propagation is supported separately, as described below.
-Native metric callbacks, exporters and handled-branch latency remain
-unimplemented: `require_native_metrics()` fails, and the deferred latency
-instrument never registers. No zero-valued production
-series are fabricated.
+Enabled profiles instrument the owning graph's actual operation boundaries:
+
+| Detail | Supported spans |
+|---|---|
+| Basic | Source publication, transformer/query processing, single/batch sink handling, start/stop/reconfigure, and control requests |
+| Debug | Inner query evaluation, query-owned commits, pipe acceptance, output confirmation, and supported acknowledgements |
+
+Publication excludes idle `next()` waiting; batch handling excludes collection.
+Processing excludes later forwarding, confirmation, and acknowledgement. Sink
+completion stays `accepted` or `handled` according to its declared contract.
+Ordinary reaction enqueue acceptance is not completed reaction processing.
+Output-only replay does not imply another evaluation. Bootstrap, scheduled-work
+narratives and broad component-internal worker instrumentation remain separate.
+
+The common component instruments count operation attempts, successfully processed
+input envelopes, and validated output envelopes before fan-out. Source dispatch
+counts successful publication attempts accepted by all bound destinations.
+Successful idempotent admission retries are publication attempts but do not
+produce new envelopes or physical queue entries. Call durations use local
+monotonic clocks and record success, error or cancellation independently of
+tracing. The `up` gauge follows lifecycle/readiness, not idle or backpressure.
+
+Queue observations use one graph-scoped identity per physical owner, including
+shared ranked queues and multicast. Volatile depth describes queued deliveries;
+QoS/retained depth describes unique retained records still owed to at least one
+non-retired consumer, including delivered-but-unacknowledged work. Completed
+retained history is excluded. Disconnection does not retire an obligation.
+Only confirmed durable mutations update these observations; page-cache movement,
+staging and receipt lookups do not. Blocking counts once per waiting attempt;
+drops exclude eviction of already completed history. Queue gauges reset when
+their binding ends, and counters retain their stable host series.
+Custom providers may expose `PipeControl::observations()`; custom retained stores
+may expose `RetainedEnvelopeStore::observations()`. Unsupported capabilities
+remain absent, not fabricated zeros. Existing pipe inspection snapshots retain
+their original semantics.
+
+Query/reaction-specific counters, evaluator histograms, native metric callbacks,
+native completed-span/log collection, exporters and handled-branch latency remain
+unimplemented: `require_native_metrics()` fails, and deferred instruments are not
+registered by graph instrumentation.
 
 Use `TelemetrySettings::new(profile).with_metrics(false)` for tracing-only
 policy, or `.with_tracing(false)` for metrics-only policy. Metric exclusions are
@@ -862,6 +896,21 @@ literal substrings, not globs; an empty substring excludes all metrics. Trace
 sampling never samples metrics. A child inherits its parent's decision; a new
 root consults the configured policy once. Sampling ratios must be finite and
 within `[0, 1]`.
+
+With `otel-context`, compose `TelemetrySampler(host_root_sampler)` into the host
+tracer provider and supply `OpenTelemetryContextAdapter`. The wrapper inherits
+parent decisions and applies configured Never/Ratio policies to new roots.
+An incompatible host sampler is reported explicitly rather than silently
+ignoring a requested root policy. No provider/subscriber is installed for you.
+
+Batch handling uses a child when all callback inputs have the same valid context;
+otherwise it uses an explicit root linked to distinct contextual inputs. Mixed
+contextual/context-free inputs and different parents in one trace use links too.
+Links, identity and `links_truncated` are supplied before sampling; unsampled
+batch context still reaches static/native callbacks. `with_trace_link_limits`
+accepts positive count/encoded-byte budgets (defaults: 128 links, 64 KiB).
+Configure these no larger than the host adapter/processor/exporter limits.
+Link truncation never changes the handler's inputs.
 
 The host creates one `MetricRegistrationContext` per supplied
 `Arc<dyn metrics::Recorder + Send + Sync>` and clones it into all graphs and
@@ -916,7 +965,10 @@ is present and requires native context capability where native components are
 bound. The optional `otel-context` feature supplies `OpenTelemetryContextAdapter`;
 the host composes its `tracing-opentelemetry` layer with context activation enabled
 and owns collection/export/shutdown. No helper installs a subscriber or exporter.
-An adapter alone does not add production operation spans or native span collection.
+An adapter alone does not enable a collection profile or native span collection.
+Graph-owned operation spans are emitted once on the host in static and native
+builds; native component-authored children still require their own local tracing
+integration, and production transport of completed native spans is separate.
 
 `ExecutionScope::capture()` captures local execution bindings for explicitly
 spawned work. Wrap its future with `scope.scope(future)` and pass that future to
@@ -934,8 +986,9 @@ rename existing component log keys.
   `new(port, envelope)` and `with_execution_context(...)` to two-field literals.
 - Constructors are context-free. Forward an input's context explicitly, or use
   `OutputEnvelope::with_current_context()` inside a restored producing scope.
-  Empty output contexts are not automatically filled from ambient work: this
-  prevents replayed or deliberately detached work from acquiring another trace.
+  Empty transformer/replay output contexts are not filled from ambient work.
+  A graph-owned source publication can explicitly create and carry its own
+  operation context; that does not reconstruct historical traces.
 - `EnvelopeSender` implementors must implement `send_message(EnvelopeMessage)`.
   `send`/`send_batch` remain context-free conveniences; `send_messages` preserves
   context through accepted-prefix failures and unattempted suffixes.

@@ -710,14 +710,20 @@ const COMMAND_CAPACITY: usize = 64;
 
 #[derive(Clone)]
 pub(super) struct CommandSender {
-    regular: mpsc::Sender<Command>,
-    construction: mpsc::Sender<Command>,
+    regular: mpsc::Sender<ContextualCommand>,
+    construction: mpsc::Sender<ContextualCommand>,
+}
+
+struct ContextualCommand {
+    command: Command,
+    context: crate::observability::ExecutionContext,
 }
 
 pub(super) struct CommandReceiver {
-    regular: mpsc::Receiver<Command>,
-    construction: mpsc::Receiver<Command>,
+    regular: mpsc::Receiver<ContextualCommand>,
+    construction: mpsc::Receiver<ContextualCommand>,
     construction_first: bool,
+    context: crate::observability::ExecutionContext,
 }
 
 pub(super) fn command_channel() -> (CommandSender, CommandReceiver) {
@@ -732,12 +738,13 @@ pub(super) fn command_channel() -> (CommandSender, CommandReceiver) {
             regular,
             construction,
             construction_first: false,
+            context: Default::default(),
         },
     )
 }
 
 impl CommandSender {
-    fn channel(&self, command: &Command) -> &mpsc::Sender<Command> {
+    fn channel(&self, command: &Command) -> &mpsc::Sender<ContextualCommand> {
         match command {
             Command::Add { .. } | Command::HandleStop { .. } => &self.construction,
             _ => &self.regular,
@@ -748,12 +755,21 @@ impl CommandSender {
         &self,
         command: Command,
     ) -> Result<(), mpsc::error::SendError<Command>> {
-        self.channel(&command).send(command).await
+        self.channel(&command)
+            .send(ContextualCommand {
+                command,
+                context: crate::observability::ExecutionContext::current(),
+            })
+            .await
+            .map_err(|error| mpsc::error::SendError(error.0.command))
     }
 
     pub(super) fn try_send(&self, command: Command) -> Result<(), mpsc::error::TrySendError<()>> {
         self.channel(&command)
-            .try_send(command)
+            .try_send(ContextualCommand {
+                command,
+                context: crate::observability::ExecutionContext::current(),
+            })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => mpsc::error::TrySendError::Full(()),
                 mpsc::error::TrySendError::Closed(_) => mpsc::error::TrySendError::Closed(()),
@@ -777,13 +793,17 @@ impl CommandReceiver {
             let first_closed = match first.poll_recv(cx) {
                 Poll::Ready(Some(command)) => {
                     self.construction_first = !self.construction_first;
-                    return Poll::Ready(Some(command));
+                    self.context = command.context;
+                    return Poll::Ready(Some(command.command));
                 }
                 Poll::Ready(None) => true,
                 Poll::Pending => false,
             };
             match second.poll_recv(cx) {
-                Poll::Ready(Some(command)) => Poll::Ready(Some(command)),
+                Poll::Ready(Some(command)) => {
+                    self.context = command.context;
+                    Poll::Ready(Some(command.command))
+                }
                 Poll::Ready(None) if first_closed => Poll::Ready(None),
                 _ => Poll::Pending,
             }
@@ -793,7 +813,9 @@ impl CommandReceiver {
     // Mutations wait in their bounded channel, not an unbounded side queue.
     // Independent additions and generation-fenced stops remain serviceable.
     async fn recv_during_construction(&mut self) -> Option<Command> {
-        self.construction.recv().await
+        let command = self.construction.recv().await?;
+        self.context = command.context;
+        Some(command.command)
     }
 }
 
@@ -854,19 +876,23 @@ impl GraphControl {
         deadline: &crate::computation::v1::OperationDeadline,
         command: impl FnOnce(oneshot::Sender<GraphResult<T>>) -> Command,
     ) -> GraphResult<T> {
-        let (reply, result) = oneshot::channel();
-        deadline
-            .wait(
-                "queueing the lifecycle request",
-                false,
-                self.commands.send(command(reply)),
-            )
-            .await?
-            .map_err(|_| GraphError::ControllerClosed)?;
-        deadline
-            .wait("awaiting component outcomes", true, result)
-            .await?
-            .map_err(|_| GraphError::ControllerClosed)?
+        self.observe_control(deadline.operation())?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                deadline
+                    .wait(
+                        "queueing the lifecycle request",
+                        false,
+                        self.commands.send(command(reply)),
+                    )
+                    .await?
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                deadline
+                    .wait("awaiting component outcomes", true, result)
+                    .await?
+                    .map_err(|_| GraphError::ControllerClosed)?
+            })
+            .await
     }
 
     /// Explicitly interrupt selected work without a drain/rollback promise.
@@ -967,20 +993,24 @@ impl GraphControl {
         bindings: super::TopologyBindings,
         deprovision: BTreeSet<ComponentId>,
     ) -> GraphResult<reconcile::ReconciliationReport> {
-        self.require_configuration_write()?;
-        let (reply, receive) = oneshot::channel();
-        self.commands
-            .send(Command::MutateMembers {
-                members,
-                changes,
-                bindings,
-                deprovision,
-                management_access: self.management_access,
-                reply,
+        self.observe_control("mutate_members")?
+            .run_control(async {
+                self.require_configuration_write()?;
+                let (reply, receive) = oneshot::channel();
+                self.commands
+                    .send(Command::MutateMembers {
+                        members,
+                        changes,
+                        bindings,
+                        deprovision,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                receive.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        receive.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub(crate) async fn reconcile_components(
@@ -989,33 +1019,41 @@ impl GraphControl {
         desired: super::DesiredTopology,
         bindings: super::TopologyBindings,
     ) -> GraphResult<reconcile::ReconciliationReport> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::ReconcileComponents {
-                previous,
-                desired,
-                bindings,
-                reply,
+        self.observe_control("reconcile_components")?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::ReconcileComponents {
+                        previous,
+                        desired,
+                        bindings,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub(crate) async fn add_components(
         &self,
         batch: crate::computation::v1::ComponentBatch,
     ) -> GraphResult<reconcile::ReconciliationReport> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::AddComponents {
-                batch,
-                management_access: self.management_access,
-                reply,
+        self.observe_control("add_components")?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::AddComponents {
+                        batch,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub(crate) async fn protect_components(
@@ -1061,12 +1099,16 @@ impl GraphControl {
         &self,
         factory: Arc<dyn crate::computation::v1::ComponentFactory>,
     ) -> GraphResult<()> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::RegisterFactory { factory, reply })
+        self.observe_control("register_factory")?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::RegisterFactory { factory, reply })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
+            })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub fn subscribe_observed(&self) -> watch::Receiver<Arc<ObservedGraph>> {
@@ -1180,19 +1222,23 @@ impl GraphControl {
         component: ComponentId,
         policy: LifecyclePolicy,
     ) -> GraphResult<GraphRevision> {
-        self.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Policy {
-                revision,
-                component,
-                policy,
-                management_access: self.management_access,
-                reply,
+        self.observe_control("set_lifecycle_policy")?
+            .run_control(async {
+                self.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::Policy {
+                        revision,
+                        component,
+                        policy,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub async fn report_health(
@@ -1200,16 +1246,20 @@ impl GraphControl {
         revision: GraphRevision,
         observation: HealthObservation,
     ) -> GraphResult<()> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Health {
-                revision,
-                observation,
-                reply,
+        self.observe_control("report_health")?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::Health {
+                        revision,
+                        observation,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 }
 
@@ -2208,6 +2258,7 @@ fn construct_pipe(
     let resources = graph.resource_handles.clone();
     let edge = edge.clone();
     let producer_role = graph.nodes[graph.ids[&edge.definition.from.component]].role;
+    let telemetry = graph.observability.telemetry.clone();
     let identity = super::execution::GraphIdentity {
         graph: graph.snapshot.id.clone(),
         run_epoch: graph.observed().run_epoch,
@@ -2236,6 +2287,45 @@ fn construct_pipe(
                                         "created pipe differs from preflight capabilities",
                                     ));
                                 }
+                                let queue_id: Arc<str> = match &edge.pipe {
+                                    super::DesiredPipe::Ranked(config) => {
+                                        format!("resource:{}", config.queue).into()
+                                    }
+                                    super::DesiredPipe::Qos(config) => {
+                                        format!("resource:{}", config.resource).into()
+                                    }
+                                    super::DesiredPipe::Retained(config) => {
+                                        format!("resource:{}", config.resource).into()
+                                    }
+                                    _ => format!(
+                                        "edge:{}:{}:{}:{}:{}:{}:{}:{}",
+                                        edge.definition.from.component.as_str().len(),
+                                        edge.definition.from.component,
+                                        edge.definition.from.port.as_str().len(),
+                                        edge.definition.from.port,
+                                        edge.definition.to.component.as_str().len(),
+                                        edge.definition.to.component,
+                                        edge.definition.to.port.as_str().len(),
+                                        edge.definition.to.port
+                                    )
+                                    .into(),
+                                };
+                                if let Some(observations) = provided.control.observations() {
+                                    let binding = observations
+                                        .bind(&telemetry, &queue_id)
+                                        .map_err(|error| GraphError::Pipe {
+                                            edge: index,
+                                            source: crate::computation::v1::PipeError::Backend(
+                                                error.into(),
+                                            ),
+                                        })?;
+                                    provided.control =
+                                        crate::computation::v1::bounded_pipe::observed_control(
+                                            provided.control,
+                                            binding,
+                                        );
+                                    controls.0.insert(index, provided.control.clone());
+                                }
                                 let receiver = provided.pipe.take_receiver().map_err(|source| {
                                     GraphError::Pipe {
                                         edge: index,
@@ -2244,6 +2334,7 @@ fn construct_pipe(
                                 })?;
                                 let progress = Arc::new(super::FlowProgress::default());
                                 let outgoing = Outgoing {
+                                    queue_id,
                                     edge: index,
                                     port: edge.definition.from.port.clone(),
                                     sender: provided.pipe.sender(),
@@ -2533,6 +2624,7 @@ impl PeerDriver {
 
 #[derive(Default)]
 struct Operations {
+    lifecycle_contexts: BTreeMap<usize, crate::observability::ExecutionContext>,
     futures: FuturesUnordered<BoxFuture<'static, Completion>>,
     active: BTreeMap<usize, Active>,
     starting: Vec<Starting>,
@@ -2542,7 +2634,7 @@ struct Operations {
     next_drain: u64,
     drain_futures: FuturesUnordered<BoxFuture<'static, DrainCompletion>>,
     /// Handle starts and stops waiting for a conflicting operation, in arrival order.
-    handle_requests: VecDeque<HandleRequest>,
+    handle_requests: VecDeque<PendingHandleRequest>,
     stop_after_abort: BTreeSet<usize>,
     propagated_stop: BTreeSet<usize>,
     exhausted: BTreeSet<usize>,
@@ -3522,6 +3614,19 @@ impl Operations {
             .collect();
         let node = graph.nodes[index].clone();
         let generation = slot.generation;
+        let observations = graph
+            .observability
+            .telemetry
+            .observations(
+                node.descriptor.id().clone(),
+                node.role,
+                drasi_computation_contracts::ComponentSemanticKind::for_component(
+                    node.role,
+                    &node.descriptor,
+                ),
+                generation.0,
+            )
+            .map_err(|error| component_error(&node, "bind operation telemetry", error.into()))?;
         #[cfg(feature = "test-support")]
         if operation == Operation::Start {
             lease
@@ -3607,7 +3712,10 @@ impl Operations {
                 node.role, node.descriptor.semantic_kind()).as_str(),
             generation = generation.0);
         let execution_scope = crate::observability::ExecutionScope::new(
-            crate::observability::ExecutionContext::default(),
+            self.lifecycle_contexts
+                .get(&index)
+                .cloned()
+                .unwrap_or_else(crate::observability::ExecutionContext::current),
         )
         .with_component(
             crate::observability::TelemetryScope::graph(
@@ -3750,7 +3858,9 @@ impl Operations {
                             source: error.source,
                         })?;
                         if operation == Operation::Reconfigure {
-                            tokio::time::timeout_at(construction_deadline, lease.component.reconfigure(context))
+                            let observation = super::observe(&node, crate::observability::ObservedOperation::Reconfigure,
+                                &crate::observability::ExecutionContext::current(), Default::default())?;
+                            tokio::time::timeout_at(construction_deadline, observation.run(lease.component.reconfigure(context)))
                                 .await
                                 .map_err(|_| work_identity.interrupted("reconfiguration timeout"))?
                                 .map_err(|source| component_error(&node, "reconfigure", source))?;
@@ -3893,9 +4003,9 @@ impl Operations {
                         lease.component.bind_control(control);
                     }
                     super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
-                    lease
-                        .component
-                        .start()
+                    super::observe(&node, crate::observability::ObservedOperation::Start,
+                        &crate::observability::ExecutionContext::current(), Default::default())?
+                        .run(lease.component.start())
                         .await
                         .map_err(|source| component_error(&node, "start", source))?;
                     {
@@ -4023,9 +4133,9 @@ impl Operations {
                         .as_ref()
                         .map(|progress| progress.fence());
                     if lease.attempted {
-                        lease
-                            .component
-                            .stop()
+                        super::observe(&node, crate::observability::ObservedOperation::Stop,
+                            &crate::observability::ExecutionContext::current(), Default::default())?
+                            .run(lease.component.stop())
                             .await
                             .map_err(|source| component_error(&node, "stop", source))?;
                         lease.attempted = false;
@@ -4065,15 +4175,18 @@ impl Operations {
             .spawn(identity.clone(), abort.clone(), async move {
                 let result = identity
                     .run(async {
-                        Abortable::new(execution_scope.scope(future.instrument(span)), registration)
-                            .await
-                            .unwrap_or_else(|_| {
-                                Err(if operation == Operation::Reconfigure {
-                                    identity.interrupted("reconfiguration cancellation")
-                                } else {
-                                    GraphError::Cancelled
-                                })
+                        Abortable::new(
+                            observations.scope(execution_scope.scope(future.instrument(span))),
+                            registration,
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(if operation == Operation::Reconfigure {
+                                identity.interrupted("reconfiguration cancellation")
+                            } else {
+                                GraphError::Cancelled
                             })
+                        })
                     })
                     .await;
                 Completion {
@@ -4118,6 +4231,10 @@ impl Operations {
         reply: Option<oneshot::Sender<GraphResult<StartReport>>>,
         force: bool,
     ) {
+        for index in &selected {
+            self.lifecycle_contexts
+                .insert(*index, crate::observability::ExecutionContext::current());
+        }
         update(graph, |state| {
             for index in &selected {
                 let id = graph.nodes[*index].descriptor.id();
@@ -4383,7 +4500,7 @@ impl Operations {
     /// Rejects queued handle starts for `component`, which a later stop
     /// supersedes; otherwise they would restart the component afterwards.
     fn supersede_queued_starts(&mut self, component: &ComponentId) {
-        let is_superseded = |queued: &HandleRequest| matches!(queued, HandleRequest::Start { component: id, .. } if id == component);
+        let is_superseded = |queued: &PendingHandleRequest| matches!(&queued.request, HandleRequest::Start { component: id, .. } if id == component);
         if !self.handle_requests.iter().any(is_superseded) {
             return;
         }
@@ -4393,7 +4510,7 @@ impl Operations {
                 .partition(is_superseded);
         self.handle_requests = retained;
         for start in superseded {
-            start.reject(GraphError::StartSuperseded {
+            start.request.reject(GraphError::StartSuperseded {
                 component: component.clone(),
             });
         }
@@ -4580,6 +4697,10 @@ impl Operations {
         selected: BTreeSet<usize>,
         reply: StopReply,
     ) -> GraphResult<()> {
+        for index in &selected {
+            self.lifecycle_contexts
+                .insert(*index, crate::observability::ExecutionContext::current());
+        }
         let mut group = Stopping {
             revision: graph.snapshot.revision,
             selected: selected.clone(),
@@ -5384,6 +5505,18 @@ fn accept_addition(
     }
 }
 
+struct PendingHandleRequest {
+    request: HandleRequest,
+    context: crate::observability::ExecutionContext,
+}
+
+impl std::ops::Deref for PendingHandleRequest {
+    type Target = HandleRequest;
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
 /// Accepts a single-component start or stop. A request that conflicts only
 /// with the operation in flight, or follows a queued request for the same
 /// component, is queued for the controller loop instead of failing. A stop
@@ -5416,7 +5549,10 @@ async fn submit_handle_request(
         if operations.handle_requests.len() >= COMMAND_CAPACITY {
             request.reject(GraphError::OperationInProgress);
         } else {
-            operations.handle_requests.push_back(request);
+            operations.handle_requests.push_back(PendingHandleRequest {
+                request,
+                context: crate::observability::ExecutionContext::current(),
+            });
         }
         Ok(())
     } else {
@@ -5444,7 +5580,11 @@ async fn begin_handle_requests(
             blocked.extend(request.components());
             position += 1;
         } else if let Some(request) = operations.handle_requests.remove(position) {
-            request.begin(graph, operations, controls, cancel).await?;
+            let scope =
+                crate::observability::ExecutionScope::capture().with_context(request.context);
+            scope
+                .scope(request.request.begin(graph, operations, controls, cancel))
+                .await?;
             began = true;
         }
     }
@@ -5773,7 +5913,9 @@ fn handle_command<'a>(
     command: Command,
     mut commands: &'a mut CommandReceiver,
 ) -> BoxFuture<'a, GraphResult<()>> {
-    async move {
+    let scope =
+        crate::observability::ExecutionScope::capture().with_context(commands.context.clone());
+    scope.scope(async move {
         if operations.reconciliation.is_some() {
             let key = match &command {
                 Command::ObserveResources { component, generation, .. } =>
@@ -6368,7 +6510,7 @@ fn handle_command<'a>(
                 None => unreachable!("a received command is present"),
         }
         Ok(())
-    }
+    })
     .boxed()
 }
 
@@ -6818,7 +6960,7 @@ mod command_tests {
             };
             drop(closed);
             assert!(receiver.recv().now_or_never().is_none());
-            remaining.send(Command::AutoStart).await.unwrap();
+            remaining.send(ContextualCommand { command: Command::AutoStart, context: Default::default() }).await.unwrap();
             assert!(matches!(receiver.recv().await, Some(Command::AutoStart)));
             drop(remaining);
             assert!(receiver.recv().await.is_none());

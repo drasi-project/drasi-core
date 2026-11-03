@@ -1759,6 +1759,14 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if let Some(scheduling) = &self.scheduling {
             scheduling.ready(self.query()?.scheduling_queue());
         }
+        let observer = crate::observability::ComponentObservations::current().map(|observations| {
+            Arc::new(crate::observability::QueryOperationObserver(observations))
+                as Arc<dyn drasi_core::computation::QueryObserver>
+        });
+        self.query
+            .as_mut()
+            .expect("started query")
+            .set_observer(observer)?;
         Ok(())
     }
 

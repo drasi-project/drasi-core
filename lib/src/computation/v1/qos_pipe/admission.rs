@@ -268,7 +268,7 @@ impl QosChannel {
         let mut metadata = state.metadata.clone();
         metadata.admission = Some(AdmissionState::new(options, &self.definition)?);
         self.persist(&metadata, None).await?;
-        state.metadata = metadata;
+        state.publish_metadata(metadata);
         Ok(())
     }
 
@@ -530,7 +530,7 @@ impl QosChannel {
             retain_from,
             budget,
         );
-        state.metadata = metadata;
+        state.publish_metadata(metadata);
         Ok(AdmissionReceipt {
             session: session.clone(),
             sequence,

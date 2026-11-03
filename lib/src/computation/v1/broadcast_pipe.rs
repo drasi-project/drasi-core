@@ -122,6 +122,9 @@ impl PipeControl for Shared {
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         Some(self.metrics.snapshot())
     }
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        Some(self.metrics.observations.clone())
+    }
 }
 
 struct Sender(Arc<Shared>);

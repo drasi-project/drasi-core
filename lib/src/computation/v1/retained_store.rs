@@ -49,6 +49,9 @@ pub struct StoredEnvelope {
 /// between simultaneously active bindings is rejected by generation leases.
 #[async_trait]
 pub trait RetainedEnvelopeStore: ResourceCleanup + Send + Sync {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        None
+    }
     fn capacity(&self) -> NonZeroUsize;
     /// Optional full binary-envelope byte quota, configured on the journal owner.
     fn max_bytes(&self) -> Option<NonZeroUsize> {
@@ -108,6 +111,7 @@ struct MemoryState {
 }
 
 pub struct MemoryEnvelopeStore {
+    observations: Arc<crate::observability::QueueObservations>,
     state: std::sync::Mutex<MemoryState>,
     capacity: NonZeroUsize,
     max_bytes: Option<NonZeroUsize>,
@@ -139,6 +143,7 @@ impl MemoryEnvelopeStore {
         max_bytes: Option<NonZeroUsize>,
     ) -> Self {
         Self {
+            observations: Arc::default(),
             state: std::sync::Mutex::new(MemoryState {
                 budget: max_bytes.map(JournalBudget::new),
                 ..MemoryState::default()
@@ -170,6 +175,9 @@ impl MemoryEnvelopeStore {
 
 #[async_trait]
 impl RetainedEnvelopeStore for MemoryEnvelopeStore {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        Some(self.observations.clone())
+    }
     fn max_bytes(&self) -> Option<NonZeroUsize> {
         self.max_bytes
     }
@@ -243,6 +251,12 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
                 return Err(PipeError::CapacityExhausted);
             }
         }
+        let discarded = state
+            .entries
+            .keys()
+            .take(remove)
+            .filter(|position| **position > state.progress)
+            .count();
         for _ in 0..remove {
             if let Some((position, _)) = state.entries.pop_first() {
                 state.contexts.remove(&position);
@@ -262,6 +276,13 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
                 .insert(position, message.execution_context.clone());
         }
         state.head = position;
+        self.observations.discarded(discarded);
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.entries.keys().next().copied(),
+                state.progress,
+            ));
         drop(state);
         self.notify.notify_waiters();
         Ok(position)
@@ -307,6 +328,12 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
             )));
         }
         state.progress = position;
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.entries.keys().next().copied(),
+                state.progress,
+            ));
         drop(state);
         self.notify.notify_waiters();
         Ok(())
@@ -334,6 +361,7 @@ impl ResourceCleanup for MemoryEnvelopeStore {
 /// Committed bytes and progress are loaded once and updated only after commit.
 /// A smaller reopened capacity retains old obligations until they can be pruned.
 pub struct IndexedEnvelopeStore {
+    observations: Arc<crate::observability::QueueObservations>,
     indexes: ComputationIndexes,
     codec: Arc<EnvelopeCodec>,
     key: String,
@@ -438,6 +466,7 @@ impl IndexedEnvelopeStore {
             )));
         }
         Ok(Self {
+            observations: Arc::new(crate::observability::QueueObservations::unknown()),
             indexes,
             codec,
             key,
@@ -568,7 +597,14 @@ impl IndexedEnvelopeStore {
         self.check()?;
         check_generation(&self.generation, generation)?;
         if state.is_none() {
-            *state = Some(self.load().await?);
+            let loaded = self.load().await?;
+            self.observations
+                .set_depth(crate::observability::pending_depth(
+                    loaded.head,
+                    loaded.oldest,
+                    loaded.progress,
+                ));
+            *state = Some(loaded);
         }
         check_generation(&self.generation, generation)?;
         Ok(MutexGuard::map(state, |state| {
@@ -617,6 +653,9 @@ impl Drop for WriteFence<'_> {
 
 #[async_trait]
 impl RetainedEnvelopeStore for IndexedEnvelopeStore {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        Some(self.observations.clone())
+    }
     fn max_bytes(&self) -> Option<NonZeroUsize> {
         self.max_bytes
     }
@@ -771,9 +810,21 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
                 .contexts
                 .insert(position, message.execution_context.clone());
         }
+        self.observations
+            .discarded(crate::observability::discarded_pending(
+                state.oldest,
+                retain_from,
+                state.progress,
+            ));
         state.retained = state.retained - remove + 1;
         state.oldest = Some(retain_from);
         state.head = position;
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.oldest,
+                state.progress,
+            ));
         fence.complete = true;
         self.notify.notify_waiters();
         Ok(position)
@@ -897,6 +948,12 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             });
         }
         state.progress = position;
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.oldest,
+                state.progress,
+            ));
         fence.complete = true;
         self.notify.notify_waiters();
         Ok(())

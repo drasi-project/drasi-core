@@ -138,7 +138,32 @@ impl SinkBatchState {
                 self.acknowledging = first
                     .acknowledgement
                     .take()
-                    .map(|acknowledgement| acknowledgement.complete(HandlingOutcome::Handled));
+                    .map(|acknowledgement| {
+                        let observation =
+                            crate::observability::ComponentObservations::current_or_disabled()
+                                .begin(
+                                    crate::observability::ObservedOperation::Acknowledge,
+                                    &first.input.execution_context,
+                                    crate::observability::OperationFields {
+                                        input_port: Some(first.input.port.as_str()),
+                                        handling_outcome: Some("handled"),
+                                        ..Default::default()
+                                    },
+                                )
+                                .map_err(|error| PipeError::Backend(error.into()))?;
+                        Ok::<BoxFuture<'static, Result<(), PipeError>>, PipeError>(Box::pin(
+                            async move {
+                                observation
+                                    .run(acknowledgement.complete(HandlingOutcome::Handled))
+                                    .await
+                            },
+                        ))
+                    })
+                    .transpose()
+                    .map_err(|source| GraphError::Pipe {
+                        edge: first.edge,
+                        source,
+                    })?;
             }
             if let Some(acknowledging) = &mut self.acknowledging {
                 let result = acknowledging.await;
@@ -234,18 +259,59 @@ impl SinkBatchState {
                     .map(|(_, input)| input.input.clone())
                     .collect();
                 if !batch.is_empty() {
-                    crate::observability::ExecutionScope::capture()
-                        .with_context(ExecutionContext::default())
-                        .scope(sink.handle_batch(batch))
+                    let observation =
+                        crate::observability::ComponentObservations::current_or_disabled()
+                            .batch(
+                                batch.iter().map(|input| &input.execution_context),
+                                crate::observability::OperationFields {
+                                    input_port: Some(first.input.port.as_str()),
+                                    input_count: Some(batch.len()),
+                                    change_count: Some(
+                                        batch
+                                            .iter()
+                                            .map(|input| {
+                                                input.envelope.changes().operations().len()
+                                            })
+                                            .sum(),
+                                    ),
+                                    completion: Some(
+                                        if sink.completion() == SinkCompletion::Handled {
+                                            "handled"
+                                        } else {
+                                            "accepted"
+                                        },
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                            .map_err(|error| {
+                                component_error(node, "observe batch", error.into())
+                            })?;
+                    observation
+                        .run(sink.handle_batch(batch))
                         .await
                         .map_err(|error| component_error(node, "handle batch", error))?;
                 }
             } else if is_new(0) {
-                crate::observability::ExecutionScope::capture()
-                    .with_context(first.input.execution_context.clone())
-                    .scope(sink.handle(first.input.clone()))
-                    .await
-                    .map_err(|error| component_error(node, "handle", error))?;
+                observe(
+                    node,
+                    crate::observability::ObservedOperation::Handle,
+                    &first.input.execution_context,
+                    crate::observability::OperationFields {
+                        input_port: Some(first.input.port.as_str()),
+                        input_count: Some(1),
+                        change_count: Some(first.input.envelope.changes().operations().len()),
+                        completion: Some(if sink.completion() == SinkCompletion::Handled {
+                            "handled"
+                        } else {
+                            "accepted"
+                        }),
+                        ..Default::default()
+                    },
+                )?
+                .run(sink.handle(first.input.clone()))
+                .await
+                .map_err(|error| component_error(node, "handle", error))?;
             }
             check_descriptor(component, node)?;
             if let (Some(progress), Some(prepared)) = (input_progress.as_mut(), prepared) {

@@ -42,6 +42,84 @@ pub enum TelemetryError {
 
 pub type Result<T> = std::result::Result<T, TelemetryError>;
 
+#[derive(Debug, Clone, Copy)]
+pub struct TraceLinkLimits {
+    pub max_links: usize,
+    pub max_bytes: usize,
+}
+
+impl Default for TraceLinkLimits {
+    fn default() -> Self {
+        Self {
+            max_links: 128,
+            max_bytes: 64 * 1024,
+        }
+    }
+}
+
+impl TraceLinkLimits {
+    pub fn validate(self) -> Result<Self> {
+        if self.max_links == 0 || self.max_bytes == 0 {
+            return Err(TelemetryError::Invalid(
+                "trace link count and byte limits must be positive".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug)]
+pub struct BatchTraceParent {
+    pub parent: ExecutionContext,
+    pub links: Vec<TraceContextV1>,
+    pub links_truncated: bool,
+}
+
+impl BatchTraceParent {
+    pub fn select<'a>(
+        contexts: impl IntoIterator<Item = &'a ExecutionContext>,
+        limits: TraceLinkLimits,
+    ) -> Self {
+        let mut contexts = contexts.into_iter().peekable();
+        let first = contexts.peek().and_then(|context| context.trace()).cloned();
+        let mut identical = first.is_some();
+        let mut links = Vec::new();
+        let mut bytes = 0usize;
+        let mut links_truncated = false;
+        for context in contexts {
+            identical &= context.trace() == first.as_ref();
+            let Some(trace) = context.trace() else {
+                continue;
+            };
+            if links.iter().any(|link: &TraceContextV1| {
+                link.trace_id() == trace.trace_id() && link.span_id() == trace.span_id()
+            }) {
+                continue;
+            }
+            let size = context.transport_size();
+            if links.len() < limits.max_links && size <= limits.max_bytes.saturating_sub(bytes) {
+                bytes += size;
+                links.push(trace.clone());
+            } else {
+                links_truncated = true;
+            }
+        }
+        if identical {
+            Self {
+                parent: ExecutionContext::new(first.expect("identical contextual inputs")),
+                links: Vec::new(),
+                links_truncated: false,
+            }
+        } else {
+            Self {
+                parent: ExecutionContext::default(),
+                links,
+                links_truncated,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TelemetryProfile {
     #[default]
@@ -326,14 +404,7 @@ impl TelemetryScope {
             ("graph_id".into(), self.graph_id.to_string()),
         ];
         if let Some((id, _, kind)) = &self.component {
-            let kind = match kind {
-                ComponentSemanticKind::Source => "source",
-                ComponentSemanticKind::Transformer => "transformer",
-                ComponentSemanticKind::Query => "query",
-                ComponentSemanticKind::Sink => "sink",
-                ComponentSemanticKind::Reaction => "reaction",
-                ComponentSemanticKind::Service => "service",
-            };
+            let kind = kind.as_str();
             labels.push(("component_id".into(), id.to_string()));
             labels.push(("component_kind".into(), kind.into()));
         }
@@ -409,6 +480,7 @@ mod tests {
                 parent
             );
         }
+
         let calls = Cell::new(0);
         let decision = sampling.decide(None, |_| {
             calls.set(calls.get() + 1);
@@ -433,6 +505,57 @@ mod tests {
                     .allows_metric(metric));
             }
         }
+    }
+
+    #[test]
+    fn batch_parent_links_are_bounded_ordered_and_deduplicated() {
+        let context = |trace, span, flags| {
+            ExecutionContext::new(TraceContextV1::new([trace; 16], [span; 8], flags, None).unwrap())
+        };
+        let one = context(1, 1, 1);
+        let two = context(1, 2, 0);
+        let three = context(3, 3, 1);
+        let empty = ExecutionContext::default();
+        let selected = BatchTraceParent::select([&one, &one], TraceLinkLimits::default());
+        assert_eq!(selected.parent, one);
+        assert!(selected.links.is_empty());
+        assert!(!selected.links_truncated);
+        let selected = BatchTraceParent::select([&empty, &empty], TraceLinkLimits::default());
+        assert!(selected.parent.is_empty());
+        assert!(selected.links.is_empty());
+        let selected = BatchTraceParent::select(
+            [&one, &empty, &two, &one, &three],
+            TraceLinkLimits {
+                max_links: 2,
+                max_bytes: usize::MAX,
+            },
+        );
+        assert!(selected.parent.is_empty());
+        assert_eq!(
+            selected.links,
+            vec![one.trace().unwrap().clone(), two.trace().unwrap().clone()]
+        );
+        assert!(selected.links_truncated);
+        let selected = BatchTraceParent::select(
+            [&one, &two],
+            TraceLinkLimits {
+                max_links: 10,
+                max_bytes: one.transport_size(),
+            },
+        );
+        assert_eq!(selected.links, vec![one.trace().unwrap().clone()]);
+        assert!(selected.links_truncated);
+        let changed_flags = context(1, 1, 0);
+        let selected = BatchTraceParent::select([&one, &changed_flags], TraceLinkLimits::default());
+        assert!(selected.parent.is_empty());
+        assert_eq!(selected.links, vec![one.trace().unwrap().clone()]);
+        assert!(!selected.links_truncated);
+        assert!(TraceLinkLimits {
+            max_links: 0,
+            max_bytes: 1
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

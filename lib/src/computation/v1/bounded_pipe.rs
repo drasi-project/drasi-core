@@ -48,12 +48,50 @@ pub trait PipeControl: Send + Sync {
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         None
     }
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        None
+    }
 }
 
 /// A fresh pipe and its sender-independent lifecycle handle.
 pub struct ProvidedPipe {
     pub pipe: Box<dyn Pipe>,
     pub control: Arc<dyn PipeControl>,
+}
+
+pub(crate) fn observed_control(
+    control: Arc<dyn PipeControl>,
+    binding: Option<Arc<crate::observability::QueueBinding>>,
+) -> Arc<dyn PipeControl> {
+    struct ObservedControl {
+        control: Arc<dyn PipeControl>,
+        _binding: Arc<crate::observability::QueueBinding>,
+    }
+    #[async_trait]
+    impl PipeControl for ObservedControl {
+        fn close(&self) {
+            self.control.close();
+        }
+        fn cancel(&self) {
+            self.control.cancel();
+        }
+        async fn is_idle(&self) -> Result<bool, PipeError> {
+            self.control.is_idle().await
+        }
+        fn metrics(&self) -> Option<PipeMetricsSnapshot> {
+            self.control.metrics()
+        }
+        fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+            self.control.observations()
+        }
+    }
+    match binding {
+        Some(binding) => Arc::new(ObservedControl {
+            control,
+            _binding: binding,
+        }),
+        None => control,
+    }
 }
 
 /// In-process provider instance, separate from descriptive topology.
@@ -313,6 +351,9 @@ impl PipeControl for Control {
     }
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         Some(self.1.snapshot())
+    }
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        Some(self.1.observations.clone())
     }
     fn close(&self) {
         self.0.send_if_modified(|state| {

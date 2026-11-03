@@ -185,6 +185,10 @@ pub(super) fn publish(graph: &ComputationGraph) {
     }));
     let desired = graph.desired.borrow().clone();
     let observed = graph.observed();
+    graph
+        .observability
+        .telemetry
+        .publish_components(&observed, Some(&graph.peers));
     let previous = graph.registry.borrow().clone();
     let next = if !Arc::ptr_eq(&previous.desired, &desired) {
         GraphRegistrySnapshot::new(

@@ -48,6 +48,15 @@ layer using its default context activation. It installs no subscriber/exporter.
 The adapter feature brings the tracing integration's OpenTelemetry dependencies;
 DTO-only builds do not enable them.
 
+`TraceContextAdapter::prepare_operation` supplies parent/root and bounded links
+before the first span context extraction or entry. `BatchTraceParent` selects a
+shared parent or ordered, deduplicated links without retaining an unbounded
+intermediate list. The runtime validates positive `TraceLinkLimits`; hosts must
+align their count/byte limits with their tracing backend. The optional
+`TelemetrySampler(host_root_sampler)` supports configured new-root policies
+while always inheriting valid parent decisions. This is host composition, not
+an automatically installed provider or exporter.
+
 Rust callers must migrate input/output struct literals to include
 `execution_context`, or use the new context-free constructors. Forward the input
 context explicitly, or use `OutputEnvelope::with_current_context()` when producing

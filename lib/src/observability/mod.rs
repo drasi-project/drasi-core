@@ -21,6 +21,8 @@ mod component_log;
 mod event_history;
 mod log_runtime;
 mod logging;
+mod operations;
+mod queues;
 mod telemetry;
 mod tracing_layer;
 
@@ -28,5 +30,8 @@ pub use component_log::*;
 pub use event_history::*;
 pub use log_runtime::*;
 pub use logging::*;
+pub(crate) use operations::*;
+pub use queues::QueueObservations;
+pub(crate) use queues::{discarded_pending, pending_depth, QueueBinding};
 pub use telemetry::*;
 pub use tracing_layer::*;

@@ -442,7 +442,10 @@ pub(crate) struct ControlPlane {
     state: Mutex<State>,
     revision: watch::Sender<u64>,
     weak_self: Weak<Self>,
+    readiness_observer: Option<Arc<ReadinessObserver>>,
 }
+
+type ReadinessObserver = dyn Fn(&ControlPlane) + Send + Sync;
 
 pub(crate) struct ControlTopologyCommit<'a> {
     plane: &'a ControlPlane,
@@ -529,11 +532,19 @@ impl ControlPlane {
     }
 
     pub(crate) fn new(capacity: usize) -> Result<Arc<Self>, ControlError> {
+        Self::with_readiness_observer(capacity, None)
+    }
+
+    pub(crate) fn with_readiness_observer(
+        capacity: usize,
+        readiness_observer: Option<Arc<ReadinessObserver>>,
+    ) -> Result<Arc<Self>, ControlError> {
         if capacity == 0 || capacity > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(ControlError::InvalidCapacity { capacity });
         }
         let (revision, _) = watch::channel(0);
         Ok(Arc::new_cyclic(|weak_self| Self {
+            readiness_observer,
             capacity,
             state: Mutex::new(State::default()),
             revision,
@@ -828,6 +839,9 @@ impl ControlPlane {
         self.revision.send_modify(|revision| {
             *revision = revision.wrapping_add(1);
         });
+        if let Some(observer) = &self.readiness_observer {
+            observer(self);
+        }
     }
 }
 

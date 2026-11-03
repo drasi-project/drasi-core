@@ -7,7 +7,10 @@
 pub use drasi_computation_contracts::telemetry::facade::*;
 pub use drasi_computation_contracts::telemetry::*;
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 use tracing_subscriber::{
     filter::{filter_fn, FilterExt},
     layer::Filter,
@@ -30,6 +33,7 @@ pub struct TelemetryOptions {
     metrics: Option<MetricRegistrationContext>,
     trace_directives: Option<String>,
     context_adapter: Option<Arc<dyn TraceContextAdapter>>,
+    link_limits: TraceLinkLimits,
 }
 
 impl From<TelemetrySettings> for TelemetryOptions {
@@ -72,12 +76,18 @@ impl TelemetryOptions {
         self
     }
 
+    pub fn with_trace_link_limits(mut self, limits: TraceLinkLimits) -> Self {
+        self.link_limits = limits;
+        self
+    }
+
     pub(crate) fn resolve(
         &self,
         graph_id: &str,
         instance_id: Option<&str>,
     ) -> Result<GraphTelemetry> {
         let policy = Arc::new(self.settings.resolve()?);
+        let link_limits = self.link_limits.validate()?;
         if policy.distributed_tracing_required() && self.context_adapter.is_none() {
             return Err(TelemetryError::Unsupported(
                 "distributed trace context adapter",
@@ -115,6 +125,8 @@ impl TelemetryOptions {
             metrics: self.metrics.clone(),
             filter: Arc::new(filter),
             context_adapter: self.context_adapter.clone(),
+            link_limits,
+            owners: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 }
@@ -126,6 +138,12 @@ pub struct GraphTelemetry {
     metrics: Option<MetricRegistrationContext>,
     filter: Arc<EnvFilter>,
     context_adapter: Option<Arc<dyn TraceContextAdapter>>,
+    link_limits: TraceLinkLimits,
+    owners: Arc<
+        Mutex<
+            BTreeMap<drasi_computation_contracts::ComponentId, Arc<super::ComponentObservations>>,
+        >,
+    >,
 }
 
 impl Default for GraphTelemetry {
@@ -136,11 +154,82 @@ impl Default for GraphTelemetry {
             metrics: None,
             filter: Arc::new(EnvFilter::new("trace")),
             context_adapter: None,
+            link_limits: TraceLinkLimits::default(),
+            owners: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
 
 impl GraphTelemetry {
+    pub(crate) fn link_limits(&self) -> TraceLinkLimits {
+        self.link_limits
+    }
+
+    pub(crate) fn register(
+        &self,
+        name: &str,
+        labels: Vec<(String, String)>,
+    ) -> Result<RegisteredMetric> {
+        match (&self.metrics, &self.scope) {
+            (Some(context), Some(scope)) => context.framework(&self.policy, scope, name, labels),
+            _ => Ok(RegisteredMetric::Disabled),
+        }
+    }
+
+    pub(crate) fn observations(
+        &self,
+        id: drasi_computation_contracts::ComponentId,
+        role: drasi_computation_contracts::ComponentRole,
+        kind: drasi_computation_contracts::ComponentSemanticKind,
+        generation: u64,
+    ) -> Result<Arc<super::ComponentObservations>> {
+        let mut owners = self.owners.lock().map_err(|_| TelemetryError::Poisoned)?;
+        if let Some(owner) = owners
+            .get(&id)
+            .filter(|owner| owner.generation == generation)
+        {
+            return Ok(owner.clone());
+        }
+        let mut config = self.component(id.clone(), role, kind);
+        // A binding must not retain the cache which owns it.
+        config.owners = Arc::new(Mutex::new(BTreeMap::new()));
+        let owner = super::ComponentObservations::new(config, generation)?;
+        if let Some(previous) = owners.insert(id, owner.clone()) {
+            previous.revoke();
+        }
+        Ok(owner)
+    }
+
+    pub(crate) fn publish_components(
+        &self,
+        observed: &crate::computation::v1::ObservedGraph,
+        readiness: Option<&crate::computation::v1::ControlPlane>,
+    ) {
+        let mut owners = self.owners.lock().unwrap_or_else(|error| {
+            log::error!("Publishing poisoned telemetry bindings: {error}");
+            error.into_inner()
+        });
+        owners.retain(|id, owner| {
+            let current = observed
+                .components
+                .get(id)
+                .filter(|component| component.generation.0 == owner.generation);
+            if let Some(component) = current {
+                owner.update_up(
+                    component.lifecycle == crate::computation::v1::ComponentLifecycle::Running
+                        && component.started
+                        && !component.exhausted
+                        && component.failure.is_none()
+                        && readiness.map_or(true, |plane| plane.is_ready(id, component.generation)),
+                );
+                true
+            } else {
+                owner.revoke();
+                false
+            }
+        });
+    }
+
     pub fn context_adapter(&self) -> Option<&Arc<dyn TraceContextAdapter>> {
         self.context_adapter.as_ref()
     }

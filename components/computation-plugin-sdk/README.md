@@ -88,6 +88,15 @@ Native metric callbacks, generation-scoped absolute counter accounting,
 stale-handle revocation and replacement gauge resets remain follow-up work.
 Do not install a recorder/exporter inside a plugin as a substitute.
 
+The graph now owns source publication, processing/handling, lifecycle and
+acceptance observations in both build modes. Do not duplicate those wrappers
+inside a native component. A batch callback receives the graph-created batch
+operation context, selected from all callback inputs before sampling; each input
+keeps its separate carried context. Internal plugin spans become children of
+that operation when the local tracing integration is enabled, including
+propagation of unsampled decisions. These host observations do not imply that
+completed native spans or native metric updates are transported to the host.
+
 ### Portable execution context
 
 The SDK re-exports `ExecutionContext`, `TraceContextV1` and `ExecutionScope` under

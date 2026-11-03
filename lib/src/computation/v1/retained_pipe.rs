@@ -182,6 +182,9 @@ impl Shared {
 
 #[async_trait]
 impl PipeControl for Shared {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        self.store.observations()
+    }
     async fn is_idle(&self) -> Result<bool, PipeError> {
         {
             let state = self.lock()?;
@@ -236,6 +239,7 @@ impl EnvelopeSender for Sender {
             state.sends += 1;
         }
         let _admission = SendAdmission(self.0.clone());
+        let mut blocked = false;
         loop {
             let notified = self.0.store.notify().notified();
             tokio::pin!(notified);
@@ -268,7 +272,15 @@ impl EnvelopeSender for Sender {
                     }
                     return Ok(EnqueueReceipt::new(message.envelope.id().clone()));
                 }
-                Err(PipeError::CapacityExhausted) => notified.await,
+                Err(PipeError::CapacityExhausted) => {
+                    if !blocked {
+                        if let Some(observations) = self.0.store.observations() {
+                            observations.blocked();
+                        }
+                        blocked = true;
+                    }
+                    notified.await
+                }
                 Err(error) => return Err(SendFailure::new(message, error)),
             }
         }

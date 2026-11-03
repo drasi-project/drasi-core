@@ -63,6 +63,7 @@ pub(crate) async fn in_operation<T>(
     resources: &ComputationIndexes,
     recovery_required: &AtomicBool,
     atomic: bool,
+    observer: Option<&Arc<dyn super::QueryObserver>>,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     if recovery_required.load(Ordering::Acquire)
@@ -81,7 +82,15 @@ pub(crate) async fn in_operation<T>(
     let session = &resources.indexes().session_control;
     let result = match session.begin().await {
         Ok(()) => match operation.await {
-            Ok(value) => match session.commit().await {
+            Ok(value) => match super::observation::observe(
+                observer,
+                super::QueryOperation::Commit,
+                None,
+                session.commit(),
+                |_| None,
+            )
+            .await
+            {
                 Ok(()) => Ok(value),
                 Err(error) => {
                     recovery_required.store(true, Ordering::Release);
@@ -110,6 +119,7 @@ pub(crate) async fn in_operation<T>(
 /// commit fences this owner. After dropping/awaiting the operation, call
 /// [`Self::shutdown`] to join provider I/O before opening a replacement.
 pub struct ComputationTransaction {
+    observer: std::sync::RwLock<Option<Arc<dyn super::QueryObserver>>>,
     resources: ComputationIndexes,
     lock: Arc<tokio::sync::Mutex<()>>,
     retirement: Mutex<Weak<RetirementGate>>,
@@ -124,7 +134,15 @@ impl ComputationTransaction {
     }
 
     pub(crate) fn for_query(resources: ComputationIndexes) -> Self {
+        Self::for_query_with_observer(resources, None)
+    }
+
+    pub(crate) fn for_query_with_observer(
+        resources: ComputationIndexes,
+        observer: Option<Arc<dyn super::QueryObserver>>,
+    ) -> Self {
         Self {
+            observer: std::sync::RwLock::new(observer),
             atomic: resources.atomic_result_transaction().is_ok(),
             resources,
             lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -135,6 +153,17 @@ impl ComputationTransaction {
 
     pub fn resources(&self) -> &ComputationIndexes {
         &self.resources
+    }
+
+    pub(crate) fn set_observer(
+        &self,
+        observer: Option<Arc<dyn super::QueryObserver>>,
+    ) -> Result<()> {
+        *self
+            .observer
+            .write()
+            .map_err(|_| crate::interface::IndexError::CorruptedData)? = observer;
+        Ok(())
     }
 
     /// Hold this actual standalone owner's operation gate through a decision.
@@ -231,10 +260,16 @@ impl ComputationTransaction {
 
     pub async fn run<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
         let _lock = self.lock_operation().await?;
+        let observer = self
+            .observer
+            .read()
+            .map_err(|_| crate::interface::IndexError::CorruptedData)?
+            .clone();
         in_operation(
             &self.resources,
             &self.recovery_required,
             self.atomic,
+            observer.as_ref(),
             operation,
         )
         .await

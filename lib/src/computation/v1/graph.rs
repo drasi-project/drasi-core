@@ -1552,6 +1552,7 @@ fn resolve<'a>(
 /// Cancellation is idempotent. Await the run to actually finish cleanup.
 #[derive(Clone)]
 pub struct GraphControl {
+    telemetry: crate::observability::GraphTelemetry,
     startup_timeout: Duration,
     shutdown_timeout: Duration,
     cancel: watch::Sender<bool>,
@@ -1568,6 +1569,23 @@ pub struct GraphControl {
 }
 
 impl GraphControl {
+    pub(super) fn observe_control(
+        &self,
+        operation: &str,
+    ) -> GraphResult<crate::observability::OperationObservation> {
+        let owner = crate::observability::ComponentObservations::new(self.telemetry.clone(), 0)
+            .map_err(|error| topology(format!("cannot bind control telemetry: {error}")))?;
+        let observation = owner
+            .begin(
+                crate::observability::ObservedOperation::Control,
+                &ExecutionContext::current(),
+                Default::default(),
+            )
+            .map_err(|error| topology(format!("cannot observe control operation: {error}")))?;
+        observation.record("operation", operation);
+        Ok(observation)
+    }
+
     pub(crate) fn output_catalogue(&self) -> super::OutputCatalogue {
         super::OutputCatalogue::from_publications(self.registry.clone(), self.state.clone())
     }
@@ -2046,10 +2064,22 @@ impl ComputationGraph {
             .publish(self.desired.borrow().clone(), self.observed());
         self.desired = watch::channel(Arc::new(self.snapshot.clone())).0;
         registry::publish(self);
-        self.peers = super::ControlPlane::new(64)?;
+        self.peers = if self.observability.telemetry.policy().metrics_enabled() {
+            let telemetry = self.observability.telemetry.clone();
+            let observed = self.observed.subscribe();
+            super::ControlPlane::with_readiness_observer(
+                64,
+                Some(Arc::new(move |plane| {
+                    telemetry.publish_components(&observed.borrow(), Some(plane));
+                })),
+            )?
+        } else {
+            super::ControlPlane::new(64)?
+        };
         let (cancel, cancellation) = watch::channel(false);
         let (commands, receiver) = controller::command_channel();
         let control = GraphControl {
+            telemetry: self.observability.telemetry.clone(),
             startup_timeout: self.startup_timeout,
             shutdown_timeout: self.shutdown_timeout,
             cancel,
@@ -2277,6 +2307,9 @@ impl Future for GraphRun<'_> {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(abandoned)));
                 self.state.send_replace(GraphState::CleanupRequired);
                 controller::mark_cleanup_required(&self.observed);
+                self.control
+                    .telemetry
+                    .publish_components(&self.observed.borrow(), None);
                 self.inspector.publish(
                     self.control.desired_snapshot(),
                     self.observed.borrow().clone(),
@@ -2353,6 +2386,9 @@ impl Drop for GraphRun<'_> {
             }
             self.state.send_replace(GraphState::CleanupRequired);
             controller::mark_cleanup_required(&self.observed);
+            self.control
+                .telemetry
+                .publish_components(&self.observed.borrow(), None);
             self.inspector.publish(
                 self.control.desired_snapshot(),
                 self.observed.borrow().clone(),
@@ -2395,6 +2431,7 @@ struct Outgoing {
     multicast: Option<ResourceId>,
     admission_channel: Option<Arc<super::QosChannel>>,
     destination: Option<Arc<super::OutputDestination>>,
+    queue_id: Arc<str>,
 }
 
 fn output_destination(
@@ -2862,18 +2899,22 @@ async fn run_admitted_source(
         check_descriptor(component, node)?;
         let mut pending = sequences.clone();
         let accepted = lease
-            .process(quiesce, |envelope| {
-                validate_emissions(
-                    node,
-                    &mut pending,
-                    &[OutputEnvelope {
-                        execution_context: Default::default(),
-                        port: admission.port().clone(),
-                        envelope: envelope.clone(),
-                    }],
-                )
-                .map_err(Into::into)
-            })
+            .process(
+                quiesce,
+                outputs.first().map(|output| output.queue_id.as_ref()),
+                |envelope| {
+                    validate_emissions(
+                        node,
+                        &mut pending,
+                        &[OutputEnvelope {
+                            execution_context: Default::default(),
+                            port: admission.port().clone(),
+                            envelope: envelope.clone(),
+                        }],
+                    )
+                    .map_err(Into::into)
+                },
+            )
             .await
             .map_err(|error| component_error(node, "admit", error.into()))?;
         let Some(accepted) = accepted else {
@@ -2927,7 +2968,7 @@ async fn run_node(
         tokio::select! {
             biased;
             _ = cancelled(quiesce) => {}
-            result = service.run() => return result.map_err(|error| component_error(node, "run service", error)),
+            result = observe(node, crate::observability::ObservedOperation::Run, execution_scope.context(), Default::default())?.run(service.run()) => return result.map_err(|error| component_error(node, "run service", error)),
         }
         return service
             .quiesce()
@@ -2975,7 +3016,7 @@ async fn run_node(
                 match tokio::select! {
                     biased;
                     _ = cancelled(quiesce) => return Ok(()),
-                    result = execution_scope.scope(source.next()) => result.map_err(|source| component_error(node, "next", source))?,
+                    result = observe(node, crate::observability::ObservedOperation::Next, execution_scope.context(), Default::default())?.run(source.next()) => result.map_err(|source| component_error(node, "next", source))?,
                 } {
                     Some(output) => vec![output],
                     None => {
@@ -3126,14 +3167,46 @@ async fn run_node(
                 }
                 match component {
                     Component::Transformer(transformer) | Component::Query(transformer) => {
-                        processing_scope
-                            .scope(transformer.transform(input))
+                        let observation = observe(
+                            node,
+                            crate::observability::ObservedOperation::Transform,
+                            &input.execution_context,
+                            crate::observability::OperationFields {
+                                input_port: Some(input.port.as_str()),
+                                input_count: Some(1),
+                                change_count: Some(input.envelope.changes().operations().len()),
+                                completion: Some("transformed"),
+                                ..Default::default()
+                            },
+                        )?;
+                        processing_scope =
+                            execution_scope.with_context(observation.context().clone());
+                        observation
+                            .run_outputs(transformer.transform(input))
                             .await
                             .map_err(|source| component_error(node, "transform", source))?
                     }
                     Component::Sink(sink) => {
-                        processing_scope
-                            .scope(sink.handle(input))
+                        let observation = observe(
+                            node,
+                            crate::observability::ObservedOperation::Handle,
+                            &input.execution_context,
+                            crate::observability::OperationFields {
+                                input_port: Some(input.port.as_str()),
+                                input_count: Some(1),
+                                change_count: Some(input.envelope.changes().operations().len()),
+                                completion: Some(if sink.completion() == SinkCompletion::Handled {
+                                    "handled"
+                                } else {
+                                    "accepted"
+                                }),
+                                ..Default::default()
+                            },
+                        )?;
+                        processing_scope =
+                            execution_scope.with_context(observation.context().clone());
+                        observation
+                            .run(sink.handle(input))
                             .await
                             .map_err(|source| component_error(node, "handle", source))?;
                         Vec::new()
@@ -3150,61 +3223,50 @@ async fn run_node(
                 break;
             }
             check_descriptor(component, node)?;
-            validate_emissions(node, sequences, &emissions)?;
-            // The input/continuation already paid for its first forward.
-            let mut first_branch = true;
-            for emission in &emissions {
-                if !outputs.iter().any(|output| output.port == emission.port) {
-                    return Err(emission_error(
+            if matches!(component, Component::Source(_)) {
+                let emission = emissions.first().expect("source output");
+                let publication = observe(
+                    node,
+                    crate::observability::ObservedOperation::Publish,
+                    &emission.execution_context,
+                    crate::observability::OperationFields {
+                        output_port: Some(emission.port.as_str()),
+                        output_count: Some(1),
+                        change_count: Some(emission.envelope.changes().operations().len()),
+                        publication_mode: Some("polled"),
+                        ..Default::default()
+                    },
+                )?;
+                let context = publication.context().clone();
+                publication
+                    .run(forward_emissions(
                         node,
-                        "output port has no bound relationship",
-                    ));
-                }
-                let mut multicast = BTreeSet::new();
-                let mut accepted_branches = 0;
-                for output in outputs.iter().filter(|output| output.port == emission.port) {
-                    if first_branch {
-                        first_branch = false;
-                    } else if let Some(yield_node) = budget.checkpoint() {
-                        yield_node.await;
-                    }
-                    if output
-                        .multicast
-                        .as_ref()
-                        .is_some_and(|group| !multicast.insert(group.clone()))
-                    {
-                        continue;
-                    }
-                    execution_scope
-                        .with_context(emission.execution_context.clone())
-                        .scope(output.sender.send_message(EnvelopeMessage::new(
-                            emission.envelope.clone(),
-                            emission.execution_context.clone(),
-                        )))
-                        .await
-                        .map_err(|source| GraphError::Forward {
-                            edge: output.edge,
-                            accepted_branches,
-                            source: Box::new(source),
-                        })?;
-                    accepted_branches += match &output.multicast {
-                        Some(group) => outputs
-                            .iter()
-                            .filter(|branch| {
-                                branch.port == emission.port
-                                    && branch.multicast.as_ref() == Some(group)
-                            })
-                            .count(),
-                        None => 1,
-                    };
-                }
+                        sequences,
+                        &emissions,
+                        outputs,
+                        budget,
+                        Some(&context),
+                    ))
+                    .await?;
+                crate::observability::ComponentObservations::current_or_disabled()
+                    .dispatched(false);
+            } else {
+                forward_emissions(node, sequences, &emissions, outputs, budget, None).await?;
             }
             match component {
                 Component::Transformer(transformer) | Component::Query(transformer) => {
-                    processing_scope
-                        .scope(transformer.delivery_completed(&emissions))
-                        .await
-                        .map_err(|source| component_error(node, "complete delivery", source))?;
+                    observe(
+                        node,
+                        crate::observability::ObservedOperation::Confirm,
+                        processing_scope.context(),
+                        crate::observability::OperationFields {
+                            output_count: Some(emissions.len()),
+                            ..Default::default()
+                        },
+                    )?
+                    .run(transformer.delivery_completed(&emissions))
+                    .await
+                    .map_err(|source| component_error(node, "complete delivery", source))?;
                 }
                 _ => {}
             }
@@ -3216,12 +3278,18 @@ async fn run_node(
                         yield_node.await;
                     }
                     Some(
-                        processing_scope
-                            .scope(transformer.continue_transform())
-                            .await
-                            .map_err(|source| {
-                                component_error(node, "continue transform", source)
-                            })?,
+                        observe(
+                            node,
+                            crate::observability::ObservedOperation::Continue,
+                            processing_scope.context(),
+                            crate::observability::OperationFields {
+                                input_count: Some(0),
+                                ..Default::default()
+                            },
+                        )?
+                        .run_outputs(transformer.continue_transform())
+                        .await
+                        .map_err(|source| component_error(node, "continue transform", source))?,
                     )
                 }
                 _ => None,
@@ -3235,13 +3303,117 @@ async fn run_node(
             progress.confirm([*input]);
         }
         if let Some((edge, acknowledgement)) = acknowledgement {
-            acknowledgement
-                .complete(super::HandlingOutcome::Handled)
-                .await
-                .map_err(|source| GraphError::Pipe { edge, source })?;
+            observe(
+                node,
+                crate::observability::ObservedOperation::Acknowledge,
+                processing_scope.context(),
+                crate::observability::OperationFields {
+                    handling_outcome: Some("handled"),
+                    ..Default::default()
+                },
+            )?
+            .run(acknowledgement.complete(super::HandlingOutcome::Handled))
+            .await
+            .map_err(|source| GraphError::Pipe { edge, source })?;
         }
         drop(consumed);
     }
+}
+
+fn observe(
+    node: &NodeSnapshot,
+    operation: crate::observability::ObservedOperation,
+    parent: &ExecutionContext,
+    fields: crate::observability::OperationFields<'_>,
+) -> GraphResult<crate::observability::OperationObservation> {
+    crate::observability::ComponentObservations::current_or_disabled()
+        .begin(operation, parent, fields)
+        .map_err(|error| component_error(node, "observe operation", error.into()))
+}
+
+async fn forward_emissions(
+    node: &NodeSnapshot,
+    sequences: &mut BTreeMap<PortId, u64>,
+    emissions: &[OutputEnvelope],
+    outputs: &[Outgoing],
+    budget: &NodeWorkBudget,
+    publication_context: Option<&ExecutionContext>,
+) -> GraphResult<()> {
+    let owner = crate::observability::ComponentObservations::current_or_disabled();
+    validate_emissions(node, sequences, emissions).map_err(|error| {
+        if publication_context.is_none() {
+            owner.failed(crate::observability::ObservedOperation::Transform);
+        }
+        error
+    })?;
+    owner.outputs(emissions.len());
+    let mut first_branch = true;
+    for emission in emissions {
+        if !outputs.iter().any(|output| output.port == emission.port) {
+            if publication_context.is_none() {
+                owner.failed(crate::observability::ObservedOperation::Transform);
+            }
+            return Err(emission_error(
+                node,
+                "output port has no bound relationship",
+            ));
+        }
+        let context = publication_context.unwrap_or(&emission.execution_context);
+        let mut multicast = BTreeSet::new();
+        let mut accepted_branches = 0;
+        for output in outputs.iter().filter(|output| output.port == emission.port) {
+            if first_branch {
+                first_branch = false;
+            } else if let Some(yield_node) = budget.checkpoint() {
+                yield_node.await;
+            }
+            if output
+                .multicast
+                .as_ref()
+                .is_some_and(|group| !multicast.insert(group.clone()))
+            {
+                continue;
+            }
+            let observation = observe(
+                node,
+                crate::observability::ObservedOperation::Send,
+                context,
+                crate::observability::OperationFields {
+                    output_port: Some(emission.port.as_str()),
+                    queue_id: Some(&output.queue_id),
+                    ..Default::default()
+                },
+            )?;
+            let result = observation
+                .run_send(output.sender.send_message(EnvelopeMessage::new(
+                    emission.envelope.clone(),
+                    context.clone(),
+                )))
+                .await;
+            result
+                .map_err(|error| {
+                    if publication_context.is_none() {
+                        owner.failed(crate::observability::ObservedOperation::Acknowledge);
+                    }
+                    error
+                })
+                .map_err(|source| GraphError::Forward {
+                    edge: output.edge,
+                    accepted_branches,
+                    source: Box::new(source),
+                })?;
+            accepted_branches += match &output.multicast {
+                Some(group) => outputs
+                    .iter()
+                    .filter(|branch| {
+                        branch.port == emission.port && branch.multicast.as_ref() == Some(group)
+                    })
+                    .count(),
+                None => 1,
+            };
+        }
+    }
+    Ok(())
 }
 
 fn validate_emissions(

@@ -382,39 +382,49 @@ impl ComponentHandle {
 
     /// Set readiness-gated activation before starting this component.
     pub async fn require_downstream_ready(&self, required: bool) -> GraphResult<()> {
-        self.control.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
         self.control
-            .commands
-            .send(controller::Command::ReadinessPolicy {
-                component: self.id.clone(),
-                generation: self.generation,
-                required,
-                management_access: self.control.management_access,
-                reply,
+            .observe_control("readiness_policy")?
+            .run_control(async {
+                self.control.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.control
+                    .commands
+                    .send(controller::Command::ReadinessPolicy {
+                        component: self.id.clone(),
+                        generation: self.generation,
+                        required,
+                        management_access: self.control.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     /// Configure a native output stream before its first activation.
     pub async fn bind_stream(&self, port: PortId, stream: StreamId) -> GraphResult<()> {
-        self.control.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
         self.control
-            .commands
-            .send(controller::Command::BindStream {
-                component: self.id.clone(),
-                generation: self.generation,
-                port,
-                stream,
-                management_access: self.control.management_access,
-                reply,
+            .observe_control("bind_stream")?
+            .run_control(async {
+                self.control.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.control
+                    .commands
+                    .send(controller::Command::BindStream {
+                        component: self.id.clone(),
+                        generation: self.generation,
+                        port,
+                        stream,
+                        management_access: self.control.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub fn observed(&self) -> GraphResult<ObservedComponent> {
@@ -436,20 +446,25 @@ impl ComponentHandle {
     }
 
     pub async fn set_control_handler(&self, handler: Arc<dyn ControlHandler>) -> GraphResult<()> {
-        self.control.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
         self.control
-            .commands
-            .send(controller::Command::ControlHandler {
-                component: self.id.clone(),
-                generation: self.generation,
-                handler,
-                management_access: self.control.management_access,
-                reply,
+            .observe_control("set_control_handler")?
+            .run_control(async {
+                self.control.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.control
+                    .commands
+                    .send(controller::Command::ControlHandler {
+                        component: self.id.clone(),
+                        generation: self.generation,
+                        handler,
+                        management_access: self.control.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     /// Observe readiness without issuing a lifecycle operation. Missing
@@ -726,51 +741,55 @@ impl GraphControl {
     /// Only rejection of the graph addition is a method error. Later failures
     /// belong to the returned generation-specific handle.
     pub async fn add_component(&self, addition: ComponentAddition) -> GraphResult<ComponentHandle> {
-        if let Err(cause) = self.require_configuration_write() {
-            let addition = RejectedAddition::new(addition);
-            self.rejected_additions
-                .lock()
-                .map_err(|_| topology("rejected addition ownership poisoned"))?
-                .push(addition.clone());
-            return Err(GraphError::AdditionRejected {
-                cause: Box::new(cause),
-                addition,
-            });
-        }
-        let (reply, result) = oneshot::channel();
-        if let Err(error) = self
-            .commands
-            .send(controller::Command::Add {
-                addition,
-                management_access: self.management_access,
-                reply,
-            })
-            .await
-        {
-            let controller::Command::Add { addition, .. } = error.0 else {
-                unreachable!("only an addition was sent");
-            };
-            let rejected = RejectedAddition::new(addition);
-            let mut pending = self.rejected_additions.lock().unwrap_or_else(|error| {
-                log::error!(
+        self.observe_control("add_component")?
+            .run_control(async {
+                if let Err(cause) = self.require_configuration_write() {
+                    let addition = RejectedAddition::new(addition);
+                    self.rejected_additions
+                        .lock()
+                        .map_err(|_| topology("rejected addition ownership poisoned"))?
+                        .push(addition.clone());
+                    return Err(GraphError::AdditionRejected {
+                        cause: Box::new(cause),
+                        addition,
+                    });
+                }
+                let (reply, result) = oneshot::channel();
+                if let Err(error) = self
+                    .commands
+                    .send(controller::Command::Add {
+                        addition,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                {
+                    let controller::Command::Add { addition, .. } = error.0 else {
+                        unreachable!("only an addition was sent");
+                    };
+                    let rejected = RejectedAddition::new(addition);
+                    let mut pending = self.rejected_additions.lock().unwrap_or_else(|error| {
+                        log::error!(
                     "Retaining rejected resources through poisoned cleanup registry: {error}"
                 );
-                error.into_inner()
-            });
-            pending.retain(|addition| !addition.complete());
-            pending.push(rejected.clone());
-            return Err(GraphError::AdditionRejected {
-                cause: Box::new(GraphError::ControllerClosed),
-                addition: rejected,
-            });
-        }
-        let (id, generation) = result.await.map_err(|_| GraphError::ControllerClosed)??;
-        Ok(ComponentHandle {
-            control: self.clone(),
-            id,
-            generation,
-            lifecycle_members: None,
-        })
+                        error.into_inner()
+                    });
+                    pending.retain(|addition| !addition.complete());
+                    pending.push(rejected.clone());
+                    return Err(GraphError::AdditionRejected {
+                        cause: Box::new(GraphError::ControllerClosed),
+                        addition: rejected,
+                    });
+                }
+                let (id, generation) = result.await.map_err(|_| GraphError::ControllerClosed)??;
+                Ok(ComponentHandle {
+                    control: self.clone(),
+                    id,
+                    generation,
+                    lifecycle_members: None,
+                })
+            })
+            .await
     }
 
     pub fn component_handle(&self, id: &ComponentId) -> GraphResult<ComponentHandle> {
@@ -795,18 +814,22 @@ impl GraphControl {
         &self,
         connections: Vec<(ComponentId, ComponentId)>,
     ) -> GraphResult<()> {
-        self.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(controller::Command::ControlConnections {
-                connections,
-                subscriptions: false,
-                management_access: self.management_access,
-                reply,
+        self.observe_control("set_control_connections")?
+            .run_control(async {
+                self.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(controller::Command::ControlConnections {
+                        connections,
+                        subscriptions: false,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     /// Data subscription topology implemented by ordinary component hosts.
@@ -814,18 +837,22 @@ impl GraphControl {
         &self,
         connections: Vec<(ComponentId, ComponentId)>,
     ) -> GraphResult<()> {
-        self.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(controller::Command::ControlConnections {
-                connections,
-                subscriptions: true,
-                management_access: self.management_access,
-                reply,
+        self.observe_control("set_subscriptions")?
+            .run_control(async {
+                self.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(controller::Command::ControlConnections {
+                        connections,
+                        subscriptions: true,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 }
 
