@@ -374,6 +374,13 @@ mod before {
 
     #[tokio::test]
     #[serial]
+    async fn before_value_types() {
+        let test_config = RocksDbQueryConfig::new();
+        before::value_types(&test_config).await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn before_sum() {
         let test_config = RocksDbQueryConfig::new();
         before::before_sum(&test_config).await;

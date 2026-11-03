@@ -418,6 +418,12 @@ mod before {
     }
 
     #[tokio::test]
+    async fn before_value_types() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        before::value_types(&test_config).await;
+    }
+
+    #[tokio::test]
     async fn before_sum() {
         let test_config = GarnetQueryConfig::new(false).await;
         before::before_sum(&test_config).await;
