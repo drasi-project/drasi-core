@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -78,7 +79,8 @@ pub struct SourceProxy {
     cached_id: String,
     cached_type_name: String,
     /// Keeps the per-instance callback context alive for the lifetime of this proxy.
-    _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
+    _callback_ctx: std::sync::Mutex<Option<Arc<dyn Send + Sync>>>,
+    redact_diagnostics: AtomicBool,
     /// Per-source identity provider set programmatically via
     /// [`Source::set_identity_provider`]. When present, it takes precedence over
     /// any instance-wide provider supplied via
@@ -100,8 +102,20 @@ impl SourceProxy {
             cached_id,
             cached_type_name,
             _callback_ctx: std::sync::Mutex::new(None),
+            redact_diagnostics: AtomicBool::new(false),
             identity_provider: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Initialize with redacted log and lifecycle callbacks and host-owned IDs.
+    ///
+    /// Use this instead of the initial `Source::initialize` call for a
+    /// credential-bearing source. Data, properties and returned errors are not
+    /// redacted; the host must handle those separately. Redaction cannot be
+    /// disabled by a subsequent ordinary initialization.
+    pub async fn initialize_redacted(&self, context: SourceRuntimeContext) {
+        self.redact_diagnostics.store(true, Ordering::Release);
+        self.initialize(context).await;
     }
 }
 
@@ -121,10 +135,14 @@ impl Source for SourceProxy {
         match serde_json::from_str(&json_str) {
             Ok(props) => props,
             Err(e) => {
-                log::warn!(
-                    "Failed to parse plugin properties for '{}': {e}",
-                    self.cached_id
-                );
+                if self.redact_diagnostics.load(Ordering::Acquire) {
+                    log::warn!("Failed to parse plugin source properties; diagnostics redacted");
+                } else {
+                    log::warn!(
+                        "Failed to parse plugin properties for '{}': {e}",
+                        self.cached_id
+                    );
+                }
                 HashMap::new()
             }
         }
@@ -152,10 +170,14 @@ impl Source for SourceProxy {
         match serde_json::from_str(&json) {
             Ok(schema) => schema,
             Err(e) => {
-                log::warn!(
-                    "Failed to parse plugin schema for '{}': {e}",
-                    self.cached_id
-                );
+                if self.redact_diagnostics.load(Ordering::Acquire) {
+                    log::warn!("Failed to parse plugin source schema; diagnostics redacted");
+                } else {
+                    log::warn!(
+                        "Failed to parse plugin schema for '{}': {e}",
+                        self.cached_id
+                    );
+                }
                 None
             }
         }
@@ -426,7 +448,11 @@ impl Source for SourceProxy {
                 log::debug!("SourceProxy::remove_position_handle('{query_id}') completed via FFI");
             }
             Ok(Err(e)) => {
-                log::warn!("SourceProxy::remove_position_handle('{query_id}') FFI error: {e}");
+                if self.redact_diagnostics.load(Ordering::Acquire) {
+                    log::warn!("SourceProxy::remove_position_handle('{query_id}') FFI failed");
+                } else {
+                    log::warn!("SourceProxy::remove_position_handle('{query_id}') FFI error: {e}");
+                }
             }
             Err(_) => {
                 log::warn!("SourceProxy::remove_position_handle('{query_id}') thread panicked");
@@ -488,12 +514,34 @@ impl Source for SourceProxy {
         // and intentionally leaks one strong ref per instance — acceptable
         // because the cdylib itself is intentionally process-leaked (see
         // host-sdk/src/loader.rs).
-        let ctx_for_plugin = per_instance_ctx.clone();
-        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut c_void;
+        let (ctx_ptr, keep_alive, log_callback, lifecycle_callback): (
+            *mut c_void,
+            Arc<dyn Send + Sync>,
+            drasi_plugin_sdk::ffi::LogCallbackFn,
+            drasi_plugin_sdk::ffi::LifecycleCallbackFn,
+        ) = if self.redact_diagnostics.load(Ordering::Acquire) {
+            let redacted = Arc::new(crate::callbacks::RedactedInstanceCallbackContext {
+                inner: per_instance_ctx,
+                component_id: component_id_str.clone(),
+            });
+            (
+                Arc::into_raw(redacted.clone()) as *mut c_void,
+                redacted,
+                crate::callbacks::redacted_log_callback,
+                crate::callbacks::redacted_lifecycle_callback,
+            )
+        } else {
+            (
+                Arc::into_raw(per_instance_ctx.clone()) as *mut c_void,
+                per_instance_ctx,
+                crate::callbacks::instance_log_callback,
+                crate::callbacks::instance_lifecycle_callback,
+            )
+        };
 
         // Store the Arc so it stays alive as long as this proxy
         if let Ok(mut guard) = self._callback_ctx.lock() {
-            *guard = Some(per_instance_ctx);
+            *guard = Some(keep_alive);
         }
 
         let identity_vtable = crate::proxies::identity_resolution::resolve_identity_provider(
@@ -512,9 +560,9 @@ impl Source for SourceProxy {
             component_id: component_id_ffi,
             state_store: ss_ptr,
             identity_provider: ip_ptr as *const _,
-            log_callback: Some(crate::callbacks::instance_log_callback),
+            log_callback: Some(log_callback),
             log_ctx: ctx_ptr,
-            lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
+            lifecycle_callback: Some(lifecycle_callback),
             lifecycle_ctx: ctx_ptr,
             snapshot_fetcher: std::ptr::null(),
             wal_provider: wp_ptr,

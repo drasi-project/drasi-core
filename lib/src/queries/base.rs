@@ -44,7 +44,7 @@
 //! ```
 
 use anyhow::Result;
-use log::{debug, error, info, warn};
+use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -70,6 +70,7 @@ pub struct QueryBase {
     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal
     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    task_failure: RwLock<Option<String>>,
 }
 
 impl QueryBase {
@@ -92,6 +93,7 @@ impl QueryBase {
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            task_failure: RwLock::new(None),
         })
     }
 
@@ -214,39 +216,7 @@ impl QueryBase {
     /// Handle common stop functionality.
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping query '{}'", self.config.id);
-
-        // Send shutdown signal if we have one
-        if let Some(tx) = self.shutdown_tx.write().await.take() {
-            let _ = tx.send(());
-        }
-
-        // Wait for task to complete
-        let task = self.task_handle.write().await.take();
-        if let Some(mut handle) = task {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
-                Ok(Ok(())) => {
-                    info!("Query '{}' task completed successfully", self.config.id);
-                }
-                Ok(Err(e)) => {
-                    error!("Query '{}' task panicked: {}", self.config.id, e);
-                }
-                Err(_) => {
-                    warn!(
-                        "Query '{}' task did not complete within timeout, aborting",
-                        self.config.id
-                    );
-                    handle.abort();
-                    if let Err(error) = handle.await {
-                        if !error.is_cancelled() {
-                            error!(
-                                "Query '{}' task failed during stop: {error}",
-                                self.config.id
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        self.stop_task().await?;
 
         self.set_status(
             ComponentStatus::Stopped,
@@ -254,6 +224,37 @@ impl QueryBase {
         )
         .await;
         info!("Query '{}' stopped", self.config.id);
+        Ok(())
+    }
+
+    pub(crate) async fn stop_task(&self) -> Result<()> {
+        // Send shutdown signal if we have one
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+
+        // Keep the slot occupied while joining; concurrent stops cannot claim quiescence.
+        let mut slot = self.task_handle.write().await;
+        if let Some(failure) = self.task_failure.read().await.as_ref() {
+            anyhow::bail!("{failure}");
+        }
+        if let Some(handle) = slot.as_mut() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let message =
+                        format!("Query '{}' processor join failed: {error}", self.config.id);
+                    *self.task_failure.write().await = Some(message.clone());
+                    anyhow::bail!("{message}");
+                }
+                Err(_) => anyhow::bail!(
+                    "Query '{}' processor is still stopping; task retained after join timeout",
+                    self.config.id
+                ),
+            }
+            *slot = None;
+        }
+
         Ok(())
     }
 
@@ -442,20 +443,6 @@ mod tests {
     // =============================================================================
 
     #[tokio::test]
-    async fn stop_common_joins_aborted_task() {
-        let base = QueryBase::new(test_config("join-test", None)).unwrap();
-        let resource = Arc::new(());
-        let retained = Arc::downgrade(&resource);
-        base.set_task_handle(tokio::spawn(async move {
-            std::future::pending::<()>().await;
-            drop(resource);
-        }))
-        .await;
-        base.stop_common().await.unwrap();
-        assert!(retained.upgrade().is_none(), "aborted task must be joined");
-    }
-
-    #[tokio::test]
     async fn test_stop_common_sends_shutdown_signal() {
         let base = QueryBase::new(test_config("q1", None)).unwrap();
 
@@ -531,6 +518,43 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "Shutdown took {elapsed:?}, expected < 500ms"
         );
+    }
+
+    #[tokio::test]
+    async fn test_stop_common_retains_unresponsive_processor_until_joined() {
+        struct TaskExit(Arc<AtomicBool>);
+        impl Drop for TaskExit {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let base = QueryBase::new(test_config("joined-stop", None)).unwrap();
+        base.set_status(ComponentStatus::Running, None).await;
+        let exited = Arc::new(AtomicBool::new(false));
+        let guard = TaskExit(exited.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        base.set_task_handle(tokio::spawn(async move {
+            let _guard = guard;
+            started.send(()).unwrap();
+            released.await.unwrap();
+        }))
+        .await;
+        ready.await.unwrap();
+        let error = base.stop_common().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("task retained after join timeout"));
+        assert!(base.task_handle.read().await.is_some());
+        assert!(!exited.load(Ordering::SeqCst));
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+        release.send(()).unwrap();
+        base.stop_common().await.unwrap();
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "Stopped must mean task resources have been dropped"
+        );
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
     }
 
     #[tokio::test]
@@ -631,5 +655,76 @@ mod tests {
 
         assert_eq!(received1.query_id, "test_query");
         assert_eq!(received2.query_id, "test_query");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn test_stop_timeout_retains_owned_writer_until_joined() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        base.set_status(ComponentStatus::Stopping, None).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        base.set_task_handle(tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            if release_rx.await.is_ok() {
+                let _ = finished_tx.send(());
+            }
+        }))
+        .await;
+        entered_rx.await.unwrap();
+
+        let error = base.stop_common().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("task retained after join timeout"));
+        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
+        assert!(base.task_handle.read().await.is_some());
+
+        release_tx.send(()).unwrap();
+        base.stop_common().await.unwrap();
+        finished_rx.await.unwrap();
+        assert!(base.task_handle.read().await.is_none());
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_stops_join_the_same_owned_writer() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        base.set_status(ComponentStatus::Stopping, None).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        base.set_task_handle(tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }))
+        .await;
+        entered_rx.await.unwrap();
+        let first = base.stop_common();
+        let second = base.stop_common();
+        tokio::pin!(first, second);
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
+
+        release_tx.send(()).unwrap();
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        second.unwrap();
+        assert!(base.task_handle.read().await.is_none());
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_failed_join_never_reports_quiescence_on_retry() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        base.set_status(ComponentStatus::Stopping, None).await;
+        base.set_task_handle(tokio::spawn(async {
+            panic!("controlled processor panic");
+        }))
+        .await;
+        let first = base.stop_common().await.unwrap_err().to_string();
+        let second = base.stop_common().await.unwrap_err().to_string();
+        assert!(first.contains("processor join failed"));
+        assert_eq!(first, second);
+        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
     }
 }

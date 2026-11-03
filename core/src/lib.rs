@@ -20,3 +20,6 @@ pub mod middleware;
 pub mod models;
 pub mod path_solver;
 pub mod query;
+
+/// Version of the query engine linked into this build.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -1047,14 +1047,17 @@ In `lib.rs`, invoke the macro to generate the C ABI entry points. Gate it behind
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "my-bootstrap",
-    core_version = env!("CARGO_PKG_VERSION"),
-    lib_version = env!("CARGO_PKG_VERSION"),
+    core_version = drasi_core::VERSION,
+    lib_version = drasi_lib::VERSION,
     plugin_version = env!("CARGO_PKG_VERSION"),
     source_descriptors = [],
     reaction_descriptors = [],
     bootstrap_descriptors = [descriptor::MyBootstrapDescriptor],
 );
 ```
+
+The dependency-owned version constants report the actual linked engine/runtime.
+Use `env!("CARGO_PKG_VERSION")` only for `plugin_version`, not dependency metadata.
 
 ### Building
 

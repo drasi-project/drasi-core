@@ -146,6 +146,7 @@ pub struct DrasiLibBuilder {
     wal_provider: Option<Arc<dyn WalProvider>>,
     secret_store_provider: Option<Arc<dyn SecretStoreProvider>>,
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
+    require_bootstrap_certification: bool,
     default_index_backend: Option<crate::indexes::StorageBackendRef>,
 }
 
@@ -173,6 +174,7 @@ impl DrasiLibBuilder {
             wal_provider: None,
             secret_store_provider: None,
             default_recovery_policy: None,
+            require_bootstrap_certification: false,
             default_index_backend: None,
         }
     }
@@ -376,6 +378,18 @@ impl DrasiLibBuilder {
     /// If neither is set, defaults to [`RecoveryPolicy::Strict`](crate::RecoveryPolicy::Strict).
     pub fn with_default_recovery_policy(mut self, policy: crate::recovery::RecoveryPolicy) -> Self {
         self.default_recovery_policy = Some(policy);
+        self
+    }
+
+    /// Require complete, read-back-certified initial images for persistent queries.
+    ///
+    /// Every requested bootstrap source must supply a stream, completion count,
+    /// and bounded replayable handover, including empty snapshots. The default
+    /// preserves optional bootstrap providers. This startup validation does not
+    /// change query identity; enabling it cannot reset uncertified existing state
+    /// under Strict or ExistingOnly. Explicit AutoReset may rebuild that state.
+    pub fn with_bootstrap_certification(mut self, required: bool) -> Self {
+        self.require_bootstrap_certification = required;
         self
     }
 
@@ -589,7 +603,7 @@ impl DrasiLibBuilder {
         }
 
         // Create runtime config and server with optional index and state store providers
-        let runtime_config = Arc::new(crate::config::RuntimeConfig::new(
+        let mut runtime_config = crate::config::RuntimeConfig::new(
             config,
             self.index_providers,
             self.state_store_provider,
@@ -597,8 +611,9 @@ impl DrasiLibBuilder {
             self.secret_store_provider,
             self.default_recovery_policy,
             self.default_index_backend,
-        ));
-        let mut core = DrasiLib::new(runtime_config);
+        );
+        runtime_config.require_bootstrap_certification = self.require_bootstrap_certification;
+        let mut core = DrasiLib::new(Arc::new(runtime_config));
 
         // Inject state store before provisioning sources (they need it for initialization)
         let state_store = core.config.state_store_provider.clone();
@@ -964,8 +979,9 @@ impl Query {
         self
     }
 
-    /// Set the recovery policy. Applies only to queries with a persistent
-    /// storage backend. See [`RecoveryPolicy`](crate::RecoveryPolicy).
+    /// Set the startup and gap-recovery policy. `ExistingOnly` requires a
+    /// persistent backend and refuses to initialize or reset logical state.
+    /// See [`RecoveryPolicy`](crate::RecoveryPolicy).
     pub fn with_recovery_policy(mut self, policy: crate::recovery::RecoveryPolicy) -> Self {
         self.recovery_policy = Some(policy);
         self

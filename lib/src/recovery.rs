@@ -20,10 +20,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Behavior when a source cannot honor a requested resume position.
+/// Startup and gap-recovery behavior for a query.
 ///
 /// Configured per-query via `QueryConfig::recovery_policy`. When the field is
-/// `None`, a future global default applies (which itself defaults to `Strict`).
+/// `None`, the global default applies (which itself defaults to `Strict`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryPolicy {
@@ -35,6 +35,17 @@ pub enum RecoveryPolicy {
     /// Automatically wipe the query's persistent index and perform a full
     /// re-bootstrap on gap detection. Favors availability over consistency.
     AutoReset,
+    /// Recover only an existing persistent query with a readable, matching config
+    /// hash, readable checkpoints, and consistent durable output. Never initialize
+    /// or reset its logical state. Missing metadata, read failures, inconsistent
+    /// output, and unavailable source positions fail startup instead.
+    ///
+    /// Unlike `Strict`, this rejects first startup and configuration changes.
+    /// Create new queries with `Strict` or `AutoReset`, then opt in when reopening
+    /// or use [`crate::DrasiLib::start_query_existing`] for a per-start override.
+    /// Backend opening may create physical files; this protects logical state,
+    /// not filesystem immutability. In-memory backends are rejected.
+    ExistingOnly,
 }
 
 /// Behavior when a reaction's checkpoint falls behind the query outbox.
@@ -104,11 +115,23 @@ mod tests {
 
     #[test]
     fn yaml_round_trip() {
-        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
+        for policy in
+            [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset, RecoveryPolicy::ExistingOnly]
+        {
             let yaml = serde_yaml::to_string(&policy).unwrap();
             let back: RecoveryPolicy = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(back, policy);
         }
+    }
+
+    #[test]
+    fn json_round_trip_existing_only() {
+        let json = serde_json::to_string(&RecoveryPolicy::ExistingOnly).unwrap();
+        assert_eq!(json, "\"existing_only\"");
+        assert_eq!(
+            serde_json::from_str::<RecoveryPolicy>(&json).unwrap(),
+            RecoveryPolicy::ExistingOnly
+        );
     }
 
     #[test]

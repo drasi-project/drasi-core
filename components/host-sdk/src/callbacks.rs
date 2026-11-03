@@ -25,7 +25,7 @@ use drasi_lib::channels::events::{ComponentEvent, ComponentStatus, ComponentType
 use drasi_lib::component_graph::{ComponentUpdate, ComponentUpdateSender};
 use drasi_lib::managers::{ComponentEventHistory, ComponentLogRegistry, LogLevel, LogMessage};
 use drasi_plugin_sdk::ffi::{
-    FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, FfiLogLevelFilter,
+    FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, FfiLogLevelFilter, FfiStr,
     LifecycleCallbackFn, LogCallbackFn,
 };
 use tokio::sync::RwLock;
@@ -99,6 +99,82 @@ impl InstanceCallbackContext {
     unsafe fn from_raw_ref<'a>(ptr: *mut c_void) -> &'a Self {
         &*(ptr as *const Self)
     }
+}
+
+pub(crate) struct RedactedInstanceCallbackContext {
+    pub inner: Arc<InstanceCallbackContext>,
+    pub component_id: String,
+}
+
+/// Forward severity without copying plugin text or plugin-supplied identities.
+///
+/// A null context forwards to the host logger only. Non-null contexts are owned
+/// by `SourceProxy::initialize_redacted` and remain alive for late callbacks.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn redacted_log_callback(ctx: *mut c_void, entry: *const FfiLogEntry) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if entry.is_null() {
+            log::error!("Plugin supplied a null log entry");
+            return;
+        }
+        let context = if ctx.is_null() {
+            None
+        } else {
+            Some(unsafe { &*ctx.cast::<RedactedInstanceCallbackContext>() })
+        };
+        let sanitized = FfiLogEntry {
+            level: unsafe { (*entry).level },
+            plugin_id: FfiStr::from_str("plugin"),
+            target: FfiStr::from_str("plugin"),
+            message: FfiStr::from_str("Plugin log diagnostics redacted"),
+            timestamp_us: chrono::Utc::now().timestamp_micros(),
+            instance_id: FfiStr::from_str(context.map_or("", |ctx| &ctx.inner.instance_id)),
+            component_id: FfiStr::from_str(context.map_or("plugin", |ctx| &ctx.component_id)),
+        };
+        match context {
+            Some(context) => {
+                instance_log_callback(Arc::as_ptr(&context.inner) as *mut c_void, &sanitized)
+            }
+            None => default_log_callback(std::ptr::null_mut(), &sanitized),
+        }
+    }));
+}
+
+/// Forward lifecycle status using only the host-owned component identity.
+///
+/// Plugin text is never copied. The context contract matches
+/// [`redacted_log_callback`].
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn redacted_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if event.is_null() {
+            log::error!("Plugin supplied a null lifecycle event");
+            return;
+        }
+        let context = if ctx.is_null() {
+            None
+        } else {
+            Some(unsafe { &*ctx.cast::<RedactedInstanceCallbackContext>() })
+        };
+        let event_type = unsafe { (*event).event_type };
+        let sanitized = FfiLifecycleEvent {
+            component_id: FfiStr::from_str(context.map_or("plugin", |ctx| &ctx.component_id)),
+            component_type: FfiStr::from_str("source"),
+            event_type,
+            message: FfiStr::from_str(if event_type == FfiLifecycleEventType::Error {
+                "Plugin lifecycle diagnostics redacted"
+            } else {
+                ""
+            }),
+            timestamp_us: chrono::Utc::now().timestamp_micros(),
+        };
+        match context {
+            Some(context) => {
+                instance_lifecycle_callback(Arc::as_ptr(&context.inner) as *mut c_void, &sanitized)
+            }
+            None => default_lifecycle_callback(std::ptr::null_mut(), &sanitized),
+        }
+    }));
 }
 
 /// Compute the host's effective log level for plugin log forwarding.
@@ -428,4 +504,114 @@ pub fn instance_log_callback_fn() -> LogCallbackFn {
 /// Get the per-instance lifecycle callback function pointer.
 pub fn instance_lifecycle_callback_fn() -> LifecycleCallbackFn {
     instance_lifecycle_callback
+}
+
+#[cfg(test)]
+mod redacted_callback_tests {
+    use super::*;
+    use drasi_lib::managers::ComponentLogKey;
+
+    #[tokio::test]
+    async fn redacted_callbacks_preserve_status_and_host_identity_without_plugin_text() {
+        let registry = Arc::new(ComponentLogRegistry::new());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        let context = RedactedInstanceCallbackContext {
+            inner: Arc::new(InstanceCallbackContext {
+                instance_id: "host-instance".into(),
+                runtime_handle: tokio::runtime::Handle::current(),
+                log_registry: registry.clone(),
+                update_tx: sender,
+            }),
+            component_id: "host-source".into(),
+        };
+        let pointer = &context as *const RedactedInstanceCallbackContext as *mut c_void;
+        let private = "credential-and-capability-sentinel";
+        redacted_log_callback(
+            pointer,
+            &FfiLogEntry {
+                level: FfiLogLevel::Error,
+                plugin_id: FfiStr::from_str(private),
+                target: FfiStr::from_str(private),
+                message: FfiStr::from_str(private),
+                timestamp_us: 0,
+                instance_id: FfiStr::from_str(private),
+                component_id: FfiStr::from_str(private),
+            },
+        );
+        let logs = registry
+            .get_history_by_key(&ComponentLogKey::new(
+                "host-instance",
+                ComponentType::Source,
+                "host-source",
+            ))
+            .await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "Plugin log diagnostics redacted");
+        assert_eq!(logs[0].level, LogLevel::Error);
+        assert_eq!(logs[0].instance_id, "host-instance");
+        assert_eq!(logs[0].component_id, "host-source");
+
+        for (event_type, expected_status) in [
+            (FfiLifecycleEventType::Starting, ComponentStatus::Starting),
+            (FfiLifecycleEventType::Started, ComponentStatus::Running),
+            (FfiLifecycleEventType::Stopping, ComponentStatus::Stopping),
+            (FfiLifecycleEventType::Stopped, ComponentStatus::Stopped),
+            (FfiLifecycleEventType::Error, ComponentStatus::Error),
+        ] {
+            redacted_lifecycle_callback(
+                pointer,
+                &FfiLifecycleEvent {
+                    component_id: FfiStr::from_str(private),
+                    component_type: FfiStr::from_str(private),
+                    event_type,
+                    message: FfiStr::from_str(private),
+                    timestamp_us: 0,
+                },
+            );
+            let ComponentUpdate::Status {
+                component_id,
+                status,
+                message,
+            } = receiver.try_recv().unwrap();
+            assert_eq!(component_id, "host-source");
+            assert_eq!(status, expected_status);
+            assert_eq!(
+                message.as_deref(),
+                (event_type == FfiLifecycleEventType::Error)
+                    .then_some("Plugin lifecycle diagnostics redacted"),
+            );
+        }
+    }
+
+    #[test]
+    fn redacted_global_callbacks_do_not_read_plugin_strings() {
+        let ignored = || FfiStr {
+            ptr: std::ptr::null(),
+            len: 1,
+        };
+        redacted_log_callback(
+            std::ptr::null_mut(),
+            &FfiLogEntry {
+                level: FfiLogLevel::Error,
+                plugin_id: ignored(),
+                target: ignored(),
+                message: ignored(),
+                timestamp_us: 0,
+                instance_id: ignored(),
+                component_id: ignored(),
+            },
+        );
+        redacted_lifecycle_callback(
+            std::ptr::null_mut(),
+            &FfiLifecycleEvent {
+                component_id: ignored(),
+                component_type: ignored(),
+                event_type: FfiLifecycleEventType::Error,
+                message: ignored(),
+                timestamp_us: 0,
+            },
+        );
+        redacted_log_callback(std::ptr::null_mut(), std::ptr::null());
+        redacted_lifecycle_callback(std::ptr::null_mut(), std::ptr::null());
+    }
 }

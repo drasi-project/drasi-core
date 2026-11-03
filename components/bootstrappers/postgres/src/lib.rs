@@ -67,10 +67,28 @@ pub use postgres::{
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "postgres-bootstrap",
-    core_version = env!("CARGO_PKG_VERSION"),
-    lib_version = env!("CARGO_PKG_VERSION"),
+    core_version = drasi_core::VERSION,
+    lib_version = drasi_lib::VERSION,
     plugin_version = env!("CARGO_PKG_VERSION"),
     source_descriptors = [],
     reaction_descriptors = [],
     bootstrap_descriptors = [descriptor::PostgresBootstrapDescriptor],
 );
+
+#[cfg(all(test, feature = "dynamic-plugin"))]
+mod metadata_tests {
+    #[test]
+    fn exported_metadata_uses_dependency_versions() {
+        // The export returns immutable static metadata with static UTF-8 fields.
+        let metadata = unsafe { &*super::drasi_plugin_metadata() };
+        assert_eq!(
+            unsafe { metadata.core_version.as_str() },
+            drasi_core::VERSION
+        );
+        assert_eq!(unsafe { metadata.lib_version.as_str() }, drasi_lib::VERSION);
+        assert_eq!(
+            unsafe { metadata.plugin_version.as_str() },
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+}

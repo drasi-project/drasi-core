@@ -120,6 +120,47 @@ impl DrasiLib {
         Ok(())
     }
 
+    /// Remove a stopped query from this instance without deleting its persistent
+    /// indexes, checkpoints, outbox, live results, sequence, or generation.
+    ///
+    /// Both graph and runtime must be `Stopped`, all owned work must have been
+    /// joined, and no dependents may remain. Stop the query normally and observe
+    /// `Stopped` first. Active, failed, unknown, and custom runtimes that do not
+    /// support safe retirement are refused without removal. Teardown and graph
+    /// deregistration failures are returned to the caller.
+    ///
+    /// The ID can then be re-added with the same query identity and backend and
+    /// recovered with [`Self::start_query_existing`] or `RecoveryPolicy::ExistingOnly`.
+    /// Ordinary [`Self::remove_query`] remains destructive.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Normal stop_query has completed and Stopped has been observed.
+    /// core.remove_query_preserving_state("my-query").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn remove_query_preserving_state(&self, id: &str) -> Result<()> {
+        self.state_guard.require_initialized()?;
+        self.query_manager
+            .get_query_config(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("query", id))?;
+        self.query_manager
+            .remove_query_preserving_state(id.to_string())
+            .await
+            .map_err(|error| {
+                DrasiError::operation_failed(
+                    "query",
+                    id,
+                    "remove_preserving_state",
+                    format!("{error:#}"),
+                )
+            })
+    }
+
     /// Start a stopped query
     ///
     /// This will create the necessary subscriptions to source data streams.
@@ -145,6 +186,47 @@ impl DrasiLib {
         // Query will subscribe directly to sources when started
         map_component_error(
             self.query_manager.start_query(id.to_string()).await,
+            "query",
+            id,
+            "start",
+        )
+    }
+
+    /// Start or restart an existing persistent query without initializing or
+    /// resetting its logical state, regardless of its configured recovery policy.
+    ///
+    /// Applies [`crate::RecoveryPolicy::ExistingOnly`] to this start only. Missing,
+    /// mismatched, unreadable, or inconsistent persisted state fails startup.
+    /// The query runtime, graph, and configured policy are not replaced. Sources
+    /// may remain running while the query is stopped and restarted.
+    ///
+    /// Uses the same lifecycle validation and error cleanup as [`Self::start_query`].
+    /// On failure, stop the failed query normally before retrying. This is not
+    /// creation authority: a new query must first be started with `start_query`.
+    /// After stopping, observe `Stopped` through status inspection or component
+    /// events before starting again.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// // The existing query has been stopped and Stopped has been observed.
+    /// core.start_query_existing("my-query").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn start_query_existing(&self, id: &str) -> Result<()> {
+        self.state_guard.require_initialized()?;
+
+        self.query_manager
+            .get_query_config(id)
+            .await
+            .ok_or_else(|| DrasiError::component_not_found("query", id))?;
+
+        map_component_error(
+            self.query_manager
+                .start_query_existing(id.to_string())
+                .await,
             "query",
             id,
             "start",
@@ -516,6 +598,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn preserved_removal_refuses_unknown_wrong_kind_and_shutdown() {
+        let core = build_core_with_source().await;
+        for id in ["missing-query", "test-source", "test"] {
+            assert!(matches!(
+                core.remove_query_preserving_state(id).await,
+                Err(DrasiError::ComponentNotFound { .. })
+            ));
+        }
+        assert!(core.component_graph().read().await.contains("test-source"));
+        assert!(core.component_graph().read().await.contains("test"));
+        core.shutdown().await.unwrap();
+        assert!(matches!(
+            core.remove_query_preserving_state("missing-query").await,
+            Err(DrasiError::ComponentNotFound { .. })
+        ));
+    }
+
     // ========================================================================
     // list_queries
     // ========================================================================
@@ -625,6 +725,21 @@ mod tests {
         .await;
         let status = core.get_query_status("q-lifecycle").await.unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn start_query_existing_preserves_public_error_boundaries() {
+        let core = build_core_with_source().await;
+        assert!(matches!(
+            core.start_query_existing("missing").await,
+            Err(DrasiError::ComponentNotFound { .. })
+        ));
+        core.shutdown().await.unwrap();
+        let error = core.start_query_existing("missing").await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            core.start_query("missing").await.unwrap_err().to_string()
+        );
     }
 
     // ========================================================================

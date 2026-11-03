@@ -208,7 +208,10 @@ impl LifecycleManager {
             let retry_failed_reaction = permanent
                 && kind == ComponentKind::Reaction
                 && live_status == ComponentStatus::Error;
+            let retry_stopping_query =
+                kind == ComponentKind::Query && live_status == ComponentStatus::Stopping;
             if !retry_failed_reaction
+                && !retry_stopping_query
                 && !crate::component_graph::is_valid_transition(
                     &kind,
                     &live_status,

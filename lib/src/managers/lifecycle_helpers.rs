@@ -152,6 +152,16 @@ pub async fn start_component<R: ComponentRuntime>(
     component_type: &str,
     runtime: &R,
 ) -> Result<()> {
+    start_component_with(graph, id, component_type, || runtime.start()).await
+}
+
+/// Run a selected start operation through the normal managed lifecycle.
+pub(crate) async fn start_component_with<Fut: Future<Output = Result<()>>>(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    id: &str,
+    component_type: &str,
+    start: impl FnOnce() -> Fut,
+) -> Result<()> {
     // Validate and apply Starting transition atomically through the graph
     {
         let mut g = graph.write().await;
@@ -162,7 +172,7 @@ pub async fn start_component<R: ComponentRuntime>(
         )?;
     }
 
-    if let Err(e) = runtime.start().await {
+    if let Err(e) = start().await {
         // Revert graph status so the component isn't stuck at Starting
         let mut g = graph.write().await;
         let _ = g.validate_and_transition(

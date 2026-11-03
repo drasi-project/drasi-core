@@ -256,6 +256,8 @@ pub struct RuntimeConfig {
     /// Per-query `QueryConfig::recovery_policy` overrides this.
     /// If neither is set, defaults to `Strict`.
     pub default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
+    /// Opt-in startup validation, not part of persisted query identity.
+    pub require_bootstrap_certification: bool,
 }
 
 impl std::fmt::Debug for RuntimeConfig {
@@ -289,6 +291,10 @@ impl std::fmt::Debug for RuntimeConfig {
             )
             .field("storage_backends", &self.storage_backends)
             .field("default_recovery_policy", &self.default_recovery_policy)
+            .field(
+                "require_bootstrap_certification",
+                &self.require_bootstrap_certification,
+            )
             .finish()
     }
 }
@@ -370,6 +376,7 @@ impl RuntimeConfig {
             global_dispatch_buffer_capacity,
             storage_backends,
             default_recovery_policy,
+            require_bootstrap_certification: false,
         }
     }
 }

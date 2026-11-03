@@ -371,6 +371,9 @@ pub(crate) fn next_output_generation(persisted: u64, ram: u64) -> u64 {
 /// Never continue processing with sequence 0 against non-empty durable output.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DurableOutputInconsistency {
+    /// Bootstrap has no acknowledged durable initial image.
+    #[error("incomplete or legacy bootstrap has no published durable initial snapshot")]
+    MissingBootstrapSnapshot,
     /// Durable outbox high-water is ahead of the stored result sequence.
     #[error("outbox high-water {outbox_hwm} is ahead of stored result sequence {stored_sequence}")]
     OutboxAheadOfSequence {
@@ -412,6 +415,14 @@ impl DurableOutputInconsistency {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BootstrapRecovery {
+    NotRequired,
+    Compatible,
+    Required,
+    Published,
+}
+
 /// Reconcile durable output high-water marks without lowering either side.
 ///
 /// Returns the sequence to install into `QueryOutputState`. The next emitted
@@ -421,16 +432,24 @@ impl DurableOutputInconsistency {
 /// Returns [`DurableOutputInconsistency`] if the stored sequence, outbox
 /// high-water mark, and live row count are not mutually consistent (e.g. a
 /// gapped or duplicate outbox, an outbox ahead of the stored sequence, missing
-/// live rows for a stored sequence, or non-empty durable output with sequence 0).
+/// live rows for a stored sequence, or an unpublished bootstrap at sequence 0).
 pub(crate) fn reconcile_durable_output(
     stored_sequence: Option<u64>,
     outbox_sequences: &[u64],
     live_row_count: usize,
     live_rows_readable: bool,
+    bootstrap: BootstrapRecovery,
 ) -> Result<u64, DurableOutputInconsistency> {
     let stored = stored_sequence.unwrap_or(0);
 
-    if !live_rows_readable && stored > 0 {
+    if stored == 0
+        && (bootstrap == BootstrapRecovery::Required
+            || (bootstrap == BootstrapRecovery::Published && stored_sequence.is_none()))
+    {
+        return Err(DurableOutputInconsistency::MissingBootstrapSnapshot);
+    }
+
+    if !live_rows_readable && (stored > 0 || bootstrap == BootstrapRecovery::Published) {
         return Err(DurableOutputInconsistency::MissingLiveRows {
             stored_sequence: stored,
         });
@@ -452,7 +471,10 @@ pub(crate) fn reconcile_durable_output(
     }
 
     let outbox_hwm = retained.last().copied();
-    if stored == 0 && (live_row_count > 0 || outbox_hwm.is_some()) {
+    if stored == 0
+        && (outbox_hwm.is_some()
+            || (live_row_count > 0 && bootstrap != BootstrapRecovery::Published))
+    {
         return Err(
             DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
                 live_rows: live_row_count,
@@ -760,6 +782,29 @@ impl Stream for OutboxStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[rstest::rstest]
+    #[case::published_empty(Some(0), &[], 0, true, BootstrapRecovery::Published, Ok(0))]
+    #[case::published_rows(Some(0), &[], 2, true, BootstrapRecovery::Published, Ok(0))]
+    #[case::missing_zero(None, &[], 0, true, BootstrapRecovery::Published, Err(DurableOutputInconsistency::MissingBootstrapSnapshot))]
+    #[case::legacy_absent(None, &[], 0, true, BootstrapRecovery::Required, Err(DurableOutputInconsistency::MissingBootstrapSnapshot))]
+    #[case::legacy_explicit_zero(Some(0), &[], 0, true, BootstrapRecovery::Required, Err(DurableOutputInconsistency::MissingBootstrapSnapshot))]
+    #[case::unreadable_rows(Some(0), &[], 0, false, BootstrapRecovery::Published, Err(DurableOutputInconsistency::MissingLiveRows { stored_sequence: 0 }))]
+    #[case::contradictory_outbox(Some(0), &[1], 2, true, BootstrapRecovery::Published, Err(DurableOutputInconsistency::SequenceZeroAgainstDurableOutput { live_rows: 2, outbox_hwm: Some(1) }))]
+    #[case::live_after_bootstrap(Some(1), &[1], 2, true, BootstrapRecovery::Published, Ok(1))]
+    fn bootstrap_recovery_requires_an_explicit_published_image(
+        #[case] sequence: Option<u64>,
+        #[case] outbox: &[u64],
+        #[case] rows: usize,
+        #[case] readable: bool,
+        #[case] bootstrap: BootstrapRecovery,
+        #[case] expected: Result<u64, DurableOutputInconsistency>,
+    ) {
+        assert_eq!(
+            reconcile_durable_output(sequence, outbox, rows, readable, bootstrap),
+            expected
+        );
+    }
     use std::collections::HashMap;
 
     fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
@@ -1090,19 +1135,35 @@ mod tests {
 
     #[test]
     fn reconcile_matching_sequence_and_outbox_hwm() {
-        let seq = reconcile_durable_output(Some(4), &[1, 2, 3, 4], 3, true).unwrap();
+        let seq = reconcile_durable_output(
+            Some(4),
+            &[1, 2, 3, 4],
+            3,
+            true,
+            BootstrapRecovery::NotRequired,
+        )
+        .unwrap();
         assert_eq!(seq, 4);
     }
 
     #[test]
     fn reconcile_does_not_lower_stored_sequence_below_outbox_hwm() {
-        let seq = reconcile_durable_output(Some(5), &[3, 4], 1, true).unwrap();
+        let seq =
+            reconcile_durable_output(Some(5), &[3, 4], 1, true, BootstrapRecovery::NotRequired)
+                .unwrap();
         assert_eq!(seq, 5);
     }
 
     #[test]
     fn reconcile_outbox_ahead_of_sequence_is_inconsistent() {
-        let err = reconcile_durable_output(Some(4), &[1, 2, 3, 4, 5], 3, true).unwrap_err();
+        let err = reconcile_durable_output(
+            Some(4),
+            &[1, 2, 3, 4, 5],
+            3,
+            true,
+            BootstrapRecovery::NotRequired,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             DurableOutputInconsistency::OutboxAheadOfSequence {
@@ -1114,7 +1175,14 @@ mod tests {
 
     #[test]
     fn reconcile_gapped_outbox_is_inconsistent() {
-        let err = reconcile_durable_output(Some(5), &[1, 2, 4, 5], 2, true).unwrap_err();
+        let err = reconcile_durable_output(
+            Some(5),
+            &[1, 2, 4, 5],
+            2,
+            true,
+            BootstrapRecovery::NotRequired,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             DurableOutputInconsistency::GappedOutbox { retained } if retained == vec![1, 2, 4, 5]
@@ -1123,7 +1191,14 @@ mod tests {
 
     #[test]
     fn reconcile_duplicate_outbox_sequence_is_inconsistent() {
-        let err = reconcile_durable_output(Some(3), &[1, 2, 2, 3], 2, true).unwrap_err();
+        let err = reconcile_durable_output(
+            Some(3),
+            &[1, 2, 2, 3],
+            2,
+            true,
+            BootstrapRecovery::NotRequired,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             DurableOutputInconsistency::GappedOutbox { retained } if retained == vec![1, 2, 2, 3]
@@ -1132,7 +1207,14 @@ mod tests {
 
     #[test]
     fn reconcile_missing_live_rows_for_stored_sequence() {
-        let err = reconcile_durable_output(Some(3), &[1, 2, 3], 0, false).unwrap_err();
+        let err = reconcile_durable_output(
+            Some(3),
+            &[1, 2, 3],
+            0,
+            false,
+            BootstrapRecovery::NotRequired,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             DurableOutputInconsistency::MissingLiveRows { stored_sequence: 3 }
@@ -1141,7 +1223,8 @@ mod tests {
 
     #[test]
     fn reconcile_sequence_zero_against_live_rows_is_inconsistent() {
-        let err = reconcile_durable_output(None, &[], 2, true).unwrap_err();
+        let err = reconcile_durable_output(None, &[], 2, true, BootstrapRecovery::NotRequired)
+            .unwrap_err();
         assert_eq!(
             err,
             DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
@@ -1153,7 +1236,9 @@ mod tests {
 
     #[test]
     fn reconcile_sequence_zero_against_outbox_is_inconsistent() {
-        let err = reconcile_durable_output(None, &[1, 2, 3], 0, true).unwrap_err();
+        let err =
+            reconcile_durable_output(None, &[1, 2, 3], 0, true, BootstrapRecovery::NotRequired)
+                .unwrap_err();
         assert_eq!(
             err,
             DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
@@ -1165,8 +1250,15 @@ mod tests {
 
     #[test]
     fn reconcile_empty_durable_output_is_sequence_zero() {
-        assert_eq!(reconcile_durable_output(None, &[], 0, true).unwrap(), 0);
-        assert_eq!(reconcile_durable_output(Some(0), &[], 0, true).unwrap(), 0);
+        assert_eq!(
+            reconcile_durable_output(None, &[], 0, true, BootstrapRecovery::NotRequired).unwrap(),
+            0
+        );
+        assert_eq!(
+            reconcile_durable_output(Some(0), &[], 0, true, BootstrapRecovery::NotRequired)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

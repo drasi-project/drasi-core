@@ -25,12 +25,17 @@ use utoipa::OpenApi;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PostgresSourceConfigDto {
     #[serde(default = "default_postgres_host")]
+    #[schema(schema_with = ConfigValue::<String>::schema)]
     pub host: ConfigValue<String>,
     #[serde(default = "default_postgres_port")]
+    #[schema(schema_with = ConfigValue::<u16>::schema)]
     pub port: ConfigValue<u16>,
+    #[schema(schema_with = ConfigValue::<String>::schema)]
     pub database: ConfigValue<String>,
+    #[schema(schema_with = ConfigValue::<String>::schema)]
     pub user: ConfigValue<String>,
     #[serde(default = "default_password")]
+    #[schema(schema_with = ConfigValue::<String>::schema)]
     pub password: ConfigValue<String>,
     #[serde(default)]
     pub tables: Vec<String>,
@@ -39,7 +44,7 @@ pub struct PostgresSourceConfigDto {
     #[serde(default = "default_publication_name")]
     pub publication_name: String,
     #[serde(default = "default_ssl_mode")]
-    #[schema(value_type = ConfigValue<source::postgres::SslMode>)]
+    #[schema(schema_with = ConfigValue::<SslModeDto>::schema)]
     pub ssl_mode: ConfigValue<SslModeDto>,
     #[serde(default)]
     #[schema(value_type = Vec<source::postgres::TableKeyConfig>)]
@@ -55,6 +60,12 @@ pub enum SslModeDto {
     #[default]
     Prefer,
     Require,
+}
+
+impl utoipa::PartialSchema for SslModeDto {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        <Self as utoipa::ToSchema>::schema().1
+    }
 }
 
 impl FromStr for SslModeDto {
@@ -258,5 +269,34 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
         source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_embeds_canonical_typed_config_schemas() {
+        let schemas: serde_json::Value =
+            serde_json::from_str(&PostgresSourceDescriptor.config_schema_json()).unwrap();
+        let fields = &schemas["source.postgres.PostgresSourceConfig"]["properties"];
+        for name in ["host", "database", "user", "password"] {
+            assert_eq!(
+                fields[name]["anyOf"],
+                serde_json::to_value(ConfigValue::<String>::schema()).unwrap()["anyOf"]
+            );
+        }
+        assert_eq!(
+            fields["port"]["anyOf"],
+            serde_json::to_value(ConfigValue::<u16>::schema()).unwrap()["anyOf"]
+        );
+        assert_eq!(
+            fields["sslMode"]["anyOf"][0]["enum"],
+            serde_json::json!(["disable", "prefer", "require"])
+        );
+        assert!(!schemas
+            .to_string()
+            .contains("#/components/schemas/ConfigValue"));
     }
 }

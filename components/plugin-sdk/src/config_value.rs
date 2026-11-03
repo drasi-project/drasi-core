@@ -56,16 +56,16 @@
 //! #[serde(rename_all = "camelCase")]
 //! pub struct MySourceConfigDto {
 //!     /// Database host
-//!     #[schema(value_type = ConfigValueString)]
+//!     #[schema(schema_with = ConfigValue::<String>::schema)]
 //!     pub host: ConfigValue<String>,
 //!
 //!     /// Database port
-//!     #[schema(value_type = ConfigValueU16)]
+//!     #[schema(schema_with = ConfigValue::<u16>::schema)]
 //!     pub port: ConfigValue<u16>,
 //!
 //!     /// Optional connection timeout in milliseconds
 //!     #[serde(skip_serializing_if = "Option::is_none")]
-//!     #[schema(value_type = Option<ConfigValueU32>)]
+//!     #[schema(schema_with = ConfigValue::<u32>::schema)]
 //!     pub timeout_ms: Option<ConfigValue<u32>>,
 //! }
 //! ```
@@ -122,6 +122,33 @@ pub type ConfigValueU64 = ConfigValue<u64>;
 pub type ConfigValueUsize = ConfigValue<usize>;
 /// Type alias for `ConfigValue<bool>` — commonly used for feature flags.
 pub type ConfigValueBool = ConfigValue<bool>;
+
+impl<T> ConfigValue<T>
+where
+    T: Serialize + DeserializeOwned + Clone + utoipa::PartialSchema,
+{
+    /// Describe canonical serialized values and structured references without unresolved generic refs.
+    pub fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{
+            AdditionalProperties, AnyOfBuilder, ObjectBuilder, SchemaType,
+        };
+        let string = || ObjectBuilder::new().schema_type(SchemaType::String);
+        let reference = |kind| {
+            ObjectBuilder::new()
+                .schema_type(SchemaType::Object)
+                .property("kind", string().enum_values(Some([kind])))
+                .property("name", string())
+                .required("kind")
+                .required("name")
+                .additional_properties(Some(AdditionalProperties::FreeForm(false)))
+        };
+        AnyOfBuilder::new()
+            .item(T::schema())
+            .item(reference("Secret"))
+            .item(reference("EnvironmentVariable").property("default", string()))
+            .into()
+    }
+}
 
 /// OpenAPI schema wrapper for [`ConfigValueString`].
 ///
@@ -394,5 +421,29 @@ mod tests {
     fn test_default() {
         let value: ConfigValue<String> = ConfigValue::default();
         assert_eq!(value, ConfigValue::Static(String::default()));
+    }
+
+    #[test]
+    fn canonical_schemas_include_typed_values_and_complete_reference_shapes() {
+        let schema = serde_json::to_value(ConfigValue::<String>::schema()).unwrap();
+        assert_eq!(
+            schema,
+            serde_json::json!({"anyOf": [
+                {"type": "string"},
+                {"type": "object", "properties": {
+                    "kind": {"type": "string", "enum": ["Secret"]},
+                    "name": {"type": "string"}
+                }, "required": ["kind", "name"], "additionalProperties": false},
+                {"type": "object", "properties": {
+                    "kind": {"type": "string", "enum": ["EnvironmentVariable"]},
+                    "name": {"type": "string"},
+                    "default": {"type": "string"}
+                }, "required": ["kind", "name"], "additionalProperties": false}
+            ]})
+        );
+        let number = serde_json::to_value(ConfigValue::<u16>::schema()).unwrap();
+        assert_eq!(number["anyOf"][0]["type"], "integer");
+        assert_eq!(number["anyOf"][1], schema["anyOf"][1]);
+        assert_eq!(number["anyOf"][2], schema["anyOf"][2]);
     }
 }

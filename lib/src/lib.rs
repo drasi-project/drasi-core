@@ -140,6 +140,9 @@ pub use error::{DrasiError, Result};
 /// Recovery policy and error types for checkpoint-based recovery
 pub use recovery::{ReactionRecoveryPolicy, RecoveryError, RecoveryPolicy};
 
+/// Version of the embedded runtime linked into this build.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
 

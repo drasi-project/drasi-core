@@ -293,16 +293,19 @@ impl DrasiLib {
 
         let middleware_registry = Arc::new(middleware_registry);
 
-        let query_manager = Arc::new(QueryManager::new(
-            &instance_id,
-            source_manager.clone(),
-            config.index_factory.clone(),
-            middleware_registry.clone(),
-            log_registry.clone(),
-            component_graph.clone(),
-            update_tx.clone(),
-            config.default_recovery_policy,
-        ));
+        let query_manager = Arc::new(
+            QueryManager::new(
+                &instance_id,
+                source_manager.clone(),
+                config.index_factory.clone(),
+                middleware_registry.clone(),
+                log_registry.clone(),
+                component_graph.clone(),
+                update_tx.clone(),
+                config.default_recovery_policy,
+            )
+            .with_bootstrap_certification(config.require_bootstrap_certification),
+        );
 
         let reaction_manager = Arc::new(ReactionManager::new(
             &instance_id,

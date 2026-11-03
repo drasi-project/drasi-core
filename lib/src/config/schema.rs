@@ -473,7 +473,8 @@ pub struct QueryConfig {
     /// Can reference a named backend or provide inline configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_backend: Option<StorageBackendRef>,
-    /// Recovery policy when a source cannot honor a requested resume position.
+    /// Startup and gap-recovery policy. `ExistingOnly` requires an existing
+    /// persistent query and refuses initialization or reset.
     /// `None` inherits the global default (itself defaulting to `Strict`).
     /// See [`RecoveryPolicy`](crate::RecoveryPolicy).
     #[serde(

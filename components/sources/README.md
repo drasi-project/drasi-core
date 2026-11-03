@@ -2559,8 +2559,8 @@ pub mod descriptor;
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "my-source",
-    core_version = "0.5.3",
-    lib_version = "0.8.5",
+    core_version = drasi_core::VERSION,
+    lib_version = drasi_lib::VERSION,
     plugin_version = env!("CARGO_PKG_VERSION"),
     source_descriptors = [descriptor::MySourceDescriptor],
     reaction_descriptors = [],
@@ -2568,8 +2568,10 @@ drasi_plugin_sdk::export_plugin!(
 );
 ```
 
-Set `core_version` and `lib_version` to the exact `drasi-core` and `drasi-lib`
-versions used to build the plugin.
+Use the dependency-owned `drasi_core::VERSION` and `drasi_lib::VERSION` constants
+so metadata reports the actual linked versions. `env!("CARGO_PKG_VERSION")`
+belongs only in `plugin_version`; in this crate it reports the plugin's version,
+not either dependency's version.
 
 If the crate also provides a bootstrap provider, implement
 `BootstrapPluginDescriptor` and list it in `bootstrap_descriptors`.

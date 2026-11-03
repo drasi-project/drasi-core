@@ -372,6 +372,69 @@ fn test_log_reaction_config_schema_is_valid_json() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
+async fn test_source_proxy_redaction_survives_ordinary_reinitialization() {
+    use drasi_host_sdk::proxies::source::SourceProxy;
+    use drasi_lib::managers::ComponentLogKey;
+    use drasi_lib::{ComponentStatus, ComponentType, Source, SourceRuntimeContext};
+
+    let plugin = load_plugin_from_path(
+        &require_plugin("drasi-source-mock"),
+        std::ptr::null_mut(),
+        callbacks::redacted_log_callback,
+        std::ptr::null_mut(),
+        callbacks::redacted_lifecycle_callback,
+    )
+    .unwrap();
+    let source = plugin.source_plugins[0]
+        .create_source(
+            "plugin-identity-sentinel",
+            &serde_json::json!({"dataType": {"type": "generic"}, "intervalMs": 1000}),
+            false,
+        )
+        .await
+        .unwrap();
+    let proxy = source.as_any().downcast_ref::<SourceProxy>().unwrap();
+    let (updates, mut receiver) = tokio::sync::mpsc::channel(128);
+    let context = SourceRuntimeContext::new(
+        "redacted-proxy-host",
+        "host-owned-source",
+        None,
+        updates,
+        None,
+    );
+    proxy.initialize_redacted(context.clone()).await;
+    proxy.initialize(context).await;
+    source.start().await.unwrap();
+    source.stop().await.unwrap();
+    let mut stopped = false;
+    while let Ok(update) = receiver.try_recv() {
+        let drasi_lib::component_graph::ComponentUpdate::Status {
+            component_id,
+            status,
+            message,
+        } = update;
+        assert_eq!(component_id, "host-owned-source");
+        assert!(message
+            .as_deref()
+            .is_none_or(|message| !message.contains("sentinel")));
+        stopped |= status == ComponentStatus::Stopped;
+    }
+    assert!(stopped, "real FFI lifecycle callbacks must reach the host");
+    let logs = drasi_lib::managers::get_or_init_global_registry()
+        .get_history_by_key(&ComponentLogKey::new(
+            "redacted-proxy-host",
+            ComponentType::Source,
+            "host-owned-source",
+        ))
+        .await;
+    assert!(!logs.is_empty(), "real FFI logs must reach the host");
+    assert!(logs
+        .iter()
+        .all(|message| message.message == "Plugin log diagnostics redacted"));
+}
+
+#[tokio::test]
 async fn test_create_mock_source_instance() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");

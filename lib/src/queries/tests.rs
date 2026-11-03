@@ -861,6 +861,44 @@ mod manager_tests {
         );
     }
 
+    /// Stopping joins bootstrap receiver ownership before runtime retirement.
+    #[tokio::test]
+    async fn test_stop_joins_bootstrap_before_preserved_retirement() {
+        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
+        let source =
+            create_test_bootstrap_mock_source("joined-bs-source".to_string(), bootstrap_rx);
+        add_source(&source_manager, &graph, source).await.unwrap();
+        add_query(
+            &manager,
+            &graph,
+            create_test_query_config("joined-bs-query", vec!["joined-bs-source".into()]),
+        )
+        .await
+        .unwrap();
+        manager.start_query("joined-bs-query".into()).await.unwrap();
+        assert!(!bootstrap_tx.is_closed());
+        manager.stop_query("joined-bs-query".into()).await.unwrap();
+        assert!(
+            bootstrap_tx.is_closed(),
+            "Stopped must have joined the bootstrap receiver owner"
+        );
+        crate::component_graph::wait_for_status(
+            &graph,
+            "joined-bs-query",
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        manager
+            .remove_query_preserving_state("joined-bs-query".into())
+            .await
+            .unwrap();
+        assert!(!graph.read().await.contains("joined-bs-query"));
+        assert!(graph.read().await.contains("joined-bs-source"));
+    }
+
     /// Test that deleting a query cleans up its log history
     #[tokio::test]
     async fn test_delete_query_cleans_up_log_history() {

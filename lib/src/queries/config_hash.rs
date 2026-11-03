@@ -16,11 +16,13 @@
 //!
 //! On query restart with a persistent index, we compare a hash of the query's
 //! identity-defining config against the hash stored alongside the index. A
-//! mismatch triggers an automatic wipe + re-bootstrap
+//! mismatch triggers an automatic wipe + re-bootstrap unless `ExistingOnly`
+//! recovery is selected, in which case startup fails without changing state
 //! (see design doc 02 §3 — Reading Checkpoints on Startup).
 //!
 //! Source ordering ranks are part of the identity. Hashes written before ranks
-//! were included will mismatch once, triggering a full re-bootstrap on upgrade.
+//! were included will mismatch once, triggering a full re-bootstrap on upgrade
+//! (or failing startup under `ExistingOnly`).
 //!
 //! We use `fnv` rather than `std::hash::DefaultHasher` because `DefaultHasher`
 //! is explicitly documented as unstable across Rust versions — upgrading the

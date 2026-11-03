@@ -271,7 +271,7 @@ let config = Query::gql("active-orders")
 | `with_dispatch_mode(DispatchMode)` | `Channel` (backpressure) or `Broadcast` (fanout) | `Channel` |
 | `with_outbox_capacity(usize)` | Number of recent results retained for reaction replay | `1,000` |
 | `with_storage_backend(StorageBackendRef)` | Persistent storage for this query | In-memory |
-| `with_recovery_policy(RecoveryPolicy)` | Gap-recovery behavior for persistent queries (`Strict` fails on gap, `AutoReset` wipes + re-bootstraps) | `Strict` (via global default) |
+| `with_recovery_policy(RecoveryPolicy)` | Persistent startup/gap recovery: `Strict` fails on gaps, `AutoReset` rebuilds, `ExistingOnly` refuses initialization/reset | `Strict` (via global default) |
 | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
 | `build() -> QueryConfig` | Build the configuration | — |
 
@@ -289,7 +289,7 @@ those checkpoints still preserve a committed sequence-zero result snapshot.
 that has no committed result sequence. Source checkpoints alone do not prove
 that the initial result snapshot was persisted. Replacement bootstraps after a
 configuration change or `AutoReset` retain the existing reset-in-progress marker
-until their handover commits. A reset-created result sequence zero alone does not
+until publication marks their handover complete. A reset-created result sequence zero alone does not
 prove completion: `Strict` rejects an interrupted replacement, while `AutoReset`
 clears partial indexes and bootstraps again.
 The explicit `AutoReset` policy rebuilds output, indexes and checkpoints from
@@ -453,7 +453,7 @@ are returned after the remaining cleanup is attempted. Repeated calls are safe;
 concurrent shutdown calls wait for teardown to complete.
 
 Application sources finish any in-flight WAL pruning before stopping. Queries
-join all bootstrap workers but cancel blocked bootstrap-completion dispatch
+join the bootstrap-owning processor but cancel blocked bootstrap-completion dispatch
 during stop, so an undrained result subscription cannot hold shutdown open.
 
 After shutdown, drop all `DrasiLib` clones and caller-held component/provider
@@ -1037,6 +1037,156 @@ downstream checkpoint consequences considered. The existing opt-in query
 `AutoReset` policy rebuilds output **and** indexes/checkpoints; clearing only the
 outbox is not a safe migration. This change performs no automatic migration and
 does not change recovery policies.
+
+#### Durable Initial Snapshots
+
+The query processor owns bootstrap evaluation and publication before processing
+live changes. A persistent bootstrap requires checkpoint, live-results, outbox,
+and session capabilities. Evaluation or source completion errors fail readiness
+instead of exposing a partial snapshot. By default, sources without bootstrap
+providers retain their existing streaming behavior, including mixed-provider
+queries.
+
+Hosts that need a certified complete initial image must opt in explicitly:
+
+```rust,ignore
+DrasiLib::builder()
+    .with_bootstrap_certification(true)
+    // Register the persistent index provider and sources as usual.
+    .build()
+    .await?;
+```
+
+This runtime-wide startup-validation policy defaults to `false` and does not
+change `QueryConfig`, the successful query's config hash, or FFI layouts. In this
+mode, every source requested with `enable_bootstrap=true` must supply a stream,
+a successful completion, and a bounded opaque handover position. Even an absent
+stream/completion pair is refused. A query with `enable_bootstrap=false` can
+certify an empty image instead.
+
+The SDK marks initial publication as pending before evaluating bootstrap events.
+It then commits the complete keyed result image, every source handover, and an
+explicit result sequence of zero, and reads them back from storage. Only after
+successful readback does it publish the completed marker (or the ordinary config
+hash in default compatibility mode) and expose a ready
+snapshot. Bootstrap does not emit historical outbox entries or advance the output
+generation. The first subsequent result change has sequence one; a live event
+with no result change advances its source checkpoint without advancing that
+sequence. Empty snapshots follow the same publication protocol.
+
+The persisted config-hash slot distinguishes ordinary identity `H`, incomplete
+reset `!H`, pending initial publication `H.wrapping_add(4)`, and certified
+completion `H.wrapping_add(2)`. Both modes recognize certified completion and
+refuse a pending publication under `Strict`; neither treats these as ordinary
+config mismatches. Snapshot and
+outbox responses continue to expose the ordinary semantic config hash. This
+changes the interpretation of existing metadata, not its encoding or FFI layout.
+Full-output persistent providers also publish an empty initial image when
+bootstrap is disabled. Checkpoint-only providers retain streaming-only operation
+but cannot perform durable bootstrap.
+
+An interrupted publication refuses recovery under `Strict` and `ExistingOnly`;
+an explicit `AutoReset` rebuild is required. With certification enabled (or under
+`ExistingOnly`), legacy zero-sequence state without a completed marker also
+refuses recovery, even if it contains an explicit zero and
+appears empty: it cannot prove that bootstrap rows were ever persisted. Legacy
+positive-sequence state retains the existing output consistency checks; it is not
+retrospectively certified by this protocol. Default compatibility mode retains
+the existing checkpoint-based admission of legacy bootstrap snapshots.
+Changing a source from streaming-only
+to bootstrap-enabled can refuse recovery if its saved handover has no opaque
+position.
+
+Stopping joins the owned processor before releasing source positions or reporting
+`Stopped`. A join timeout retains the task and returns an error; a failed task join
+continues to fail later stops. Permanent shutdown propagates stop failures and
+retains the graph loop and persistent handles. Retrying shutdown after a cancelled
+or timed-out attempt joins unfinished work before releasing those handles.
+
+#### Recovering an Existing Persistent Query Without Reset
+
+Opt in when reopening a query whose state must not be recreated:
+
+```rust
+use drasi_lib::{Query, RecoveryPolicy, StorageBackendRef};
+
+let query = Query::cypher("q1")
+    .query("MATCH (n:Sensor) RETURN n.id, n.value")
+    .from_source("sensors")
+    .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+    .with_recovery_policy(RecoveryPolicy::ExistingOnly)
+    .build();
+```
+
+`ExistingOnly` requires a persistent checkpoint store with an existing, readable,
+matching config hash. Missing/mismatched hashes (including incomplete-reset markers),
+checkpoint read errors, and unreadable or inconsistent durable output fail startup
+before reset, logical-state writes, or source subscription. Output is revalidated
+even on a same-process stop/start. An unchanged valid query retains its generation,
+live results, outbox, and source resume positions. An unavailable source position
+also fails without resetting; detecting it can require a subscription attempt.
+Backend opening may create physical files or empty databases, so this is a
+logical-state guarantee, not a read-only filesystem API.
+
+Create genuinely new queries with the default `Strict` policy (or `AutoReset`),
+then select `ExistingOnly` for recovery. `Strict` still initializes new queries
+and rebuilds on ordinary config-hash changes. Unreadable native/full-output
+metadata never authorizes a reset. The default legacy checkpoint-only,
+non-bootstrap path retains its existing read-failure rebuild behavior.
+Incomplete initial
+publication and uncertified zero-sequence output refuse as described above.
+A runtime-wide opt-in is available through
+`DrasiLib::builder().with_default_recovery_policy(RecoveryPolicy::ExistingOnly)`;
+per-query policies override it. JSON/YAML uses `recoveryPolicy: existing_only`.
+Recovery policy is not part of the persisted config hash.
+
+For a query already created under `Strict` or `AutoReset`, use the managed
+per-start operation instead of rebuilding the graph or changing its configuration:
+
+```rust
+// After stopping the query and observing ComponentStatus::Stopped:
+core.start_query_existing("q1").await?;
+```
+
+`DrasiLib::start_query_existing(&str)` and
+`core.query_manager().start_query_existing(String)` apply `ExistingOnly` only to
+that start. They reuse the existing runtime and normal graph transition validation,
+revalidate durable output even when it is already cached in RAM, and leave the
+configured policy unchanged for subsequent `start_query` calls. Sources can stay
+running. A failed start enters `Error`; use normal `stop_query`, observe `Stopped`,
+then retry after resolving the failure. Neither operation grants new-query
+creation authority or removes persistent state. Custom `Query` implementations
+must explicitly implement `start_existing`; its default rejects the operation
+rather than falling back to ordinary startup.
+
+Adding `ExistingOnly` extends the public `RecoveryPolicy` enum: downstream
+exhaustive matches must handle the new variant. The durable initial-snapshot
+protocol also adds `DurableOutputInconsistency::MissingBootstrapSnapshot`.
+No plugin FFI layout changes are required; metadata compatibility is described above.
+
+#### Retiring a Query Without Deleting Persistent State
+
+After normal `stop_query` has completed and `Stopped` has been observed:
+
+```rust
+core.remove_query_preserving_state("q1").await?;
+```
+
+This removes the query runtime and graph registration, evicts its cached labels
+and instance-scoped logs, and releases its persistent handles. Both graph and
+runtime must be `Stopped`, all owned tasks must be joined, and no dependents may
+remain. Active, failed, unknown, or unsupported custom runtimes are refused
+without removal; preparation and deregistration errors are returned.
+`core.query_manager().remove_query_preserving_state(String)` provides the same
+managed operation, including graph deregistration.
+
+All persistent index, checkpoint, outbox, live-result, sequence, and generation
+bytes are retained. Re-add the same ID, query identity, and backend using
+`RecoveryPolicy::ExistingOnly` with automatic start disabled, then call
+`start_query_existing` to recover them. Sources need not be stopped. Ordinary
+`remove_query` still clears persistent state; it is not a retirement operation.
+Custom `Query` implementations must explicitly support
+`prepare_for_removal_preserving_state`; its default rejects retirement.
 
 ### Result Format
 
