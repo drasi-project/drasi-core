@@ -179,14 +179,14 @@ async fn position_replay_keeps_handled_cursor_and_rejects_new_position_sequence_
     )?);
     owner.bind_input_boundary(
         &ComponentId::try_new("source")?,
-        ComponentRole::Source,
+        crate::computation::v1::ProducerBoundary::Origin,
         Some(policy.clone()),
         vec![StreamId::try_new("source/out")?],
     )?;
     assert!(owner
         .bind_input_boundary(
             &ComponentId::try_new("another-producer")?,
-            ComponentRole::Source,
+            crate::computation::v1::ProducerBoundary::Origin,
             Some(policy),
             vec![StreamId::try_new("source/out")?],
         )
@@ -218,7 +218,7 @@ async fn malformed_initial_position_fails_before_becoming_handled() -> anyhow::R
     let (mut query, owner) = query().await?;
     owner.bind_input_boundary(
         &ComponentId::try_new("source")?,
-        ComponentRole::Source,
+        crate::computation::v1::ProducerBoundary::Origin,
         Some(Arc::new(InputPositionPolicy::new(
             SourceProgressKey::Source("source".into()),
             Arc::new(OneBytePosition),

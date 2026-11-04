@@ -598,7 +598,7 @@ async fn run_query(
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut graph = ComputationGraph::builder("query-graph")
         .source(Box::new(source(changes)))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(sink("sink", events.clone())))
         .bind_stream(endpoint("source", "out"), stream("source/out"))
         .bind_stream(endpoint("query", "out"), stream("query/out"))
@@ -687,7 +687,7 @@ async fn source_fanout_to_real_queries_and_multiple_sinks(fault: Option<(&str, &
         let results = query.results();
         owners.push(progress);
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -821,7 +821,7 @@ async fn consumer_changes_await_the_feedback_producer_stop() {
                 .unwrap();
         owners.push(owner);
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -1099,7 +1099,7 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink_id = format!("{name}-sink");
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(sink(&sink_id, events.clone())))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(

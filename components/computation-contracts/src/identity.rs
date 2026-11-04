@@ -39,11 +39,14 @@ impl ImplementationIdentity {
     }
 }
 
+/// A component's execution role: its port shape and lifecycle contract.
+///
+/// Continuous queries execute as [`ComponentRole::Transformer`] and declare
+/// [`ComponentSemanticKind::Query`] on their descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ComponentRole {
     Source,
     Transformer,
-    Query,
     Sink,
     Service,
 }
@@ -65,7 +68,6 @@ impl From<ComponentRole> for ComponentSemanticKind {
         match role {
             ComponentRole::Source => Self::Source,
             ComponentRole::Transformer => Self::Transformer,
-            ComponentRole::Query => Self::Query,
             ComponentRole::Sink => Self::Sink,
             ComponentRole::Service => Self::Service,
         }

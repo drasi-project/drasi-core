@@ -97,6 +97,18 @@ fn service() -> Service {
 
 async fn instance(component: Service) -> DrasiLib {
     DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(
             ComponentBatch::builder()
                 .service(Box::new(component))
@@ -309,6 +321,18 @@ async fn stop_during_failure_cleanup() {
         .unwrap()
         .auto_start(false);
     let core = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(batch)
         .build()
         .await

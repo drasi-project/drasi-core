@@ -316,7 +316,7 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
 async fn test_source_log_streaming() {
     let source = TestSource::new("test-source-logs").expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -374,7 +374,7 @@ async fn test_source_log_streaming() {
 async fn test_source_event_streaming() {
     let source = TestSource::new("test-source-events").expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -444,7 +444,7 @@ async fn test_query_event_streaming() {
         .query("MATCH (n) RETURN n")
         .build();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .build()
@@ -514,7 +514,7 @@ async fn test_query_log_streaming() {
         .query("MATCH (n) RETURN n")
         .build();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .build()
@@ -555,7 +555,7 @@ async fn test_reaction_event_streaming() {
         vec!["reaction-event-query".to_string()],
     );
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -628,7 +628,7 @@ async fn test_reaction_log_streaming() {
 
     let reaction = TestReaction::new("test-reaction-logs", vec!["reaction-log-query".to_string()]);
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -691,7 +691,7 @@ async fn test_full_lifecycle_streaming() {
         vec!["full-lifecycle-query".to_string()],
     );
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -803,7 +803,7 @@ async fn test_full_lifecycle_streaming() {
 /// Test that subscribing to non-existent components fails gracefully.
 #[tokio::test]
 async fn test_subscribe_nonexistent_component() {
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .build()
         .await
         .expect("Failed to build DrasiLib");
@@ -836,7 +836,7 @@ async fn test_subscribe_nonexistent_component() {
 async fn test_log_levels_captured() {
     let source = TestSource::new("log-levels-source").expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await

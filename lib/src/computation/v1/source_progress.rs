@@ -128,13 +128,13 @@ impl SourceProgressReader {
 }
 
 struct InputPositionBinding {
-    role: super::ComponentRole,
+    producer: super::ProducerBoundary,
     policy: Option<Arc<super::InputPositionPolicy>>,
     paths: BTreeSet<Vec<StreamId>>,
 }
 
 pub(super) struct InputBoundary {
-    pub role: super::ComponentRole,
+    pub producer: super::ProducerBoundary,
     pub policy: Option<Arc<super::InputPositionPolicy>>,
     pub system: Arc<super::SystemMetadata>,
     pub distinct_ancestor: bool,
@@ -188,6 +188,7 @@ pub struct QuerySourceProgress {
     input_positions: std::sync::RwLock<BTreeMap<ComponentId, InputPositionBinding>>,
     has_input_positions: AtomicBool,
     volatile_writer: std::sync::Mutex<Option<VolatileWriter>>,
+    committed_writer: std::sync::Mutex<std::sync::Weak<()>>,
 }
 
 impl SourceProgressProvider for QuerySourceProgress {
@@ -229,6 +230,7 @@ impl QuerySourceProgress {
             input_positions: std::sync::RwLock::new(BTreeMap::new()),
             has_input_positions: AtomicBool::new(false),
             volatile_writer: std::sync::Mutex::new(None),
+            committed_writer: std::sync::Mutex::new(std::sync::Weak::new()),
         })
     }
     pub fn graph_id(&self) -> &str {
@@ -256,6 +258,14 @@ impl QuerySourceProgress {
     }
 
     pub(super) fn claim_volatile_writer(&self, identity: &Arc<()>) -> anyhow::Result<()> {
+        let committed = self
+            .committed_writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query progress writer poisoned"))?;
+        anyhow::ensure!(
+            committed.upgrade().is_none(),
+            "query progress already has a committed writer"
+        );
         let mut writer = self
             .volatile_writer
             .lock()
@@ -307,7 +317,7 @@ impl QuerySourceProgress {
     pub(super) fn bind_input_boundary(
         &self,
         producer: &ComponentId,
-        role: super::ComponentRole,
+        boundary: super::ProducerBoundary,
         policy: Option<Arc<super::InputPositionPolicy>>,
         path: Vec<StreamId>,
     ) -> anyhow::Result<()> {
@@ -330,7 +340,7 @@ impl QuerySourceProgress {
             let previous = bound.policy.as_ref().map(|policy| policy.key());
             let next = policy.as_ref().map(|policy| policy.key());
             if bound_producer == producer {
-                anyhow::ensure!(previous == next && bound.role == role,
+                anyhow::ensure!(previous == next && bound.producer == boundary,
                     "producer changed its input replay identity without reconstructing its consumer");
             } else {
                 anyhow::ensure!(
@@ -357,7 +367,7 @@ impl QuerySourceProgress {
         let binding = positions
             .entry(producer.clone())
             .or_insert_with(|| InputPositionBinding {
-                role,
+                producer: boundary,
                 policy: policy.clone(),
                 paths: BTreeSet::new(),
             });
@@ -388,7 +398,7 @@ impl QuerySourceProgress {
                         "input matches more than one producer replay position"
                     );
                     selected = Some(InputBoundary {
-                        role: binding.role,
+                        producer: binding.producer,
                         policy: binding.policy.clone(),
                         system,
                         distinct_ancestor,
@@ -531,6 +541,281 @@ impl QuerySourceProgress {
 /// It never registers a legacy Source position handle or controls another pipeline.
 pub struct QuerySourceProgressResource(pub Arc<QuerySourceProgress>);
 
+/// One graph component's progress publication, bound to its actual transaction
+/// owner. Readers retain only the publication, never the indexes or database.
+pub struct CommittedProgressPublication {
+    progress: Arc<QuerySourceProgress>,
+    owner: std::sync::Mutex<CommittedPublicationOwner>,
+    _writer: Arc<()>,
+    volatile: bool,
+    atomic: bool,
+}
+
+struct CommittedPublicationOwner {
+    transaction: std::sync::Weak<drasi_core::computation::ComputationTransaction>,
+    generation: u64,
+    bootstrap_managed: bool,
+}
+
+impl CommittedProgressPublication {
+    pub fn new(graph: impl Into<Arc<str>>, component: ComponentId) -> anyhow::Result<Self> {
+        Self::for_reader(Arc::new(QuerySourceProgress::new(graph, component)?))
+    }
+
+    /// Claim one fresh graph-provided progress view. It remains paired with one
+    /// actual writer; matching graph/component names cannot create a second owner.
+    pub fn for_reader(progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
+        Self::with_mode(progress, false, true)
+    }
+
+    /// Publish completed volatile work without claiming atomicity or restart durability.
+    pub fn for_volatile_reader(progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
+        Self::with_mode(progress, true, false)
+    }
+
+    /// Publish only after the non-atomic publication protocol has completed.
+    pub fn for_non_atomic_reader(progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
+        Self::with_mode(progress, false, false)
+    }
+
+    fn with_mode(
+        progress: Arc<QuerySourceProgress>,
+        volatile: bool,
+        atomic: bool,
+    ) -> anyhow::Result<Self> {
+        let mut writer = progress
+            .committed_writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query progress writer poisoned"))?;
+        anyhow::ensure!(
+            writer.upgrade().is_none(),
+            "query progress already has a committed writer"
+        );
+        let snapshot = progress.snapshot();
+        anyhow::ensure!(
+            !snapshot.ready
+                && !snapshot.recovered
+                && snapshot.failure.is_none()
+                && !progress.replay_only(),
+            "committed progress requires an uninitialized query progress view"
+        );
+        anyhow::ensure!(
+            progress
+                .volatile_writer
+                .lock()
+                .map_err(|_| anyhow::anyhow!("query progress writer poisoned"))?
+                .is_none(),
+            "query progress already has a volatile writer"
+        );
+        let token = Arc::new(());
+        *writer = Arc::downgrade(&token);
+        drop(writer);
+        Ok(Self {
+            progress,
+            _writer: token,
+            volatile,
+            atomic,
+            owner: std::sync::Mutex::new(CommittedPublicationOwner {
+                transaction: std::sync::Weak::new(),
+                generation: 1,
+                bootstrap_managed: false,
+            }),
+        })
+    }
+
+    pub fn reader(&self) -> Arc<QuerySourceProgress> {
+        self.progress.clone()
+    }
+
+    pub fn generation(&self) -> anyhow::Result<u64> {
+        Ok(self
+            .owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("committed progress owner poisoned"))?
+            .generation)
+    }
+
+    pub fn bind_owner(
+        &self,
+        owner: &Arc<drasi_core::computation::ComputationTransaction>,
+    ) -> anyhow::Result<()> {
+        if self.volatile {
+            anyhow::ensure!(
+                !owner
+                    .resources()
+                    .checkpoint_store()
+                    .is_some_and(|store| store.is_persistent()),
+                "volatile progress cannot adopt persistent checkpoints"
+            );
+        } else {
+            if self.atomic {
+                owner.resources().atomic_result_transaction()?;
+                owner
+                    .resources()
+                    .durability()
+                    .require(drasi_core::interface::FailureMode::ProcessRestart)?;
+            }
+            anyhow::ensure!(
+                owner
+                    .resources()
+                    .checkpoint_store()
+                    .is_some_and(|store| store.is_persistent()),
+                "committed progress requires the actual persistent checkpoint store"
+            );
+        }
+        let mut current = self
+            .owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("committed progress owner poisoned"))?;
+        anyhow::ensure!(
+            current.transaction.upgrade().is_none(),
+            "committed progress still has an active storage owner"
+        );
+        current.transaction = Arc::downgrade(owner);
+        Ok(())
+    }
+
+    fn active_owner(
+        state: &CommittedPublicationOwner,
+        generation: u64,
+    ) -> anyhow::Result<Arc<drasi_core::computation::ComputationTransaction>> {
+        anyhow::ensure!(
+            state.generation == generation,
+            "committed progress publication is revoked"
+        );
+        let owner = state
+            .transaction
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("committed progress storage owner is inactive"))?;
+        anyhow::ensure!(
+            !owner.recovery_required(),
+            "committed progress storage owner is fenced"
+        );
+        Ok(owner)
+    }
+
+    /// Called only after this owner's operation has confirmed its commit.
+    pub fn publish_committed(
+        &self,
+        generation: u64,
+        mut snapshot: SourceProgressSnapshot,
+        bootstrap_complete: Option<bool>,
+    ) -> anyhow::Result<()> {
+        let mut state = self
+            .owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("committed progress owner poisoned"))?;
+        let owner = Self::active_owner(&state, generation)?;
+        state.bootstrap_managed |= bootstrap_complete.is_some();
+        snapshot.persistent = !self.volatile
+            && owner
+                .resources()
+                .checkpoint_store()
+                .is_some_and(|store| store.is_persistent());
+        self.progress.state.send_modify(|current| {
+            snapshot.ready = current.ready;
+            snapshot.admitting = current.admitting;
+            snapshot.bootstrap_complete = bootstrap_complete.unwrap_or(current.bootstrap_complete);
+            snapshot.failure = current.failure.clone();
+            *current = Arc::new(snapshot);
+        });
+        Ok(())
+    }
+
+    pub fn ready(&self, generation: u64) -> anyhow::Result<()> {
+        let state = self
+            .owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("committed progress owner poisoned"))?;
+        Self::active_owner(&state, generation)?;
+        let mut result = Ok(());
+        self.progress.state.send_if_modified(|snapshot| {
+            if !snapshot.recovered
+                || state.bootstrap_managed && !snapshot.bootstrap_complete
+                || snapshot.failure.is_some()
+            {
+                result = Err(anyhow::anyhow!(
+                    "processing did not recover its committed input progress"
+                ));
+                return false;
+            }
+            let snapshot = Arc::make_mut(snapshot);
+            snapshot.ready = true;
+            snapshot.admitting = true;
+            snapshot.bootstrap_complete = true;
+            true
+        });
+        result
+    }
+
+    pub fn fail(
+        &self,
+        generation: u64,
+        additional_failure: Option<&std::sync::atomic::AtomicBool>,
+    ) {
+        match self.owner.lock() {
+            Ok(state) if state.generation == generation => {
+                if let Some(failure) = additional_failure {
+                    failure.store(true, std::sync::atomic::Ordering::Release);
+                }
+                self.progress.fail();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(failure) = additional_failure {
+                    failure.store(true, std::sync::atomic::Ordering::Release);
+                }
+                self.progress.fail();
+                log::error!("committed progress failure publication poisoned: {error}");
+            }
+        }
+    }
+
+    pub fn reset_after_close(&self) -> anyhow::Result<()> {
+        let mut state = self
+            .owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("committed progress owner poisoned"))?;
+        anyhow::ensure!(
+            state.transaction.upgrade().is_none(),
+            "committed progress cannot reset before its actual owner is released"
+        );
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("committed progress generation exhausted"))?;
+        state.bootstrap_managed = false;
+        self.progress.publish(SourceProgressSnapshot::default());
+        Ok(())
+    }
+
+    pub fn reset_after_quiesce(
+        &self,
+        owner: &Arc<drasi_core::computation::ComputationTransaction>,
+    ) -> anyhow::Result<()> {
+        let mut state = self
+            .owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("committed progress owner poisoned"))?;
+        anyhow::ensure!(
+            self.volatile
+                && !owner.recovery_required()
+                && state
+                    .transaction
+                    .upgrade()
+                    .is_some_and(|actual| Arc::ptr_eq(&actual, owner)),
+            "only this healthy volatile owner can resume after quiescence"
+        );
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("committed progress generation exhausted"))?;
+        state.bootstrap_managed = false;
+        self.progress.publish(SourceProgressSnapshot::default());
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +839,37 @@ mod tests {
 
     fn owner() -> Arc<QuerySourceProgress> {
         Arc::new(QuerySourceProgress::new("graph", ComponentId::try_new("query").unwrap()).unwrap())
+    }
+
+    #[test]
+    fn committed_publication_claims_the_actual_reader_exclusively() -> anyhow::Result<()> {
+        let reader = owner();
+        let publication = CommittedProgressPublication::for_reader(reader.clone())?;
+        assert!(Arc::ptr_eq(&reader, &publication.reader()));
+        assert!(CommittedProgressPublication::for_reader(reader.clone()).is_err());
+        assert!(reader.claim_volatile_writer(&Arc::new(())).is_err());
+        drop(publication);
+        let replacement = CommittedProgressPublication::for_reader(reader.clone())?;
+        assert!(Arc::ptr_eq(&reader, &replacement.reader()));
+        Ok(())
+    }
+
+    #[test]
+    fn committed_publication_cannot_adopt_an_existing_writer_or_recovered_state(
+    ) -> anyhow::Result<()> {
+        let reader = owner();
+        let identity = Arc::new(());
+        reader.claim_volatile_writer(&identity)?;
+        assert!(CommittedProgressPublication::for_reader(reader.clone()).is_err());
+        reader.release_volatile_writer(&identity)?;
+        assert!(CommittedProgressPublication::for_reader(reader).is_err());
+        let reader = owner();
+        reader.publish(SourceProgressSnapshot {
+            recovered: true,
+            ..Default::default()
+        });
+        assert!(CommittedProgressPublication::for_reader(reader).is_err());
+        Ok(())
     }
 
     #[test]

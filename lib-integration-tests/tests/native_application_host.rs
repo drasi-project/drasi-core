@@ -37,7 +37,10 @@ struct QueryOutput {
 
 impl Application {
     async fn new(scope: &str) -> Result<Self> {
-        let core = DrasiLib::builder().with_id(scope).build().await?;
+        let core = lib_integration_tests::query_builder()
+            .with_id(scope)
+            .build()
+            .await?;
         core.start().await?;
         let control = core.computation_control()?;
         let (source, input) = NativeApplicationSource::channel(
@@ -472,7 +475,10 @@ async fn late_source_case(
 ) -> Result<()> {
     let scope =
         format!("native-late-source-{auto_start}-{explicit_stop}-{update}-{initial_source}");
-    let core = DrasiLib::builder().with_id(&scope).build().await?;
+    let core = lib_integration_tests::query_builder()
+        .with_id(&scope)
+        .build()
+        .await?;
     let result = async {
         core.start().await?;
         let output = Endpoint::new(
@@ -1030,7 +1036,7 @@ async fn custom_inputs_are_not_replaced() -> Result<()> {
 }
 
 async fn native_pipeline_validates_configuration() -> Result<()> {
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id("native-input-validation")
         .build()
         .await?;

@@ -29,6 +29,18 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>) {
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("runtime-parity")
             .with_source(TestMockSource::new("source".into()).unwrap())
             .with_query(
@@ -63,7 +75,11 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
         let snapshot = native.inspector().snapshot();
         let id = ComponentId::try_new("query").unwrap();
         let specification = &snapshot.desired.specifications[&id];
-        assert_eq!(specification.role, ComponentRole::Query);
+        assert_eq!(specification.role, ComponentRole::Transformer);
+        assert_eq!(
+            specification.descriptor.semantic_kind(),
+            Some(ComponentSemanticKind::Query)
+        );
         assert_eq!(
             specification.implementation.name.as_ref(),
             "drasi/continuous-query"
@@ -411,6 +427,18 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
         }
     }
     let core = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(FailingSource)
         .with_source(TestMockSource::new("good".into()).unwrap())
         .with_query(

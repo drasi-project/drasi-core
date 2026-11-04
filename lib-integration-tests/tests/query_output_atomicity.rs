@@ -939,7 +939,7 @@ async fn build_core(
             .await;
     }
     let wal = Arc::new(RedbWalProvider::new(&opts.wal));
-    let mut builder = DrasiLib::builder()
+    let mut builder = lib_integration_tests::query_builder()
         .with_id("query-output-atomicity")
         .with_source(source)
         .with_query(

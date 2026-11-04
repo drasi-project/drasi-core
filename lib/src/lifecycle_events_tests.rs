@@ -36,6 +36,18 @@ mod tests {
     /// Build a minimal DrasiLib instance for testing.
     async fn create_test_core() -> DrasiLib {
         DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("lifecycle-event-test")
             .build()
             .await
@@ -230,6 +242,18 @@ mod tests {
         // Queries depend on sources, so add a source first.
         let source = TestMockSource::with_auto_start("q-src".to_string(), false).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("query-lifecycle-test")
             .with_source(source)
             .build()
@@ -338,6 +362,18 @@ mod tests {
         // Reactions depend on queries, which depend on sources.
         let source = TestMockSource::with_auto_start("r-src".to_string(), false).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("reaction-lifecycle-test")
             .with_source(source)
             .with_query(
@@ -656,6 +692,18 @@ mod tests {
     async fn test_add_duplicate_query_fails() {
         let source = TestMockSource::with_auto_start("dup-q-src".to_string(), false).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("dup-query-test")
             .with_source(source)
             .build()
@@ -730,6 +778,18 @@ mod tests {
     async fn test_remove_source_with_dependent_query_fails() {
         let source = TestMockSource::with_auto_start("dep-src".to_string(), false).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("dep-test")
             .with_source(source)
             .build()
@@ -755,6 +815,18 @@ mod tests {
     async fn test_remove_query_with_dependent_reaction_fails() {
         let source = TestMockSource::with_auto_start("dep2-src".to_string(), false).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("dep2-test")
             .with_source(source)
             .with_query(

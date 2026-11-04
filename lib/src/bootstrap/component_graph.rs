@@ -240,6 +240,18 @@ mod tests {
     #[tokio::test]
     async fn test_new_creates_provider_with_graph_reference() {
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-instance")
             .build()
             .await
@@ -251,6 +263,18 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_empty_graph() {
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-instance")
             .build()
             .await
@@ -285,6 +309,18 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_with_sources_and_queries() {
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-instance")
             .with_source(crate::sources::tests::TestMockSource::new("src1".into()).unwrap())
             .with_source(crate::sources::tests::TestMockSource::new("src2".into()).unwrap())
@@ -339,6 +375,18 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_emitted_labels_match_component_kind() {
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-instance")
             .with_source(crate::sources::tests::TestMockSource::new("my-source".into()).unwrap())
             .with_query(

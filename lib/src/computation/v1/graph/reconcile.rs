@@ -2053,6 +2053,40 @@ async fn drive_reconciliation<T>(
     }
 }
 
+/// Waits for stops that failure propagation started on the affected
+/// components. They finish on their own, so a change requested while one
+/// is still releasing resources waits instead of being rejected.
+pub(super) async fn settle_propagated_stops(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    commands: &mut CommandReceiver,
+    affected: &BTreeSet<usize>,
+) -> GraphResult<()> {
+    let deadline = tokio::time::Instant::now() + graph.cleanup_timeout;
+    let mut observed = graph.observed.subscribe();
+    while !operations.propagated_stop.is_disjoint(affected) {
+        observed.borrow_and_update();
+        drive_reconciliation(
+            graph,
+            operations,
+            controls,
+            cancel,
+            commands,
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            async {
+                observed
+                    .changed()
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn settle_retirements(
     graph: &mut ComputationGraph,
     operations: &mut Operations,

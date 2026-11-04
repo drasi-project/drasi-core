@@ -76,13 +76,9 @@ impl Runtime {
                 }
             }
             if candidate.is_none() {
-                let native_factory = ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation
-                    .clone();
                 for (query, specification) in &publication.desired.specifications {
                     if attempted.contains(query)
-                        || specification.implementation != native_factory
+                        || !publication.has_query_authoring(specification)
                         || !specification.configuration.contains_key("query_config")
                         || publication
                             .observed
@@ -594,13 +590,9 @@ impl Runtime {
         &self,
         publication: &GraphRegistrySnapshot,
     ) -> anyhow::Result<BTreeMap<ComponentId, Arc<OrdinaryQueryDeclaration>>> {
-        let implementation = ContinuousQueryFactory::default()
-            .descriptor()
-            .implementation
-            .clone();
         let mut result = BTreeMap::new();
         for (id, specification) in &publication.desired.specifications {
-            if specification.implementation != implementation {
+            if !publication.has_query_authoring(specification) {
                 continue;
             }
             let Some(resources) = specification.dependencies.get("declaration") else {
@@ -624,6 +616,7 @@ impl Runtime {
         config: &QueryConfig,
         catalog: Option<QueryResultsCatalog>,
     ) -> anyhow::Result<ComponentBatch> {
+        let factory = self.query_factory().ok_or(QueryFactoryNotRegistered)?;
         let publication = self.control()?.registry_snapshot();
         let id = ComponentId::try_new(config.id.as_str())?;
         let prepared = async {
@@ -649,6 +642,7 @@ impl Runtime {
                 self.config.global_priority_queue_capacity.unwrap_or(10_000),
                 self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
             )?
+            .query_factory(factory.clone())
             .with_output_catalogue(
                 self.config.id.clone(),
                 OutputCatalogue::new(self.control()?),
@@ -732,14 +726,7 @@ impl Runtime {
         let (mut batch, failure) = match prepared {
             Ok(batch) => (batch, None),
             Err(error) => {
-                let implementation = ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation
-                    .clone();
-                let factory = FactoryRegistry::standard()
-                    .get(&implementation)
-                    .expect("standard query factory")
-                    .clone();
+                let factory = factory.clone();
                 let specification = factory.specification_from_config(
                     id.clone(),
                     serde_json::json!({
@@ -760,7 +747,7 @@ impl Runtime {
                     .select(GraphSelection::Exact(Vec::new()))?;
                 definition.components.push(DesiredComponent {
                     descriptor: specification.descriptor.clone(),
-                    role: ComponentRole::Query,
+                    role: ComponentRole::Transformer,
                     completion: None,
                     streams: BTreeMap::from([(
                         PortId::try_new("out")?,

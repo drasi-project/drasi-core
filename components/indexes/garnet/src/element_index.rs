@@ -23,9 +23,10 @@ use async_trait::async_trait;
 use bit_set::BitSet;
 use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
-    interface::{ElementIndex, ElementStream, IndexError},
+    interface::{
+        index_joins_by_label, ElementIndex, ElementStream, IndexError, IndexJoin, IndexJoinsByLabel,
+    },
     models::{Element, ElementReference, QueryJoin, QueryJoinKey},
-    path_solver::match_path::MatchPath,
 };
 use prost::Message;
 use tokio::sync::RwLock;
@@ -55,7 +56,7 @@ pub struct GarnetElementIndex {
     query_id: Arc<str>,
     key_formatter: Arc<KeyFormatter>,
     connection: MultiplexedConnection,
-    join_spec_by_label: Arc<RwLock<HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>>>>,
+    join_spec_by_label: Arc<RwLock<IndexJoinsByLabel>>,
     archive_enabled: bool,
     session_state: Arc<GarnetSessionState>,
 }
@@ -971,10 +972,11 @@ impl ElementIndex for GarnetElementIndex {
             .await
     }
 
-    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
+        let joins_by_label = index_joins_by_label(joins)?;
         let mut join_spec_by_label = self.join_spec_by_label.write().await;
         join_spec_by_label.clone_from(&joins_by_label);
+        Ok(())
     }
 }
 
@@ -1099,35 +1101,6 @@ impl KeyFormatter {
             &element_ref.element_id
         )
     }
-}
-
-#[allow(clippy::type_complexity)]
-fn extract_join_spec_by_label(
-    match_path: &MatchPath,
-    joins: &Vec<Arc<QueryJoin>>,
-) -> HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>> {
-    let mut result: HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>> = HashMap::new();
-
-    for join in joins {
-        let mut slots = Vec::new();
-        for (slot_num, slot) in match_path.slots.iter().enumerate() {
-            if slot.spec.labels.contains(&join.id.as_str().into()) {
-                slots.push(slot_num);
-            }
-        }
-        if slots.is_empty() {
-            continue;
-        }
-
-        for jk in &join.keys {
-            result
-                .entry(jk.label.clone())
-                .or_default()
-                .push((join.clone(), slots.clone()));
-        }
-    }
-
-    result
 }
 
 fn get_join_virtual_ref(

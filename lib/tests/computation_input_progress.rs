@@ -203,7 +203,9 @@ async fn fanout(batched: bool) -> Result<()> {
         );
         GraphProducerProgress::annotate(&mut envelope, &identity, sequence)?;
         Ok(vec![output(envelope)])
-    });
+    })
+    .with_output_progress(OutputProgress::Origin);
+    assert_eq!(transformer.descriptor().semantic_kind(), None);
     let mut builder = ComputationGraph::builder(GRAPH)
         .source(Box::new(Tracked {
             inner: FiniteSource::new("source", replayed_inputs()?),

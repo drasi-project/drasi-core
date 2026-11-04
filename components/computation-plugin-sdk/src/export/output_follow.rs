@@ -14,10 +14,10 @@
 //! cancelling an operation can never lose it.
 
 use super::output_reads::{
-    check_snapshot, encode_snapshot, finish, limit, retired, ReadBinding, READ_TIMEOUT,
+    check_snapshot, finish, retired, CapturedRead, Pages, ReadBinding, READ_TIMEOUT,
 };
 use super::*;
-use crate::output_reads::{Outcome, WireFollowItem, WireFollowLimits, WireNext, WireSnapshot};
+use crate::output_reads::{Outcome, WireFollowItem, WireFollowLimits, WireNext, WireReadMetadata};
 use drasi_computation_contracts::{
     BinaryEnvelopeCodecError, ChangeEnvelope, GraphProducerProgress, OutputFollow, OutputReadError,
     OutputSnapshotFollow, PortId, SchemaDescriptor, SnapshotFollowProvider,
@@ -30,9 +30,9 @@ use std::{
     task::{Context, Poll},
 };
 
-pub(super) static EXTENSION: abi::output_follow::PluginOutputFollowV1 =
-    abi::output_follow::PluginOutputFollowV1 {
-        header: Header::new::<abi::output_follow::PluginOutputFollowV1>(),
+pub(super) static EXTENSION: abi::output_follow::PluginOutputFollowV2 =
+    abi::output_follow::PluginOutputFollowV2 {
+        header: Header::new::<abi::output_follow::PluginOutputFollowV2>(),
         version: abi::output_follow::VERSION,
         reserved: 0,
         open: Some(open),
@@ -50,6 +50,7 @@ static LEASE_VTABLE: abi::output_follow::OutputFollowLeaseVTable =
         header: Header::new::<abi::output_follow::OutputFollowLeaseVTable>(),
         release: Some(release_lease),
         next: Some(next),
+        snapshot_page: Some(snapshot_page),
     };
 
 type OpenFuture =
@@ -77,6 +78,7 @@ enum Slot {
 
 struct LeaseState {
     slot: Slot,
+    snapshot: Option<Pages>,
     /// Items produced from the provider so far; indices start at 1.
     produced: u64,
     /// The last produced item until the holder acknowledges observing it.
@@ -130,6 +132,7 @@ impl Lease {
                 std::mem::replace(&mut state.slot, Slot::Closed),
                 state.pending.take(),
                 state.terminal.take(),
+                state.snapshot.take(),
             )
         };
         // Provider drops run outside the lease lock.
@@ -179,28 +182,46 @@ impl Lease {
             Ok(opened) => opened.into_parts(),
             Err(error) => {
                 state.slot = Slot::Closed;
-                return Poll::Ready(finish(Outcome::<WireSnapshot<'_>>::from_result(Err(error))));
+                return Poll::Ready(finish(Outcome::<WireReadMetadata>::from_result(Err(error))));
             }
         };
         // Any rejection closes the lease, dropping the tail and its retention.
         if let Err(error) = check_snapshot(&self.binding.descriptor, &self.schema, &snapshot) {
             state.slot = Slot::Closed;
-            return Poll::Ready(finish(Outcome::<WireSnapshot<'_>>::from_result(Err(error))));
+            return Poll::Ready(finish(Outcome::<WireReadMetadata>::from_result(Err(error))));
         }
-        match encode_snapshot(&snapshot) {
-            Ok(Ok(bytes)) => {
+        match Pages::new(CapturedRead::Snapshot(snapshot)) {
+            Ok((metadata, pages)) => {
+                state.snapshot = Some(pages);
                 state.slot = Slot::Idle(follow);
-                Poll::Ready(Ok(bytes))
+                Poll::Ready(finish(Outcome::Ok(metadata)))
             }
-            Ok(Err(message)) => {
+            Err(error) => {
                 state.slot = Slot::Closed;
-                Poll::Ready(limit(message))
-            }
-            Err(failure) => {
-                state.slot = Slot::Closed;
-                Poll::Ready(Err(failure))
+                Poll::Ready(finish(Outcome::<WireReadMetadata>::from_result(Err(error))))
             }
         }
+    }
+
+    fn snapshot_page(&self) -> Result<Vec<u8>, Failure> {
+        let mut state = self.lock()?;
+        if matches!(state.slot, Slot::Closed) {
+            return Err(retired());
+        }
+        let pages = state.snapshot.as_mut().ok_or_else(|| {
+            Failure::new(
+                abi::status::INVALID_ARGUMENT,
+                "no unfinished snapshot on this lease",
+            )
+        })?;
+        let reply = pages.next(&self.binding.codec);
+        if reply.is_err() {
+            state.slot = Slot::Closed;
+            state.snapshot = None;
+        } else if pages.done() {
+            state.snapshot = None;
+        }
+        reply
     }
 
     /// Record a provider result as the pending item (or terminal outcome) in the
@@ -269,6 +290,12 @@ impl Lease {
         };
         if matches!(state.slot, Slot::Closed) {
             return Poll::Ready(Err(retired()));
+        }
+        if state.snapshot.is_some() {
+            return Poll::Ready(Err(Failure::new(
+                abi::status::INVALID_ARGUMENT,
+                "finish the snapshot before reading live output",
+            )));
         }
         if acknowledged > state.produced {
             return Poll::Ready(Err(Failure::new(
@@ -432,6 +459,7 @@ unsafe extern "C" fn begin(
             generation: guard.generation(),
             state: Mutex::new(LeaseState {
                 slot: Slot::Opening(opening),
+                snapshot: None,
                 produced: 0,
                 pending: None,
                 terminal: None,
@@ -505,6 +533,19 @@ unsafe extern "C" fn next(
     input: BorrowedBytes,
     out: *mut abi::OperationHandle,
 ) -> Status {
+    unsafe { lease_request(state, input, out, false) }
+}
+
+unsafe extern "C" fn snapshot_page(state: *mut c_void, out: *mut abi::OperationHandle) -> Status {
+    unsafe { lease_request(state, BorrowedBytes::new(&[]), out, true) }
+}
+
+unsafe fn lease_request(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    out: *mut abi::OperationHandle,
+    snapshot: bool,
+) -> Status {
     transport::status_boundary(|| {
         require_output(out)?;
         let lease = unsafe { state_ref::<Arc<Lease>>(state)? }.clone();
@@ -519,8 +560,13 @@ unsafe extern "C" fn next(
         let input =
             unsafe { transport::borrowed_bytes(input, abi::output_follow::MAX_REQUEST_BYTES)? }
                 .to_vec();
-        let request: WireNext = wire::decode(&input)
-            .map_err(|error| Failure::new(abi::status::INVALID_ARGUMENT, format!("{error:#}")))?;
+        let request = if snapshot {
+            None
+        } else {
+            Some(wire::decode::<WireNext>(&input).map_err(|error| {
+                Failure::new(abi::status::INVALID_ARGUMENT, format!("{error:#}"))
+            })?)
+        };
         if lease.active_next.swap(true, Ordering::AcqRel) {
             return Err(Failure::new(
                 abi::status::BUSY,
@@ -543,7 +589,10 @@ unsafe extern "C" fn next(
                     biased;
                     _ = changed.changed() => return Err(retired()),
                     _ = cancelled.changed() => return Err(retired()),
-                    result = std::future::poll_fn(|cx| lease.poll_next(cx, request.acknowledged)) => result?,
+                    result = std::future::poll_fn(|cx| match &request {
+                        Some(request) => lease.poll_next(cx, request.acknowledged),
+                        None => Poll::Ready(lease.snapshot_page()),
+                    }) => result?,
                 };
                 guard.validate()?;
                 Ok(bytes)
@@ -590,6 +639,7 @@ mod tests {
             generation: 1,
             state: Mutex::new(LeaseState {
                 slot,
+                snapshot: None,
                 produced,
                 pending: None,
                 terminal: None,

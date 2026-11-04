@@ -274,7 +274,7 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
             descriptor: descriptor("inventory", false)?,
             admission: admission.clone(),
         }))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(Alerts {
             descriptor: descriptor("alerts", true)?,
             runner: runner.clone(),

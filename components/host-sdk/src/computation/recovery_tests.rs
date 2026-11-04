@@ -367,7 +367,7 @@ async fn native_recovery_graph_requires_the_actual_host_owner_not_matching_names
         )?;
         let graph = ComputationGraph::builder(GRAPH)
             .source(Box::new(source))
-            .query(Box::new(query(directory.path(), progress).await?))
+            .transformer(Box::new(query(directory.path(), progress).await?))
             .sink(Box::new(sink("sink", QueryChangeCodec::schema())?))
             .bind_stream(endpoint("source", "out"), stream("changes"))
             .bind_stream(endpoint("query", "out"), stream("results"))

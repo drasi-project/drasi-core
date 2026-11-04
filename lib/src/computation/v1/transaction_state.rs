@@ -19,11 +19,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use drasi_core::{
-    interface::{ElementIndex, ElementStream, IndexError},
-    models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, QueryJoin,
-    },
-    path_solver::match_path::MatchPath,
+    interface::{ElementIndex, ElementStream, IndexError, IndexJoin},
+    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue},
 };
 
 use super::{
@@ -361,9 +358,9 @@ impl ElementIndex for StepElements<'_> {
         Err(IndexError::NotSupported)
     }
 
-    async fn set_joins(&self, _: &MatchPath, _: &Vec<Arc<QueryJoin>>) {
+    async fn set_joins(&self, _: &[IndexJoin]) -> Result<(), IndexError> {
         self.unsupported.store(true, Ordering::Release);
-        log::error!("Transaction middleware cannot reconfigure shared index joins");
+        Err(IndexError::NotSupported)
     }
 }
 
@@ -540,6 +537,20 @@ mod tests {
             context.get("keep").await.unwrap(),
             Some(ElementValue::Integer(42))
         );
+    }
+
+    #[tokio::test]
+    async fn join_reconfiguration_error_fences_the_transaction_even_when_ignored() {
+        let index = InMemoryElementIndex::new();
+        let step = ComponentId::try_new("step").unwrap();
+        let context =
+            TransactionContext::new(&step, &index, StreamId::try_new("step/out").unwrap(), 1);
+        assert!(context.validate().is_ok());
+        assert!(matches!(
+            context.middleware_index().set_joins(&[]).await,
+            Err(IndexError::NotSupported)
+        ));
+        assert!(context.validate().is_err());
     }
 
     #[test]

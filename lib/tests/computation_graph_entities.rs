@@ -1564,7 +1564,11 @@ fn native_semantic_kinds_follow_declared_execution_roles() {
         .transformer(Box::new(NativeTransform::new("transformer", |_| {
             Ok(vec![])
         })))
-        .query(Box::new(NativeTransform::new("query", |_| Ok(vec![]))))
+        .transformer(Box::new(
+            NativeTransform::new("query", |_| Ok(vec![]))
+                .with_semantic_kind(ComponentSemanticKind::Query)
+                .with_output_progress(OutputProgress::Origin),
+        ))
         .sink(Box::new(CollectSink::new(
             "sink",
             &["in"],
@@ -1594,7 +1598,11 @@ fn native_semantic_kinds_follow_declared_execution_roles() {
             ComponentRole::Transformer,
             ComponentSemanticKind::Transformer,
         ),
-        ("query", ComponentRole::Query, ComponentSemanticKind::Query),
+        (
+            "query",
+            ComponentRole::Transformer,
+            ComponentSemanticKind::Query,
+        ),
         ("sink", ComponentRole::Sink, ComponentSemanticKind::Sink),
         (
             "service",
@@ -1608,9 +1616,72 @@ fn native_semantic_kinds_follow_declared_execution_roles() {
             panic!("component");
         };
         assert_eq!(node.desired.role, role);
-        assert!(node.desired.descriptor.semantic_kind().is_none());
+        assert_eq!(
+            node.desired.descriptor.semantic_kind().is_some(),
+            id == "query",
+            "only the query declares a semantic kind beyond its execution role"
+        );
         assert_eq!(node.kind, kind);
         assert!(node.plugin_identity().is_none());
+    }
+
+    let GraphEntity::Component(query) =
+        &topology.nodes[&GraphEntityId::Component(component("query"))]
+    else {
+        panic!("query");
+    };
+    let specification = ComponentSpecification {
+        descriptor: query.desired.descriptor.clone(),
+        role: query.desired.role,
+        completion: None,
+        implementation: ImplementationIdentity::try_new("drasi/continuous-query", "1")
+            .expect("implementation"),
+        configuration_version: 1,
+        configuration: Default::default(),
+        dependencies: Default::default(),
+    };
+    let desired = DesiredComponent {
+        descriptor: specification.descriptor.clone(),
+        role: specification.role,
+        completion: None,
+        streams: Default::default(),
+        lifecycle: LifecyclePolicy { auto_start: false },
+        input_merge: InputMergePolicy::default(),
+        construction: ComponentConstruction::Factory(specification),
+    };
+    let serialized = serde_json::to_value(&desired).expect("desired component");
+    assert_eq!(serialized["role"], "Transformer");
+    assert_eq!(serialized["descriptor"]["semantic_kind"], "Query");
+    assert_eq!(serialized["descriptor"]["output_progress"], "Origin");
+    assert_eq!(serialized["construction"]["Factory"]["role"], "Transformer");
+    let restored: DesiredComponent =
+        serde_json::from_value(serialized).expect("current query transformer");
+    assert_eq!(restored, desired);
+}
+
+#[test]
+fn output_progress_must_be_valid_for_the_component_role() {
+    let source = FiniteSource::new("source", vec![]).with_output_progress(OutputProgress::Relay);
+    let error = match ComputationGraph::builder("invalid-progress")
+        .source(Box::new(source))
+        .build()
+    {
+        Ok(_) => panic!("a source cannot relay input progress"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("invalid output progress"));
+
+    for progress in [OutputProgress::Origin, OutputProgress::Relay] {
+        let mut component = service("service", None);
+        component.descriptor = component.descriptor.clone().with_output_progress(progress);
+        let error = match ComputationGraph::builder("invalid-progress")
+            .service(component)
+            .build()
+        {
+            Ok(_) => panic!("a service has no outputs"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("invalid output progress"));
     }
 }
 
@@ -2172,6 +2243,18 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_compone
         .build()
         .expect("right graph");
     let instance = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(left.auto_start(false))
         .with_components(right.auto_start(false))
         .build()

@@ -7,6 +7,8 @@ publish = false
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-hyperliquid = { path = "../../../components/sources/hyperliquid" }
 drasi-reaction-sse = { path = "../../../components/reactions/sse" }

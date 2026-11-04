@@ -567,6 +567,7 @@ unsafe extern "C" fn create_source(
             std::ptr::null(),
             false,
             coordinator,
+            std::ptr::null(),
             out,
         )
     }

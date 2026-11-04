@@ -68,6 +68,11 @@ impl QueryInputBatch {
         self
     }
 
+    pub fn with_optional_input_scope(mut self, scope: Option<Arc<str>>) -> Self {
+        self.input_scope = scope;
+        self
+    }
+
     pub fn input_scope(&self) -> Option<&str> {
         self.input_scope.as_deref()
     }
@@ -76,6 +81,44 @@ impl QueryInputBatch {
 impl From<Vec<SourceChange>> for QueryInputBatch {
     fn from(changes: Vec<SourceChange>) -> Self {
         Self::new(changes, ChangeOrdering::EventTime)
+    }
+}
+
+impl QueryEvaluator {
+    /// Evaluate within the caller's actual processing scope. This stages query
+    /// index changes but neither opens nor commits a transaction.
+    pub async fn evaluate_input_batch<const SOURCE_TRANSACTION: bool>(
+        &self,
+        input: QueryInputBatch,
+    ) -> Result<Vec<QueryPartEvaluationContext>> {
+        let results = self
+            .evaluate_changes_with_input_scope(input.changes, input.ordering, input.input_scope)
+            .await?;
+        if SOURCE_TRANSACTION {
+            Ok(crate::query::transaction_results(results).map_err(IndexError::other)?)
+        } else {
+            Ok(results)
+        }
+    }
+
+    /// Pop and evaluate one future under the caller's processing transaction.
+    pub async fn evaluate_next_future(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
+        let Some(future_ref) = self.future_queue().pop().await? else {
+            return Ok(None);
+        };
+        let source_id = future_ref.element_ref.source_id.clone();
+        Ok(Some(Arc::new(ComputationFutureResult {
+            results: self
+                .evaluate_input_batch::<false>(
+                    vec![SourceChange::Future {
+                        future_ref: future_ref.clone(),
+                    }]
+                    .into(),
+                )
+                .await?,
+            source_id,
+            future: future_ref,
+        })))
     }
 }
 
@@ -211,20 +254,14 @@ impl ComputationQuery {
         &self,
         input: QueryInputBatch,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
-        Ok(self
-            .inner
-            .evaluate_changes_with_input_scope(input.changes, input.ordering, input.input_scope)
-            .await?)
+        self.inner.evaluate_input_batch::<false>(input).await
     }
 
     async fn evaluate_source_transaction(
         &self,
         input: QueryInputBatch,
     ) -> Result<Arc<[QueryPartEvaluationContext]>> {
-        let results = self.evaluate_source_changes(input).await?;
-        Ok(super::query_results::transaction_results(results)
-            .map_err(IndexError::other)?
-            .into())
+        Ok(self.inner.evaluate_input_batch::<true>(input).await?.into())
     }
 
     pub async fn process_source_change(
@@ -407,19 +444,7 @@ impl ComputationQuery {
     }
 
     async fn evaluate_due_future(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
-        let Some(future_ref) = self.inner.future_queue().pop().await? else {
-            return Ok(None);
-        };
-        let source_id = future_ref.element_ref.source_id.clone();
-        Ok(Some(Arc::new(ComputationFutureResult {
-            results: self
-                .evaluate_source_change(SourceChange::Future {
-                    future_ref: future_ref.clone(),
-                })
-                .await?,
-            source_id,
-            future: future_ref,
-        })))
+        self.inner.evaluate_next_future().await
     }
 
     pub async fn process_due_futures_with_transaction_group<F, Fut>(

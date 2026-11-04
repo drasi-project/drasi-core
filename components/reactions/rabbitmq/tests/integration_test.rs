@@ -242,6 +242,18 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
     let rocks = Arc::new(RocksDbIndexProvider::new(tmp_dir.path(), false, false));
     let wal = Arc::new(RedbWalProvider::new(wal_dir.path()));
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("rabbitmq-test-core")
         .with_default_index_provider("rocks", rocks)
         .with_wal_provider(wal)
@@ -399,6 +411,18 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
     let rocks = Arc::new(RocksDbIndexProvider::new(tmp_dir.path(), false, false));
     let wal = Arc::new(RedbWalProvider::new(wal_dir.path()));
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("rabbitmq-agg-test-core")
         .with_default_index_provider("rocks", rocks)
         .with_wal_provider(wal)

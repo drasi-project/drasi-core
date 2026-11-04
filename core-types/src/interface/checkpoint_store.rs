@@ -17,24 +17,22 @@
 //! Atomic checkpoint persistence for source sequence tracking, opaque source
 //! position bytes (for native stream resumption), and config hashing.
 //!
-//! Implementations are paired with an [`IndexBackendPlugin`](super::IndexBackendPlugin)
-//! and share the same session state. [`CheckpointStore::stage_checkpoint`] writes
+//! Implementations are paired with an index backend and share the same session
+//! state. [`CheckpointStore::stage_checkpoint`] and
+//! [`CheckpointStore::stage_clear_checkpoints`] write
 //! into the currently-active session transaction (opened by
 //! [`SessionControl::begin`](super::SessionControl)) and is committed by the
 //! session's outer commit alongside the index updates. All other methods operate
 //! outside a session transaction and commit independently.
 //!
-//! This trait lives in core (not lib) so that index plugins can implement it
-//! without taking a reverse dependency on `drasi-lib`.
+//! Index plugins implement this contract without depending on the evaluator.
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::IndexError;
-
-pub use drasi_core_types::interface::SourceCheckpoint;
+use super::{IndexError, SourceCheckpoint};
 
 /// Atomic checkpoint persistence for source sequence tracking and config hashing.
 ///
@@ -44,7 +42,8 @@ pub use drasi_core_types::interface::SourceCheckpoint;
 ///   `SessionControl::begin` and `SessionControl::commit` for persistent backends.
 ///   The write is staged into the active session transaction and persisted by the
 ///   outer commit. For volatile (in-memory) backends, it applies immediately.
-/// - All other methods operate independently of the session transaction and
+/// - `stage_clear_checkpoints` also participates in the active transaction.
+/// - Other non-staging mutations operate independently of the session transaction and
 ///   commit on their own.
 ///
 /// # Source positions
@@ -96,6 +95,12 @@ pub trait CheckpointStore: Send + Sync {
     /// Used during auto-reset recovery and `delete_query(cleanup: true)`.
     /// Standalone commit; not part of any outer session transaction.
     async fn clear_checkpoints(&self) -> Result<(), IndexError>;
+
+    /// Delete checkpoints/configuration inside the active session transaction.
+    /// Unlike `clear_checkpoints`, rollback must restore every removed entry.
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        Err(IndexError::NotSupported)
+    }
 
     /// Write the query config hash.
     ///

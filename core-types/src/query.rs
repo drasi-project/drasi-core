@@ -4,6 +4,8 @@
 use crate::evaluation::variable_value::VariableValue;
 use std::collections::BTreeMap;
 
+pub mod match_path;
+
 pub type QueryVariables = BTreeMap<Box<str>, VariableValue>;
 
 /// Projected changes carry MATCH identities until aggregation replaces them

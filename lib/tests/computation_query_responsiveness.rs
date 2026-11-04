@@ -186,8 +186,8 @@ async fn responsiveness(runtime: &str) -> Result<()> {
         let timer_count = Arc::new(AtomicU64::new(0));
         let processed = Arc::new(Mutex::new(BTreeMap::<String, u64>::new()));
         let mut builder = ComputationGraph::builder("responsiveness")
-            .query(Box::new(query("live", false).await?))
-            .query(Box::new(timers))
+            .transformer(Box::new(query("live", false).await?))
+            .transformer(Box::new(timers))
             .source(Box::new(QueryScheduledSource::new(
                 ComponentId::try_new("clock")?,
                 StreamId::try_new("clock/out")?,

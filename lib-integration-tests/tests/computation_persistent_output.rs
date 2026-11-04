@@ -68,7 +68,7 @@ async fn build(
             }),
         },
     )?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id(instance)
         .with_source(source)
         .with_query(query)
@@ -128,7 +128,7 @@ async fn snapshot_named(core: &DrasiLib, id: &str, minimum: u64) -> Result<Snaps
                 Ok(snapshot) => format!("output is only at sequence {}", snapshot.as_of_sequence),
                 Err(error) => error.to_string(),
             },
-            Err(error) => error,
+            Err(error) => error.to_string(),
         };
         if Instant::now() >= deadline {
             anyhow::bail!("query snapshot did not reach sequence {minimum}: {diagnostic}");

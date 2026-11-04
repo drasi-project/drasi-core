@@ -74,12 +74,25 @@ pub(crate) fn read_page(
     after: u64,
     limits: OutboxPageLimits,
 ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-    let cf = db.cf_handle(OUTBOX_CF).ok_or(IndexError::CorruptedData)?;
+    read_keyed_page(db, OUTBOX_CF, query_id, Some(after), limits)
+}
+
+pub(crate) fn read_keyed_page(
+    db: &IndexDb,
+    family: &str,
+    query_id: &str,
+    after: Option<u64>,
+    limits: OutboxPageLimits,
+) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    let cf = db.cf_handle(family).ok_or(IndexError::CorruptedData)?;
     let prefix = make_prefix(query_id);
     let mut iterator = db.raw_iterator_cf(&cf);
     // Seek to the last exact key, not the next integer: malformed suffixes
     // between consecutive sequence keys must not disappear at a page boundary.
-    iterator.seek(make_key(query_id, after));
+    match after {
+        Some(after) => iterator.seek(make_key(query_id, after)),
+        None => iterator.seek(&prefix),
+    }
     let mut entries = Vec::new();
     let mut bytes = 0;
     while iterator.valid() {
@@ -91,7 +104,7 @@ pub(crate) fn read_page(
             return Err(IndexError::CorruptedData);
         }
         let sequence = sequence_from_key(key, prefix.len()).ok_or(IndexError::CorruptedData)?;
-        if sequence > after {
+        if after.is_none_or(|after| sequence > after) {
             let value = iterator.value().ok_or(IndexError::CorruptedData)?;
             if !limits.admits(entries.len(), bytes, value.len()) {
                 break;

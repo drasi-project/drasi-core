@@ -17,11 +17,13 @@ mod auto_future_queue_consumer;
 mod continuous_query;
 mod evaluator;
 mod query_builder;
+mod transaction_projection;
 
 pub use auto_future_queue_consumer::AutoFutureQueueConsumer;
 pub use continuous_query::{ContinuousQuery, DueFutureResult};
 pub use evaluator::QueryEvaluator;
 pub use query_builder::QueryBuilder;
+pub use transaction_projection::{transaction_results, TransactionResultError};
 
 /// Persisted query identities must change when source mutation semantics change.
 pub const SOURCE_CHANGE_SEMANTICS_VERSION: u32 = 1;

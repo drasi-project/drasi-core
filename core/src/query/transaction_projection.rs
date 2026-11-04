@@ -153,9 +153,8 @@ impl Delta {
     }
 }
 
-pub(super) fn transaction_results(
-    results: Vec<Context>,
-) -> Result<Vec<Context>, TransactionResultError> {
+/// Fold intermediate evaluations into one complete transaction's net row changes.
+pub fn transaction_results(results: Vec<Context>) -> Result<Vec<Context>, TransactionResultError> {
     let mut rows = BTreeMap::<u64, Delta>::new();
     for result in results {
         let signature = result.row_signature();

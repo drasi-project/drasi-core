@@ -107,6 +107,18 @@ async fn graph_snapshots_and_events_follow_the_controller_without_a_mutable_shad
     timeout(Duration::from_secs(10), async {
         let (source, _input) = mock_source::MockSource::new("source").unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("inspection-contract")
             .with_source(source)
             .with_query(
@@ -211,7 +223,22 @@ async fn graph_snapshots_and_events_follow_the_controller_without_a_mutable_shad
 
 #[tokio::test]
 async fn read_only_graph_handles_do_not_keep_the_runtime_alive() {
-    let core = DrasiLib::builder().build().await.unwrap();
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     let view: ComponentGraphView = core.component_graph();
     let clone: ComponentGraphView = view.clone();
     core.shutdown().await.unwrap();
@@ -235,6 +262,18 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
             vec!["query-1".into(), "query-2".into()],
         );
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-instance")
             .with_source(source1)
             .with_source(source2)

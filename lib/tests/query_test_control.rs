@@ -189,6 +189,18 @@ async fn rows(core: &DrasiLib, id: &str) -> Result<(u64, Vec<serde_json::Value>)
 async fn production_default_scheduler_uses_wall_clock_without_test_controls() -> Result<()> {
     let source = Input::new();
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(source.clone())
         .with_query(query("query", EXPIRY).build())
         .build()
@@ -240,6 +252,18 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
                 .with_dispatch_buffer_capacity(1);
         }
         let mut builder = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("timing-tests")
             .with_source(source.clone());
         if let Some(provider) = provider {
@@ -333,6 +357,18 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
         let check = QueryTestControl::new(1000);
         let deadline = QueryTestControl::new(1000);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_source(source.clone())
             .with_query(query("check", EXPIRY).build())
             .with_query(query("deadline", EXPIRY).build())
@@ -676,6 +712,18 @@ datetime.realtime().epochMillis AS logicalTime";
         let failed = QueryTestControl::new(1000);
         let healthy = QueryTestControl::new(1000);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_source(source.clone())
             .with_index_provider("store", Storage::new(directory.path(), fault.clone())?)
             .with_query(
@@ -838,11 +886,35 @@ datetime.realtime().epochMillis AS logicalTime";
         let control = QueryTestControl::new(1000);
         assert!(control.wake(WAIT).await.is_err());
         assert!(DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1"
+                        )
+                        .expect("reference query identity")
+                    )
+                    .expect("reference query factory")
+                    .clone()
+            )
             .with_query_test_control("missing", control.clone())
             .build()
             .await
             .is_err());
         assert!(DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1"
+                        )
+                        .expect("reference query identity")
+                    )
+                    .expect("reference query factory")
+                    .clone()
+            )
             .with_query(query("query", EXPIRY).build())
             .with_query_test_control("query", control.clone())
             .with_query_test_control("query", control.clone())
@@ -850,6 +922,18 @@ datetime.realtime().epochMillis AS logicalTime";
             .await
             .is_err());
         assert!(DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1"
+                        )
+                        .expect("reference query identity")
+                    )
+                    .expect("reference query factory")
+                    .clone()
+            )
             .with_query(query("query", EXPIRY).build())
             .with_query_test_control("query", QueryTestControl::new(u64::MAX))
             .build()

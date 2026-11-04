@@ -254,7 +254,10 @@ impl QueryBuilder {
             }
         }?;
 
-        element_index.set_joins(&match_path, &self.joins).await;
+        element_index
+            .set_joins(&match_path.index_joins(&self.joins))
+            .await
+            .map_err(QueryBuilderError::IndexSetup)?;
 
         Ok(QueryEvaluator::new(
             Arc::new(query),

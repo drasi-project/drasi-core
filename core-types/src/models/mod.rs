@@ -57,13 +57,13 @@ pub struct QuerySubscription {
     pub pipeline: Vec<Arc<str>>,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct QueryJoinKey {
     pub label: String,
     pub property: String,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct QueryJoin {
     pub id: String,
     pub keys: Vec<QueryJoinKey>,

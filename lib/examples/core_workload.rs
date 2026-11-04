@@ -345,6 +345,7 @@ async fn ordinary(options: &Options) -> Result<Value> {
     let (reaction, output) = ApplicationReaction::new("output", ids.clone());
     let receiver = output.take_receiver().await.context("output receiver")?;
     let mut builder = DrasiLib::builder()
+        .with_query_factory(Arc::new(ContinuousQueryFactory::default()))
         .with_id("core-workload")
         .with_source(source);
     for id in ids {
@@ -515,7 +516,7 @@ async fn native(options: &Options) -> Result<Value> {
         )
         .await?;
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(NativeSink {
                 descriptor: descriptor(
                     &sink,

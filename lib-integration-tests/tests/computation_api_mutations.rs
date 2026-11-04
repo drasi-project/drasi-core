@@ -21,7 +21,7 @@ fn source_config() -> ApplicationSourceConfig {
 async fn query_mutations(native: bool, strict_consumer: bool) -> Result<()> {
     let (left, left_input) = ApplicationSource::new("left", source_config())?;
     let (right, right_input) = ApplicationSource::new("right", source_config())?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id(format!("mutation-{native}-{strict_consumer}"))
         .with_source(left)
         .with_source(right)
@@ -237,7 +237,7 @@ async fn native_query_mutations_preserve_dependents_and_rewire_sources() -> Resu
 async fn reaction_updates_accept_native_queries() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (source, input) = ApplicationSource::new("input", source_config())?;
-        let core = DrasiLib::builder().with_source(source).build().await?;
+        let core = lib_integration_tests::query_builder().with_source(source).build().await?;
         core.computation_component("input")?.wait_created().await?;
         let ordinary = Query::cypher("ordinary")
             .query("MATCH (n:Item) RETURN n.value AS value")
@@ -279,7 +279,7 @@ async fn native_query_removal_clears_persistent_state_before_same_id_recreation(
             false,
         ));
         let (source, input) = ApplicationSource::new("input", source_config())?;
-        let core = DrasiLib::builder()
+        let core = lib_integration_tests::query_builder()
             .with_id("native-removal-storage")
             .with_source(source)
             .with_index_provider("rocks", provider)
@@ -349,7 +349,7 @@ async fn native_query_removal_clears_persistent_state_before_same_id_recreation(
 async fn source_replacement_rewires_native_query_subscriptions() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (source, input) = ApplicationSource::new("input", source_config())?;
-        let core = DrasiLib::builder().with_id("native-source-replacement")
+        let core = lib_integration_tests::query_builder().with_id("native-source-replacement")
             .with_source(source).build().await?;
         core.computation_component("input")?.wait_created().await?;
         let config = Query::cypher("items").query("MATCH (n:Item) RETURN n.value AS value")
@@ -392,7 +392,7 @@ async fn source_replacement_rewires_native_query_subscriptions() -> Result<()> {
 async fn native_query_replacement_preserves_scheduled_delivery_identity() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (source, input) = ApplicationSource::new("input", source_config())?;
-        let core = DrasiLib::builder().with_id("native-timer-replacement").with_source(source).build().await?;
+        let core = lib_integration_tests::query_builder().with_id("native-timer-replacement").with_source(source).build().await?;
         core.computation_component("input")?.wait_created().await?;
         let mut config = Query::cypher("items")
             .query("MATCH (n:Item) WHERE drasi.trueFor(n.value > 0, duration({ milliseconds: 50 })) RETURN n.value AS value")
@@ -423,7 +423,10 @@ async fn native_query_replacement_preserves_scheduled_delivery_identity() -> Res
 async fn failed_native_query_declaration_can_be_removed_without_activation() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(20), async {
         let (source, _) = ApplicationSource::new("input", source_config())?;
-        let core = DrasiLib::builder().with_source(source).build().await?;
+        let core = lib_integration_tests::query_builder()
+            .with_source(source)
+            .build()
+            .await?;
         core.computation_component("input")?.wait_created().await?;
         let mut config = Query::cypher("invalid")
             .query("MATCH (n:Item) RETURN n.value AS value")
@@ -489,7 +492,7 @@ async fn native_persistent_query_replacement_releases_storage_and_retains_new_ro
                 enabled: true, max_events: 128, capacity_policy: drasi_lib::CapacityPolicy::RejectIncoming,
             }),
         })?;
-        let core = DrasiLib::builder().with_id("native-storage-replacement").with_source(source)
+        let core = lib_integration_tests::query_builder().with_id("native-storage-replacement").with_source(source)
             .with_wal_provider(std::sync::Arc::new(drasi_wal_redb::RedbWalProvider::new(directory.path().join("wal"))))
             .with_index_provider("rocks", provider).build().await?;
         core.computation_component("input")?.wait_created().await?;
@@ -561,7 +564,10 @@ impl Transformer for RemovalProbe {
 async fn failed_native_query_cleanup_keeps_its_node_and_retries_explicitly() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(20), async {
         let (source, _) = ApplicationSource::new("input", source_config())?;
-        let core = DrasiLib::builder().with_source(source).build().await?;
+        let core = lib_integration_tests::query_builder()
+            .with_source(source)
+            .build()
+            .await?;
         core.computation_component("input")?.wait_created().await?;
         let allow_cleanup = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -591,7 +597,7 @@ async fn failed_native_query_cleanup_keeps_its_node_and_retries_explicitly() -> 
         };
         batch.bindings.components.insert(
             "cleanup-probe".into(),
-            ConstructedComponent::query(Box::new(RemovalProbe {
+            ConstructedComponent::transformer(Box::new(RemovalProbe {
                 descriptor: component.descriptor.clone(),
                 allow_cleanup: allow_cleanup.clone(),
                 attempts: attempts.clone(),

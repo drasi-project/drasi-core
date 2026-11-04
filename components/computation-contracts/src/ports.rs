@@ -26,6 +26,18 @@ pub enum PortDirection {
     Output,
 }
 
+/// How a component's outputs relate to their inputs' replay progress.
+///
+/// This applies to every output of the component and does not by itself
+/// establish durability or a valid producer identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OutputProgress {
+    /// Outputs have their own progress boundary.
+    Origin,
+    /// Outputs carry forward their input's progress boundary.
+    Relay,
+}
+
 /// Provider promises which must be negotiated before a graph starts.
 /// These descriptors implement no delivery guarantees by themselves.
 #[derive(
@@ -194,6 +206,8 @@ pub struct ComponentDescriptor {
     plugin_identity: Option<PluginIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic_kind: Option<ComponentSemanticKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_progress: Option<OutputProgress>,
 }
 
 impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
@@ -208,6 +222,8 @@ impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
             plugin_identity: Option<PluginIdentity>,
             #[serde(default)]
             semantic_kind: Option<ComponentSemanticKind>,
+            #[serde(default)]
+            output_progress: Option<OutputProgress>,
         }
         let value = Specification::deserialize(deserializer)?;
         let mut descriptor =
@@ -219,6 +235,9 @@ impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
         }
         if let Some(kind) = value.semantic_kind {
             descriptor = descriptor.with_semantic_kind(kind);
+        }
+        if let Some(progress) = value.output_progress {
+            descriptor = descriptor.with_output_progress(progress);
         }
         Ok(descriptor)
     }
@@ -239,6 +258,7 @@ impl ComponentDescriptor {
             ports: ports.into(),
             plugin_identity: None,
             semantic_kind: None,
+            output_progress: None,
         })
     }
 
@@ -260,6 +280,17 @@ impl ComponentDescriptor {
     /// configuration. Unannotated descriptors retain their native role's kind.
     pub fn with_semantic_kind(mut self, kind: ComponentSemanticKind) -> Self {
         self.semantic_kind = Some(kind);
+        self
+    }
+
+    /// Explicit output progress behavior. Sources default to an origin and
+    /// transformers default to a relay when this is not declared.
+    pub const fn output_progress(&self) -> Option<OutputProgress> {
+        self.output_progress
+    }
+
+    pub fn with_output_progress(mut self, progress: OutputProgress) -> Self {
+        self.output_progress = Some(progress);
         self
     }
 

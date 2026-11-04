@@ -139,6 +139,18 @@ async fn receiver_core_controlled(
         )
         .build()?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("right")
         .with_components(batch)
         .build()
@@ -265,6 +277,18 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
             .bind_stream(endpoint("input", "out"), StreamId::try_new("sender/out")?)
             .build()?;
         let left = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("left")
             .with_components(batch)
             .build()
@@ -349,6 +373,18 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
         .bind_stream(endpoint("input", "out"), StreamId::try_new("sender/out")?)
         .build()?;
     let left = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("left")
         .with_components(batch)
         .build()

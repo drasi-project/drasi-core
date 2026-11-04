@@ -340,7 +340,7 @@ async fn configured_pipeline(
         .with_outbox_capacity(16)
         .with_storage_backend(StorageBackendRef::Named("rocks".into()))
         .build();
-    let builder = DrasiLib::builder()
+    let builder = lib_integration_tests::query_builder()
         .with_id("remote-effects")
         .with_index_provider(
             "rocks",

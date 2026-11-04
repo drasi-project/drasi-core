@@ -91,6 +91,18 @@ impl Reaction for CallbackReaction {
 
 async fn callback_flood(instance: &str) {
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(instance)
         .with_query(
             Query::cypher("query")

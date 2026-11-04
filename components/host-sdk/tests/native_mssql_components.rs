@@ -223,7 +223,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
     for query in queries {
         let name = query.descriptor().id().to_string();
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .bind_stream(endpoint(&name, "out"), stream(&name))
             .connect(
                 EdgeDefinition::new(endpoint("items", "out"), endpoint(&name, "in")),
@@ -235,6 +235,18 @@ async fn exercise(dynamic: bool) -> Result<()> {
         Box::new(BoundedPipeConfig { capacity: 1 }),
     );
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("native-mssql")
         .with_components(builder.build()?)
         .build()

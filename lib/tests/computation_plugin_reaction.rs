@@ -162,7 +162,7 @@ async fn make_graph_query(
             )
             .expect("source"),
         )))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .component(
             ComponentSpecification {
                 descriptor: ComponentDescriptor::try_new(
@@ -242,6 +242,18 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
             .expect("store"),
     );
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("reaction-instance")
         .with_state_store_provider(state.clone())
         .build()
@@ -351,7 +363,22 @@ impl Reaction for FailingBootstrap {
 #[tokio::test]
 async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
     let temp = test_root();
-    let drasi = DrasiLib::builder().build().await.expect("instance");
+    let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .expect("instance");
     let services = drasi.computation_plugin_services().expect("services");
     let catalog = QueryResultsCatalog::new(instance_graph_id()).expect("catalogue");
     let calls = Arc::new(AtomicUsize::new(0));
@@ -420,6 +447,18 @@ async fn existing_snapshot_reaction_accepts_empty_and_aggregate_native_snapshots
     ] {
         let temp = test_root();
         let drasi = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_state_store_provider(Arc::new(
                 drasi_state_store_redb::RedbStateStoreProvider::new(temp.path().join("state.redb"))
                     .expect("state"),
@@ -588,6 +627,18 @@ async fn snapshot_query(
 }
 async fn materialization_instance(state: Arc<dyn StateStoreProvider>) -> DrasiLib {
     DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("durable-materialization")
         .with_state_store_provider(state)
         .build()

@@ -227,6 +227,12 @@ impl ComputationComponent for NativeConsumerProxy {
     fn recovery_contract(&self) -> ComponentRecovery {
         self.recovery.clone()
     }
+    fn binds_inputs(&self) -> bool {
+        self.component.binds_inputs()
+    }
+    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
+        self.component.bind_inputs(bindings).await
+    }
     fn bind_control(&mut self, control: ComponentControl) {
         self.component.bind_control(control);
     }

@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use anyhow::Context as _;
+
 use crate::{
     NativeComponent as ComputationComponent, NativeService as ComputationService,
     NativeSink as EnvelopeSink, NativeSource as EnvelopeSource, NativeTransformer as Transformer,
@@ -13,12 +15,16 @@ use std::{
     ffi::c_void,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
     },
 };
 
 mod activation_credentials;
 mod bootstrap_coordination;
+#[cfg(test)]
+mod deprovision_tests;
+#[cfg(test)]
+mod input_binding_tests;
 mod output_follow;
 mod output_reads;
 mod source_schema;
@@ -73,6 +79,14 @@ pub trait Factory: Send + Sync + 'static {
     }
     fn supports_sink_batching(&self) -> bool {
         false
+    }
+    fn create_with_processing(
+        &self,
+        _request: &CreateRequest,
+        _control: ControlSender,
+        _processing: crate::NativeProcessing,
+    ) -> anyhow::Result<CreatedComponent> {
+        anyhow::bail!("factory does not implement host-owned indexed processing")
     }
     /// Optional pure metadata describing defaults and supported field values.
     fn configuration_details(&self) -> Option<crate::ConfigDetails> {
@@ -399,6 +413,9 @@ impl ExportedPlugin {
     pub fn output_snapshots(&self) -> *const abi::output_snapshots::PluginOutputSnapshotsV1 {
         &PLUGIN_OUTPUT_SNAPSHOTS
     }
+    pub fn processing(&self) -> *const abi::processing::PluginProcessingV1 {
+        &PLUGIN_PROCESSING
+    }
     pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
         &PLUGIN_RECOVERY
     }
@@ -408,10 +425,10 @@ impl ExportedPlugin {
     pub fn source_schema(&self) -> *const abi::source_schema::PluginSourceSchemaV1 {
         &source_schema::EXTENSION
     }
-    pub fn output_reads(&self) -> *const abi::output_reads::PluginOutputReadsV1 {
+    pub fn output_reads(&self) -> *const abi::output_reads::PluginOutputReadsV2 {
         &output_reads::EXTENSION
     }
-    pub fn output_follow(&self) -> *const abi::output_follow::PluginOutputFollowV1 {
+    pub fn output_follow(&self) -> *const abi::output_follow::PluginOutputFollowV2 {
         &output_follow::EXTENSION
     }
     pub fn activation_credentials(
@@ -495,6 +512,14 @@ static PLUGIN_OUTPUT_SNAPSHOTS: abi::output_snapshots::PluginOutputSnapshotsV1 =
         reserved: 0,
         factory: Some(factory_output_snapshots),
         create: Some(create_component_with_output_snapshots),
+    };
+
+static PLUGIN_PROCESSING: abi::processing::PluginProcessingV1 =
+    abi::processing::PluginProcessingV1 {
+        header: Header::new::<abi::processing::PluginProcessingV1>(),
+        version: abi::processing::VERSION,
+        reserved: 0,
+        create: Some(create_component_with_processing),
     };
 
 unsafe extern "C" fn factory_output_snapshots(state: *mut c_void, index: u32) -> Reply {
@@ -1004,6 +1029,8 @@ struct Instance {
     wakeup: Option<Arc<dyn WakeupSource>>,
     busy: AtomicBool,
     running: AtomicBool,
+    bootstrapping: AtomicBool,
+    administration: Option<Arc<StateAdministration>>,
     activation_credentials_bound: bool,
     source_schema: Option<Arc<source_schema::SchemaState>>,
     output_reads: Option<Arc<output_reads::ReadBinding>>,
@@ -1017,6 +1044,45 @@ struct Instance {
     consumer_recovery: Option<crate::consumer_progress::InstanceProgress>,
     input_position_policy: Option<crate::input_position::ExportedInputPositionPolicy>,
     consumer: Option<Box<crate::consumer::ConsumerState>>,
+}
+
+#[derive(Default)]
+struct IndependentCalls {
+    active: usize,
+    retiring: bool,
+}
+
+struct StateAdministration {
+    cleanup_complete: AtomicBool,
+    deprovision_complete: AtomicBool,
+    independent: Mutex<IndependentCalls>,
+    independent_changed: tokio::sync::watch::Sender<()>,
+}
+
+impl StateAdministration {
+    fn new() -> Self {
+        Self {
+            cleanup_complete: AtomicBool::new(true),
+            deprovision_complete: AtomicBool::new(false),
+            independent: Mutex::new(IndependentCalls::default()),
+            independent_changed: tokio::sync::watch::channel(()).0,
+        }
+    }
+
+    async fn wait_for_independent_calls(&self) -> anyhow::Result<()> {
+        let mut changed = self.independent_changed.subscribe();
+        loop {
+            let active = self
+                .independent
+                .lock()
+                .map_err(|_| anyhow::anyhow!("native operation lifecycle lock is poisoned"))?
+                .active;
+            if active == 0 {
+                return Ok(());
+            }
+            changed.changed().await?;
+        }
+    }
 }
 
 fn source_recovery(
@@ -1137,6 +1203,7 @@ unsafe extern "C" fn create_component(
             std::ptr::null(),
             false,
             std::ptr::null(),
+            std::ptr::null(),
             out,
         )
     }
@@ -1157,6 +1224,7 @@ unsafe extern "C" fn create_component_with_admission(
             std::ptr::null(),
             std::ptr::null(),
             false,
+            std::ptr::null(),
             std::ptr::null(),
             out,
         )
@@ -1182,6 +1250,7 @@ unsafe extern "C" fn create_component_with_progress(
             std::ptr::null(),
             false,
             std::ptr::null(),
+            std::ptr::null(),
             out,
         )
     }
@@ -1205,6 +1274,7 @@ unsafe extern "C" fn create_component_with_consumer_progress(
             progress,
             std::ptr::null(),
             false,
+            std::ptr::null(),
             std::ptr::null(),
             out,
         )
@@ -1230,6 +1300,7 @@ unsafe extern "C" fn create_component_with_output_snapshots(
             snapshots,
             false,
             std::ptr::null(),
+            std::ptr::null(),
             out,
         )
     }
@@ -1250,6 +1321,34 @@ unsafe extern "C" fn create_component_with_consumer(
             std::ptr::null(),
             true,
             std::ptr::null(),
+            std::ptr::null(),
+            out,
+        )
+    }
+}
+
+unsafe extern "C" fn create_component_with_processing(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    processing: *const abi::processing::ProcessingV1,
+    out: *mut abi::ComponentHandle,
+) -> Status {
+    if processing.is_null() {
+        return transport::status_result(Err(Failure::protocol(
+            "missing indexed processing service",
+        )));
+    }
+    unsafe {
+        create_component_with_services(
+            state,
+            input,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            false,
+            std::ptr::null(),
+            processing,
             out,
         )
     }
@@ -1265,6 +1364,7 @@ unsafe fn create_component_with_services(
     snapshots: *const abi::output_snapshots::OutputSnapshotsV1,
     consumer_bound: bool,
     coordinator: *const abi::bootstrap_coordination::BootstrapCoordinatorHandle,
+    processing: *const abi::processing::ProcessingV1,
     out: *mut abi::ComponentHandle,
 ) -> Status {
     transport::status_boundary(|| {
@@ -1281,6 +1381,10 @@ unsafe fn create_component_with_services(
             let metadata = &resolved;
             let control = ControlSender::default();
             let factory = &state.plugin.definition.factories[state.index];
+            anyhow::ensure!(
+                metadata.capabilities.indexed_processing != processing.is_null(),
+                "native transformer requires its negotiated indexed processing service"
+            );
             let coordinator = if coordinator.is_null() {
                 None
             } else {
@@ -1325,7 +1429,23 @@ unsafe fn create_component_with_services(
                     crate::NativeAdmission::from_borrowed(admission, state.plugin.codec.clone())?
                 })
             };
-            let (created, progress, consumer_progress) = if !consumer_progress.is_null() {
+            let (created, progress, consumer_progress) = if !processing.is_null() {
+                anyhow::ensure!(
+                    admission.is_null()
+                        && progress.is_null()
+                        && consumer_progress.is_null()
+                        && snapshots.is_null()
+                        && !consumer_bound
+                        && coordinator.is_none(),
+                    "indexed processing cannot use a conflicting construction service"
+                );
+                let processing = unsafe { crate::NativeProcessing::from_borrowed(processing)? };
+                (
+                    factory.create_with_processing(&request, control.clone(), processing)?,
+                    None,
+                    None,
+                )
+            } else if !consumer_progress.is_null() {
                 anyhow::ensure!(
                     admission.is_null()
                         && progress.is_null()
@@ -1372,7 +1492,11 @@ unsafe fn create_component_with_services(
                         && progress.is_null()
                         && !consumer_bound
                         && factory.supports_output_snapshots()
-                        && metadata.role == drasi_computation_contracts::ComponentRole::Sink,
+                        && matches!(
+                            metadata.role,
+                            drasi_computation_contracts::ComponentRole::Sink
+                                | drasi_computation_contracts::ComponentRole::Transformer
+                        ),
                     "unsupported native output-snapshot binding"
                 );
                 let snapshots = unsafe { crate::NativeOutputSnapshots::from_borrowed(snapshots)? };
@@ -1490,6 +1614,29 @@ unsafe fn create_component_with_services(
                     == metadata.capabilities.readiness,
                 "native readiness capability mismatch"
             );
+            anyhow::ensure!(
+                component.base().supports_deprovision() == metadata.capabilities.deprovision,
+                "native deprovision capability mismatch"
+            );
+            anyhow::ensure!(
+                component.base().supports_input_binding_updates()
+                    == metadata.capabilities.input_binding_updates,
+                "native input-binding update capability mismatch"
+            );
+            anyhow::ensure!(
+                component
+                    .transformer()
+                    .and_then(|transformer| transformer.quiescent_bootstrap_input())
+                    == metadata.capabilities.quiescent_bootstrap,
+                "native quiescent bootstrap capability mismatch"
+            );
+            anyhow::ensure!(
+                component
+                    .transformer()
+                    .and_then(|transformer| transformer.durable_bootstrap_input())
+                    == metadata.capabilities.durable_bootstrap,
+                "native durable bootstrap capability mismatch"
+            );
             let wakeup = component
                 .transformer()
                 .and_then(|value| value.wakeup_source());
@@ -1570,6 +1717,21 @@ unsafe fn create_component_with_services(
                 metadata: InstanceMetadata {
                     descriptor: metadata.descriptor(request.id)?,
                     capabilities: metadata.capabilities.clone(),
+                    queries: output_reads
+                        .as_ref()
+                        .map(|binding| {
+                            binding
+                                .readers
+                                .ports()
+                                .iter()
+                                .filter_map(|(port, readers)| {
+                                    readers
+                                        .query()
+                                        .map(|reader| (port.clone(), reader.description()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 },
                 component: tokio::sync::Mutex::new(component),
                 factory: metadata.clone(),
@@ -1579,6 +1741,11 @@ unsafe fn create_component_with_services(
                 wakeup,
                 busy: AtomicBool::new(false),
                 running: AtomicBool::new(false),
+                bootstrapping: AtomicBool::new(false),
+                administration: metadata
+                    .capabilities
+                    .deprovision
+                    .then(|| Arc::new(StateAdministration::new())),
                 activation_credentials_bound: request.activation_credentials_bound,
                 source_schema,
                 output_reads,
@@ -1752,6 +1919,25 @@ impl Drop for BusyGuard {
     }
 }
 
+struct IndependentGuard {
+    administration: Arc<StateAdministration>,
+    damaged: Arc<transport::PanicState>,
+}
+impl Drop for IndependentGuard {
+    fn drop(&mut self) {
+        let mut calls = self
+            .administration
+            .independent
+            .lock()
+            .unwrap_or_else(|error| {
+                self.damaged.quarantine();
+                error.into_inner()
+            });
+        calls.active -= 1;
+        self.administration.independent_changed.send_modify(|_| ());
+    }
+}
+
 unsafe extern "C" fn begin(
     state: *mut c_void,
     code: u32,
@@ -1804,6 +1990,14 @@ unsafe extern "C" fn begin(
             SNAPSHOT => !c.snapshot_inputs.is_empty(),
             CONTROL => c.control,
             TRANSACT => c.transactional,
+            DEPROVISION => c.deprovision,
+            BIND_INPUTS => c.input_binding_updates,
+            BOOTSTRAP_INPUT | BOOTSTRAP_COMPLETE => {
+                c.quiescent_bootstrap.is_some() || c.durable_bootstrap.is_some()
+            }
+            BOOTSTRAP_STATUS => c.durable_bootstrap.is_some() || c.bootstrap_optional,
+            BOOTSTRAP_RESET => c.durable_bootstrap.is_some(),
+            DELIVERY_RESUME => c.durable_output,
             _ => false,
         };
         if !allowed {
@@ -1826,13 +2020,50 @@ unsafe extern "C" fn begin(
                 })?;
             Some(BusyGuard(instance.clone()))
         };
+        let independent =
+            if let Some(administration) = &instance.administration {
+                let mut calls = administration.independent.lock().map_err(|_| {
+                    Failure::protocol("native operation lifecycle lock is poisoned")
+                })?;
+                if calls.retiring && code != DEPROVISION {
+                    return Err(Failure::closed());
+                }
+                if code == DEPROVISION {
+                    if !input.is_empty() {
+                        return Err(Failure::protocol(
+                            "native deprovision requires an empty payload",
+                        ));
+                    }
+                    if instance.running.load(Ordering::Acquire)
+                        || !administration.cleanup_complete.load(Ordering::Acquire)
+                    {
+                        return Err(Failure::failed(
+                            "native deprovision requires successfully stopped work",
+                        ));
+                    }
+                    calls.retiring = true;
+                }
+                if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
+                    calls.active = calls.active.checked_add(1).ok_or_else(|| {
+                        Failure::protocol("too many independent native operations")
+                    })?;
+                    Some(IndependentGuard {
+                        administration: administration.clone(),
+                        damaged: instance.damaged.clone(),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
         let runtime = io_runtime()?;
-        if code == STOP {
+        if matches!(code, START | STOP | DEPROVISION) {
             if let Some(schema) = &instance.source_schema {
                 schema.deactivate();
             }
             if let Some(reads) = &instance.output_reads {
-                reads.deactivate();
+                reads.deactivate()?;
             }
         }
         let damaged = instance.damaged.clone();
@@ -1841,6 +2072,7 @@ unsafe extern "C" fn begin(
             transport::export_component_operation(
                 async move {
                     let _guard = guard;
+                    let _independent = independent;
                     let consumer = instance.consumer.as_ref().expect("checked consumer");
                     consumer
                         .run(async {
@@ -1858,6 +2090,7 @@ unsafe extern "C" fn begin(
             transport::export_component_operation(
                 async move {
                     let _guard = guard;
+                    let _independent = independent;
                     execute(instance, code, input, transaction)
                         .await
                         .map_err(Failure::from)
@@ -1878,7 +2111,7 @@ async fn execute(
     transaction: Option<RetainedTransaction>,
 ) -> anyhow::Result<Vec<u8>> {
     use abi::operation::*;
-    if code != STOP {
+    if !matches!(code, STOP | DEPROVISION) {
         if let Some(coordinator) = &instance.coordinator {
             coordinator.check_active()?;
         }
@@ -1906,8 +2139,30 @@ async fn execute(
                 .await?,
         );
     }
+    if code == DEPROVISION {
+        instance
+            .administration
+            .as_ref()
+            .expect("deprovision capability was validated")
+            .wait_for_independent_calls()
+            .await?;
+        if let Some(reads) = &instance.output_reads {
+            reads.wait_quiescent().await?;
+        }
+    }
     let mut component = instance.component.lock().await;
-    if !matches!(code, START | STOP | TRANSACT) {
+    if !matches!(
+        code,
+        START
+            | STOP
+            | TRANSACT
+            | DEPROVISION
+            | BIND_INPUTS
+            | BOOTSTRAP_INPUT
+            | BOOTSTRAP_COMPLETE
+            | BOOTSTRAP_STATUS
+            | BOOTSTRAP_RESET
+    ) {
         anyhow::ensure!(
             instance.running.load(Ordering::Acquire),
             "native component has not started"
@@ -1919,9 +2174,19 @@ async fn execute(
                 consumer.check_ready()?;
             }
             anyhow::ensure!(
-                !instance.running.load(Ordering::Acquire),
+                !instance.running.load(Ordering::Acquire)
+                    && !instance.bootstrapping.load(Ordering::Acquire),
                 "native component already started"
             );
+            if let Some(administration) = &instance.administration {
+                anyhow::ensure!(
+                    administration.cleanup_complete.load(Ordering::Acquire),
+                    "native component requires successful cleanup before restart"
+                );
+                administration
+                    .cleanup_complete
+                    .store(false, Ordering::Release);
+            }
             if let Some(progress) = &instance.progress {
                 anyhow::ensure!(
                     Some(source_recovery(&component, progress)?) == instance.recovery,
@@ -1958,7 +2223,12 @@ async fn execute(
                 );
                 component.base_mut().start().await?;
             }
-            instance.running.store(true, Ordering::Release);
+            let bootstrapping = instance.factory.capabilities.quiescent_bootstrap.is_some()
+                || instance.factory.capabilities.durable_bootstrap.is_some();
+            instance
+                .bootstrapping
+                .store(bootstrapping, Ordering::Release);
+            instance.running.store(!bootstrapping, Ordering::Release);
             if let Some(progress) = &instance.progress {
                 anyhow::ensure!(
                     Some(source_recovery(&component, progress)?) == instance.recovery,
@@ -1979,12 +2249,18 @@ async fn execute(
             if let Some(schema) = &instance.source_schema {
                 schema.activate()?;
             }
-            if let Some(reads) = &instance.output_reads {
+            if let Some(reads) = instance.output_reads.as_ref().filter(|_| !bootstrapping) {
                 reads.activate()?;
             }
         }
         STOP => {
             instance.running.store(false, Ordering::Release);
+            instance.bootstrapping.store(false, Ordering::Release);
+            if let Some(administration) = &instance.administration {
+                administration
+                    .cleanup_complete
+                    .store(false, Ordering::Release);
+            }
             if let Some(coordinator) = &instance.coordinator {
                 coordinator.stopping();
             }
@@ -1995,6 +2271,108 @@ async fn execute(
             if let Some(coordinator) = &instance.coordinator {
                 coordinator.stopped();
             }
+            if let Some(administration) = &instance.administration {
+                administration
+                    .cleanup_complete
+                    .store(true, Ordering::Release);
+            }
+            if let Some(reads) = &instance.output_reads {
+                reads.retain_recovery()?;
+            }
+        }
+        DEPROVISION => {
+            let administration = instance
+                .administration
+                .as_ref()
+                .expect("deprovision capability was validated");
+            if !administration.deprovision_complete.load(Ordering::Acquire) {
+                component.base_mut().deprovision().await?;
+                administration
+                    .deprovision_complete
+                    .store(true, Ordering::Release);
+            }
+        }
+        BIND_INPUTS => {
+            let bindings: Vec<drasi_computation_contracts::InputBinding> = wire::decode(&input)?;
+            for binding in &bindings {
+                anyhow::ensure!(
+                    instance.metadata.descriptor.ports().iter().any(|port| {
+                        port.direction() == PortDirection::Input && port.id() == &binding.input_port
+                    }),
+                    "native input-binding update names an undeclared input port"
+                );
+            }
+            component.base_mut().bind_inputs(&bindings).await?;
+        }
+        BOOTSTRAP_INPUT => {
+            anyhow::ensure!(
+                instance.bootstrapping.load(Ordering::Acquire),
+                "native transformer is not initializing"
+            );
+            let input = wire::decode::<wire::Envelope>(&input)?.into_input(&instance.codec)?;
+            anyhow::ensure!(
+                instance
+                    .factory
+                    .capabilities
+                    .quiescent_bootstrap
+                    .as_ref()
+                    .or(instance.factory.capabilities.durable_bootstrap.as_ref())
+                    == Some(&input.port),
+                "bootstrap envelope targets an undeclared initialization input"
+            );
+            wire::check_port(
+                &instance.metadata.descriptor,
+                &input.port,
+                &input.envelope,
+                PortDirection::Input,
+            )?;
+            component.transformer_mut()?.bootstrap(input).await?;
+        }
+        BOOTSTRAP_COMPLETE => {
+            anyhow::ensure!(
+                instance.bootstrapping.load(Ordering::Acquire),
+                "native transformer is not awaiting bootstrap completion"
+            );
+            let completion = if instance.factory.capabilities.durable_bootstrap.is_some() {
+                drasi_computation_contracts::BootstrapCompletion::try_from(wire::decode::<
+                    crate::bootstrap::Completed,
+                >(
+                    &input
+                )?)?
+            } else {
+                anyhow::ensure!(
+                    input.is_empty(),
+                    "quiescent bootstrap has no completion payload"
+                );
+                drasi_computation_contracts::BootstrapCompletion::default()
+            };
+            component
+                .transformer_mut()?
+                .bootstrap_completed(completion)
+                .await?;
+            instance.bootstrapping.store(false, Ordering::Release);
+            instance.running.store(true, Ordering::Release);
+            if let Some(reads) = &instance.output_reads {
+                reads.activate()?;
+            }
+        }
+        BOOTSTRAP_STATUS => {
+            anyhow::ensure!(
+                input.is_empty() && !instance.running.load(Ordering::Acquire),
+                "native transformer cannot inspect bootstrap requirements while running"
+            );
+            return wire::encode(&component.transformer_mut()?.bootstrap_status()?);
+        }
+        BOOTSTRAP_RESET => {
+            anyhow::ensure!(
+                input.is_empty() && instance.bootstrapping.load(Ordering::Acquire),
+                "native transformer is not initializing"
+            );
+            component.transformer_mut()?.reset_bootstrap().await?;
+        }
+        DELIVERY_RESUME => {
+            anyhow::ensure!(input.is_empty(), "delivery resumption takes no payload");
+            component.transformer_mut()?.resume_delivery()?;
         }
         NEXT => {
             let Component::Source(source) = &mut *component else {
@@ -2049,12 +2427,43 @@ async fn execute(
                     PortDirection::Output,
                 )?;
             }
+            let query_observation = if instance.factory.capabilities.query_observations {
+                let port = &instance.factory.capabilities.output_queries[0];
+                if outputs.iter().any(|output| &output.port == port) {
+                    let reader = instance
+                        .output_reads
+                        .as_ref()
+                        .context("missing query observation binding")?
+                        .readers
+                        .ports()
+                        .get(port)
+                        .and_then(|output| output.query())
+                        .context("missing query observation reader")?;
+                    let observation = reader.query_observation().await?;
+                    observation.validate(
+                        instance.metadata.descriptor.id(),
+                        instance
+                            .metadata
+                            .queries
+                            .get(port)
+                            .context("missing query description")?,
+                    )?;
+                    Some(crate::output_reads::WireQueryObservation::new(
+                        &observation,
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             return wire::encode(&wire::OutputBatch {
                 outputs: outputs
                     .iter()
                     .map(|output| wire::Envelope::output(output, &instance.codec))
                     .collect::<anyhow::Result<_>>()?,
                 pending,
+                query_observation,
             });
         }
         DELIVERY_COMPLETED => {

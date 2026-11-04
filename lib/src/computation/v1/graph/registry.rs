@@ -30,6 +30,7 @@ pub(crate) struct GraphRegistrySnapshot {
         im::OrdMap<ComponentId, std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>>,
     output_readers: im::OrdMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
     primary_ports: im::OrdMap<ComponentId, crate::computation::v1::PortPrimaries>,
+    factories: im::OrdMap<ImplementationIdentity, std::sync::Weak<dyn ComponentFactory>>,
     deferred_activation: im::OrdSet<ComponentId>,
 }
 
@@ -91,6 +92,10 @@ impl GraphRegistrySnapshot {
                 })
                 .collect(),
             deferred_activation,
+            factories: factories
+                .iter()
+                .map(|(id, factory)| (id.clone(), Arc::downgrade(factory)))
+                .collect(),
             resources: resources
                 .iter()
                 .map(|(id, handle)| (id.clone(), handle.downgrade()))
@@ -126,6 +131,32 @@ impl GraphRegistrySnapshot {
         id: &ComponentId,
     ) -> Option<&CapturedComponentConfiguration> {
         self.configurations.get(id)
+    }
+
+    pub(crate) fn factory(
+        &self,
+        implementation: &ImplementationIdentity,
+    ) -> Option<Arc<dyn ComponentFactory>> {
+        self.factories
+            .get(implementation)
+            .and_then(std::sync::Weak::upgrade)
+    }
+
+    pub(crate) fn has_query_authoring(&self, specification: &ComponentSpecification) -> bool {
+        self.factory(&specification.implementation)
+            .is_some_and(|factory| factory.query_authoring().is_some())
+    }
+
+    pub(crate) fn authored_query_configuration(
+        &self,
+        specification: &ComponentSpecification,
+    ) -> Option<anyhow::Result<crate::config::QueryConfig>> {
+        self.factory(&specification.implementation)
+            .and_then(|factory| {
+                factory
+                    .query_authoring()
+                    .map(|authoring| authoring.query_configuration(specification, &self.desired.id))
+            })
     }
 
     pub(crate) fn query_api(

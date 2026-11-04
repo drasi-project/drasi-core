@@ -56,36 +56,29 @@ pub trait ReactionPluginConstructor: Send + Sync {
     async fn create(&self) -> anyhow::Result<Box<dyn Reaction>>;
 }
 
-#[derive(Clone)]
-pub(super) struct OutputView {
-    pub(super) snapshot: QueryResultSnapshot,
-    pub(super) retained: Vec<ChangeEnvelope>,
-    pub(super) config_hash: u64,
-    pub(super) incarnation: Option<uuid::Uuid>,
+pub(super) use drasi_query_common::QueryOutputView as OutputView;
+pub(super) async fn output_view(query: &CatalogQuery) -> anyhow::Result<OutputView> {
+    query.output.view().await
 }
-pub(super) fn output_view(query: &CatalogQuery) -> anyhow::Result<OutputView> {
-    query.reader.query_view().map_err(Into::into)
-}
-pub(super) fn snapshot_response(
+pub(super) fn snapshot_response_parts(
     query_id: &str,
-    view: &OutputView,
+    snapshot: &QueryResultSnapshot,
+    config_hash: u64,
 ) -> anyhow::Result<SnapshotResponse> {
-    if view.snapshot.rows.is_empty() {
-        return Ok(SnapshotResponse::new(
-            im::HashMap::new(),
-            view.snapshot.as_of_sequence,
-            view.config_hash,
-        )
-        .with_output_generation(view.snapshot.generation));
+    if snapshot.rows.is_empty() {
+        return Ok(
+            SnapshotResponse::new(im::HashMap::new(), snapshot.as_of_sequence, config_hash)
+                .with_output_generation(snapshot.generation),
+        );
     }
     let envelope = QueryChangeCodec::snapshot_envelope(
-        &view.snapshot.projector,
+        &snapshot.projector,
         query_id,
-        &view.snapshot,
+        snapshot,
         &ComponentId::try_new("snapshot-bridge")?,
         SystemMetadata::new(
             StreamId::try_new("snapshot-bridge/out")?,
-            view.snapshot.as_of_sequence,
+            snapshot.as_of_sequence,
         ),
     )?;
     let result = QueryChangeCodec::to_legacy_result(&envelope)?;
@@ -102,8 +95,8 @@ pub(super) fn snapshot_response(
         }
     }
     Ok(
-        SnapshotResponse::new(rows, view.snapshot.as_of_sequence, view.config_hash)
-            .with_output_generation(view.snapshot.generation),
+        SnapshotResponse::new(rows, snapshot.as_of_sequence, config_hash)
+            .with_output_generation(snapshot.generation),
     )
 }
 
@@ -123,32 +116,45 @@ pub(super) fn outbox_response(
     view: &OutputView,
     after: u64,
 ) -> std::result::Result<OutboxResponse, FetchError> {
+    outbox_response_parts(
+        &view.retained,
+        view.snapshot.as_of_sequence,
+        view.snapshot.generation,
+        view.config_hash,
+        after,
+    )
+}
+
+pub(super) fn outbox_response_parts(
+    retained: &[ChangeEnvelope],
+    latest_sequence: u64,
+    generation: u64,
+    config_hash: u64,
+    after: u64,
+) -> std::result::Result<OutboxResponse, FetchError> {
     if after == u64::MAX {
         return Ok(OutboxResponse {
             results: Vec::new(),
-            latest_sequence: view.snapshot.as_of_sequence,
-            config_hash: view.config_hash,
-            output_generation: view.snapshot.generation,
+            latest_sequence,
+            config_hash,
+            output_generation: generation,
         });
     }
-    let oldest = view
-        .retained
+    let oldest = retained
         .first()
         .map(|event| event.system().sequence())
-        .unwrap_or(view.snapshot.as_of_sequence);
-    if after > view.snapshot.as_of_sequence
-        || after < view.snapshot.as_of_sequence
-            && (view.retained.is_empty() || after < oldest.saturating_sub(1))
+        .unwrap_or(latest_sequence);
+    if after > latest_sequence
+        || after < latest_sequence && (retained.is_empty() || after < oldest.saturating_sub(1))
     {
         return Err(FetchError::OutboxGap(OutboxGap {
             requested: after,
             earliest_available: oldest,
-            latest_sequence: view.snapshot.as_of_sequence,
-            config_hash: view.config_hash,
+            latest_sequence,
+            config_hash,
         }));
     }
-    let results = view
-        .retained
+    let results = retained
         .iter()
         .filter(|event| event.system().sequence() > after)
         .map(|event| {
@@ -164,9 +170,9 @@ pub(super) fn outbox_response(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(OutboxResponse {
         results,
-        latest_sequence: view.snapshot.as_of_sequence,
-        config_hash: view.config_hash,
-        output_generation: view.snapshot.generation,
+        latest_sequence,
+        config_hash,
+        output_generation: generation,
     })
 }
 
@@ -183,9 +189,9 @@ impl SnapshotFetcher for Fetcher {
                 status: ComponentStatus::Error,
             });
         }
-        let query = self
+        let (snapshot, hash) = self
             .catalog
-            .ready(id, self.timeout)
+            .query_snapshot(id, self.timeout)
             .await
             .map_err(|error| {
                 log::warn!("Native query {id} cannot supply a legacy snapshot: {error:#}");
@@ -200,17 +206,7 @@ impl SnapshotFetcher for Fetcher {
                     }
                 }
             })?;
-        let snapshot = query
-            .reader
-            .query_view()
-            .map_err(|error| {
-                log::error!("Cannot read native output snapshot: {error}");
-                FetchError::NotRunning {
-                    status: ComponentStatus::Error,
-                }
-            })?
-            .snapshot;
-        snapshot_stream(snapshot, query.config_hash).map_err(|error| {
+        snapshot_stream(snapshot, hash).map_err(|error| {
             log::error!("Native snapshot conversion failed: {error:#}");
             FetchError::NotRunning {
                 status: ComponentStatus::Error,
@@ -738,9 +734,9 @@ impl ReactionPluginHost {
                 Some(heads) => heads.remove(query_id).ok_or_else(|| {
                     anyhow::anyhow!("query '{query_id}' has no subscription head")
                 })?,
-                None => self.catalog.query_head(query_id)?,
+                None => self.catalog.query_head(query_id).await?,
             };
-            Self::validate_head(query_id, &head, &query, &output_view(&query)?)?;
+            Self::validate_head(query_id, &head, &query, &output_view(&query).await?)?;
             heads.insert(query_id.clone(), head);
         }
         anyhow::ensure!(
@@ -759,7 +755,7 @@ impl ReactionPluginHost {
                     Duration::from_secs(self.options.bootstrap_timeout_secs),
                 )
                 .await?;
-            let view = output_view(&query)?;
+            let view = output_view(&query).await?;
             let head = &heads[query_id];
             Self::validate_head(query_id, head, &query, &view)?;
             life.query_generations
@@ -1026,7 +1022,7 @@ impl ReactionPluginHost {
             {
                 metrics.record_checkpoint(
                     result.sequence,
-                    self.catalog.current_sequence(&result.query_id)?,
+                    self.catalog.current_sequence(&result.query_id).await?,
                 );
             }
             life.accepted
@@ -1110,7 +1106,7 @@ impl ReactionPluginHost {
                 Duration::from_secs(self.options.bootstrap_timeout_secs),
             )
             .await?;
-        let view = output_view(&entry)?;
+        let view = output_view(&entry).await?;
         self.require_query_generation(&life, query)?;
         let (generation, after) = life.accepted.get(query).copied().ok_or_else(|| {
             anyhow::anyhow!("query '{query}' has no accepted subscription position")
@@ -1135,7 +1131,7 @@ impl ReactionPluginHost {
                         if let Some(metrics) = metrics {
                             metrics.record_checkpoint(
                                 replay.latest_sequence,
-                                self.catalog.current_sequence(query)?,
+                                self.catalog.current_sequence(query).await?,
                             );
                         }
                         return Ok(());
@@ -1451,7 +1447,7 @@ mod tests {
         .with_result_catalog(&catalog)
         .unwrap();
         query.start().await.unwrap();
-        let results = query.results();
+        let results = query.output_owner();
         let projector = results.snapshot().unwrap().projector;
         let view = snapshot_view(projector.clone(), 10_000);
         let identity = results.recovery_view(None).unwrap().identity;
@@ -1471,7 +1467,8 @@ mod tests {
             .get(&ComponentId::try_new("query").unwrap())
             .unwrap()
             .unwrap()
-            .config_hash;
+            .output
+            .configuration_hash();
         let fetcher = Fetcher {
             catalog,
             queries: BTreeSet::from(["query".into()]),

@@ -42,6 +42,7 @@ pub mod consumer_progress;
 pub mod output_follow;
 pub mod output_reads;
 pub mod output_snapshots;
+pub mod processing;
 pub mod recovery;
 pub mod services;
 pub mod source_schema;
@@ -269,6 +270,20 @@ pub mod operation {
     pub const TRANSACT: u32 = 15;
     /// Available only after negotiating `batching::PluginBatchingV1`.
     pub const HANDLE_BATCH: u32 = 16;
+    /// Available only when the transformer declares the deprovision capability.
+    pub const DEPROVISION: u32 = 17;
+    /// Available only when the component declares input-binding updates.
+    pub const BIND_INPUTS: u32 = 18;
+    /// One initialization envelope for the declared provider-bootstrap input.
+    pub const BOOTSTRAP_INPUT: u32 = 19;
+    /// Complete initialization and enable ordinary processing/reads.
+    pub const BOOTSTRAP_COMPLETE: u32 = 20;
+    /// Recovered initialization state for a declared durable-bootstrap consumer.
+    pub const BOOTSTRAP_STATUS: u32 = 21;
+    /// Reset initialization under the component's explicit recovery policy.
+    pub const BOOTSTRAP_RESET: u32 = 22;
+    /// Reschedule retained output after the Host validates actual destinations.
+    pub const DELIVERY_RESUME: u32 = 23;
 }
 
 pub const POLL_PENDING: u32 = 0;

@@ -225,10 +225,24 @@ async fn build_e2e_lib(
     default_recovery_policy: Option<RecoveryPolicy>,
 ) -> anyhow::Result<Arc<DrasiLib>> {
     let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-    let mut builder = DrasiLib::builder().with_id(id).with_index_provider(
-        "persistent",
-        Arc::new(provider) as Arc<dyn IndexBackendPlugin>,
-    );
+    let mut builder = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .with_id(id)
+        .with_index_provider(
+            "persistent",
+            Arc::new(provider) as Arc<dyn IndexBackendPlugin>,
+        );
 
     if let Some(policy) = default_recovery_policy {
         builder = builder.with_default_recovery_policy(policy);

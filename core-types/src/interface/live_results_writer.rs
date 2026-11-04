@@ -28,7 +28,7 @@
 
 use async_trait::async_trait;
 
-use super::IndexError;
+use super::{IndexError, OutboxPageLimits};
 
 /// A single row mutation: upsert if data is `Some`, delete if `None`.
 #[derive(Debug, Clone)]
@@ -63,6 +63,21 @@ pub trait LiveResultsWriter: Send + Sync {
     /// Returns `(row_signature, serialized_data)` pairs in unspecified order.
     /// Returns an empty vec if no rows exist for this query.
     async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError>;
+
+    /// Read committed rows in strictly increasing signature order, after the
+    /// optional exclusive cursor. `None` includes signature zero.
+    ///
+    /// Reuses the outbox's record/payload budget, including its single oversized
+    /// first-record rule. Implementations must not collect the full snapshot
+    /// and truncate it. Callers must exclude writers across a multi-page read.
+    async fn read_page(
+        &self,
+        _query_id: &str,
+        _after_signature: Option<u64>,
+        _limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        Err(IndexError::NotSupported)
+    }
 
     /// Delete all live rows for a query.
     ///

@@ -81,6 +81,12 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
             .run_async(async move { inner.clear_checkpoints().await })
             .await
     }
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        let inner = self.inner.clone();
+        self.work
+            .run_async(async move { inner.stage_clear_checkpoints().await })
+            .await
+    }
     async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         self.work
@@ -213,6 +219,19 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
 
 #[async_trait]
 impl<T: LiveResultsWriter + ?Sized + 'static> LiveResultsWriter for ScopedIndex<T> {
+    async fn read_page(
+        &self,
+        query: &str,
+        after: Option<u64>,
+        limits: crate::interface::OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let inner = self.inner.clone();
+        let query = query.to_owned();
+        self.work
+            .run_async(async move { inner.read_page(&query, after, limits).await })
+            .await
+    }
+
     async fn apply_mutations(
         &self,
         query: &str,

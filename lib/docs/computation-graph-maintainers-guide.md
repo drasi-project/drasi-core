@@ -1347,7 +1347,7 @@ command-capable `GraphControl` or component owners.
 publication; resolving them independently could cross a replacement.
 
 Start with [`output_catalogue.rs`](../src/computation/v1/output_catalogue.rs),
-[`query_output.rs`](../src/computation/v1/query_output.rs),
+[`query_output.rs`](../../components/query-common/src/query_output.rs),
 [`query_catalog.rs`](../src/computation/v1/query_catalog.rs) and
 [`runtime/native_query.rs`](../src/computation/runtime/native_query.rs).
 [Native read transport limits](#native-output-read-services) are separate

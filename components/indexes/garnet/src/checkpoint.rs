@@ -280,6 +280,25 @@ impl CheckpointStore for GarnetCheckpointStore {
         Ok(())
     }
 
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        let checkpoints = self.read_all_checkpoints().await?;
+        self.session_state
+            .with_active_buffer(|buffer| {
+                for source in checkpoints.keys() {
+                    buffer.del(self.seq_key(source));
+                    buffer.del(self.pos_key(source));
+                }
+                buffer.del(self.sources_key());
+                buffer.del(self.config_hash_key());
+            })?
+            .ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "stage_clear_checkpoints requires an active session",
+                ))
+            })?;
+        Ok(())
+    }
+
     async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
         let key = self.config_hash_key();
         let mut con = self.connection.clone();

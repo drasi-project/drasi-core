@@ -1143,7 +1143,18 @@ impl crate::bootstrap::BootstrapProvider for GatedBootstrap {
 }
 
 fn builder() -> crate::DrasiLibBuilder {
-    DrasiLib::builder()
+    DrasiLib::builder().with_query_factory(
+        crate::computation::v1::FactoryRegistry::standard()
+            .get(
+                &crate::computation::v1::ImplementationIdentity::try_new(
+                    "drasi/continuous-query",
+                    "1",
+                )
+                .expect("reference query identity"),
+            )
+            .expect("reference query factory")
+            .clone(),
+    )
 }
 fn config(id: &str, source: Option<&str>) -> QueryConfig {
     let query = crate::Query::cypher(id)
@@ -2099,7 +2110,7 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
                 .contains_key(handle.id()));
             assert_eq!(
                 publication.desired.specifications[handle.id()].role,
-                ComponentRole::Query
+                ComponentRole::Transformer
             );
             for (name, _) in services {
                 let id = ResourceId::try_new(format!("instance.{name}")).unwrap();
@@ -3055,7 +3066,22 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
 
 #[tokio::test]
 async fn default_builder_is_native_and_preserves_public_result_signatures() {
-    let core = DrasiLib::builder().build().await.unwrap();
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     let (source, control) = ControlledSource::new("added-by-default");
     core.add_source_with_handle(source)
         .await

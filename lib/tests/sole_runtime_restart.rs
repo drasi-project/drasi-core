@@ -223,6 +223,18 @@ async fn no_snapshot_source_keeps_committed_query_state_and_strict_reaction_prog
     let (sender, mut received) = mpsc::unbounded_channel();
     let state = Arc::new(drasi_lib::MemoryStateStoreProvider::new());
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("no-snapshot-restart")
         .with_source(source.clone())
         .with_query(
@@ -281,6 +293,18 @@ async fn real_volatile_snapshot_still_refreshes_state_and_advances_reset_generat
     let snapshot_value = Arc::new(AtomicU64::new(1));
     let source = OptionalSnapshotSource::new(Some(snapshot_value.clone()));
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("actual-snapshot-restart")
         .with_source(source)
         .with_query(

@@ -185,7 +185,10 @@ mod component;
 mod output_bindings;
 mod output_identity;
 mod shared_storage;
-pub use output_bindings::{OutputBindingError, OutputBindings, OutputDestination};
+pub use output_bindings::{
+    OutputBindingError, OutputBindingState, OutputBindings, OutputDestination, OutputReservations,
+    CHECKPOINT as OUTPUT_BINDINGS_CHECKPOINT,
+};
 pub use shared_storage::SharedStorageGroup;
 mod recovery;
 pub use recovery::*;
@@ -236,27 +239,34 @@ mod pipe;
 mod pipe_metrics;
 mod ports;
 mod producer_progress;
-pub use producer_progress::{GraphProducerIdentity, GraphProducerProgress};
+pub(crate) use producer_progress::ProducerBoundary;
+pub use producer_progress::{GraphInputProgress, GraphProducerIdentity, GraphProducerProgress};
 mod query;
 mod query_api;
 pub use query_api::QueryApi;
 mod query_identity;
 pub use query_identity::*;
 mod query_configuration;
+mod query_construction;
 pub use query_configuration::QueryMiddlewareResource as MiddlewareRegistryResource;
 pub use query_configuration::*;
+pub use query_construction::{
+    validate_query_sources, QueryAuthoring, QueryConstruction, QueryConstructor,
+    QueryFactoryNotRegistered,
+};
 mod query_catalog;
 pub use query_catalog::*;
 mod output_bootstrap;
+pub use output_bootstrap::OutputBootstrapProvider;
 mod output_catalogue;
-pub use output_catalogue::*;
-mod query_output;
 pub use drasi_computation_contracts::{
     OutputCapability, OutputCursor, OutputEndpoint, OutputFollow, OutputFollowHub,
     OutputFollowLimits, OutputPortReaders, OutputReadError, OutputReaders, OutputReplay,
     OutputSnapshot, OutputSnapshotFollow, ReplayProvider, SnapshotFollowProvider, SnapshotProvider,
     WeakOutputPortReaders, WeakOutputReaders,
 };
+use drasi_query_common::query_output;
+pub use output_catalogue::*;
 mod inspection;
 pub use inspection::*;
 mod inventory;

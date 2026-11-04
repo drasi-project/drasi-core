@@ -97,7 +97,6 @@ pub trait ComputationComponent: Send + Sync {
     /// do not originate control notifications.
     fn bind_control(&mut self, _control: super::ComponentControl) {}
     /// Bind generation-scoped observation for opt-in query test controls.
-    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     fn bind_query_test_support(
         &mut self,

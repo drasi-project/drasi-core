@@ -120,7 +120,7 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
             .await?
             .with_source_progress(owner.clone())?;
             builder = builder
-                .query(Box::new(query))
+                .transformer(Box::new(query))
                 .bind_stream(
                     Endpoint::new(owner.component_id().clone(), PortId::try_new("out")?),
                     StreamId::try_new(format!("{}/out", owner.component_id()))?,

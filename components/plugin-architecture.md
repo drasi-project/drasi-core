@@ -1,6 +1,6 @@
 # Drasi Plugin Architecture
 
-**Current development architecture, reviewed 17 October 2026.**
+**Current development architecture.**
 
 This guide explains which interfaces a component implements, what the host owns,
 and how separately built libraries are loaded. Use matching Core and Server
@@ -37,7 +37,8 @@ their callers move. Native libraries are selected explicitly, not substituted
 automatically for an ordinary plugin with a similar name.
 
 The dependency rule is directional: native libraries cannot depend on the
-ordinary SDK or query runtime. An ordinary Rust compatibility entry point may
+ordinary SDK or graph runtime. Only the query transformer may depend on the
+query evaluator and parser. An ordinary Rust compatibility entry point may
 delegate to a native implementation instead of copying it; that does not give
 the native library a dependency on the old host. Protocol, mapping and SQL logic
 shared by both families belongs in the relevant `*-common` crate.
@@ -50,13 +51,29 @@ Package versions follow workspace release tooling; native ABI metadata and
 configuration versions are independently checked and are not inferred from
 the package version.
 
-**Queries remain built in.** Ordinary and explicitly assembled native queries
-use `ContinuousQueryTransformer` and the existing query engine in the main
-graph. There is no extra query host/private graph. Independently loaded Query
-plugins are still rejected because the complete storage/recovery/read interface
-is unfinished. The
-[CW-43 investigation](../lib/docs/computation-graph-remaining-work.md#cw-43-optional-native-query-plugin)
-is not a released capability.
+**Ordinary queries require an explicitly registered factory.** The native query
+plugin runs the existing Core evaluator inside a normal Transformer. The Host
+SDK's ordinary-query adapter supplies the actual selected index provider,
+progress owner, bootstrap provider, result catalogue and scheduling resource.
+There is no private graph, fallback evaluator or implicit query-plugin
+dependency in `drasi-lib`. The linked `ContinuousQueryTransformer` remains an
+explicit reference implementation, not an automatically selected default.
+
+The indexed plugin supports normal memory, persistent atomic and explicitly
+non-atomic providers, including bootstrap, archives, joins, middleware, scheduled work,
+test clocks, replacement and removal. Query configuration and canonical
+result/recovery behavior are shared through `drasi-query-common`. Ordinary
+read APIs, indefinite subscriptions and reactions use the existing graph-owned
+result outlet. Large snapshots/history and snapshot/live attachment transfer
+one immutable observation in bounded pages; the Host keeps no result mirror.
+Query output metrics use canonical metadata, and recovery consumers can read
+positively retained state after completed cleanup without enabling ordinary
+inactive reads or recreating an evaluator.
+Server registers the unique eligible loaded query factory before ordinary
+query creation. Non-atomic publication reuses the existing pending-output/reset
+protocol and never claims atomicity for independent writers. Remaining
+diagnostic and qualification gaps are tracked in
+[CW-43](../lib/docs/computation-graph-remaining-work.md#cw-43-optional-native-query-plugin).
 
 ## Architecture Diagram
 
@@ -68,18 +85,19 @@ flowchart TD
     Native["Native component library"]
     Ordinary["Existing Source/Reaction-family library"]
     Adapters["Graph-owned ordinary adapters"]
-    Query["Built-in ContinuousQueryTransformer"]
+    Query["Explicitly registered native query transformer"]
     Engine["Existing Core query evaluator"]
     Providers["Host-supplied storage and resource owners"]
 
     Application --> Registry
     Application --> Graph
     Registry --> Native
+    Registry --> Query
     Registry --> Ordinary
     Graph -->|"Host proxy, bounded native operations"| Native
     Graph --> Adapters
     Adapters --> Ordinary
-    Graph --> Query
+    Graph -->|"Same native transformer contract"| Query
     Query --> Engine
     Graph --> Providers
 ```
@@ -102,13 +120,14 @@ Paths below are relative to the Core repository unless noted otherwise.
 | `drasi-ffi-primitives` | `components/ffi-primitives/` | Dependency-free C-compatible types and declarative macros |
 | `drasi-lib` | `lib/` | Graph ownership, query assembly, lifecycle, ordinary APIs and injected storage |
 | `drasi-core` | `core/` | Shared query algorithms and transaction/index machinery |
+| `drasi-query-common` | `components/query-common/` | Existing query configuration, builder and canonical result/read implementation shared by linked and loaded query adapters |
 | `drasi-server` | Sibling `drasi-server/` repository | Configuration, verified plugin installation, APIs, UI and process lifecycle |
 
 Native plugin data/interfaces must not pull in `drasi-lib`, the evaluator,
 parsers or the ordinary plugin SDK. Use
 [`make check-native-dependencies`](../Makefile) to protect that separation.
-The planned query plugin is a separate migration, not permission to weaken
-dependency checks for the existing non-query components.
+The query plugin is the explicit evaluator-dependent exception; it does not
+weaken dependency checks for the SDK or non-query components.
 
 ## Plugin Types
 
@@ -121,6 +140,12 @@ and actually implemented capabilities. Snapshot replacement is declared per sink
 input port and must match the handlers the constructed sink actually registers.
 Construction is configuration-only;
 activation and I/O belong to lifecycle operations.
+
+Sinks and transformers may separately opt into input-binding updates. The graph
+then supplies actual incoming producer endpoints and streams before startup and
+at processing boundaries, including after rebinding. This is distinct from
+construction-time bindings, which can require reconstructing a component. See
+the native SDK guide for repetition, cancellation and transaction-step limits.
 
 Native bootstrap providers are negotiated through the bootstrap extension,
 not another graph processing role. Handled-consumer factories use the consumer

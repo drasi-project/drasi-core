@@ -48,6 +48,7 @@ impl NativePlugin {
                 || Some(exported.activation_credentials()),
                 || Some(exported.output_reads()),
                 || Some(exported.output_follow()),
+                || Some(exported.processing()),
             )
         }
     }
@@ -353,6 +354,7 @@ impl NativePlugin {
                 activation_credentials,
                 || None,
                 || None,
+                || None,
             )
         }
     }
@@ -380,12 +382,14 @@ impl NativePlugin {
         activation_credentials: impl FnOnce() -> Option<
             *const abi::activation_credentials::PluginActivationCredentialsV1,
         >,
-        output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV1>,
-        output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV1>,
+        output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV2>,
+        output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV2>,
+        processing: impl FnOnce() -> Option<*const abi::processing::PluginProcessingV1>,
     ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata())? };
         let output_reads = unsafe { read_output_reads(output_reads(), &manifest)? };
         let output_follow = unsafe { read_output_follow(output_follow(), &manifest)? };
+        let processing = unsafe { read_processing(processing(), &manifest)? };
         let mut configurations = unsafe { read_configuration(configuration(), &manifest)? };
         let batching = unsafe { read_batching(batching())? };
         let output_snapshots = unsafe { read_output_snapshots(output_snapshots())? };
@@ -569,6 +573,7 @@ impl NativePlugin {
                 .with_source_schema(source_schema)
                 .with_output_reads(output_reads)
                 .with_output_follow(output_follow)
+                .with_processing(processing)?
                 .with_configuration_details(configurations.remove(&metadata.implementation))
             }));
         }
@@ -709,6 +714,10 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let processing =
+        unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -724,6 +733,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && activation_credentials.is_none()
         && output_reads.is_none()
         && output_follow.is_none()
+        && processing.is_none()
     {
         return Ok(None);
     }
@@ -752,6 +762,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
             || activation_credentials.map(|entry| entry()),
             || output_reads.map(|entry| entry()),
             || output_follow.map(|entry| entry()),
+            || processing.map(|entry| entry()),
         )?
     }))
 }
@@ -895,9 +906,9 @@ unsafe fn read_source_schema(
 
 /// The extension is required exactly when some factory declares output reads.
 unsafe fn read_output_reads(
-    entry: Option<*const abi::output_reads::PluginOutputReadsV1>,
+    entry: Option<*const abi::output_reads::PluginOutputReadsV2>,
     manifest: &PluginMetadata,
-) -> anyhow::Result<Option<abi::output_reads::PluginOutputReadsV1>> {
+) -> anyhow::Result<Option<abi::output_reads::PluginOutputReadsV2>> {
     let table = entry
         .map(|entry| -> anyhow::Result<_> {
             let table = *unsafe { checked_table(entry)? };
@@ -923,9 +934,9 @@ unsafe fn read_output_reads(
 
 /// The extension is required exactly when some factory declares output follows.
 unsafe fn read_output_follow(
-    entry: Option<*const abi::output_follow::PluginOutputFollowV1>,
+    entry: Option<*const abi::output_follow::PluginOutputFollowV2>,
     manifest: &PluginMetadata,
-) -> anyhow::Result<Option<abi::output_follow::PluginOutputFollowV1>> {
+) -> anyhow::Result<Option<abi::output_follow::PluginOutputFollowV2>> {
     let table = entry
         .map(|entry| -> anyhow::Result<_> {
             let table = *unsafe { checked_table(entry)? };
@@ -945,6 +956,33 @@ unsafe fn read_output_follow(
                 .iter()
                 .any(|factory| factory.capabilities.declares_output_follows()),
         "native factory declares output follows without the negotiated extension"
+    );
+    Ok(table)
+}
+
+unsafe fn read_processing(
+    entry: Option<*const abi::processing::PluginProcessingV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<Option<abi::processing::PluginProcessingV1>> {
+    let table = entry
+        .map(|entry| -> anyhow::Result<_> {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::processing::VERSION
+                    && table.reserved == 0
+                    && table.create.is_some(),
+                "incompatible or incomplete native indexed processing extension"
+            );
+            Ok(table)
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        table.is_some()
+            || !manifest
+                .factories
+                .iter()
+                .any(|factory| factory.capabilities.indexed_processing),
+        "native transformer declares indexed processing without its extension"
     );
     Ok(table)
 }
@@ -1106,6 +1144,10 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let processing =
+        unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && activation_credentials.is_none()
@@ -1121,6 +1163,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && coordination.is_none()
         && output_reads.is_none()
         && output_follow.is_none()
+        && processing.is_none()
     {
         return Ok(None);
     }
@@ -1141,6 +1184,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     unsafe { read_bootstrap_coordination(coordination.map(|entry| entry()))? };
     unsafe { read_output_reads(output_reads.map(|entry| entry()), &manifest)? };
     unsafe { read_output_follow(output_follow.map(|entry| entry()), &manifest)? };
+    unsafe { read_processing(processing.map(|entry| entry()), &manifest)? };
     let bootstrap = unsafe { read_bootstrap(bootstrap.map(|entry| entry()))? };
     anyhow::ensure!(
         !manifest.factories.is_empty() || bootstrap.is_some(),

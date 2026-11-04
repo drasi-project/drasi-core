@@ -58,14 +58,16 @@ impl QueryInputOwner {
     }
 }
 
-pub(super) struct GraphInputProgress {
+/// The existing graph input identity and replay rules, shared by linked and
+/// native processing adapters. This value does not publish or commit progress.
+pub struct GraphInputProgress {
     stream: StreamId,
     transport_sequence: Option<u64>,
-    pub key: String,
-    pub identity: SourceProgressKey,
-    pub sequence: u64,
-    pub position: Option<Bytes>,
-    pub producer: Option<GraphProducerIdentity>,
+    pub(crate) key: String,
+    pub(crate) identity: SourceProgressKey,
+    pub(crate) sequence: u64,
+    pub(crate) position: Option<Bytes>,
+    pub(crate) producer: Option<GraphProducerIdentity>,
     volatile_producer: bool,
     pub(super) positioned: Option<Box<PositionedInput>>,
 }
@@ -76,7 +78,80 @@ pub(super) struct PositionedInput {
     origin_transport: Option<(StreamId, u64)>,
 }
 
+/// How a producer relates to the replay progress carried by its outputs.
+///
+/// Sources originate progress; transformers declare whether their outputs
+/// originate or relay it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProducerBoundary {
+    Origin,
+    Relay,
+}
+
+impl ProducerBoundary {
+    pub(crate) fn of(node: &super::NodeSnapshot) -> Self {
+        if node.role != super::ComponentRole::Transformer {
+            return Self::Origin;
+        }
+        match node
+            .descriptor
+            .output_progress()
+            .unwrap_or(super::OutputProgress::Relay)
+        {
+            super::OutputProgress::Origin => Self::Origin,
+            super::OutputProgress::Relay => Self::Relay,
+        }
+    }
+}
+
 impl GraphInputProgress {
+    pub fn for_query(
+        input: &ChangeEnvelope,
+        owner: Option<&super::QuerySourceProgress>,
+    ) -> anyhow::Result<Self> {
+        Self::from_envelope(input)?
+            .with_transport(input)
+            .with_consumer_boundary(input, owner)
+    }
+
+    pub fn identity(&self) -> &SourceProgressKey {
+        &self.identity
+    }
+
+    pub fn checkpoint(&self) -> SourceCheckpoint {
+        SourceCheckpoint::new(self.sequence, self.position.clone())
+    }
+
+    pub fn is_duplicate(
+        &self,
+        saved: Option<&SourceCheckpoint>,
+        watermark: Option<u64>,
+        owner: Option<&super::QuerySourceProgress>,
+    ) -> anyhow::Result<bool> {
+        if let Some(handled) = owner
+            .map(|owner| owner.position_handled(self, saved))
+            .transpose()?
+            .flatten()
+        {
+            return Ok(handled);
+        }
+        Ok(watermark.is_some_and(|sequence| sequence >= self.sequence)
+            || saved.is_some_and(|saved| saved.sequence >= self.sequence))
+    }
+
+    pub fn retain_valid_position(
+        &mut self,
+        saved: Option<&SourceCheckpoint>,
+        component: &ComponentId,
+    ) {
+        if self.position.as_ref().is_some_and(|position| {
+            position.len() > drasi_computation_contracts::MAX_SOURCE_POSITION_BYTES
+        }) {
+            log::warn!("Query {component} retains its last valid checkpoint cursor because the new source position is oversized");
+            self.position = saved.and_then(|saved| saved.source_position.clone());
+        }
+    }
+
     pub(super) fn from_stream(input: &ChangeEnvelope, sequence: u64) -> Self {
         Self::from_system(input.system(), sequence)
     }
@@ -103,7 +178,7 @@ impl GraphInputProgress {
     pub(super) fn from_processing_input(
         input: &ChangeEnvelope,
         progress_owner: Option<&super::QuerySourceProgress>,
-        producer_role: Option<super::ComponentRole>,
+        producer: Option<ProducerBoundary>,
     ) -> anyhow::Result<(Self, Option<QueryInputOwner>)> {
         let query_input = super::QueryChangeCodec::is_query_output(input);
         let immediate = if query_input {
@@ -115,13 +190,12 @@ impl GraphInputProgress {
             return Ok((Self::from_envelope(input)?, None));
         }
         let fallback = SourceProgressKey::Stream(input.system().stream().clone());
-        let bound_role = progress_owner
+        let bound = progress_owner
             .map(|owner| owner.input_binding(input, &fallback))
             .transpose()?
             .flatten()
-            .map(|boundary| boundary.role);
-        let query_producer =
-            bound_role.or(producer_role) != Some(super::ComponentRole::Transformer);
+            .map(|boundary| boundary.producer);
+        let query_producer = bound.or(producer) != Some(ProducerBoundary::Relay);
         if query_input && query_producer {
             anyhow::ensure!(
                 !super::QueryChangeCodec::is_snapshot(input)
@@ -241,7 +315,7 @@ impl GraphInputProgress {
         };
         let origin = boundary.system;
         let producer = GraphProducerProgress::read_boundary(input, &origin)?.0;
-        let query_progress = boundary.role != super::ComponentRole::Transformer
+        let query_progress = boundary.producer == ProducerBoundary::Origin
             && super::QueryChangeCodec::is_query_output(input)
             && producer.is_none();
         if origin.stream() != input.system().stream() {
@@ -324,7 +398,7 @@ impl GraphInputProgress {
         self
     }
 
-    pub(super) fn input_producer(&self) -> Option<&GraphProducerIdentity> {
+    pub fn input_producer(&self) -> Option<&GraphProducerIdentity> {
         self.producer.as_ref().or_else(|| {
             self.positioned
                 .as_ref()
@@ -332,19 +406,33 @@ impl GraphInputProgress {
         })
     }
 
-    fn owner_key(&self) -> String {
-        let stream = self
-            .positioned
-            .as_ref()
-            .and_then(|position| position.origin_transport.as_ref())
-            .map_or(&self.stream, |(stream, _)| stream);
-        producer_owner_key(stream)
+    pub fn producer(&self) -> Option<&GraphProducerIdentity> {
+        self.producer.as_ref()
     }
 
-    pub(super) fn validate_durability(&self, persistent: bool) -> anyhow::Result<()> {
+    pub fn owner_stream(&self) -> &StreamId {
+        self.positioned
+            .as_ref()
+            .and_then(|position| position.origin_transport.as_ref())
+            .map_or(&self.stream, |(stream, _)| stream)
+    }
+
+    pub fn owner_key(&self) -> String {
+        producer_owner_key(self.owner_stream())
+    }
+
+    pub fn validate_durability(&self, persistent: bool) -> anyhow::Result<()> {
         anyhow::ensure!(
             !persistent || !self.volatile_producer,
             "persistent graph processing cannot recover through volatile middleware"
+        );
+        anyhow::ensure!(
+            !persistent
+                || self
+                    .producer
+                    .as_ref()
+                    .map_or(true, GraphProducerIdentity::persistent),
+            "persistent graph processing cannot recover through a volatile output"
         );
         Ok(())
     }
@@ -357,14 +445,6 @@ impl GraphInputProgress {
         let saved = store.read_checkpoint(&self.key).await?;
         let owner = store.read_checkpoint(&self.owner_key()).await?;
         self.validate_durability(persistent)?;
-        anyhow::ensure!(
-            !persistent
-                || self
-                    .producer
-                    .as_ref()
-                    .map_or(true, GraphProducerIdentity::persistent),
-            "persistent graph processing cannot recover through a volatile output"
-        );
         let owner = owner
             .map(|owner| {
                 anyhow::ensure!(
@@ -385,7 +465,7 @@ impl GraphInputProgress {
         Ok(saved)
     }
 
-    pub(super) fn validate_owner(
+    pub fn validate_owner(
         &self,
         saved: Option<u64>,
         owner: Option<&GraphProducerIdentity>,
@@ -514,6 +594,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn output_progress_is_independent_of_semantic_identity() {
+        let node = |role, kind, progress| {
+            let mut descriptor = super::super::ComponentDescriptor::try_new(
+                ComponentId::try_new("producer").unwrap(),
+                Vec::new(),
+            )
+            .unwrap();
+            if let Some(kind) = kind {
+                descriptor = descriptor.with_semantic_kind(kind);
+            }
+            if let Some(progress) = progress {
+                descriptor = descriptor.with_output_progress(progress);
+            }
+            super::super::NodeSnapshot {
+                descriptor,
+                role,
+                completion: None,
+                output_streams: Default::default(),
+                input_merge: Default::default(),
+            }
+        };
+        assert_eq!(
+            ProducerBoundary::of(&node(super::super::ComponentRole::Source, None, None)),
+            ProducerBoundary::Origin
+        );
+        assert_eq!(
+            ProducerBoundary::of(&node(
+                super::super::ComponentRole::Transformer,
+                Some(super::super::ComponentSemanticKind::Query),
+                None,
+            )),
+            ProducerBoundary::Relay
+        );
+        assert_eq!(
+            ProducerBoundary::of(&node(
+                super::super::ComponentRole::Transformer,
+                None,
+                Some(super::super::OutputProgress::Origin),
+            )),
+            ProducerBoundary::Origin
+        );
+    }
+
+    #[test]
     fn validated_stateless_paths_restore_logical_producer_progress_and_both_transports() {
         let stream = StreamId::try_new("producer/out").expect("producer stream");
         let relay = StreamId::try_new("relay/out").expect("relay stream");
@@ -539,7 +663,7 @@ mod tests {
             owner
                 .bind_input_boundary(
                     identity.component_id(),
-                    super::super::ComponentRole::Transformer,
+                    ProducerBoundary::Relay,
                     None,
                     vec![stream.clone(), relay.clone()],
                 )

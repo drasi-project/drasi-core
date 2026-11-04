@@ -102,6 +102,75 @@ typed object-field contract, not arbitrary JSON Schema: it checks required keys,
 allowed additional fields and field types. The constructor validates any further
 domain-specific constraints. Secret fields require host-side unresolved references.
 
+`Capabilities::output_progress` describes whether all outputs originate their
+own replay progress or relay their inputs' progress. Sources default to an origin
+and transformers to a relay. This declaration is independent of semantic labels
+and does not itself establish durability or validate a producer identity.
+
+### Explicit state removal
+
+A transformer that owns removable state can set `Capabilities::deprovision`,
+return `true` from `NativeComponent::supports_deprovision()`, and implement
+`NativeComponent::deprovision()`. Metadata and the constructed component must
+agree. This capability currently applies only to transformers; it does not
+provide a storage service or authorize deletion of borrowed or shared
+host-owned resources.
+
+Ordinary stop, replacement and shutdown preserve state. Explicit removal is
+allowed only before the first start or after a successful stop and cleanup.
+Once removal is accepted, the component is permanently fenced from restart and
+other work, even if the request is cancelled or fails. The Host retains an
+accepted operation across cancellation and retries it rather than starting a
+second deletion. A failed operation can be retried on the retired instance.
+The exporter waits for accepted independent control/wakeup
+operations and output reads to release their work before invoking the hook.
+Repeated completed removal does not invoke the hook again.
+
+A failed or directly cancelled native operation may already have removed part
+of the state. Implement the hook so it can safely retry an incomplete deletion,
+and report errors rather than claiming success. Existing native components that
+do not opt in retain their ordinary lifecycle and do not allocate exporter-side
+removal tracking.
+
+## Quiescent provider-driven transformer initialization
+
+A transformer can declare `Capabilities::quiescent_bootstrap = Some(input_port)`.
+Its `NativeTransformer::quiescent_bootstrap_input()` must return that same port.
+The profile is explicitly non-indexed and non-transaction-participant; it does
+not claim durable or coordinated bootstrap.
+
+`bootstrap_optional` lets a quiescent transformer use `bootstrap_status()` to
+declare whether its configuration requests a provider. The Host checks that
+choice before activation. Without a configured provider it completes the
+initialization barrier without loading records. Required-provider factories keep
+their required resource dependency.
+
+`start()` prepares private initialization state. The Host SDK then drives an
+existing `ComputationBootstrapProvider` bound as `NativeBootstrapResource`:
+prepare, stream snapshot envelopes, complete the snapshot and await provider
+stop. Each envelope reaches `NativeTransformer::bootstrap(InputEnvelope)`.
+Only after that succeeds does `bootstrap_completed(completion)` publish initialized
+state. The exporter blocks ordinary data operations and output reads until
+completion; initialization callbacks do not emit live result batches.
+
+The `BOOTSTRAP_INPUT` and `BOOTSTRAP_COMPLETE` operations use the existing
+component vtable and bounded envelope transport. They are admitted only for the
+declared capability. Base C table layouts remain unchanged; a host that does
+not recognize the capability rejects its metadata rather than ignoring it.
+
+Provider scope must match the constructing component. This profile rejects
+progress-bound providers, non-ready preparation, watermarks and durable
+completion state. It supplies no `BootstrapState` persistence service and
+does not invent positions from row ordinals. Writers must remain quiescent
+through startup. Source-paired/coordinated providers use the separate
+`durable_bootstrap` binding described below.
+
+Provider cleanup precedes transformer cleanup on failure/stop. The Host retains
+accepted provider cleanup across waiter cancellation and reports cleanup errors;
+dropping an owner is not proof of completed asynchronous cleanup. The
+experimental query's `drasi.experimental/provider-query` factory exercises this
+contract using the unchanged native SQLite file-bootstrap library.
+
 ## Optional activation credentials
 
 Factories may opt into `activation_credentials_v1` by implementing
@@ -180,22 +249,56 @@ activations. Cancellation releases the read slot. Actual failures remain errors;
 older libraries without the extension simply have no native schema reader.
 This interface exposes no SQL execution, database query or transaction methods.
 
-## Optional per-output snapshot, replay and follow providers
+## Optional per-output snapshot, replay, follow and query readers
 
 `NativeComponent::output_readers()` returns the component's `OutputReaders`: a
-`SnapshotProvider`, `ReplayProvider` and/or `SnapshotFollowProvider` for each
+`SnapshotProvider`, `ReplayProvider`, `SnapshotFollowProvider` and/or
+`QueryViewProvider` for each
 declared **output** port, registered independently (neither implies another, and
 none implies persistence). The default registers nothing. Obtaining them is
 configuration-only, performs no I/O and takes no processing lock; every provider
 reads its own state, so a read is independent of a pending `next()`/`transform()`.
 
 Capability is exactly the registration. Factory metadata lists the ports in
-`Capabilities::output_snapshots`, `output_replays` and `output_follows`; at
+`Capabilities::output_snapshots`, `output_replays`, `output_follows` and
+`output_queries`; at
 construction the SDK rejects any mismatch with the actual registrations, an
 undeclared, duplicate or non-output port, and a registered provider the metadata
-does not list. There are no boolean flags or no-op callbacks. A library
-needs the separately negotiated `output_reads_v1` extension for snapshots/replay
-and `output_follow_v1` for follows; the Host rejects a declaration without it.
+does not list. Flags alone cannot create a provider or a no-op substitute. A library
+needs the separately negotiated `output_reads_v2` extension for snapshots/replay
+and query reads, and `output_follow_v2` for follows; the Host rejects a declaration
+without it.
+
+Query readers provide immutable `QueryDescription` metadata at construction and
+coherent query snapshot/head/replay reads with their output generation. A query
+view captures the actual producer cursor, canonical rows and retained history in
+one observation; it is not assembled from independent snapshot and replay calls. The
+description uses the shared execution settings and semantic configuration hash.
+The Host can attach ordinary library query read APIs to this capability without
+running an evaluator or keeping a second result projection. It is descriptive
+query semantics over an output, not a Query execution role. Base C table layouts
+are unchanged; old hosts reject an unknown `output_queries` declaration.
+Query-read history uses logical query sequences, including its normalized
+transport sequence, and retains matching query scope, configuration and reset
+generation. The Host validates those fields as well as the actual producer epoch.
+
+`query_observations` additionally negotiates metadata-only canonical row/outbox
+counts for a single query output on a Transformer. A cold observation initializes
+the Host's existing gauges; successful query-output replies include updated
+metadata. No-op and replay processing cannot fabricate logical sequence advances.
+This capability is validated against the actual query provider, not inferred from
+its descriptive Query label.
+
+`query_recovery_views` requires those observations and an actual recovery-view
+implementation. It adds recovery observation/view operations using the same
+bounded query-view pages. `QueryViewProvider::recovery_reader()` supplies the
+read-only `QueryRecoveryReader` contract to recovery consumers. Recovery heads
+contain no rows; full views capture canonical rows and history together.
+
+An application may separately bind a native query's read API to the existing
+graph-owned result catalogue and connect a real query-results outlet. Ordinary
+channel/broadcast subscriptions then use that existing delivery path, not native
+follow leases. This adds neither an evaluator nor mutable result state to the Host.
 
 Records and envelopes use the existing codecs: snapshot records keep their
 schema-encoded payload, replayed envelopes are binary computation envelopes with
@@ -203,29 +306,46 @@ their logical `GraphProducerProgress` (transport sequences are separate), and a
 cursor is the producer epoch plus committed logical sequence. Typed provider
 results (`NotReady`, `Gap`, `EpochChanged`, `Retired`, `Absent`, `Invalid`,
 `LeaseExpired`) cross as data; they are never converted to an empty snapshot or
-replay. A snapshot above 16 MiB or 16,384 records, a replay above 1,024 envelopes
-or an item above 16 MiB is an explicit `OutputReadLimit` failure, never a
-truncation. At most 16 reads and 16 leases are active per component; excess
-requests report BUSY/`NotReady`.
+replay. The Host opens an owned transfer, captures one provider observation, and
+pulls bounded pages until the advertised record/envelope counts are complete.
+Snapshot rows, replay and combined query views have no transport-wide count or
+byte cap. Pages target 1 MiB, contain at most 1,024 items and must fit 16 MiB;
+an individually oversized record/envelope is an explicit `OutputReadLimit`,
+never truncation. Single-message requests remain bounded to 16,384 snapshot
+records or 1,024 replay envelopes, but ordinary Host reads use transfers.
+At most 16 in-flight reads, 16 transfers and 16 follow leases are active per
+component; excess requests report BUSY/`NotReady`.
 
-Reads are served only while the component is started (`NotReady` otherwise).
+The plugin holds the shared immutable observation, not a fresh snapshot for each
+page. The Host validates metadata, schema, cursor, page order, duplicate record
+identities and final counts while assembling the caller's response. Query views
+must retain one common snapshot/history head. The follow extension pages its
+initial snapshot before admitting live reads, using the same captured
+snapshot/tail cut and page implementation.
+
+Ordinary reads are served only while the component is started (`NotReady` otherwise).
+Negotiated recovery reads may also use positively retained query state after
+plugin STOP and Host cleanup both succeed. A failed publication, incomplete
+initialization, cancelled cleanup or retired owner does not become an empty
+successful view. Activation/deprovisioning fences that retained access again.
 Stop, restart, replacement and release fence every read and **close every follow
-lease synchronously**, releasing provider retention even if the Host still holds
-the handle; a handle or lease never serves a later activation or a successor.
-Dropping a read future cancels the operation. A follow `next()` is a separate
+lease synchronously**, and release all captured transfer state, even if the Host still holds
+the handle; an in-flight read or lease never serves a later activation or a successor.
+Dropping a read future releases its transfer and cancels provider work, including
+an unpolled opening operation. A follow `next()` is a separate
 cancellable operation per call that carries the last item the holder observed: the
 producer retains one delivered-but-unacknowledged item per lease and resends it,
 so cancellation racing completion cannot lose an item. Lag (`Gap`) and expiry
 (`LeaseExpired`) are distinct and sticky.
 
-This is not a streaming transfer of large datasets and does not implement a
-generic live-follow coordinator or crash-durable handover; snapshot plus follow
+Streaming a captured observation does not implement a generic live-follow
+coordinator or crash-durable handover; snapshot plus follow
 detects epoch change, lag and expiry within the lease's bounds only.
 
 ## Read-only output snapshots
 
-A sink factory may opt in to the `output-snapshots-v1` extension through
-`supports_output_snapshots()` and `create_with_output_snapshots()`. The host
+A sink or transformer factory may opt in to the `output-snapshots-v1` extension
+through `supports_output_snapshots()` and `create_with_output_snapshots()`. The host
 supplies an optional `NativeOutputSnapshots` capability limited to an explicit
 allow-list of output endpoints (component and port) of sources, transformers or
 queries. The plugin cannot register outputs, obtain graph ownership or mutate
@@ -242,7 +362,8 @@ error rather than an empty snapshot. Admission limits and readiness timeouts are
 host-owned. Dropping the stream releases its reader, and component stop revokes
 pending reads. Errors remain errors, including after streaming has begun.
 
-The native SSE sink demonstrates this interface. Its Host resource is a
+The native SSE sink and experimental volatile query transformer use this
+interface. The Host resource is a
 `NativeOutputSnapshotsResource`, an immutable allow-list and limits policy bound
 as the factory's `output_snapshots` dependency. The native factory combines it
 with the graph's actual output catalogue when it creates the binding. Snapshot
@@ -250,6 +371,12 @@ callbacks enter the owning host runtime while being polled; no Tokio handle,
 catalogue or graph control crosses the ABI. This read service is distinct from
 incoming recovery snapshot envelopes and does not provide an atomic
 snapshot/live subscription.
+
+The experimental query initializes its configured inputs from captured snapshots,
+then checks each input's live producer progress against its own cursor. Its volatile factory also
+exports completed result snapshots, allowing another transformer to initialize
+from its output. This is not the full bootstrap-consumer protocol, and the read
+service does not itself retain the live suffix or order component activation.
 
 ## Declared input bindings
 
@@ -266,6 +393,19 @@ sink needing several outputs per producer names them by alias (see the
 `SinkOutputs::from_inputs` helper in `drasi-computation-contracts`). Programmatic
 construction outside a graph passes the bindings to
 `NativeFactory::create_component_with_inputs`.
+
+Alternatively, a sink or transformer can set
+`Capabilities::input_binding_updates` and implement
+`NativeComponent::supports_input_binding_updates` and `bind_inputs`. The graph
+calls the hook before start and before processing with the current validated
+bindings, including after a live rebind. It can repeat an unchanged set; the
+implementation must tolerate repetition and cancellation. The hook runs
+serially with the component's mutable operations, and a failure prevents that
+operation from proceeding. This capability does not itself request bindings
+during factory construction or force reconstruction. A factory that opts into
+both capabilities still receives construction-time bindings and is
+reconstructed when those bindings change. Transaction-sequence steps do not
+have graph input bindings and cannot use this update capability.
 
 ## Read-only consumer progress
 
@@ -499,6 +639,175 @@ crosses the boundary: existing ABI 1.0 transaction participants use their existi
 revocable mailbox. This does not give standalone native transformers output
 tracking, make separate stores atomic, or deduplicate external effects.
 
+## Optional host-owned indexed processing
+
+An ordinary transformer may declare `capabilities.indexed_processing` and
+implement `Factory::create_with_processing` to receive `NativeProcessing`. The
+graph must bind a host `NativeProcessingResource::new(provider)` as its
+`processing` dependency.
+For committed-progress components, the factory prepares the actual provider
+before the graph captures its recovery contract, without activating native
+processing. Direct constructors may call `prepare_processing()` explicitly.
+Other indexed components open their provider at start. The
+plugin calls `NativeProcessing::run` with async work. Its
+`NativeProcessingContext` currently supports element get/set/delete and slot
+lookup, join configuration, archive point reads, element/archive clearing, and
+future-queue operations. Each context is revoked at the end of that operation.
+Join configuration is not transactional: a failed operation that attempted it
+fences the owner and requires reconstruction.
+
+The context also exposes atomic state information, committed checkpoint and
+result-sequence reads, staged checkpoint/result-sequence writes, bounded outbox
+reads/appends, and live-result page reads/mutations. These operations reject a
+bundle whose checkpoint, outbox, live-results writer and indexes do not
+participate in the owner's actual atomic
+result domain. Reported checkpoint persistence and storage durability come from
+that bundle; a backend name is not evidence. Outbox, live-result and
+result-sequence methods are bound to the host component, not a plugin-supplied
+query ID. Page requests
+are limited to 1,024 records and the native frame byte budget.
+
+Result-sequence and live-row page reads observe committed state. Do not infer
+general read-your-writes behavior from staged metadata; the typed progress
+services maintain their own operation-local drafts. Live-row pages use an optional exclusive
+signature cursor, so the first page includes signature zero; signatures must
+increase strictly. Unsupported backend paging fails explicitly. Hold the
+existing processing owner across a multi-page read to exclude writers.
+
+Staged metadata, outbox and live-row changes commit or roll back with index
+mutations. The plugin cannot commit independently. The owner's bounded
+`BootstrapState` service also persists provider intent.
+
+An indexed transformer may declare `committed_input_progress` with one declared
+input port. It then uses `read_input_checkpoint`, `stage_input_checkpoint` and
+`recover_input_progress` in its existing processing operations. The Host owns
+the reserved checkpoint encoding and derives recovery from the actual committed
+store. Generic checkpoint writes cannot bypass these typed progress operations.
+The host serializes commit/publication for this opt-in path and publishes no
+staged cursor. The existing progress limits apply: 1 MiB, 4,096 combined
+checkpoint/transport entries, and the source-position byte bound.
+
+`NativeComponentProxy::committed_input_progress()` exposes the standard
+`SourceProgressView` without I/O or a forwarding task. Recovery is visible with
+`recovered: true` and `ready: false`; successful component startup separately
+enables readiness/admission. Failed or cancelled work fences the view without
+advancing its last committed checkpoints. Stop revokes old views and subscriptions;
+fresh readers for a later activation cannot be substituted behind old handles.
+This profile publishes stream or source progress, including real sequence zero.
+`stage_progress_checkpoint` preserves logical positions independently of
+`stage_input_transport`; `stage_bootstrap_watermark` does not fabricate a consumed
+transport position.
+
+The view is data-only. Host construction can separately obtain the processing
+owner's exact `QuerySourceProgress` resource through `processing_progress_owner()`
+for existing source/coordinator bindings. One canonical publication backs both
+interfaces and retains no storage owner. `stage_bootstrap_complete` persists the
+initialization marker and publishes it only after the actual commit.
+The graph-owned volatile `input_progress` binding
+remains separate and is not offered by a factory declaring committed progress.
+Factories without this opt-in acquire no progress publisher or extra gate.
+
+Query processing uses `prepare_input_progress` and
+`stage_prepared_input_progress` to reuse the existing graph source/producer
+validation, duplicate rules, opaque-position policy and transport bookkeeping.
+Successful operations must stage their prepared input. The actual graph-provided
+progress owner is bound exclusively, not replaced by a same-named resource.
+
+Factories can explicitly declare `volatile_processing` for actual memory
+providers. That profile retains indexes and evaluator state across a healthy
+quiescence, publishes successful input progress and provides
+`reset_volatile_state` without an atomic/restart claim. Persistent atomic-state
+requests remain unavailable. `state_info` reports the actual profile;
+`physical_time` uses the bound query clock, and `next_emission_sequence` reserves
+the actual catalogue transport counter so replacement cannot reuse a sequence.
+
+`durable_bootstrap = Some(input_port)` requires that input's indexed processing
+and committed progress. The component declares the same
+`durable_bootstrap_input`, reports whether bootstrap is configured/completed,
+consumes streamed initialization through `bootstrap`, and atomically stages
+watermarks/completion state in `bootstrap_completed`. The Host binds an existing
+`NativeBootstrapResource`, passes its actual owner's state service to the provider,
+awaits cleanup, and keeps normal processing and reads behind the completion
+barrier. Progress-bound providers must retain the exact local owner; external
+views or matching names are not accepted as ownership.
+
+`durable_output` uses typed `read_delivery_progress` and
+`stage_delivery_progress` operations. The Host owns destination encoding,
+fingerprints, actual group handles and the preflight publication used by graph
+reconciliation/retirement. Generic checkpoint writes cannot replace these
+records. The component implements `resume_delivery` so an unchanged binding
+reschedules any pending output after quiescence.
+
+Use `NativeProcessing::run_output` for work that may append a retained output;
+ordinary `run` is for metadata, bootstrap and replay-counter operations.
+The opt-in `OutputProcessingWorkV1` descriptor has its own exact header; the
+base C tables remain unchanged and unsupported hosts reject the descriptor.
+For shared destinations, the Host reserves capacity before beginning the actual
+transaction and enlists the validated retained envelope using the existing
+`TransactionGroupMutation` mechanism. Progress/binding publication is also a
+group mutation and runs only after commit, before the group gate is released.
+Cancellation/failure retains the owner's existing fencing/cleanup rules.
+
+Factories that also declare `non_atomic_publication` can accept an explicitly
+selected persistent non-atomic profile. Direct constructors use
+`create_component_with_processing_publication`; graph resources use
+`NativeProcessingResource::with_publication`. This is not an implicit fallback
+when atomic qualification fails, and it cannot join a shared transaction group.
+
+For phased publication, `run_deferred_progress` commits evaluation/input state
+without exposing its progress. The next output operation must call
+`resume_input_progress` and finish successfully before that metadata is published.
+Only one bounded, generation-fenced metadata draft is retained; there are no
+rows, indexes or transaction handles in it. Further input/work cannot bypass the
+pending completion. `validate_input_progress` reuses the normal admission rules
+without staging input, so invalid input can be rejected before committing a
+publication marker.
+
+Non-atomic reset uses separately committed intent, staged checkpoint clearing
+and explicit completion. `begin_non_atomic_reset`, `reset_non_atomic_state` and
+`finish_non_atomic_reset` preserve intent outside cleared query state. A
+bootstrap reset cannot complete before its completion marker; deprovision
+requires a cleared result head. The existing query plugin's protocol determines
+when these operations are authorized. The services never grant atomicity to
+independently committed output.
+
+`reset_state` requires the actual atomic bundle and staged checkpoint clearing.
+It preserves provider intent for bootstrap retry, not explicit deprovision.
+It cannot discard pending delivery during reset or clear bound durable
+destinations. `reset_generation` distinguishes a confirmed cleared incarnation
+from unidentified state; no success-shaped fallback adopts a partial store.
+
+`initialize_reset_output(sequence)` preserves a logical output baseline after an
+authorized bootstrap reset. The Host grants it once, only in that reset operation,
+before readiness and with no bound destinations. It stages the baseline and
+delivery position together; it cannot acknowledge live output, skip pending
+delivery, survive into another operation, or follow a deprovision reset. Ordinary
+sequence advancement and delivery validation remain unchanged.
+
+An ordinary transformer with `continuations` may additionally declare
+`startup_continuation`. After successful startup the host schedules one
+`continue_transform` call before admitting input, allowing recovered output to
+be replayed without waiting for another source event. Return an empty batch with
+no pending work when there is nothing to replay. Ordinary transformers that do
+not opt in acquire no extra startup work.
+
+Index failures retain their `IndexError` category across the native boundary;
+provider-specific error objects are represented by their display text. A failed
+or abandoned state request cannot be ignored to commit the operation. Stopping
+the binding cancels and joins its accepted operations, including handles that
+the plugin never polls.
+
+The host owns serialization, commit, rollback and cleanup. An interrupted or
+uncertain commit fences the owner, and non-atomic or volatile providers retain
+their existing guarantees rather than gaining atomicity. A failed operation can
+therefore leave partial state on a non-atomic provider. Calls are bounded, and
+late requests fail explicitly. The indexed query plugin uses these services for
+memory and persistent atomic operation, including bootstrap, archive reads,
+input-progress validation, Core future evaluation and delivery. Its ordinary
+factory adapter binds the existing query clock and catalogue transport counter.
+Its explicit non-atomic profile uses the same Core evaluator and the existing
+shared publication/reset protocol.
+
 ## Optional host-owned consumer completion
 
 The independently negotiated `drasi_computation_plugin_consumer_v1` extension
@@ -729,9 +1038,12 @@ source-progress binding.
 
 ## Remaining native limitations
 
-Dynamic query-role snapshot/outbox hosting, general
-graph resource injection and in-place reconfiguration are not implemented.
+Arbitrary Rust resource injection across the ABI is not implemented. Native query
+construction, atomic/non-atomic publication, snapshots/outbox,
+subscriptions, scheduling and selected graph-owned resource bindings are
+implemented. Reconfiguration uses the graph's actual replacement/lifecycle
+contract; it must not swap a running component's resources behind its owner.
 Source injection is limited to the negotiated admission and progress bindings.
-Query-role metadata and unsupported capabilities/interfaces are rejected. Query-row
-**data schemas** may still be consumed or produced by ordinary transformers/sinks;
-this does not advertise a recoverable query engine.
+Unsupported capabilities/interfaces are rejected. Query semantic metadata and
+query-row **data schemas** may be used by ordinary transformers/sinks, but they
+do not themselves provide a recoverable query engine.

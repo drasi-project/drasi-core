@@ -10,7 +10,7 @@ mod tests;
 
 struct RetainedInput {
     edge: usize,
-    producer_role: super::super::ComponentRole,
+    producer: super::super::ProducerBoundary,
     input: InputEnvelope,
     acknowledgement: Option<Box<dyn Acknowledgement>>,
     _work: DeliveryWork,
@@ -46,7 +46,7 @@ impl SinkBatchState {
         // Retain ownership before any validation that may fail.
         self.inputs.push_back(RetainedInput {
             edge: incoming.edge,
-            producer_role: incoming.producer_role,
+            producer: incoming.producer,
             input,
             acknowledgement,
             _work: work,
@@ -213,7 +213,7 @@ impl SinkBatchState {
                         self.inputs
                             .iter()
                             .take(count)
-                            .map(|input| (&input.input.envelope, input.producer_role)),
+                            .map(|input| (&input.input.envelope, input.producer)),
                     )
                 })
                 .transpose()

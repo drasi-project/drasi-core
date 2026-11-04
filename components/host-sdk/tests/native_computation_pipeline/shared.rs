@@ -234,7 +234,7 @@ fn graph_with_sinks(
     Ok(builder.build()?)
 }
 
-fn consumer_plugin() -> Result<Arc<NativePlugin>> {
+pub(super) fn consumer_plugin() -> Result<Arc<NativePlugin>> {
     let path = std::env::var_os("DRASI_NATIVE_RECOVERY_PLUGIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -250,6 +250,46 @@ fn consumer_plugin() -> Result<Arc<NativePlugin>> {
             ))
         });
     computation::load(path)
+}
+
+async fn separately_loaded_transformer_removes_only_its_owned_state_case() -> Result<()> {
+    let plugin = consumer_plugin()?;
+    let factory = plugin
+        .factories()
+        .iter()
+        .find(|factory| {
+            factory.metadata().implementation.name.as_ref() == "fixture/stateful-transformer"
+        })
+        .context("missing stateful transformer in native recovery fixture")?;
+    let directory = directory()?;
+    let state_file = directory.path().join("component-state");
+    let unrelated = directory.path().join("unrelated-state");
+    std::fs::write(&state_file, b"owned")?;
+    std::fs::write(&unrelated, b"unrelated")?;
+
+    let mut transformer =
+        factory.create_component(id("stateful"), json!({"state_file": state_file}))?;
+    transformer.start().await?;
+    assert!(transformer.deprovision().await.is_err());
+    assert!(state_file.exists());
+    transformer.stop().await?;
+    assert!(state_file.exists(), "ordinary stop must preserve state");
+    transformer.deprovision().await?;
+    assert!(!state_file.exists());
+    assert_eq!(std::fs::read(&unrelated)?, b"unrelated");
+    transformer.deprovision().await?;
+    assert!(transformer.start().await.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn separately_loaded_transformer_removes_only_its_owned_state_current_thread() -> Result<()> {
+    separately_loaded_transformer_removes_only_its_owned_state_case().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn separately_loaded_transformer_removes_only_its_owned_state_multi_thread() -> Result<()> {
+    separately_loaded_transformer_removes_only_its_owned_state_case().await
 }
 
 async fn delivery_channels(

@@ -85,6 +85,7 @@ name = "computation_runtime"
 [dependencies]
 drasi-core-types = { workspace = true }
 drasi-computation-contracts = { workspace = true }
+drasi-query-common = { workspace = true }
 drasi-reaction-common = { workspace = true }
 drasi-core = { workspace = true, features = ["computation"] }
 drasi-functions-cypher.workspace = true

@@ -31,11 +31,10 @@ mod tests {
         in_memory_outbox_writer::InMemoryOutboxWriter, in_memory_result_index::InMemoryResultIndex,
     };
     use drasi_core::interface::{
-        CheckpointStore, CreatedIndexes, ElementArchiveIndex, ElementIndex, IndexSet,
+        CheckpointStore, CreatedIndexes, ElementArchiveIndex, ElementIndex, IndexJoin, IndexSet,
         NoOpSessionControl, OutboxWriter,
     };
-    use drasi_core::models::{ElementTimestamp, QueryJoin, TimestampRange};
-    use drasi_core::path_solver::match_path::MatchPath;
+    use drasi_core::models::{ElementTimestamp, TimestampRange};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -2451,8 +2450,11 @@ mod tests {
             ElementIndex::clear(&*self.inner).await
         }
 
-        async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-            self.inner.set_joins(match_path, joins).await
+        async fn set_joins(
+            &self,
+            joins: &[IndexJoin],
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner.set_joins(joins).await
         }
     }
 

@@ -8,6 +8,8 @@ description = "DrasiLib getting-started example for Sui DeepBook source"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-sui-deepbook = { path = "../../../components/sources/sui-deepbook" }
 drasi-reaction-sse = { path = "../../../components/reactions/sse" }

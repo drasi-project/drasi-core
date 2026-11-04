@@ -164,7 +164,7 @@ impl OutboxWriter for ComputationOutboxWriter {
             .run(move || {
                 let cf = db.cf_handle(OUTBOX_CF).ok_or(IndexError::CorruptedData)?;
                 session.with_txn(|transaction| {
-                    let mut removed = 0;
+                    let mut keys = Vec::new();
                     for entry in transaction
                         .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward))
                     {
@@ -173,8 +173,12 @@ impl OutboxWriter for ComputationOutboxWriter {
                         {
                             break;
                         }
+                        keys.push(key);
+                    }
+                    // Mutating a transaction invalidates its live iterator.
+                    let removed = keys.len();
+                    for key in keys {
                         transaction.delete_cf(&cf, key).map_err(IndexError::other)?;
-                        removed += 1;
                     }
                     Ok(removed)
                 })
@@ -274,6 +278,28 @@ impl LiveResultsWriter for ComputationLiveResultsWriter {
             .await
     }
 
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_signature: Option<u64>,
+        limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        prefix(query_id)?;
+        let query = query_id.to_owned();
+        let db = self.db.clone();
+        self.work
+            .run(move || {
+                crate::outbox::read_keyed_page(
+                    &db,
+                    LIVE_RESULTS_CF,
+                    &query,
+                    after_signature,
+                    limits,
+                )
+            })
+            .await
+    }
+
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
         let prefix = prefix(query_id)?;
         let db = self.db.clone();
@@ -284,16 +310,7 @@ impl LiveResultsWriter for ComputationLiveResultsWriter {
                     .cf_handle(LIVE_RESULTS_CF)
                     .ok_or(IndexError::CorruptedData)?;
                 session.with_txn(|transaction| {
-                    for entry in transaction
-                        .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward))
-                    {
-                        let (key, _) = entry.map_err(IndexError::other)?;
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        transaction.delete_cf(&cf, key).map_err(IndexError::other)?;
-                    }
-                    Ok(())
+                    crate::session_state::delete_transaction_prefix(transaction, &cf, &prefix)
                 })
             })
             .await

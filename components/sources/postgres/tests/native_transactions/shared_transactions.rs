@@ -879,8 +879,8 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         .await?;
         let batch = ComponentBatch::builder()
             .source(Box::new(source))
-            .query(Box::new(fast))
-            .query(Box::new(slow))
+            .transformer(Box::new(fast))
+            .transformer(Box::new(slow))
             .bind_stream(endpoint("source", "out"), stream())
             .bind_stream(endpoint("fast", "out"), StreamId::try_new("fast-results")?)
             .bind_stream(endpoint("slow", "out"), StreamId::try_new("slow-results")?)

@@ -185,6 +185,18 @@ async fn instance_lifecycle() {
     let calls = Arc::new(Calls::default());
     let (components, input, mut output_rx) = components(calls.clone());
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("managed-instance")
         .with_components(components)
         .build()
@@ -321,7 +333,9 @@ async fn native_role_logs(instance_id: &str) {
             &["in"],
             &["out"],
         ))))
-        .query(Box::new(RoleLogger(descriptor("query", &["in"], &["out"]))))
+        .transformer(Box::new(RoleLogger(
+            descriptor("query", &["in"], &["out"]).with_semantic_kind(ComponentSemanticKind::Query),
+        )))
         .sink(Box::new(RoleLogger(
             descriptor("sink", &["in"], &[]).with_semantic_kind(ComponentSemanticKind::Reaction),
         )))
@@ -344,22 +358,37 @@ async fn native_role_logs(instance_id: &str) {
         .build()
         .unwrap();
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(instance_id)
         .with_components(batch)
         .build()
         .await
         .unwrap();
-    let roles = [
-        ("source", ComponentRole::Source),
-        ("transformer", ComponentRole::Transformer),
-        ("query", ComponentRole::Query),
-        ("sink", ComponentRole::Sink),
-        ("service", ComponentRole::Service),
+    let categories = [
+        ("source", ComponentLogType::Source),
+        ("transformer", ComponentLogType::Transformer),
+        ("query", ComponentLogType::Query),
+        ("sink", ComponentLogType::Sink),
+        ("service", ComponentLogType::Service),
     ];
     let mut receivers = Vec::new();
-    for (id, role) in roles {
-        let (_, receiver) = core.subscribe_computation_logs(role, id).await.unwrap();
-        receivers.push((id, role, receiver));
+    for (id, category) in categories.clone() {
+        let (_, receiver) = core
+            .subscribe_computation_logs(category.clone(), id)
+            .await
+            .unwrap();
+        receivers.push((id, category, receiver));
     }
     for (id, role, former_category) in [
         (
@@ -374,29 +403,32 @@ async fn native_role_logs(instance_id: &str) {
             .subscribe_computation_logs(former_category, id)
             .await
             .unwrap();
-        receivers.push((id, role, receiver));
+        receivers.push((id, ComponentLogType::from(role), receiver));
     }
     let (_, reaction_api) = core.subscribe_reaction_logs("sink").await.unwrap();
-    receivers.push(("sink", ComponentRole::Sink, reaction_api));
+    receivers.push(("sink", ComponentLogType::Sink, reaction_api));
     assert!(core
         .subscribe_computation_logs(ComponentRole::Source, "service")
         .await
         .is_err());
     core.start().await.unwrap();
-    for (id, role, mut receiver) in receivers {
+    for (id, category, mut receiver) in receivers {
         let message = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
             .await
             .expect("native role log was dropped")
             .unwrap();
         assert_eq!(message.instance_id, instance_id);
         assert_eq!(message.component_id, id);
-        assert_eq!(message.component_type, ComponentLogType::from(role));
+        assert_eq!(message.component_type, category);
         assert_eq!(message.message, "native role started");
     }
-    for (id, role) in roles {
-        let (history, _) = core.subscribe_computation_logs(role, id).await.unwrap();
+    for (id, category) in categories {
+        let (history, _) = core
+            .subscribe_computation_logs(category.clone(), id)
+            .await
+            .unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].component_type, ComponentLogType::from(role));
+        assert_eq!(history[0].component_type, category);
     }
     core.remove_reaction("sink", false).await.unwrap();
     let key = ComponentLogKey::new(instance_id, ComponentRole::Sink, "sink");
@@ -430,6 +462,18 @@ async fn instance_stop_preserves_typed_member_failure_and_allows_cleanup_retry()
     let calls = Arc::new(Calls::default());
     let (batch, _input, _output) = components(calls.clone());
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(batch)
         .build()
         .await
@@ -463,7 +507,22 @@ async fn instance_stop_preserves_typed_member_failure_and_allows_cleanup_retry()
 
 #[tokio::test]
 async fn component_batches_share_identity_and_preserve_existing_instance_members() {
-    let drasi = DrasiLib::builder().build().await.expect("instance");
+    let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .expect("instance");
     let control = drasi.computation_control().unwrap();
     let original: Vec<_> = control
         .desired_snapshot()
@@ -531,7 +590,22 @@ async fn component_batches_share_identity_and_preserve_existing_instance_members
 
 #[tokio::test]
 async fn cancelled_shutdown_retains_the_driver_and_actual_async_cleanup_owner() {
-    let drasi = DrasiLib::builder().build().await.expect("instance");
+    let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .expect("instance");
     let calls = Arc::new(Calls::default());
     calls.hold_stop.store(true, Ordering::Release);
     let (batch, _input, _) = components(calls.clone());
@@ -569,6 +643,18 @@ async fn builder_rejection_awaits_all_owned_resources_without_starting_component
     let (one, _, _) = components(first.clone());
     let (two, _, _) = components(second.clone());
     let result = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(one)
         .with_components(two)
         .build()
@@ -591,6 +677,18 @@ async fn query_creation_failure_retains_component_resources_until_explicit_clean
         "missing".into(),
     ));
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_query(query)
         .with_components(batch)
         .build()
@@ -621,6 +719,18 @@ async fn failed_builder_rollback_returns_the_actual_retryable_cleanup_owner() {
     let (one, _, _) = components(first.clone());
     let (two, _, _) = components(second.clone());
     let error = match DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(one)
         .with_components(two)
         .build()
@@ -660,7 +770,22 @@ async fn failed_builder_rollback_returns_the_actual_retryable_cleanup_owner() {
 
 #[tokio::test]
 async fn rejected_registration_keeps_failed_cleanup_separate_from_the_live_graph() {
-    let drasi = DrasiLib::builder().build().await.expect("instance");
+    let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .expect("instance");
     let live = Arc::new(Calls::default());
     let rejected = Arc::new(Calls::default());
     rejected.fail_dispose.store(true, Ordering::Release);

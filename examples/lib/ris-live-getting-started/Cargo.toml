@@ -8,6 +8,8 @@ description = "DrasiLib getting-started example with a live web dashboard for RI
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-ris-live = { path = "../../../components/sources/ris-live" }
 drasi-reaction-application = { path = "../../../components/reactions/application" }

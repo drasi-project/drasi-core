@@ -45,6 +45,58 @@ impl Default for QuerySchedulingResource {
     }
 }
 impl QuerySchedulingResource {
+    pub fn physical_time(&self) -> anyhow::Result<u64> {
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "query clock is closed"
+        );
+        #[cfg(feature = "test-support")]
+        if let Some(control) = &self.test_control {
+            return Ok(control.now());
+        }
+        Ok(u64::try_from(chrono::Utc::now().timestamp_millis())?)
+    }
+
+    pub fn connect_test_control(&self) -> anyhow::Result<Option<QuerySchedulingSession>> {
+        #[cfg(feature = "test-support")]
+        return self
+            .test_control
+            .as_ref()
+            .map(|control| {
+                Ok(QuerySchedulingSession {
+                    inner: control.connect()?,
+                })
+            })
+            .transpose();
+        #[cfg(not(feature = "test-support"))]
+        Ok(None)
+    }
+
+    pub fn observe_query(
+        &self,
+        _inspector: &ComputationInspector,
+        _id: ComponentId,
+        _generation: ComponentGeneration,
+    ) -> Option<QuerySchedulingObservation> {
+        #[cfg(feature = "test-support")]
+        return self
+            .test_control
+            .as_ref()
+            .map(|control| QuerySchedulingObservation {
+                _observer: control.observe_component(_inspector, _id, _generation),
+            });
+        #[cfg(not(feature = "test-support"))]
+        None
+    }
+
+    pub fn bind_processing(&self, owner: &drasi_core::computation::ComputationTransaction) {
+        self.ready(owner.resources().indexes().future_queue.clone());
+    }
+
+    pub fn suspend(&self) {
+        self.stopped();
+    }
+
     #[cfg(feature = "test-support")]
     pub(crate) fn with_test_control(
         mut self,
@@ -69,6 +121,65 @@ impl ResourceCleanup for QuerySchedulingResource {
         self.closed.store(true, Ordering::Release);
         self.stopped();
         Ok(())
+    }
+}
+
+/// The existing test control's activation, without exposing its request sender
+/// or creating a second scheduling runtime.
+pub struct QuerySchedulingSession {
+    #[cfg(feature = "test-support")]
+    inner: crate::test_support::QueryTestSession,
+}
+
+pub struct QuerySchedulingObservation {
+    _observer: Arc<dyn PublicationObserver>,
+}
+
+impl QuerySchedulingSession {
+    pub fn begin(&mut self) -> bool {
+        #[cfg(feature = "test-support")]
+        return self.inner.begin();
+        #[cfg(not(feature = "test-support"))]
+        false
+    }
+
+    pub fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
+        #[cfg(feature = "test-support")]
+        return Some(Arc::new(QueryControlWakeup(self.inner.control.clone())));
+        #[cfg(not(feature = "test-support"))]
+        None
+    }
+
+    pub fn complete(
+        &mut self,
+        _sequence: u64,
+        _generation: u64,
+        _persistent: bool,
+        _publication: QueryPublicationMode,
+    ) {
+        #[cfg(feature = "test-support")]
+        self.inner.complete(crate::test_support::DrainReport {
+            physical_time_ms: self.inner.control.now(),
+            output_sequence: _sequence,
+            output_generation: _generation,
+            output_persistent: _persistent,
+            publication: _publication,
+        });
+    }
+}
+
+#[cfg(feature = "test-support")]
+struct QueryControlWakeup(crate::test_support::QueryTestControl);
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl WakeupSource for QueryControlWakeup {
+    async fn wait(&self) -> anyhow::Result<()> {
+        self.0.notified().await;
+        Ok(())
+    }
+    async fn has_pending(&self) -> anyhow::Result<bool> {
+        Ok(true)
     }
 }
 

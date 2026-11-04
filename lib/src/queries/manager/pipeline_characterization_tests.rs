@@ -39,16 +39,15 @@ use drasi_core::{
     },
     interface::{
         AccumulatorIndex, CheckpointStore, CreatedIndexes, ElementArchiveIndex, ElementIndex,
-        ElementStream, FutureElementRef, FutureQueue, IndexBackendPlugin, IndexError, IndexSet,
-        LazySortedSetStore, LiveResultsWriter, OutboxWriter, PushType, ResultIndex, ResultKey,
-        ResultOwner, ResultSequence, ResultSequenceCounter, RowMutation, SessionControl,
+        ElementStream, FutureElementRef, FutureQueue, IndexBackendPlugin, IndexError, IndexJoin,
+        IndexSet, LazySortedSetStore, LiveResultsWriter, OutboxWriter, PushType, ResultIndex,
+        ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter, RowMutation, SessionControl,
         SourceCheckpoint,
     },
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementTimestamp,
-        QueryJoin, SourceChange, TimestampRange,
+        SourceChange, TimestampRange,
     },
-    path_solver::match_path::MatchPath,
 };
 use futures::FutureExt;
 use ordered_float::OrderedFloat;
@@ -301,11 +300,12 @@ impl ElementIndex for TransactionalIndexes {
         Ok(())
     }
 
-    async fn set_joins(&self, _match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
         assert!(
             joins.is_empty(),
             "the fixture does not implement synthetic joins"
         );
+        Ok(())
     }
 }
 
@@ -1031,6 +1031,18 @@ impl PipelineHarness {
         let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
         let source = CharacterizationSource::new(SOURCE_ID, subscription_tx);
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("pipeline-characterization")
             .with_index_provider("characterization", backend)
             .with_source(source)

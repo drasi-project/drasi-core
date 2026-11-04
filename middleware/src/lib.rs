@@ -34,3 +34,26 @@ pub mod relabel;
 
 #[cfg(feature = "unwind")]
 pub mod unwind;
+
+/// Existing middleware implementations enabled in this build. Their interfaces
+/// depend only on shared data/index contracts, not on the query evaluator.
+#[cfg(feature = "engine-adapter")]
+pub fn source_middleware_factories(
+) -> Vec<std::sync::Arc<dyn drasi_core_types::interface::SourceMiddlewareFactory>> {
+    vec![
+        #[cfg(feature = "jq")]
+        std::sync::Arc::new(jq::JQFactory::new()),
+        #[cfg(feature = "map")]
+        std::sync::Arc::new(map::MapFactory::new()),
+        #[cfg(feature = "unwind")]
+        std::sync::Arc::new(unwind::UnwindFactory::new()),
+        #[cfg(feature = "relabel")]
+        std::sync::Arc::new(relabel::RelabelMiddlewareFactory::new()),
+        #[cfg(feature = "decoder")]
+        std::sync::Arc::new(decoder::DecoderFactory::new()),
+        #[cfg(feature = "parse_json")]
+        std::sync::Arc::new(parse_json::ParseJsonFactory::new()),
+        #[cfg(feature = "promote")]
+        std::sync::Arc::new(promote::PromoteMiddlewareFactory::new()),
+    ]
+}

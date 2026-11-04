@@ -132,7 +132,7 @@ async fn fixture(
                 envelope: envelope(2, "Alicia", true),
             }),
         }))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(Output(
             ComponentDescriptor::try_new(
                 ComponentId::try_new("output").expect("output component id"),
@@ -183,6 +183,18 @@ async fn fixture(
         .expect("build actual query pipeline");
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id(INSTANCE)
             .with_components(batch)
             .build()

@@ -39,6 +39,19 @@ pub(crate) async fn core(
     );
     config.index_factory = indexes;
     let mut core = DrasiLib::new_with_middleware(Arc::new(config), middleware);
+    core.register_query_factory(
+        crate::computation::v1::FactoryRegistry::standard()
+            .get(
+                &crate::computation::v1::ImplementationIdentity::try_new(
+                    "drasi/continuous-query",
+                    "1",
+                )
+                .expect("reference query identity"),
+            )
+            .expect("reference query factory")
+            .clone(),
+    )
+    .expect("explicit reference factory");
     core.initialize().await.expect("computation fixture");
     Arc::new(core)
 }

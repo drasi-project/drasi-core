@@ -2537,7 +2537,7 @@ or plugin-authoring structure.
 [bootstrap-data]: ../../components/computation-contracts/src/bootstrap.rs
 [query-bootstrap]: ../src/computation/v1/query_bootstrap.rs
 [query-recovery]: ../src/computation/v1/query_recovery.rs
-[query-state]: ../src/computation/internal/query_state.rs
+[query-state]: ../../components/query-common/src/query_state.rs
 [catalog]: ../src/computation/v1/query_catalog.rs
 [query-exchange]: ../src/queries/output_state.rs
 [native-query]: ../src/computation/runtime/native_query.rs

@@ -2875,6 +2875,18 @@ async fn test_e2e_cdylib_source_query_reaction() {
 
     // Build DrasiLib with source, query, reaction
     let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("e2e-test")
         .with_source(source)
         .with_query(
@@ -3052,7 +3064,7 @@ async fn test_e2e_multi_source_query_reaction() {
         .expect("Should create sse-sensors reaction");
 
     // ── Build DrasiLib ──
-    let core = drasi_lib::DrasiLib::builder()
+    let core = drasi_lib::DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
         .with_id("multi-e2e-test")
         .with_source(counter_source)
         .with_source(sensor_source)
@@ -3794,6 +3806,18 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
     // Use a persistent (in-memory) checkpoint store shared between phases.
     // Build DrasiLib with the source and a simple query
     let core1 = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("ckpt-test-1")
         .with_source(source1)
         .with_query(

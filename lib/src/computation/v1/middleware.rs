@@ -48,24 +48,7 @@ use super::{
 
 const IMPLEMENTATION: &str = "drasi/middleware-transformer";
 
-pub(super) fn validate_middleware_configs<'a>(
-    configs: &'a [SourceMiddlewareConfig],
-    registry: Option<&MiddlewareTypeRegistry>,
-) -> anyhow::Result<BTreeSet<&'a str>> {
-    let mut names = BTreeSet::new();
-    for config in configs {
-        super::data::validate_identifier("middleware", &config.name)?;
-        super::data::validate_identifier("middleware kind", &config.kind)?;
-        anyhow::ensure!(
-            names.insert(config.name.as_ref()),
-            "duplicate middleware name"
-        );
-        if registry.is_some_and(|registry| registry.get(&config.kind).is_none()) {
-            anyhow::bail!("middleware kind {} is not registered", config.kind);
-        }
-    }
-    Ok(names)
-}
+pub(super) use drasi_query_common::validate_middleware_configs;
 
 fn validate_pipeline(names: &BTreeSet<&str>, pipeline: &[String]) -> anyhow::Result<()> {
     for name in pipeline {

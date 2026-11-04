@@ -8,7 +8,8 @@ Each dynamic library owns its configuration, factory, implementation and export.
 Shared crates contain helpers, not additional registered components.
 
 The dynamic plugins use the lightweight `drasi-computation-contracts` and
-`drasi-core-types` packages, not `drasi-lib` or the query engine. The SDK exposes
+`drasi-core-types` packages, not `drasi-lib`. Only the query transformer depends
+on the query engine and parsers. The SDK exposes
 only supported plugin operations and borrowed host services. Native sinks accept the standard graph-change schema from any source,
 transformer or query ([sink input contract](SINKS.md)); a query-result
 message does not require query execution. `make check-native-dependencies`
@@ -31,6 +32,7 @@ checks every native library independently, including its build dependencies.
 | Source | [drasi-computation-source-bridge](sources/bridge) | `drasi.bridge/source` | Static Rust factory |
 | Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
+| Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.experimental/volatile-query`, `drasi.experimental/indexed-query`, `drasi.experimental/provider-query` | Experimental; not a production query replacement |
 | Sink | [drasi-computation-sink-capture](sinks/capture) | `drasi.standard/capture` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |

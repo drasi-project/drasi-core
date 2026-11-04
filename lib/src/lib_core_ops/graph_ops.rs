@@ -168,6 +168,18 @@ mod tests {
     #[tokio::test]
     async fn get_graph_empty_has_instance_root() {
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("empty-graph")
             .build()
             .await
@@ -196,6 +208,18 @@ mod tests {
     async fn get_graph_with_components() {
         let source = TestMockSource::new("src1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("graph-test")
             .with_source(source)
             .with_query(
@@ -232,6 +256,18 @@ mod tests {
     async fn get_dependents_source_with_query() {
         let source = TestMockSource::new("src1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("dep-test")
             .with_source(source)
             .with_query(
@@ -256,6 +292,18 @@ mod tests {
     async fn get_dependents_leaf_returns_empty() {
         let source = TestMockSource::new("src1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("leaf-test")
             .with_source(source)
             .with_query(
@@ -282,6 +330,18 @@ mod tests {
     async fn get_dependencies_query_depends_on_source() {
         let source = TestMockSource::new("src1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("deps-test")
             .with_source(source)
             .with_query(
@@ -306,6 +366,18 @@ mod tests {
     async fn get_dependencies_source_has_none() {
         let source = TestMockSource::new("src1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("no-deps-test")
             .with_source(source)
             .build()
@@ -324,6 +396,18 @@ mod tests {
     async fn can_remove_component_safe() {
         let source = TestMockSource::new("src1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("remove-safe")
             .with_source(source)
             .with_query(
@@ -345,6 +429,18 @@ mod tests {
     async fn can_remove_component_unsafe_has_dependents() {
         let source = TestMockSource::new("src1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("remove-unsafe")
             .with_source(source)
             .with_query(

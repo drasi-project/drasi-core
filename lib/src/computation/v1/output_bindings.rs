@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::{ComponentId, PortId};
 
-pub(super) const CHECKPOINT: &str = "\0computation:output-bindings:v1";
+pub const CHECKPOINT: &str = "\0computation:output-bindings:v1";
 pub(super) const MAX_DESTINATIONS: usize = 256;
 const MAX_BYTES: usize = 1024 * 1024;
 
@@ -55,7 +55,7 @@ impl PartialEq for OutputBindings {
 
 impl Eq for OutputBindings {}
 
-pub(crate) struct OutputReservations(Vec<super::qos_pipe::QosReservation>);
+pub struct OutputReservations(Vec<super::qos_pipe::QosReservation>);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -66,7 +66,7 @@ pub(super) fn index_error(error: anyhow::Error) -> drasi_core::interface::IndexE
 }
 
 impl OutputReservations {
-    pub(crate) fn mutations(
+    pub fn mutations(
         self,
         envelope: Option<&super::ChangeEnvelope>,
     ) -> anyhow::Result<Vec<Box<dyn drasi_core::computation::TransactionGroupMutation>>> {
@@ -162,11 +162,11 @@ impl OutputBindings {
         Ok(())
     }
 
-    pub(crate) fn has_shared(&self) -> bool {
+    pub fn has_shared(&self) -> bool {
         !self.shared.is_empty()
     }
 
-    pub(crate) fn validate_transaction(
+    pub fn validate_transaction(
         &self,
         transaction: &drasi_core::computation::ComputationTransaction,
     ) -> anyhow::Result<()> {
@@ -194,7 +194,7 @@ impl OutputBindings {
         Ok(())
     }
 
-    pub(crate) async fn reserve(&self) -> anyhow::Result<OutputReservations> {
+    pub async fn reserve(&self) -> anyhow::Result<OutputReservations> {
         let mut reservations = Vec::with_capacity(self.shared.len());
         for entry in &self.shared {
             let channel = entry.channel.upgrade().ok_or(super::PipeError::Closed)?;
@@ -244,7 +244,7 @@ impl OutputBindings {
         Ok(())
     }
 
-    pub(super) fn load(checkpoint: Option<&SourceCheckpoint>) -> Result<Self, OutputBindingError> {
+    pub fn load(checkpoint: Option<&SourceCheckpoint>) -> Result<Self, OutputBindingError> {
         let Some(checkpoint) = checkpoint else {
             return Ok(Self::default());
         };
@@ -274,14 +274,11 @@ impl OutputBindings {
         Ok(self)
     }
 
-    pub(super) fn fingerprint(&self) -> Option<&Bytes> {
+    pub fn fingerprint(&self) -> Option<&Bytes> {
         self.fingerprint.as_ref()
     }
 
-    pub(super) fn validate_progress(
-        &self,
-        position: Option<&Bytes>,
-    ) -> Result<(), OutputBindingError> {
+    pub fn validate_progress(&self, position: Option<&Bytes>) -> Result<(), OutputBindingError> {
         if self.fingerprint() != position {
             return Err(OutputBindingError::Invalid(
                 "destination membership disagrees with durable output progress".into(),
@@ -290,7 +287,7 @@ impl OutputBindings {
         Ok(())
     }
 
-    pub(super) fn encode(&self) -> Result<Bytes, OutputBindingError> {
+    pub fn encode(&self) -> Result<Bytes, OutputBindingError> {
         self.validate()?;
         let bytes = serde_json::to_vec(&Record {
             version: 1,
@@ -305,7 +302,7 @@ impl OutputBindings {
         Ok(bytes.into())
     }
 
-    pub(super) fn validate_change(
+    pub fn validate_change(
         &self,
         proposed: &Self,
         pending: bool,
@@ -321,7 +318,7 @@ impl OutputBindings {
 /// A live preflight view, not another transaction owner. Only the producer
 /// publishes confirmed state here, after using its existing transaction.
 #[derive(Debug)]
-pub(crate) struct OutputBindingState {
+pub struct OutputBindingState {
     bindings: Mutex<Option<OutputBindings>>,
     standalone: Mutex<Option<StandaloneOwner>>,
     pending: AtomicBool,
@@ -348,7 +345,7 @@ impl OutputBindingState {
             .is_some())
     }
 
-    pub(super) fn bind_standalone_owner(
+    pub fn bind_standalone_owner(
         &self,
         provider: &Arc<dyn drasi_core::computation::ComputationIndexProvider>,
         transaction: Weak<drasi_core::computation::ComputationTransaction>,
@@ -410,7 +407,7 @@ impl OutputBindingState {
         }
     }
 
-    pub(super) fn new(failure: Arc<AtomicBool>) -> Arc<Self> {
+    pub fn new(failure: Arc<AtomicBool>) -> Arc<Self> {
         Arc::new(Self {
             bindings: Mutex::new(None),
             standalone: Mutex::new(None),
@@ -419,7 +416,7 @@ impl OutputBindingState {
         })
     }
 
-    pub(super) fn validate(&self, proposed: &OutputBindings) -> Result<(), OutputBindingError> {
+    pub fn validate(&self, proposed: &OutputBindings) -> Result<(), OutputBindingError> {
         let bindings = self
             .bindings
             .lock()
@@ -443,7 +440,7 @@ impl OutputBindingState {
         Ok(())
     }
 
-    pub(super) fn publish(
+    pub fn publish(
         &self,
         bindings: OutputBindings,
         pending: bool,
@@ -459,6 +456,15 @@ impl OutputBindingState {
 
     pub(super) fn pending(&self, pending: bool) {
         self.pending.store(pending, Ordering::Release);
+    }
+
+    pub fn invalidate(&self) -> Result<(), OutputBindingError> {
+        *self
+            .bindings
+            .lock()
+            .map_err(|_| OutputBindingError::Poisoned)? = None;
+        self.pending.store(false, Ordering::Release);
+        Ok(())
     }
 }
 

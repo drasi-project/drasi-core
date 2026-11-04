@@ -14,7 +14,25 @@
 
 //! Per-query output metrics: outbox health, sequence progression, snapshot tracking.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc,
+};
+
+pub(crate) struct QueryOperationTimer {
+    pub(crate) metrics: Option<Arc<QueryOutputMetrics>>,
+    pub(crate) started: std::time::Instant,
+}
+
+impl Drop for QueryOperationTimer {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_transaction_duration_ns(
+                self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            );
+        }
+    }
+}
 
 /// Progress read from a running query's actual input and output publications.
 ///
@@ -102,7 +120,12 @@ impl QueryOutputMetrics {
 
     /// Increment the result sequence advance counter.
     pub fn record_seq_advance(&self) {
-        self.result_seq_advances.fetch_add(1, Ordering::Relaxed);
+        self.record_seq_advances(1);
+    }
+
+    pub(crate) fn record_seq_advances(&self, advances: u64) {
+        self.result_seq_advances
+            .fetch_add(advances, Ordering::Relaxed);
     }
 
     /// Store the current live results count.

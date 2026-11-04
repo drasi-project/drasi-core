@@ -76,6 +76,12 @@ async fn main() -> Result<()> {
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_host_sdk::computation::NativePlugin::from_definition(
+                drasi_computation_transformer_query::plugin()?,
+            )?
+            .query_factory()?,
+        )
         .with_id("a2a-helloworld-example")
         .with_state_store_provider(Arc::new(state_store))
         .with_source(invoices)

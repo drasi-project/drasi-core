@@ -79,6 +79,13 @@ Server example is `drasi-server/examples/native-sqlite.rs`, using its `file` mod
 This does not turn file initialization into coordinated journal ownership:
 writers must remain quiescent until both queries finish loading.
 
+Embedded hosts can also bind this existing file provider to the experimental
+[`drasi.experimental/provider-query`](../../transformers/query/README.md#existing-bootstrap-provider-integration)
+transformer through `NativeBootstrapResource`. That path uses the provider's
+real prepare/stream/complete/stop lifecycle and keeps writers quiescent; it
+does not yet accept the coordinated/shared factories. This is Host SDK/library
+integration, not new Server recipe support.
+
 ## Source-paired snapshots
 
 Use `drasi.sqlite/coordinated-bootstrap` with

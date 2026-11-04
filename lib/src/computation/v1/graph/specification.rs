@@ -520,9 +520,6 @@ impl ConstructedComponent {
     pub fn transformer(transformer: Box<dyn Transformer>) -> Self {
         Self(Component::Transformer(transformer))
     }
-    pub fn query(query: Box<dyn Transformer>) -> Self {
-        Self(Component::Query(query))
-    }
     pub fn sink(sink: Box<dyn EnvelopeSink>) -> Self {
         Self(Component::Sink(sink))
     }
@@ -536,6 +533,9 @@ impl ConstructedComponent {
 #[async_trait]
 pub trait ComponentFactory: Send + Sync {
     fn descriptor(&self) -> &FactoryDescriptor;
+    fn query_authoring(&self) -> Option<&dyn crate::computation::v1::QueryAuthoring> {
+        None
+    }
     /// Ports this factory can describe and the formats it actually implements
     /// for each. When present, the graph checks before construction that a
     /// specification's declared ports are exactly those its literal `ports`

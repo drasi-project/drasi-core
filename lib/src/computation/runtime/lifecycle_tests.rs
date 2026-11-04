@@ -499,7 +499,22 @@ async fn empty_native_instance_accepts_node_first_additions_without_placeholder(
 
 #[tokio::test]
 async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
-    let core = DrasiLib::builder().build().await.unwrap();
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     let control = core.computation_control().unwrap();
     let desired = control.desired_snapshot();
     assert_eq!(desired.nodes.len(), 1);
@@ -571,6 +586,18 @@ async fn clean_restart_preserves_query_generation_and_strict_reaction_checkpoint
         let (source, source_control) = ControlledSource::new("source");
         source_control.auto_start.store(true, Ordering::Release);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_state_store_provider(store.clone())
             .with_source(source)
             .with_query(
@@ -735,7 +762,7 @@ async fn query_component_ownership() {
         assert_eq!(scope.topology.graph_id, root_id);
         assert_eq!(
             root.desired_snapshot().specifications[&node].role,
-            ComponentRole::Query
+            ComponentRole::Transformer
         );
     }
 

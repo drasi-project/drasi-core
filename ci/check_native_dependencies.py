@@ -17,6 +17,14 @@ FORBIDDEN = {
     "drasi-functions-cypher",
     "drasi-functions-gql",
 }
+QUERY_PLUGIN = "drasi-computation-transformer-query"
+QUERY_ENGINE = {
+    "drasi-core",
+    "drasi-query-cypher",
+    "drasi-query-gql",
+    "drasi-functions-cypher",
+    "drasi-functions-gql",
+}
 
 
 def cargo(*arguments):
@@ -26,8 +34,9 @@ def cargo(*arguments):
     return result.stdout
 
 
-def forbidden_dependencies(tree):
-    return FORBIDDEN.intersection(
+def forbidden_dependencies(tree, package=None):
+    forbidden = FORBIDDEN - QUERY_ENGINE if package == QUERY_PLUGIN else FORBIDDEN
+    return forbidden.intersection(
         line.split()[0] for line in tree.splitlines() if line.split()
     )
 
@@ -47,11 +56,11 @@ def main():
         arguments = ["tree", "--locked", "-p", package, "--edges", "normal,build", "--prefix", "none", "--format", "{p}"]
         if package in native:
             arguments += ["--features", "dynamic-plugin"]
-        unwanted = forbidden_dependencies(cargo(*arguments))
+        unwanted = forbidden_dependencies(cargo(*arguments), package)
         if unwanted:
             failed.append(f"{package}: {', '.join(sorted(unwanted))}")
         else:
-            print(f"{package}: no runtime, evaluator, query parser or legacy SDK dependency")
+            print(f"{package}: native dependency policy satisfied")
     if failed:
         raise RuntimeError("Native dependency isolation failed:\n" + "\n".join(failed))
 

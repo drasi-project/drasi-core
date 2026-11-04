@@ -48,7 +48,7 @@ async fn native_query_stop_preserves_an_unrelated_inflight_stop() -> anyhow::Res
         let (source, _input) = ApplicationSource::new("input", ApplicationSourceConfig {
             properties: Default::default(), durability: None,
         })?;
-        let core = DrasiLib::builder().with_source(source).build().await?;
+        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).with_source(source).build().await?;
         core.computation_component("input")?.wait_created().await?;
         let batch = core.computation_pipeline()?
             .source(core.borrow_computation_source("input").await?, SourceSubscriptionOptions::default())?
@@ -121,7 +121,21 @@ impl Transformer for PendingQuery {
 #[tokio::test]
 async fn native_query_stop_cancels_its_pending_start() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(20), async {
-        let core = DrasiLib::builder().build().await?;
+        let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .build()
+            .await?;
         let entered = Arc::new(tokio::sync::Notify::new());
         let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (_input, receiver) = tokio::sync::mpsc::channel(2);
@@ -145,7 +159,7 @@ async fn native_query_stop_cancels_its_pending_start() -> anyhow::Result<()> {
                 )?,
                 receiver,
             }))
-            .query(Box::new(PendingQuery {
+            .transformer(Box::new(PendingQuery {
                 descriptor: ComponentDescriptor::try_new(
                     ComponentId::try_new("pending")?,
                     vec![
@@ -162,7 +176,8 @@ async fn native_query_stop_cancels_its_pending_start() -> anyhow::Result<()> {
                             PipeRequirements::default(),
                         ),
                     ],
-                )?,
+                )?
+                .with_semantic_kind(ComponentSemanticKind::Query),
                 entered: entered.clone(),
                 stops: stops.clone(),
             }))
@@ -272,7 +287,21 @@ async fn preconstructed_native_query_exposes_its_existing_results_without_a_cata
         use drasi_core::models::{
             Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
         };
-        let core = DrasiLib::builder().build().await?;
+        let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .build()
+            .await?;
         let query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: core.computation_info().await?.id,
@@ -306,7 +335,7 @@ async fn preconstructed_native_query_exposes_its_existing_results_without_a_cata
                 )?,
                 receiver,
             }))
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(NativeOutput {
                 descriptor: ComponentDescriptor::try_new(
                     ComponentId::try_new("output")?,
@@ -391,6 +420,18 @@ async fn query_api(native: bool, added_while_running: bool) -> anyhow::Result<()
         },
     )?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(format!("query-api-{native}-{added_while_running}"))
         .with_source(source)
         .build()
@@ -564,7 +605,22 @@ async fn manual_native_query_lifecycle_controls_its_helpers_without_stopping_sib
                 durability: None,
             },
         )?;
-        let core = DrasiLib::builder().with_source(source).build().await?;
+        let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_source(source)
+            .build()
+            .await?;
         core.computation_component("input")?.wait_created().await?;
         for (id, auto_start) in [("manual", false), ("sibling", true)] {
             let query = Query::cypher(id)
@@ -665,7 +721,22 @@ async fn native_query_handles_and_subscriptions_cannot_observe_replacement_insta
                 durability: None,
             },
         )?;
-        let core = DrasiLib::builder().with_source(source).build().await?;
+        let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_source(source)
+            .build()
+            .await?;
         core.computation_component("input")?.wait_created().await?;
         let config = Query::cypher("items")
             .query("MATCH (n:Item) RETURN n.value AS value")
@@ -748,7 +819,22 @@ async fn failed_native_query_declarations_keep_configuration_status_and_events_v
             durability: None,
         },
     )?;
-    let core = DrasiLib::builder().with_source(source).build().await?;
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .with_source(source)
+        .build()
+        .await?;
     core.computation_component("input")?.wait_created().await?;
     let mut config = Query::cypher("invalid")
         .query("MATCH (n:Item) RETURN n.value AS value")

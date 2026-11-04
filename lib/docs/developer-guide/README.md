@@ -374,7 +374,7 @@ the source and sink, the program adds them with the query:
 ```rust
 let mut batch = ComponentBatch::builder()
     .source(Box::new(inventory))
-    .query(Box::new(query))
+    .transformer(Box::new(query))
     .sink(Box::new(alerts));
 ```
 

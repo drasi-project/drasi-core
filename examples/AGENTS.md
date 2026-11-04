@@ -6,3 +6,4 @@ Runnable demonstrations. Two different build models live side by side here.
 - examples/lib/* crates are standalone: each has an empty `[workspace]` table and ../../../ path deps, and CI never builds them - after changing drasi-lib or component APIs, build each affected example in its own directory or breakage stays silent
 - New examples/lib crates must include the empty `[workspace]` table (or be added to the root Cargo.toml `exclude` list), or cargo commands run inside that example's directory fail with "current package believes it's in a workspace when it's not"
 - Nothing under examples/ is published
+- Standalone examples using ordinary queries explicitly register the stock native query plugin through `NativePlugin::from_definition(...).query_factory()`. Keep the Host SDK/query-plugin path dependencies with that registration; source-only examples need neither.

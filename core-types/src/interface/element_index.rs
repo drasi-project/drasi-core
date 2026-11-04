@@ -12,20 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{pin::Pin, sync::Arc};
+use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures_core::Stream;
+use serde::{Deserialize, Serialize};
 
-use crate::{
-    models::{Element, ElementReference, ElementTimestamp, QueryJoin, TimestampRange},
-    path_solver::match_path::MatchPath,
-};
+use crate::models::{Element, ElementReference, ElementTimestamp, QueryJoin, TimestampRange};
 
 use super::IndexError;
 
 pub type ElementResult = Result<Arc<Element>, IndexError>;
 pub type ElementStream = Pin<Box<dyn Stream<Item = ElementResult> + Send>>;
+
+/// A synthetic join and the nonempty match slots in which its relationship is used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexJoin {
+    pub join: Arc<QueryJoin>,
+    pub slots: Vec<usize>,
+}
+
+pub type IndexJoinsByLabel = HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>>;
+
+/// Group configured joins by their source element labels, preserving key order
+/// and repeated keys within each label.
+pub fn index_joins_by_label(joins: &[IndexJoin]) -> Result<IndexJoinsByLabel, IndexError> {
+    let mut result = IndexJoinsByLabel::new();
+    for spec in joins {
+        if spec.slots.is_empty() {
+            return Err(IndexError::other(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "an indexed join must have at least one match slot",
+            )));
+        }
+        for key in &spec.join.keys {
+            result
+                .entry(key.label.clone())
+                .or_default()
+                .push((spec.join.clone(), spec.slots.clone()));
+        }
+    }
+    Ok(result)
+}
 
 #[async_trait]
 pub trait ElementIndex: Send + Sync {
@@ -61,7 +89,8 @@ pub trait ElementIndex: Send + Sync {
     ) -> Result<ElementStream, IndexError>;
     async fn clear(&self) -> Result<(), IndexError>;
 
-    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>);
+    /// Configure synthetic joins before evaluation; failures must stop construction.
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError>;
 }
 
 #[async_trait]

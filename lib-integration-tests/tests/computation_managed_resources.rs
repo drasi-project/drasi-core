@@ -134,7 +134,7 @@ fn event(sequence: u64) -> Result<ChangeEnvelope> {
 
 async fn open(directory: &std::path::Path) -> Result<(DrasiLib, Arc<Journals>)> {
     let resolver = Journals::new(directory);
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id("resource-handover")
         .with_configuration_store(Arc::new(RedbConfigurationStore::new(
             directory.join("config.redb"),
@@ -503,7 +503,7 @@ async fn open_listeners(
         },
         resources: resolver.clone(),
     }))?;
-    let mut builder = DrasiLib::builder()
+    let mut builder = lib_integration_tests::query_builder()
         .with_id("listener-handover")
         .with_management_resources(resolver.clone())
         .with_component_factories(factories);
@@ -1172,7 +1172,7 @@ async fn open_traffic(directory: &std::path::Path) -> Result<Traffic> {
         ComponentRole::Sink,
         probes.clone(),
     )?))?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id("active-handover")
         .with_configuration_store(Arc::new(RedbConfigurationStore::new(
             directory.join("config.redb"),

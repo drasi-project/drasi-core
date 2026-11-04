@@ -199,6 +199,18 @@ async fn damaged_configuration_records_fail_explicitly_without_releasing_other_i
             session.close().await?;
             if kind == "current" {
                 let result = drasi_lib::DrasiLib::builder()
+                    .with_query_factory(
+                        drasi_lib::computation::v1::FactoryRegistry::standard()
+                            .get(
+                                &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                    "drasi/continuous-query",
+                                    "1",
+                                )
+                                .expect("reference query identity"),
+                            )
+                            .expect("reference query factory")
+                            .clone(),
+                    )
                     .with_id("damaged")
                     .with_configuration_store(Arc::new(store.clone()))
                     .build()
@@ -237,6 +249,18 @@ async fn unsupported_persisted_configuration_version_rejects_restore_without_ove
     session.commit(0, "future-version", &future).await?;
     session.close().await?;
     assert!(drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1"
+                    )
+                    .expect("reference query identity")
+                )
+                .expect("reference query factory")
+                .clone()
+        )
         .with_id("instance")
         .with_configuration_store(store.clone())
         .build()

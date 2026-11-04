@@ -262,6 +262,18 @@ impl EventReader {
 async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
     const QUERY: &str = "scope.q";
     let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(format!("sse-host-{statically_linked}"))
         .build()
         .await?;
@@ -308,7 +320,7 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
         };
         let query_spec = ComponentSpecification {
             descriptor: query.descriptor(),
-            role: ComponentRole::Query,
+            role: ComponentRole::Transformer,
             completion: None,
             implementation: ImplementationIdentity::try_new("drasi/continuous-query", "1")?,
             configuration_version: 1,
@@ -579,6 +591,18 @@ async fn post_event(
 /// an untouched sink on the old producer keeps its instance.
 async fn declared_inputs_follow_a_live_rebind(statically_linked: bool) -> Result<()> {
     let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(format!("sse-rebind-{statically_linked}"))
         .build()
         .await?;

@@ -16,7 +16,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 ## Done means (the main CI gates)
 - `cargo fmt -- --check` passes
 - `make clippy` passes - do NOT use `cargo clippy --all-features` (the bundled-jq feature has a flaky source build); warnings are errors
-- `make check-native-dependencies` passes - independently built native plugins and their SDK must not pull in the query runtime/evaluator, query parsers or legacy SDK
+- `make check-native-dependencies` passes - only the query transformer may depend on the evaluator and query parsers; native plugins and their SDK must not pull in drasi-lib or the legacy SDK
 - Build the required shared libraries with `make build-native-network-plugins build-test-plugins`.
 - Run the remaining workspace tests with `cargo test --workspace --exclude drasi-host-sdk --exclude drasi-lib --exclude lib-integration-tests -- --test-threads=1`.
 - Run `bash lib/tests/run-runtime-parity.sh` for library, no-default, recovery/middleware, integration, Host SDK and selected backend profiles. CI runs both this command and the workspace command above.

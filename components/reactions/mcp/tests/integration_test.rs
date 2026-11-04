@@ -199,6 +199,18 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
     let port_handle = reaction.bound_port_handle();
 
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("test-core")
         .with_source(source)
         .with_query(query)

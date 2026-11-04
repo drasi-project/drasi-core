@@ -37,7 +37,7 @@ struct Prepared {
     origins: BTreeMap<StreamId, OutputEndpoint>,
 }
 
-pub(crate) struct OutputBootstrapProvider {
+pub struct OutputBootstrapProvider {
     catalogue: OutputCatalogue,
     outputs: Vec<OutputEndpoint>,
     progress: Arc<QuerySourceProgress>,
@@ -46,7 +46,7 @@ pub(crate) struct OutputBootstrapProvider {
 }
 
 impl OutputBootstrapProvider {
-    pub(crate) fn new(
+    pub fn new(
         catalogue: OutputCatalogue,
         outputs: Vec<OutputEndpoint>,
         progress: Arc<QuerySourceProgress>,
@@ -58,6 +58,16 @@ impl OutputBootstrapProvider {
         );
         let unique: BTreeSet<_> = outputs.iter().collect();
         anyhow::ensure!(unique.len() == outputs.len(), "duplicate bootstrap output");
+        anyhow::ensure!(
+            catalogue.graph_id().as_ref() == progress.graph_id(),
+            "output bootstrap catalogue belongs to a different graph"
+        );
+        anyhow::ensure!(
+            outputs
+                .iter()
+                .all(|output| &output.component != progress.component_id()),
+            "output bootstrap cannot depend on its own initialization"
+        );
         Ok(Arc::new(Self {
             catalogue,
             outputs,
@@ -114,7 +124,6 @@ impl OutputBootstrapProvider {
         let mut replay = Vec::new();
         let mut owners = Vec::new();
         for (index, output) in self.outputs.iter().enumerate() {
-            let handle = self.catalogue.resolve(output)?;
             if resuming {
                 let saved = &saved.as_ref().expect("resume handover validated").outputs[index];
                 saved.producer.validate()?;
@@ -125,7 +134,13 @@ impl OutputBootstrapProvider {
                     return Ok(BootstrapPreparation::ResetRequired);
                 };
                 let cursor = OutputCursor::try_new(saved.producer.clone(), checkpoint.sequence)?;
-                let suffix = handle.replay_after(&cursor).await?;
+                let suffix = self
+                    .catalogue
+                    .read_when_ready(output, |handle| {
+                        let cursor = cursor.clone();
+                        async move { handle.replay_after(&cursor).await }
+                    })
+                    .await?;
                 owners.push(OutputOwner {
                     component: output.component.clone(),
                     port: output.port.clone(),
@@ -133,7 +148,10 @@ impl OutputBootstrapProvider {
                 });
                 replay.extend(suffix.into_envelopes());
             } else {
-                let snapshot = handle.snapshot().await?;
+                let snapshot = self
+                    .catalogue
+                    .read_when_ready(output, |handle| async move { handle.snapshot().await })
+                    .await?;
                 anyhow::ensure!(
                     snapshot.schema() == GraphChangeCodec::schema().descriptor(),
                     "query bootstrap requires graph-change input"

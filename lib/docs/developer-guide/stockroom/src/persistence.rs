@@ -341,7 +341,7 @@ impl PersistentStockroom {
         let journal_id = ResourceId::try_new("output-journal")?;
         let batch = ComponentBatch::builder()
             .source(Box::new(source))
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(DurableAlerts {
                 descriptor: descriptor(
                     "alerts",

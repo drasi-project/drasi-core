@@ -53,6 +53,18 @@ mod tests {
 
     async fn instance() -> DrasiLib {
         DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_source(TestMockSource::with_auto_start("source-1".into(), false).unwrap())
             .build()
             .await

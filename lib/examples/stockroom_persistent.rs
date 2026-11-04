@@ -40,6 +40,9 @@ async fn stockroom(directory: &Path, write: bool) -> anyhow::Result<()> {
     let indexes = RocksDbIndexProvider::new(directory.join("indexes"), false, false)
         .with_memory_budget_bytes(128 << 20)?;
     let core = DrasiLib::builder()
+        .with_query_factory(Arc::new(
+            drasi_lib::computation::v1::ContinuousQueryFactory::default(),
+        ))
         .with_id("stockroom-persistent")
         .with_index_provider("local", Arc::new(indexes))
         .with_wal_provider(Arc::new(RedbWalProvider::new(directory.join("wal"))))

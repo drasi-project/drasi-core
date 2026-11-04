@@ -12,9 +12,9 @@
 
 use crate::*;
 
-pub const VERSION: u32 = 1;
-pub const SYMBOL: &[u8] = b"drasi_computation_plugin_output_follow_v1\0";
-pub type OutputFollowFn = unsafe extern "C" fn() -> *const PluginOutputFollowV1;
+pub const VERSION: u32 = 2;
+pub const SYMBOL: &[u8] = b"drasi_computation_plugin_output_follow_v2\0";
+pub type OutputFollowFn = unsafe extern "C" fn() -> *const PluginOutputFollowV2;
 
 /// Leases that may exist at once across one component's providers.
 pub const MAX_LEASES: usize = 16;
@@ -23,7 +23,7 @@ pub const MAX_REQUEST_BYTES: usize = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct PluginOutputFollowV1 {
+pub struct PluginOutputFollowV2 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
@@ -60,9 +60,10 @@ pub struct OutputFollowProviderVTable {
     pub release: Option<unsafe extern "C" fn(*mut c_void)>,
     /// Borrowed limits are copied before returning. On success both out values
     /// are written: a lease handle that exists immediately, and the operation
-    /// that opens it. The operation's reply is the encoded snapshot; until it
-    /// completes the lease serves no `next`. Releasing the lease cancels its
-    /// pending open. On failure neither is written.
+    /// that opens it. The reply is Snapshot WireReadMetadata; snapshot_page then
+    /// transfers that captured snapshot in bounded pages. The lease serves no
+    /// `next` until its snapshot is complete. Releasing the lease cancels its
+    /// pending open and pages. On failure neither out value is written.
     pub begin: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -101,6 +102,9 @@ pub struct OutputFollowLeaseVTable {
     /// A lease allows one active `next`; another reports BUSY.
     pub next:
         Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut OperationHandle) -> Status>,
+    /// The next WireReadPage of the initial snapshot. Pages are one-pass; a
+    /// holder abandoning initialization must release the lease, not skip pages.
+    pub snapshot_page: Option<unsafe extern "C" fn(*mut c_void, *mut OperationHandle) -> Status>,
 }
 
 #[cfg(test)]
@@ -110,13 +114,13 @@ mod tests {
     #[test]
     fn follow_extension_preserves_base_and_read_layouts() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginOutputFollowV1>(), 24 + pointer);
+        assert_eq!(size_of::<PluginOutputFollowV2>(), 24 + pointer);
         assert_eq!(size_of::<OutputFollowProviderHandle>(), 2 * pointer);
         assert_eq!(size_of::<OutputFollowProviderVTable>(), 16 + 2 * pointer);
         assert_eq!(size_of::<OutputFollowLeaseHandle>(), 2 * pointer);
-        assert_eq!(size_of::<OutputFollowLeaseVTable>(), 16 + 2 * pointer);
+        assert_eq!(size_of::<OutputFollowLeaseVTable>(), 16 + 3 * pointer);
         assert_eq!(
-            size_of::<crate::output_reads::PluginOutputReadsV1>(),
+            size_of::<crate::output_reads::PluginOutputReadsV2>(),
             24 + pointer
         );
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);

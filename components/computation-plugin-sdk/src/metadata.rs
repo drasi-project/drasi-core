@@ -10,8 +10,8 @@ use std::{
 
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ComponentRole, ComponentSemanticKind, ImplementationIdentity,
-    PluginIdentity, PortDescriptor, PortDirection, PortFormatAlternative, PortId, PortPrimaries,
-    SchemaDescriptor, SinkCompletion,
+    OutputProgress, PluginIdentity, PortDescriptor, PortDirection, PortFormatAlternative, PortId,
+    PortPrimaries, SchemaDescriptor, SinkCompletion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -108,8 +108,8 @@ impl ConfigSchema {
 }
 
 /// Only implemented capabilities have fields. Unknown fields are rejected, not
-/// ignored. Source recovery, reconfiguration and dynamic query snapshot/outbox
-/// interfaces are deliberately absent from ABI 1.0.
+/// ignored. Optional query read semantics use the output-read extension; they
+/// do not introduce a query execution role or expose host runtime objects.
 ///
 /// `snapshot_inputs` lists the sink input ports whose registered handler can
 /// replace consumer state from a snapshot. It must match the constructed sink's
@@ -132,7 +132,10 @@ impl ConfigSchema {
 /// component whose descriptor matches the selection
 /// (`FactoryMetadata::for_configuration`).
 ///
-/// `binds_inputs` is only valid for a sink or transformer, which have inputs.
+/// `binds_inputs` and `input_binding_updates` are only valid for a sink or
+/// transformer, which have inputs. The former supplies construction-time
+/// bindings and triggers reconstruction when they change; the latter delivers
+/// current bindings to the existing component at operation boundaries.
 ///
 /// `primary_ports` optionally designates one primary input and one primary
 /// output by port id, for shorthand endpoints that name a component without a
@@ -145,6 +148,10 @@ pub struct Capabilities {
     pub readiness: bool,
     pub transactional: bool,
     pub continuations: bool,
+    /// Poll the transformer's continuation once after successful startup,
+    /// before admitting input, so it can replay recovered output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub startup_continuation: bool,
     pub wakeups: bool,
     pub snapshot_inputs: Vec<PortId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -153,6 +160,15 @@ pub struct Capabilities {
     pub output_replays: Vec<PortId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_follows: Vec<PortId>,
+    /// Optional query read semantics over declared outputs, not an execution role.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_queries: Vec<PortId>,
+    /// Include canonical output-state observations in query transform replies.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub query_observations: bool,
+    /// Retained recovery reads after positively completed query cleanup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub query_recovery_views: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_formats: Vec<PortFormatAlternative>,
     #[serde(default, skip_serializing_if = "PortPrimaries::is_empty")]
@@ -162,11 +178,58 @@ pub struct Capabilities {
     /// reconstructs it when those bindings change.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub binds_inputs: bool,
+    /// The component receives the graph's current incoming bindings before
+    /// start and processing, without requiring construction-time bindings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_binding_updates: bool,
+    /// The transformer implements retryable, explicit deletion of its own
+    /// state after successful cleanup. Other roles cannot declare this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deprovision: bool,
+    /// The transformer requires the host-owned indexed processing service.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub indexed_processing: bool,
+    /// Also implements an explicitly volatile provider profile. The host must
+    /// not grant atomic output or durable bootstrap guarantees to that profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub volatile_processing: bool,
+    /// Also implements explicitly non-atomic persistent output publication.
+    /// This does not grant atomic state/output or shared-group guarantees.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub non_atomic_publication: bool,
+    /// Persistent delivery progress and actual Host-owned output destinations.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub durable_output: bool,
+    /// Committed progress published by the input's actual Host processing owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_input_progress: Option<PortId>,
+    /// Provider-driven initialization on this input before processing or reads.
+    /// Only quiescent, non-progress-bound providers are supported by this profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiescent_bootstrap: Option<PortId>,
+    /// The quiescent consumer reports whether its configuration requests a
+    /// provider; ordinary instances can start without allocating bootstrap state.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bootstrap_optional: bool,
+    /// Optional provider-driven initialization with atomic completion and the
+    /// actual processing owner's durable state/progress services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_bootstrap: Option<PortId>,
+    /// Optional semantic identity, independent of execution role. A
+    /// `Transformer` may declare `Query`; the annotation never selects a
+    /// different scheduler, storage path or evaluator owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_kind: Option<ComponentSemanticKind>,
+    /// Optional output progress behavior, independent of semantic identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_progress: Option<OutputProgress>,
 }
 
 impl Capabilities {
     pub fn declares_output_reads(&self) -> bool {
-        !self.output_snapshots.is_empty() || !self.output_replays.is_empty()
+        !self.output_snapshots.is_empty()
+            || !self.output_replays.is_empty()
+            || !self.output_queries.is_empty()
     }
 
     pub fn declares_output_follows(&self) -> bool {
@@ -188,11 +251,24 @@ pub struct FactoryMetadata {
 
 impl FactoryMetadata {
     pub fn descriptor(&self, id: ComponentId) -> anyhow::Result<ComponentDescriptor> {
-        let descriptor = ComponentDescriptor::try_new(id, self.ports.clone())?;
+        let mut descriptor = ComponentDescriptor::try_new(id, self.ports.clone())?;
+        if let Some(kind) = self.capabilities.semantic_kind {
+            descriptor = descriptor.with_semantic_kind(kind);
+        }
+        if let Some(progress) = self.capabilities.output_progress {
+            descriptor = descriptor.with_output_progress(progress);
+        }
         match &self.implementation.plugin {
             Some(plugin) => Ok(descriptor.with_plugin_identity(plugin.clone())?),
             None => Ok(descriptor),
         }
+    }
+
+    /// The semantic kind of this factory's instances.
+    pub fn semantic_kind(&self) -> ComponentSemanticKind {
+        self.capabilities
+            .semantic_kind
+            .unwrap_or_else(|| ComponentSemanticKind::from(self.role))
     }
 
     pub fn validate(
@@ -220,13 +296,32 @@ impl FactoryMetadata {
             .filter(|p| p.direction() == PortDirection::Input)
             .count();
         let outputs = self.ports.len() - inputs;
-        anyhow::ensure!(match self.role {
-            ComponentRole::Source => inputs == 0 && outputs > 0,
-            ComponentRole::Transformer => inputs > 0 && outputs > 0,
-            ComponentRole::Sink => inputs > 0 && outputs == 0,
-            ComponentRole::Service => inputs == 0 && outputs == 0,
-            ComponentRole::Query => false,
-        }, "unsupported native role or incompatible ports (dynamic query recovery is not implemented)");
+        anyhow::ensure!(
+            match self.role {
+                ComponentRole::Source => inputs == 0 && outputs > 0,
+                ComponentRole::Transformer => inputs > 0 && outputs > 0,
+                ComponentRole::Sink => inputs > 0 && outputs == 0,
+                ComponentRole::Service => inputs == 0 && outputs == 0,
+            },
+            "unsupported native role or incompatible ports"
+        );
+        if let Some(kind) = self.capabilities.semantic_kind {
+            anyhow::ensure!(
+                matches!(
+                    (self.role, kind),
+                    (ComponentRole::Transformer, ComponentSemanticKind::Query)
+                ) || kind == ComponentSemanticKind::from(self.role),
+                "native factory declares semantic kind {kind:?} that its {:?} role cannot carry",
+                self.role
+            );
+        }
+        if let Some(progress) = self.capabilities.output_progress {
+            anyhow::ensure!(
+                outputs > 0
+                    && (self.role != ComponentRole::Source || progress == OutputProgress::Origin),
+                "native factory declares invalid output progress for its role"
+            );
+        }
         anyhow::ensure!(
             (self.role == ComponentRole::Sink) == self.completion.is_some(),
             "only native sinks must declare a completion boundary"
@@ -256,6 +351,67 @@ impl FactoryMetadata {
             "binding inputs requires a native sink or transformer"
         );
         anyhow::ensure!(
+            !c.input_binding_updates
+                || matches!(self.role, ComponentRole::Sink | ComponentRole::Transformer),
+            "input-binding updates require a native sink or transformer"
+        );
+        anyhow::ensure!(
+            !c.deprovision || self.role == ComponentRole::Transformer,
+            "native deprovision currently requires a transformer"
+        );
+        anyhow::ensure!(
+            !c.indexed_processing || (self.role == ComponentRole::Transformer && !c.transactional),
+            "native indexed processing requires a non-participant transformer"
+        );
+        anyhow::ensure!(
+            !c.volatile_processing
+                || (c.indexed_processing && c.committed_input_progress.is_some()),
+            "volatile indexed processing requires its own input-progress publication"
+        );
+        if let Some(input) = &c.committed_input_progress {
+            anyhow::ensure!(
+                c.indexed_processing
+                    && self.ports.iter().any(|port| {
+                        port.direction() == PortDirection::Input && port.id() == input
+                    }),
+                "committed input progress requires a declared indexed input"
+            );
+        }
+        anyhow::ensure!(
+            !c.durable_output
+                || (c.indexed_processing
+                    && c.committed_input_progress.is_some()
+                    && c.startup_continuation),
+            "durable output requires indexed progress and startup replay"
+        );
+        anyhow::ensure!(
+            !c.non_atomic_publication || c.durable_output,
+            "non-atomic publication requires indexed progress and durable output"
+        );
+        if let Some(input) = &c.quiescent_bootstrap {
+            anyhow::ensure!(
+                self.role == ComponentRole::Transformer
+                    && !c.transactional
+                    && !c.indexed_processing
+                    && self.ports.iter().any(|port| {
+                        port.direction() == PortDirection::Input && port.id() == input
+                    }),
+                "quiescent bootstrap requires a non-indexed, non-participant transformer input"
+            );
+        }
+        if let Some(input) = &c.durable_bootstrap {
+            anyhow::ensure!(
+                c.quiescent_bootstrap.is_none()
+                    && c.indexed_processing
+                    && c.committed_input_progress.as_ref() == Some(input),
+                "durable bootstrap requires the indexed input's committed progress"
+            );
+        }
+        anyhow::ensure!(
+            !c.bootstrap_optional || c.quiescent_bootstrap.is_some(),
+            "optional bootstrap requires a quiescent bootstrap input"
+        );
+        anyhow::ensure!(
             c.snapshot_inputs.is_empty() || self.role == ComponentRole::Sink,
             "snapshot capability requires a native sink"
         );
@@ -276,6 +432,7 @@ impl FactoryMetadata {
             ("snapshot", &c.output_snapshots),
             ("replay", &c.output_replays),
             ("follow", &c.output_follows),
+            ("query", &c.output_queries),
         ] {
             let mut declared = BTreeSet::new();
             for port in ports {
@@ -292,9 +449,26 @@ impl FactoryMetadata {
             }
         }
         anyhow::ensure!(
+            c.output_queries.is_empty() || self.semantic_kind() == ComponentSemanticKind::Query,
+            "query read semantics require a declared query component"
+        );
+        anyhow::ensure!(
+            !c.query_observations
+                || (self.role == ComponentRole::Transformer && c.output_queries.len() == 1),
+            "query observations require one registered query output on a transformer"
+        );
+        anyhow::ensure!(
+            !c.query_recovery_views || c.query_observations,
+            "query recovery views require canonical query observations"
+        );
+        anyhow::ensure!(
             !(c.continuations || c.wakeups || c.transactional)
                 || self.role == ComponentRole::Transformer,
             "transformer capability on another role"
+        );
+        anyhow::ensure!(
+            !c.startup_continuation || c.continuations,
+            "startup continuation requires transformer continuations"
         );
         anyhow::ensure!(!c.transactional || (inputs == 1 && outputs == 1
             && !c.wakeups && !c.continuations && !c.control && !c.readiness),
@@ -318,8 +492,13 @@ impl FactoryMetadata {
         );
         anyhow::ensure!(
             descriptor.semantic_kind().is_none()
-                || descriptor.semantic_kind() == Some(ComponentSemanticKind::from(self.role)),
+                || descriptor.semantic_kind() == Some(self.semantic_kind()),
             "native component claims unsupported semantic role"
+        );
+        anyhow::ensure!(
+            descriptor.output_progress().is_none()
+                || descriptor.output_progress() == self.capabilities.output_progress,
+            "native component claims unsupported output progress"
         );
         Ok(())
     }
@@ -368,6 +547,66 @@ impl PluginMetadata {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn optional_processing_capabilities_require_matching_contracts() -> anyhow::Result<()> {
+        let schema = drasi_computation_contracts::GraphChangeCodec::schema();
+        let plugin = PluginIdentity {
+            id: "startup-continuation-test".into(),
+            version: "1".into(),
+        };
+        let mut metadata = FactoryMetadata {
+            implementation: ImplementationIdentity::try_new("test/recovered", "1")?,
+            role: ComponentRole::Transformer,
+            configuration_version: 1,
+            configuration: ConfigSchema::from_fields([]),
+            ports: vec![
+                PortDescriptor::new(
+                    PortId::try_new("in")?,
+                    PortDirection::Input,
+                    schema.descriptor().clone(),
+                    Default::default(),
+                ),
+                PortDescriptor::new(
+                    PortId::try_new("out")?,
+                    PortDirection::Output,
+                    schema.descriptor().clone(),
+                    Default::default(),
+                ),
+            ],
+            completion: None,
+            capabilities: Capabilities {
+                startup_continuation: true,
+                ..Default::default()
+            },
+        };
+        metadata.implementation.plugin = Some(plugin.clone());
+        let error = metadata
+            .validate(&plugin, &[schema.descriptor().clone()])
+            .expect_err("startup work requires declared continuation support");
+        assert!(
+            error.to_string().contains("startup continuation"),
+            "{error:#}"
+        );
+        metadata.capabilities.continuations = true;
+        metadata.validate(&plugin, &[schema.descriptor().clone()])?;
+        metadata.capabilities.transactional = true;
+        assert!(metadata
+            .validate(&plugin, &[schema.descriptor().clone()])
+            .is_err());
+        metadata.capabilities.transactional = false;
+        metadata.capabilities.committed_input_progress = Some(PortId::try_new("in")?);
+        assert!(metadata
+            .validate(&plugin, &[schema.descriptor().clone()])
+            .is_err());
+        metadata.capabilities.indexed_processing = true;
+        metadata.validate(&plugin, &[schema.descriptor().clone()])?;
+        metadata.capabilities.committed_input_progress = Some(PortId::try_new("missing")?);
+        assert!(metadata
+            .validate(&plugin, &[schema.descriptor().clone()])
+            .is_err());
+        Ok(())
+    }
 
     #[test]
     fn field_schema_preserves_types_requiredness_and_closed_input() -> anyhow::Result<()> {

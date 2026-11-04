@@ -513,7 +513,23 @@ mod tests {
 
     /// Helper: build a DrasiLib, start it, and return it.
     async fn build_and_start() -> DrasiLib {
-        let core = DrasiLib::builder().with_id("test").build().await.unwrap();
+        let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_id("test")
+            .build()
+            .await
+            .unwrap();
         core.start().await.unwrap();
         core
     }
@@ -757,6 +773,18 @@ mod tests {
     #[tokio::test]
     async fn get_graph_schema_merges_source_and_query_context_end_to_end() {
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("schema-e2e")
             .build()
             .await

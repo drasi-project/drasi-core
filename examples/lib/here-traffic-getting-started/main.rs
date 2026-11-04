@@ -122,7 +122,7 @@ impl App {
         self.last_update = Some(result.timestamp);
         for diff in &result.results {
             match diff {
-                ResultDiff::Add { data } => {
+                ResultDiff::Add { data, .. } => {
                     self.adds += 1;
                     if result.query_id == "traffic-segments" {
                         self.add_segment(data);
@@ -138,7 +138,7 @@ impl App {
                         self.update_incident(after);
                     }
                 }
-                ResultDiff::Delete { data } => {
+                ResultDiff::Delete { data, .. } => {
                     self.deletes += 1;
                     if result.query_id == "traffic-segments" {
                         self.delete_segment(data);
@@ -601,6 +601,12 @@ async fn main() -> Result<()> {
         .build();
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_host_sdk::computation::NativePlugin::from_definition(
+                drasi_computation_transformer_query::plugin()?,
+            )?
+            .query_factory()?,
+        )
         .with_id("here-traffic-dashboard")
         .with_source(source)
         .with_query(segments_query)

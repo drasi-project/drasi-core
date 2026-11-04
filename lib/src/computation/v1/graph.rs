@@ -55,9 +55,9 @@ use super::{
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentGeneration,
     ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender,
     EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy,
-    ObservedGraph, OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError,
-    PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy,
-    ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
+    ObservedGraph, OutputEnvelope, OutputProgress, PipeCapabilities, PipeCapability, PipeControl,
+    PipeError, PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    RelationshipPolicy, ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
 };
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
@@ -199,7 +199,7 @@ fn validate_role(
     let outputs = descriptor.ports().len() - inputs;
     let valid = match role {
         ComponentRole::Source => inputs == 0 && outputs > 0,
-        ComponentRole::Transformer | ComponentRole::Query => inputs > 0 && outputs > 0,
+        ComponentRole::Transformer => inputs > 0 && outputs > 0,
         ComponentRole::Sink => inputs > 0 && outputs == 0,
         ComponentRole::Service => inputs == 0 && outputs == 0,
     };
@@ -208,6 +208,14 @@ fn validate_role(
             "invalid role/ports/completion for {}",
             descriptor.id()
         )));
+    }
+    if let Some(progress) = descriptor.output_progress() {
+        if outputs == 0 || (role == ComponentRole::Source && progress == OutputProgress::Relay) {
+            return Err(topology(format!(
+                "invalid output progress for {}",
+                descriptor.id()
+            )));
+        }
     }
     Ok(())
 }
@@ -442,7 +450,6 @@ impl GraphSnapshot {
 enum Component {
     Source(Box<dyn EnvelopeSource>),
     Transformer(Box<dyn Transformer>),
-    Query(Box<dyn Transformer>),
     Sink(Box<dyn EnvelopeSink>),
     Service(Box<dyn super::ComputationService>),
     Deferred {
@@ -468,7 +475,7 @@ impl Component {
                 contract.replay_progress = component.recovery_progress();
                 contract
             }
-            Self::Transformer(component) | Self::Query(component) => {
+            Self::Transformer(component) => {
                 let mut contract = component.recovery_contract();
                 if matches!(
                     contract.processing,
@@ -488,7 +495,7 @@ impl Component {
     fn query_api(&self) -> Option<Arc<super::QueryApi>> {
         match self {
             Self::Source(component) => component.query_api(),
-            Self::Transformer(component) | Self::Query(component) => component.query_api(),
+            Self::Transformer(component) => component.query_api(),
             Self::Sink(component) => component.query_api(),
             Self::Service(component) => component.query_api(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
@@ -498,9 +505,7 @@ impl Component {
     fn source_schema_reader(&self) -> Option<Arc<dyn super::SourceSchemaReader>> {
         match self {
             Self::Source(component) => component.source_schema_reader(),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.source_schema_reader()
-            }
+            Self::Transformer(component) => component.source_schema_reader(),
             Self::Sink(component) => component.source_schema_reader(),
             Self::Service(component) => component.source_schema_reader(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
@@ -510,7 +515,7 @@ impl Component {
     fn output_readers(&self) -> super::OutputReaders {
         match self {
             Self::Source(component) => component.output_readers(),
-            Self::Transformer(component) | Self::Query(component) => component.output_readers(),
+            Self::Transformer(component) => component.output_readers(),
             Self::Sink(component) => component.output_readers(),
             Self::Service(component) => component.output_readers(),
             Self::Deferred { .. } | Self::Unresolved(_) => super::OutputReaders::default(),
@@ -521,7 +526,6 @@ impl Component {
         match self {
             Self::Source(component) => component.descriptor(),
             Self::Transformer(component) => component.descriptor(),
-            Self::Query(component) => component.descriptor(),
             Self::Sink(component) => component.descriptor(),
             Self::Service(component) => component.descriptor(),
             Self::Deferred { specification, .. } => &specification.descriptor,
@@ -533,7 +537,6 @@ impl Component {
         match self {
             Self::Source(_) => ComponentRole::Source,
             Self::Transformer(_) => ComponentRole::Transformer,
-            Self::Query(_) => ComponentRole::Query,
             Self::Sink(_) => ComponentRole::Sink,
             Self::Service(_) => ComponentRole::Service,
             Self::Deferred { specification, .. } => specification.role,
@@ -554,7 +557,6 @@ impl Component {
         match self {
             Self::Source(component) => component.start().await,
             Self::Transformer(component) => component.start().await,
-            Self::Query(component) => component.start().await,
             Self::Sink(component) => component.start().await,
             Self::Service(component) => component.start().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
@@ -566,7 +568,7 @@ impl Component {
     fn binds_inputs(&self) -> bool {
         match self {
             Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => false,
-            Self::Transformer(component) | Self::Query(component) => component.binds_inputs(),
+            Self::Transformer(component) => component.binds_inputs(),
             Self::Sink(component) => component.binds_inputs(),
             Self::Service(component) => component.binds_inputs(),
         }
@@ -575,9 +577,7 @@ impl Component {
     async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
         match self {
             Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => Ok(()),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.bind_inputs(bindings).await
-            }
+            Self::Transformer(component) => component.bind_inputs(bindings).await,
             Self::Sink(component) => component.bind_inputs(bindings).await,
             Self::Service(component) => component.bind_inputs(bindings).await,
         }
@@ -587,7 +587,6 @@ impl Component {
         match self {
             Self::Source(component) => component.stop().await,
             Self::Transformer(component) => component.stop().await,
-            Self::Query(component) => component.stop().await,
             Self::Sink(component) => component.stop().await,
             Self::Service(component) => component.stop().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
@@ -599,7 +598,7 @@ impl Component {
     async fn deprovision(&mut self) -> anyhow::Result<()> {
         match self {
             Self::Source(component) => component.deprovision().await,
-            Self::Transformer(component) | Self::Query(component) => component.deprovision().await,
+            Self::Transformer(component) => component.deprovision().await,
             Self::Sink(component) => component.deprovision().await,
             Self::Service(component) => component.deprovision().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
@@ -611,9 +610,7 @@ impl Component {
     async fn reconfigure(&mut self, context: ConstructionContext) -> anyhow::Result<()> {
         match self {
             Self::Source(component) => component.reconfigure(context).await,
-            Self::Transformer(component) | Self::Query(component) => {
-                component.reconfigure(context).await
-            }
+            Self::Transformer(component) => component.reconfigure(context).await,
             Self::Sink(component) => component.reconfigure(context).await,
             Self::Service(component) => component.reconfigure(context).await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
@@ -625,9 +622,7 @@ impl Component {
     fn bind_control(&mut self, control: super::ComponentControl) {
         match self {
             Self::Source(component) => component.bind_control(control),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.bind_control(control)
-            }
+            Self::Transformer(component) => component.bind_control(control),
             Self::Sink(component) => component.bind_control(control),
             Self::Service(component) => component.bind_control(control),
             Self::Deferred { .. } | Self::Unresolved(_) => {}
@@ -640,7 +635,7 @@ impl Component {
         inspector: &super::ComputationInspector,
         generation: super::ComponentGeneration,
     ) {
-        if let Self::Transformer(component) | Self::Query(component) = self {
+        if let Self::Transformer(component) = self {
             component.bind_query_test_support(inspector, generation);
         }
     }
@@ -648,7 +643,7 @@ impl Component {
     fn control_handler(&self) -> Option<Arc<dyn super::ControlHandler>> {
         match self {
             Self::Source(component) => component.control_handler(),
-            Self::Transformer(component) | Self::Query(component) => component.control_handler(),
+            Self::Transformer(component) => component.control_handler(),
             Self::Sink(component) => component.control_handler(),
             Self::Service(component) => component.control_handler(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
@@ -658,9 +653,7 @@ impl Component {
     fn requires_readiness_confirmation(&self) -> bool {
         match self {
             Self::Source(component) => component.requires_readiness_confirmation(),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.requires_readiness_confirmation()
-            }
+            Self::Transformer(component) => component.requires_readiness_confirmation(),
             Self::Sink(component) => component.requires_readiness_confirmation(),
             Self::Service(component) => component.requires_readiness_confirmation(),
             Self::Deferred { .. } | Self::Unresolved(_) => false,
@@ -814,11 +807,6 @@ impl ComputationGraphBuilder {
 
     pub fn transformer(mut self, transformer: Box<dyn Transformer>) -> Self {
         self.components.push(Component::Transformer(transformer));
-        self
-    }
-
-    pub fn query(mut self, query: Box<dyn Transformer>) -> Self {
-        self.components.push(Component::Query(query));
         self
     }
 
@@ -2319,7 +2307,7 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 
 struct Incoming {
     edge: usize,
-    producer_role: super::ComponentRole,
+    producer: super::ProducerBoundary,
     port: PortId,
     receiver: Box<dyn EnvelopeReceiver>,
     acknowledgement_required: bool,
@@ -2484,7 +2472,7 @@ async fn bind_output_destinations(
         ));
     }
     match component {
-        Component::Transformer(transformer) | Component::Query(transformer) => transformer
+        Component::Transformer(transformer) => transformer
             .bind_output_destinations(&bindings)
             .await
             .map_err(|error| component_error(node, "bind output destinations", error)),
@@ -2873,9 +2861,7 @@ async fn run_node(
             .map_err(|error| component_error(node, "quiesce service", error));
     }
     let wakeup = match &*component {
-        Component::Transformer(transformer) | Component::Query(transformer) => {
-            transformer.wakeup_source()
-        }
+        Component::Transformer(transformer) => transformer.wakeup_source(),
         _ => None,
     };
     if inputs.is_empty() && !matches!(component, Component::Source(_)) && wakeup.is_none() {
@@ -2922,9 +2908,7 @@ async fn run_node(
                 }
             }
             _ => 'input_work: {
-                if let Component::Transformer(transformer) | Component::Query(transformer) =
-                    component
-                {
+                if let Component::Transformer(transformer) = component {
                     if transformer.has_pending_emissions() {
                         break 'input_work transformer.continue_transform().await.map_err(
                             |source| component_error(node, "recovered processing", source),
@@ -2965,7 +2949,7 @@ async fn run_node(
                     };
                     if scheduled {
                         match component {
-                            Component::Transformer(transformer) | Component::Query(transformer) => {
+                            Component::Transformer(transformer) => {
                                 break 'input_work transformer.on_wakeup().await.map_err(
                                     |source| component_error(node, "scheduled processing", source),
                                 )?;
@@ -3037,13 +3021,13 @@ async fn run_node(
                     port: incoming.port.clone(),
                     envelope,
                 };
-                let producer_role = incoming.producer_role;
+                let producer = incoming.producer;
                 // At most one pending receive per edge, no forwarding tasks or hidden queues.
                 receivers.push(receive(incoming));
                 if let Some(progress) = input_progress {
                     let prepared =
                         progress
-                            .prepare(&input.envelope, producer_role)
+                            .prepare(&input.envelope, producer)
                             .map_err(|source| {
                                 component_error(node, "prepare input progress", source)
                             })?;
@@ -3054,12 +3038,10 @@ async fn run_node(
                     }
                 }
                 match component {
-                    Component::Transformer(transformer) | Component::Query(transformer) => {
-                        transformer
-                            .transform(input)
-                            .await
-                            .map_err(|source| component_error(node, "transform", source))?
-                    }
+                    Component::Transformer(transformer) => transformer
+                        .transform(input)
+                        .await
+                        .map_err(|source| component_error(node, "transform", source))?,
                     Component::Sink(sink) => {
                         sink.handle(input)
                             .await
@@ -3124,20 +3106,15 @@ async fn run_node(
                     };
                 }
             }
-            match component {
-                Component::Transformer(transformer) | Component::Query(transformer) => {
-                    transformer
-                        .delivery_completed(&emissions)
-                        .await
-                        .map_err(|source| component_error(node, "complete delivery", source))?;
-                }
-                _ => {}
+            if let Component::Transformer(transformer) = component {
+                transformer
+                    .delivery_completed(&emissions)
+                    .await
+                    .map_err(|source| component_error(node, "complete delivery", source))?;
             }
             let continuation =
                 match component {
-                    Component::Transformer(transformer) | Component::Query(transformer)
-                        if transformer.has_pending_emissions() =>
-                    {
+                    Component::Transformer(transformer) if transformer.has_pending_emissions() => {
                         if let Some(yield_node) = budget.checkpoint() {
                             yield_node.await;
                         }

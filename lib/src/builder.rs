@@ -133,6 +133,7 @@ pub struct DrasiLibBuilder {
     cleanup_timeout_secs: Option<u64>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
+    query_factory: Option<Arc<dyn crate::computation::v1::ComponentFactory>>,
     #[cfg(feature = "test-support")]
     query_test_controls: Vec<(String, crate::test_support::QueryTestControl)>,
     source_instances: Vec<(
@@ -167,6 +168,17 @@ impl Default for DrasiLibBuilder {
 }
 
 impl DrasiLibBuilder {
+    /// Select the implementation used by ordinary query creation and replacement.
+    /// The factory must support query authoring; execution failures never fall
+    /// back to another implementation.
+    pub fn with_query_factory(
+        mut self,
+        factory: Arc<dyn crate::computation::v1::ComponentFactory>,
+    ) -> Self {
+        self.query_factory = Some(factory);
+        self
+    }
+
     pub fn with_management(mut self, options: crate::management::ManagementOptions) -> Self {
         self.management = Some(options);
         self
@@ -221,6 +233,7 @@ impl DrasiLibBuilder {
             cleanup_timeout_secs: None,
             storage_backends: Vec::new(),
             query_configs: Vec::new(),
+            query_factory: None,
             #[cfg(feature = "test-support")]
             query_test_controls: Vec::new(),
             source_instances: Vec::new(),
@@ -682,6 +695,10 @@ impl DrasiLibBuilder {
     }
 
     async fn build_inner(self) -> Result<DrasiLib> {
+        if !self.query_configs.is_empty() && self.query_factory.is_none() {
+            let cause = crate::computation::v1::QueryFactoryNotRegistered;
+            return Err(DrasiError::invalid_config(cause.to_string()).with_cause(cause));
+        }
         #[cfg(feature = "test-support")]
         let test_controls = {
             let mut controls = std::collections::BTreeMap::new();
@@ -784,6 +801,7 @@ impl DrasiLibBuilder {
             self.reaction_instances,
             self.bootstrap_metadata,
             self.wal_provider,
+            self.query_factory,
             #[cfg(feature = "test-support")]
             test_controls,
         )
@@ -1076,7 +1094,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_drasi_lib_builder_empty() {
-        let core = DrasiLibBuilder::new().build().await.unwrap();
+        let core = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .build()
+            .await
+            .unwrap();
 
         assert!(!core.is_running().await);
     }
@@ -1084,6 +1117,18 @@ mod tests {
     #[tokio::test]
     async fn test_drasi_lib_builder_with_id() {
         let core = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-server")
             .build()
             .await
@@ -1097,6 +1142,18 @@ mod tests {
         // Test builder with query configuration that has no source subscriptions
         // In the instance-based approach, sources are added after build()
         let core = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-server")
             .with_query(
                 Query::cypher("query1")
@@ -1119,7 +1176,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_creates_initialized_server() {
-        let core = DrasiLib::builder().with_id("builder-test").build().await;
+        let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_id("builder-test")
+            .build()
+            .await;
 
         assert!(core.is_ok(), "Builder should create initialized server");
         let core = core.unwrap();
@@ -1136,6 +1208,18 @@ mod tests {
         // Source must be registered before a query can reference it
         let source = crate::sources::tests::TestMockSource::new("source1".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("complex-server")
             .with_source(source)
             .with_query(
@@ -1159,32 +1243,97 @@ mod tests {
 
     #[test]
     fn test_builder_with_id_sets_id() {
-        let builder = DrasiLibBuilder::new().with_id("my-server");
+        let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_id("my-server");
         assert_eq!(builder.server_id, Some("my-server".to_string()));
     }
 
     #[test]
     fn test_builder_with_id_accepts_string() {
-        let builder = DrasiLibBuilder::new().with_id(String::from("owned-id"));
+        let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_id(String::from("owned-id"));
         assert_eq!(builder.server_id, Some("owned-id".to_string()));
     }
 
     #[test]
     fn test_builder_with_priority_queue_capacity() {
-        let builder = DrasiLibBuilder::new().with_priority_queue_capacity(50000);
+        let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_priority_queue_capacity(50000);
         assert_eq!(builder.priority_queue_capacity, Some(50000));
     }
 
     #[test]
     fn test_builder_with_dispatch_buffer_capacity() {
-        let builder = DrasiLibBuilder::new().with_dispatch_buffer_capacity(2000);
+        let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_dispatch_buffer_capacity(2000);
         assert_eq!(builder.dispatch_buffer_capacity, Some(2000));
     }
 
     #[test]
     fn test_builder_with_query_adds_to_list() {
         let q = Query::cypher("q1").query("MATCH (n) RETURN n").build();
-        let builder = DrasiLibBuilder::new().with_query(q);
+        let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_query(q);
         assert_eq!(builder.query_configs.len(), 1);
         assert_eq!(builder.query_configs[0].id, "q1");
     }
@@ -1193,7 +1342,21 @@ mod tests {
     fn test_builder_with_multiple_queries() {
         let q1 = Query::cypher("q1").query("MATCH (a) RETURN a").build();
         let q2 = Query::gql("q2").query("MATCH (b) RETURN b").build();
-        let builder = DrasiLibBuilder::new().with_query(q1).with_query(q2);
+        let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_query(q1)
+            .with_query(q2);
         assert_eq!(builder.query_configs.len(), 2);
         assert_eq!(builder.query_configs[0].id, "q1");
         assert_eq!(builder.query_configs[1].id, "q2");
@@ -1209,7 +1372,20 @@ mod tests {
                 enable_archive: false,
             },
         };
-        let builder = DrasiLibBuilder::new().add_storage_backend(backend);
+        let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .add_storage_backend(backend);
         assert_eq!(builder.storage_backends.len(), 1);
         assert_eq!(builder.storage_backends[0].id, "mem1");
     }
@@ -1231,6 +1407,18 @@ mod tests {
             },
         };
         let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .add_storage_backend(b1)
             .add_storage_backend(b2);
         assert_eq!(builder.storage_backends.len(), 2);
@@ -1240,7 +1428,18 @@ mod tests {
 
     #[test]
     fn test_builder_default_values() {
-        let builder = DrasiLibBuilder::new();
+        let builder = DrasiLibBuilder::new().with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        );
         assert_eq!(builder.server_id, None);
         assert_eq!(builder.priority_queue_capacity, None);
         assert_eq!(builder.dispatch_buffer_capacity, None);
@@ -1265,6 +1464,18 @@ mod tests {
         let q = Query::cypher("q1").query("MATCH (n) RETURN n").build();
 
         let builder = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("chained")
             .with_priority_queue_capacity(20000)
             .with_dispatch_buffer_capacity(3000)
@@ -1280,7 +1491,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_default_id_when_none_set() {
-        let core = DrasiLibBuilder::new().build().await.unwrap();
+        let core = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .build()
+            .await
+            .unwrap();
         assert_eq!(core.get_config().id, "drasi-lib");
     }
 
@@ -1295,6 +1521,18 @@ mod tests {
             },
         };
         let core = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .add_storage_backend(backend)
             .build()
             .await;
@@ -1309,7 +1547,22 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .with_storage_backend(StorageBackendRef::Named("nope".to_string()))
             .build();
-        let result = DrasiLibBuilder::new().with_query(query).build().await;
+        let result = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_query(query)
+            .build()
+            .await;
         {
             use crate::computation::v1::{GraphError, RealizationState};
             use crate::indexes::IndexError;
@@ -1370,6 +1623,18 @@ mod tests {
             .with_storage_backend(StorageBackendRef::Named("mem".to_string()))
             .build();
         let core = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .add_storage_backend(backend)
             .with_query(query)
             .build()
@@ -1392,6 +1657,18 @@ mod tests {
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
             .build();
         let result = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .add_storage_backend(backend)
             .with_query(query)
             .build()
@@ -1451,7 +1728,22 @@ mod tests {
                 kind: "rocksdb".to_string(),
             }))
             .build();
-        let result = DrasiLibBuilder::new().with_query(query).build().await;
+        let result = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_query(query)
+            .build()
+            .await;
         {
             use crate::computation::v1::{GraphError, RealizationState};
             use crate::indexes::IndexError;
@@ -1547,6 +1839,18 @@ mod tests {
             },
         };
         let err = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .add_storage_backend(backend)
             .with_index_provider("mem", Arc::new(MockPersistentPlugin))
             .build()
@@ -1599,6 +1903,18 @@ mod tests {
         // A query with no explicit storage_backend should resolve to the default
         // provider injected via with_default_index_provider.
         let core = DrasiLibBuilder::new()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_default_index_provider("rocks", Arc::new(MockPersistentPlugin))
             .with_query(Query::cypher("q1").query("MATCH (n) RETURN n").build())
             .build()

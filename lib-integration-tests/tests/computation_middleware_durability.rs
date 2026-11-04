@@ -176,7 +176,7 @@ async fn deliver(
 #[tokio::test]
 async fn persistent_query_must_not_silently_accept_volatile_stateful_middleware() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let registry_owner = DrasiLib::builder().build().await?;
+    let registry_owner = lib_integration_tests::query_builder().build().await?;
     let mut middleware =
         MiddlewareTransformer::new(definition()?, registry_owner.middleware_registry())?;
     middleware.start().await?;
@@ -199,7 +199,7 @@ async fn persistent_query_must_not_silently_accept_volatile_stateful_middleware(
 
 #[tokio::test]
 async fn durable_unwind_reconstruction_recovers_state_and_unconfirmed_delivery() -> Result<()> {
-    let registry_owner = DrasiLib::builder().build().await?;
+    let registry_owner = lib_integration_tests::query_builder().build().await?;
     let registry = registry_owner.middleware_registry();
     for raw_metadata in [false, true] {
         for delivered_before_restart in [false, true] {
@@ -274,7 +274,7 @@ async fn durable_unwind_reconstruction_recovers_state_and_unconfirmed_delivery()
 async fn full_middleware_retention_preserves_input_for_retry_after_durable_confirmation(
 ) -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let registry_owner = DrasiLib::builder().build().await?;
+    let registry_owner = lib_integration_tests::query_builder().build().await?;
     let mut middleware = durable_middleware(
         &directory.path().join("middleware"),
         registry_owner.middleware_registry(),
@@ -313,7 +313,7 @@ async fn middleware_recovery_crash_worker() -> Result<()> {
     let phase = std::env::var("DRASI_MIDDLEWARE_CRASH_PHASE")?;
     let boundary = std::env::var("DRASI_MIDDLEWARE_CRASH_BOUNDARY")?;
     let raw_metadata = std::env::var("DRASI_MIDDLEWARE_CRASH_RAW")? == "true";
-    let registry_owner = DrasiLib::builder().build().await?;
+    let registry_owner = lib_integration_tests::query_builder().build().await?;
     let mut middleware = durable_middleware(
         &root.join("middleware"),
         registry_owner.middleware_registry(),

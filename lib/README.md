@@ -57,6 +57,18 @@ there is no compatibility module or second query executor. Snapshot/outbox
 response and stream types remain supported. Use the graph-owned construction,
 result and recovery APIs described below.
 
+**Ordinary queries require an explicitly registered query factory.** Supply it
+with `DrasiLibBuilder::with_query_factory`, or register it once on an existing
+instance with `DrasiLib::register_query_factory`. Empty/source-only instances do
+not need query support. An unregistered query fails clearly; the library does
+not silently choose a linked evaluator. The
+[native query plugin guide](../components/computation-plugins/transformers/query/README.md#registering-ordinary-queries)
+shows registration of the loaded or statically linked native plugin. It supports
+ordinary memory, persistent atomic and explicitly non-atomic providers and uses
+the existing Core evaluator. Non-atomic publication retains its existing weaker
+guarantees and recovery markers; it does not turn independent writers into an
+atomic transaction.
+
 `start()` reports requested component startup failures through a typed
 `PartialStartError` cause. Some independent components may already be running:
 inspect their status, then call `stop()` or `shutdown()` before retrying.
@@ -69,6 +81,7 @@ Start with the guide for your task:
 | [drasi-lib developer book](docs/developer-guide/README.md) | A linear path from a native application through queries, composition, recovery, deployment and operations |
 | [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
+| [Query transformer plugin design](docs/computation-graph-query-transformer-design.md) | Shared implementation, explicit native factory integration, remaining parity gaps and no-loss query/bootstrap/recovery gates |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |

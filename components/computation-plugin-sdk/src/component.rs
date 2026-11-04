@@ -6,9 +6,10 @@
 
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, ConsumerProgressView, InputEnvelope, InputPositionPolicy,
-    OutputEnvelope, OutputReaders, PortId, SinkBatching, SinkCompletion, SnapshotConsumer,
-    SourceProgressView, SourceSchemaReader, WakeupSource,
+    BootstrapCompletion, BootstrapStatus, ComponentDescriptor, ComponentId, ConsumerProgressView,
+    InputBinding, InputEnvelope, InputPositionPolicy, OutputEnvelope, OutputReaders, PortId,
+    SinkBatching, SinkCompletion, SnapshotConsumer, SourceProgressView, SourceSchemaReader,
+    WakeupSource,
 };
 use drasi_core_types::interface::StorageDurability;
 use std::sync::Arc;
@@ -24,6 +25,22 @@ pub trait NativeComponent: Send + Sync {
     }
     fn requires_readiness_confirmation(&self) -> bool {
         false
+    }
+    /// Whether this transformer implements explicit deletion of its owned state.
+    /// This must agree with the factory's `deprovision` capability.
+    fn supports_deprovision(&self) -> bool {
+        false
+    }
+    /// Whether this component consumes graph input-binding updates. This must
+    /// agree with the factory's `input_binding_updates` capability.
+    fn supports_input_binding_updates(&self) -> bool {
+        false
+    }
+    /// Called before start and before processing with the current declared
+    /// incoming edges. Calls are serialized with processing and may repeat the
+    /// same bindings; implementations must tolerate repetition and cancellation.
+    async fn bind_inputs(&mut self, _bindings: &[InputBinding]) -> anyhow::Result<()> {
+        anyhow::bail!("component does not support input-binding updates")
     }
     /// Snapshot and/or replay providers for this component's declared output
     /// ports. Obtaining them performs no I/O and does not take the component's
@@ -58,6 +75,13 @@ pub trait NativeComponent: Send + Sync {
         anyhow::bail!("component does not implement activation credentials")
     }
     async fn stop(&mut self) -> anyhow::Result<()>;
+    /// Permanently remove component-owned state after successful cleanup.
+    /// Ordinary stop and replacement must not invoke this operation. A failed
+    /// or cancelled deletion may have partially completed and must be safe to
+    /// retry; borrowed or shared host-owned resources are not owned state.
+    async fn deprovision(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("component does not support permanent state removal")
+    }
 }
 
 #[async_trait]
@@ -80,8 +104,34 @@ pub trait NativeSource: NativeComponent {
 
 #[async_trait]
 pub trait NativeTransformer: NativeComponent {
+    /// Optional provider-driven initialization before ordinary processing.
+    /// This first profile requires quiescent writers and has no durable handover.
+    fn quiescent_bootstrap_input(&self) -> Option<PortId> {
+        None
+    }
+    fn durable_bootstrap_input(&self) -> Option<PortId> {
+        None
+    }
+    fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus> {
+        anyhow::bail!("transformer does not support durable initialization")
+    }
+    async fn reset_bootstrap(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("transformer does not support bootstrap reset")
+    }
+    async fn bootstrap(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
+        anyhow::bail!("transformer does not support provider-driven bootstrap")
+    }
+    async fn bootstrap_completed(
+        &mut self,
+        _completion: BootstrapCompletion,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("transformer does not support provider-driven bootstrap")
+    }
     async fn delivery_completed(&mut self, _outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
         Ok(())
+    }
+    fn resume_delivery(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("transformer does not support durable output resumption")
     }
     fn has_pending_emissions(&self) -> bool {
         false

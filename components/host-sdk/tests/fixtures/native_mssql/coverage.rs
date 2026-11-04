@@ -135,7 +135,7 @@ impl Harness {
             results.push(query.results());
             let drain = format!("{name}-drain");
             builder = builder
-                .query(Box::new(query))
+                .transformer(Box::new(query))
                 .sink(Box::new(Drain {
                     descriptor: ComponentDescriptor::try_new(
                         id(&drain),
@@ -206,6 +206,18 @@ impl Harness {
                 .provide_resource(resource(name), handle)?;
         }
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-coverage")
             .with_components(
                 builder

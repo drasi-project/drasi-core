@@ -964,6 +964,18 @@ pub(crate) mod manager_tests {
             SnapshotTestReaction::new("snap-reaction", vec!["e2e-query".to_string()]);
 
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("e2e-bootstrap")
             .with_source(source)
             .with_query(

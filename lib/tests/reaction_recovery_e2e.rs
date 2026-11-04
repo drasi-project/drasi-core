@@ -1010,6 +1010,18 @@ async fn test_fresh_trigger_does_not_replay_retained_history() -> Result<()> {
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("fresh-trigger-test")
             .with_source(mock_source)
             .with_query(query)
@@ -1065,6 +1077,18 @@ async fn test_fresh_state_sync_bootstraps_snapshot_and_dedupes_live() -> Result<
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("fresh-state-sync-test")
             .with_source(mock_source)
             .with_query(query)
@@ -1133,6 +1157,18 @@ async fn test_trigger_autoreset_is_rejected() -> Result<()> {
         .build();
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("trigger-autoreset-invalid")
             .with_source(mock_source)
             .with_query(query)
@@ -1179,6 +1215,18 @@ async fn test_durable_reaction_rejects_volatile_query() -> Result<()> {
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-volatile-test")
             .with_source(mock_source)
             .with_query(query)
@@ -1271,6 +1319,18 @@ async fn test_durable_reaction_starts_with_persistent_query() -> Result<()> {
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-persistent-ok")
             .with_source(mock_source)
             .with_query(persistent_person_query("q1"))
@@ -1307,6 +1367,18 @@ async fn test_durable_reaction_rejects_volatile_store_with_persistent_query() ->
     let state_store = Arc::new(MemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-volatile-store")
             .with_source(mock_source)
             .with_query(persistent_person_query("q1"))
@@ -1357,6 +1429,18 @@ async fn test_volatile_reaction_allows_volatile_query() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("volatile-volatile-ok")
             .with_source(mock_source)
             .with_query(volatile_person_query("q1"))
@@ -1391,6 +1475,18 @@ async fn test_durable_reaction_rejects_if_any_subscribed_query_is_volatile() -> 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-mixed-queries")
             .with_source(mock_source)
             .with_query(persistent_person_query("q-persistent"))
@@ -1449,6 +1545,18 @@ async fn test_reaction_auto_start_reports_durable_on_volatile_query() -> Result<
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-volatile-autostart")
             .with_source(mock_source)
             .with_query(volatile_person_query("q1"))
@@ -1500,6 +1608,18 @@ async fn test_durable_reaction_rejects_after_query_backend_becomes_volatile() ->
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-backend-change")
             .with_source(mock_source)
             .with_query(persistent_person_query("q1"))
@@ -1559,6 +1679,18 @@ async fn test_durable_reaction_rejects_volatile_store_before_volatile_query() ->
     let state_store = Arc::new(MemoryStateStoreProvider::new());
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-both-volatile")
             .with_source(mock_source)
             .with_query(volatile_person_query("q1"))

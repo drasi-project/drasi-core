@@ -137,7 +137,7 @@ async fn open(root: &Path, host: &str, port: u16) -> Result<(DrasiLib, Arc<Obser
         .with_slot_name(SLOT)
         .with_publication_name("items_publication")
         .build()?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id("postgres-crash-recovery")
         .with_source(source)
         .with_query(

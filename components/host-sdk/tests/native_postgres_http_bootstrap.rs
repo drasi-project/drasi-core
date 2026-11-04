@@ -375,12 +375,12 @@ async fn exercise(dynamic: bool) -> Result<()> {
                 id:resource(name),role,ownership:ResourceOwnership::Borrowed,binding:name.into(),
             })?.provide_resource(resource(name),handle)?;
         }
-        let core = DrasiLib::builder().with_id(INSTANCE).with_components(builder
+        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).with_id(INSTANCE).with_components(builder
             .component(specification,pg_source)
             .component(price_factory.specification(id("price-feed"),json!({
                 "stream":stream("price-feed"),"sourceId":"price-feed","host":"127.0.0.1","port":price_port,
             }))?,price_factory)
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(Output { descriptor: ComponentDescriptor::try_new(id("output"), vec![
                 PortDescriptor::new(PortId::try_new("in")?, PortDirection::Input,
                     QueryChangeCodec::schema().descriptor().clone(), PipeRequirements::default()),

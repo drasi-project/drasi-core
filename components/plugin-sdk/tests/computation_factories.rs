@@ -23,6 +23,18 @@ use std::{sync::Arc, time::Duration};
 #[tokio::test]
 async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_change() {
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("sdk-computation")
         .build()
         .await
@@ -171,6 +183,18 @@ async fn concurrent_descriptor_creation_uses_instance_secrets_without_global_res
         serde_json::json!({"secret":{"kind":"Secret","name":"same-key"}}),
     );
     let one = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("first-instance")
         .with_secret_store_provider(Arc::new(
             drasi_lib::secret_store::MemorySecretStoreProvider::new()
@@ -180,6 +204,18 @@ async fn concurrent_descriptor_creation_uses_instance_secrets_without_global_res
         .await
         .expect("first instance");
     let two = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("second-instance")
         .with_secret_store_provider(Arc::new(
             drasi_lib::secret_store::MemorySecretStoreProvider::new()
@@ -264,6 +300,18 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         "test-user"
     );
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_identity_provider(identity)
         .with_secret_store_provider(secrets)
         .build()

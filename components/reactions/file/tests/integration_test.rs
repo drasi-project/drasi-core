@@ -107,6 +107,18 @@ async fn setup_drasi_for_mode(
         .build();
 
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("file-reaction-integration")
         .with_source(app_source)
         .with_query(query)
@@ -344,6 +356,18 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
         .build();
 
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("file-reaction-agg-test")
         .with_source(app_source)
         .with_query(query)

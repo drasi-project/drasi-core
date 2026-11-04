@@ -49,6 +49,27 @@ const CONFIG_HASH_KEY: &str = "config_hash";
 const RESULT_SEQUENCE_PREFIX: &str = "result_sequence:";
 const OUTPUT_GENERATION_PREFIX: &str = "output_generation:";
 
+pub(crate) fn stage_clear(db: &IndexDb, session: &RocksDbSessionState) -> Result<(), IndexError> {
+    let cf = db
+        .cf_handle(STREAM_STATE_CF)
+        .ok_or(IndexError::CorruptedData)?;
+    session.with_txn(|transaction| {
+        crate::session_state::delete_transaction_prefix(
+            transaction,
+            &cf,
+            SOURCE_SEQUENCE_PREFIX.as_bytes(),
+        )?;
+        crate::session_state::delete_transaction_prefix(
+            transaction,
+            &cf,
+            SOURCE_POSITION_PREFIX.as_bytes(),
+        )?;
+        transaction
+            .delete_cf(&cf, CONFIG_HASH_KEY)
+            .map_err(IndexError::other)
+    })
+}
+
 /// Returns the column family descriptor for the stream_state CF.
 pub(crate) fn stream_state_cf_descriptor(
     options: &crate::RocksIndexOptions,
@@ -144,6 +165,14 @@ fn read_all_checkpoints_impl(
 impl CheckpointStore for RocksDbCheckpointStore {
     fn is_persistent(&self) -> bool {
         true
+    }
+
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        let db = self.db.clone();
+        let session = self.session_state.clone();
+        task::spawn_blocking(move || stage_clear(&db, &session))
+            .await
+            .map_err(IndexError::other)?
     }
 
     async fn stage_checkpoint(

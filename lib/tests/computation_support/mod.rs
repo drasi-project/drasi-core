@@ -228,6 +228,11 @@ impl FiniteSource {
             outputs: outputs.into(),
         }
     }
+
+    pub fn with_output_progress(mut self, progress: OutputProgress) -> Self {
+        self.descriptor = self.descriptor.with_output_progress(progress);
+        self
+    }
 }
 
 type TransformFn =
@@ -250,6 +255,16 @@ impl NativeTransform {
             descriptor: descriptor(id, &["in"], &["out"]),
             transform: Box::new(transform),
         }
+    }
+
+    pub fn with_semantic_kind(mut self, kind: ComponentSemanticKind) -> Self {
+        self.descriptor = self.descriptor.with_semantic_kind(kind);
+        self
+    }
+
+    pub fn with_output_progress(mut self, progress: OutputProgress) -> Self {
+        self.descriptor = self.descriptor.with_output_progress(progress);
+        self
     }
 }
 

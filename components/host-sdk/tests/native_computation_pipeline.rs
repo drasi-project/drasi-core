@@ -12,12 +12,12 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::{
     computation::ComputationIndexProvider,
-    interface::{CreatedIndexes, ElementIndex, ElementStream, IndexBackendPlugin, IndexError},
-    models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, QueryJoin,
-        SourceChange,
+    interface::{
+        CreatedIndexes, ElementIndex, ElementStream, IndexBackendPlugin, IndexError, IndexJoin,
     },
-    path_solver::match_path::MatchPath,
+    models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    },
 };
 use drasi_host_sdk::computation::{self, NativeFactory, NativePlugin};
 use drasi_host_sdk::{
@@ -46,6 +46,8 @@ const CAPTURE: &str = "drasi.standard/capture";
 const ARITHMETIC: &str = "drasi.standard/arithmetic";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "native_computation_pipeline/input_bindings.rs"]
+mod input_bindings;
 #[path = "native_computation_pipeline/shared.rs"]
 mod shared;
 #[path = "native_computation_pipeline/sqlite_bootstrap.rs"]
@@ -223,6 +225,18 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         None,
     )?);
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("managed-host")
         .with_component_factories(plugins.computation_factory_registry()?)
         .with_configuration_store(store.clone())
@@ -259,6 +273,18 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         .await?;
     core.shutdown().await?;
     let restored = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("managed-host")
         .with_component_factories(plugins.computation_factory_registry()?)
         .with_configuration_store(store)
@@ -378,7 +404,7 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
     };
     let query_spec = ComponentSpecification {
         descriptor: query_definition.descriptor(),
-        role: ComponentRole::Query,
+        role: ComponentRole::Transformer,
         completion: None,
         implementation: query.descriptor().implementation.clone(),
         configuration_version: 1,
@@ -461,6 +487,18 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
         [17; 32],
     )?);
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_component_factories(factories)
         .with_management_resources(resources)
         .with_configuration_store(store)
@@ -1351,8 +1389,8 @@ impl ElementIndex for FaultElements {
     async fn clear(&self) -> std::result::Result<(), IndexError> {
         self.inner.clear().await
     }
-    async fn set_joins(&self, path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        self.inner.set_joins(path, joins).await;
+    async fn set_joins(&self, joins: &[IndexJoin]) -> std::result::Result<(), IndexError> {
+        self.inner.set_joins(joins).await
     }
 }
 async fn fault_transaction(

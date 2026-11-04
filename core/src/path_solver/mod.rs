@@ -18,12 +18,11 @@ pub mod match_path;
 pub mod solution;
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 
 use async_stream::stream;
-use drasi_query_ast::ast::{NodeMatch, RelationMatch};
 use futures::{stream::StreamExt, FutureExt, Stream};
 #[allow(unused_imports)]
 use tokio::{
@@ -499,82 +498,6 @@ async fn get_adjacent_elements(
                 )))),
                 None => Ok(Box::pin(tokio_stream::empty::<ElementResult>())),
             }
-        }
-    }
-}
-
-fn merge_node_match<'b>(
-    mtch: &NodeMatch,
-    slots: &'b mut Vec<match_path::MatchPathSlot>,
-    alias_map: &'b mut HashMap<Arc<str>, usize>,
-    path_index: usize,
-    optional: bool,
-) -> Result<usize, EvaluationError> {
-    match &mtch.annotation.name {
-        Some(alias) => {
-            if let Some(slot_num) = alias_map.get(alias) {
-                slots[*slot_num].optional = optional && slots[*slot_num].optional;
-                slots[*slot_num].paths.insert(path_index);
-                Ok(*slot_num)
-            } else {
-                slots.push(match_path::MatchPathSlot {
-                    spec: match_path::SlotElementSpec::from_node_match(mtch),
-                    in_slots: Vec::new(),
-                    out_slots: Vec::new(),
-                    optional,
-                    paths: HashSet::from([path_index]),
-                });
-                alias_map.insert(alias.clone(), slots.len() - 1);
-                Ok(slots.len() - 1)
-            }
-        }
-        None => {
-            slots.push(match_path::MatchPathSlot {
-                spec: match_path::SlotElementSpec::from_node_match(mtch),
-                in_slots: Vec::new(),
-                out_slots: Vec::new(),
-                optional,
-                paths: HashSet::from([path_index]),
-            });
-            Ok(slots.len() - 1)
-        }
-    }
-}
-
-fn merge_relation_match<'b>(
-    mtch: &RelationMatch,
-    slots: &'b mut Vec<match_path::MatchPathSlot>,
-    alias_map: &'b mut HashMap<Arc<str>, usize>,
-    path_index: usize,
-    optional: bool,
-) -> Result<usize, EvaluationError> {
-    match &mtch.annotation.name {
-        Some(alias) => {
-            if let Some(slot_num) = alias_map.get(alias) {
-                slots[*slot_num].optional = optional && slots[*slot_num].optional;
-                slots[*slot_num].paths.insert(path_index);
-                Ok(*slot_num)
-            } else {
-                slots.push(match_path::MatchPathSlot {
-                    spec: match_path::SlotElementSpec::from_relation_match(mtch),
-                    in_slots: Vec::new(),
-                    out_slots: Vec::new(),
-                    optional,
-                    paths: HashSet::from([path_index]),
-                });
-                alias_map.insert(alias.clone(), slots.len() - 1);
-                Ok(slots.len() - 1)
-            }
-        }
-        None => {
-            slots.push(match_path::MatchPathSlot {
-                spec: match_path::SlotElementSpec::from_relation_match(mtch),
-                in_slots: Vec::new(),
-                out_slots: Vec::new(),
-                optional,
-                paths: HashSet::from([path_index]),
-            });
-            Ok(slots.len() - 1)
         }
     }
 }

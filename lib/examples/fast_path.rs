@@ -117,6 +117,9 @@ async fn main() -> Result<()> {
     let (reaction, output) = ApplicationReaction::new("output", vec!["projection".into()]);
     let mut receiver = output.take_receiver().await.context("output receiver")?;
     let core = DrasiLib::builder()
+        .with_query_factory(std::sync::Arc::new(
+            drasi_lib::computation::v1::ContinuousQueryFactory::default(),
+        ))
         .with_id("fast-path")
         .with_source(source)
         .with_query(

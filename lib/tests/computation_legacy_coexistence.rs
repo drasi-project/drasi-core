@@ -340,6 +340,18 @@ async fn assert_coexistence(instance_id: &str) {
         loop_stops: legacy_loop_stops.clone(),
     };
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(instance_id)
         .with_source(source.clone())
         .with_query(
@@ -625,7 +637,7 @@ async fn assert_coexistence(instance_id: &str) {
         };
         let mut native = ComputationGraph::builder("native-query-graph")
             .source(Box::new(wrapped))
-            .query(Box::new(native_query))
+            .transformer(Box::new(native_query))
             .sink(Box::new(native_reaction))
             .bind_stream(
                 endpoint("native-source", "out"),
@@ -776,6 +788,18 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
                 vec![LEGACY_QUERY.into()],
             )));
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    drasi_lib::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id(format!("clean-pipeline-restart-{bootstrap}-{has_snapshot}"))
                 .with_source(InjectableSource {
                     base: injector.clone(),
@@ -946,7 +970,7 @@ async fn assert_shared_source_ingress_fence(
     let (received, mut failed_output) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("fenced-query")
         .source(Box::new(wrapped))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(NativeSink {
             descriptor: ComponentDescriptor::try_new(
                 ComponentId::try_new("sink").expect("id"),

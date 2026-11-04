@@ -42,7 +42,11 @@ mod producer_identity;
 mod progress;
 #[doc(hidden)]
 pub mod query_codec;
+mod query_configuration;
 mod query_identity;
+mod query_joins;
+mod query_read;
+mod query_recovery;
 mod snapshot;
 mod snapshot_consumer;
 mod source_schema;
@@ -84,7 +88,11 @@ pub const MAX_CONTROL_JSON_DEPTH: usize = 64;
 pub use producer_identity::{
     has_distinct_producer_lineage, GraphProducerIdentity, GraphProducerProgress,
 };
+pub use query_configuration::*;
 pub use query_identity::*;
+pub use query_joins::*;
+pub use query_read::*;
+pub use query_recovery::*;
 
 pub use bootstrap::*;
 pub use delivery::{

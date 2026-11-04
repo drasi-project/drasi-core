@@ -103,6 +103,12 @@ async fn main() -> Result<()> {
 
     // ── Drasi Core ──
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_host_sdk::computation::NativePlugin::from_definition(
+                drasi_computation_transformer_query::plugin()?,
+            )?
+            .query_factory()?,
+        )
         .with_id("sui-deepbook-orderbook")
         .with_source(source)
         .with_query(event_feed)

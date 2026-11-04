@@ -47,6 +47,143 @@ fn live_writer(db: Arc<drasi_index_rocksdb::IndexDb>) -> RocksDbLiveResultsWrite
     RocksDbLiveResultsWriter::new(db, session_state)
 }
 
+#[tokio::test]
+async fn scoped_checkpoint_clear_rolls_back_and_preserves_output_identity() {
+    let tmp = TempDir::new().unwrap();
+    let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
+    let indexes = provider
+        .create_scoped_indexes("storage", "query")
+        .await
+        .unwrap();
+    let store = indexes.checkpoint_store.as_ref().unwrap();
+    let control = &indexes.set.session_control;
+    store.write_config_hash(123).await.unwrap();
+    store.write_result_sequence("query", 7).await.unwrap();
+    store.write_output_generation("query", 2).await.unwrap();
+    control.begin().await.unwrap();
+    store
+        .stage_checkpoint("source", 5, Some(&bytes::Bytes::from_static(b"position")))
+        .await
+        .unwrap();
+    control.commit().await.unwrap();
+    control.begin().await.unwrap();
+    store.stage_clear_checkpoints().await.unwrap();
+    assert!(store.read_all_checkpoints().await.unwrap().is_empty());
+    control.rollback().unwrap();
+    assert_eq!(
+        store
+            .read_checkpoint("source")
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        5
+    );
+    assert_eq!(store.read_config_hash().await.unwrap(), Some(123));
+    control.begin().await.unwrap();
+    store.stage_clear_checkpoints().await.unwrap();
+    control.commit().await.unwrap();
+    assert!(store.read_all_checkpoints().await.unwrap().is_empty());
+    assert_eq!(store.read_config_hash().await.unwrap(), None);
+    assert_eq!(store.read_result_sequence("query").await.unwrap(), Some(7));
+    assert_eq!(
+        store.read_output_generation("query").await.unwrap(),
+        Some(2)
+    );
+}
+
+#[tokio::test]
+async fn live_row_pages_include_zero_and_bound_bytes_without_crossing_namespaces() {
+    let tmp = TempDir::new().unwrap();
+    let writer = live_writer(open_db(tmp.path().to_str().unwrap(), "q1"));
+    let limits = OutboxPageLimits {
+        max_records: std::num::NonZeroUsize::new(2).unwrap(),
+        max_bytes: std::num::NonZeroUsize::new(4).unwrap(),
+    };
+    let values = [
+        (0, &b"ab"[..]),
+        (1, b"cd"),
+        (2, b"oversized"),
+        (3, b""),
+        (u64::MAX, b"z"),
+    ];
+    let mutations: Vec<_> = values
+        .iter()
+        .map(|(signature, data)| RowMutation {
+            row_signature: *signature,
+            data: Some(*data),
+        })
+        .collect();
+    writer.apply_mutations("q1", &mutations).await.unwrap();
+    writer
+        .apply_mutations(
+            "q10",
+            &[RowMutation {
+                row_signature: 0,
+                data: Some(b"other query"),
+            }],
+        )
+        .await
+        .unwrap();
+    for (after, expected) in [
+        (None, vec![0, 1]),
+        (Some(1), vec![2]),
+        (Some(2), vec![3, u64::MAX]),
+        (Some(u64::MAX), vec![]),
+    ] {
+        let page = writer.read_page("q1", after, limits).await.unwrap();
+        limits.validate_page(&page).unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|(signature, _)| *signature)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_row_paging_rejects_malformed_keys_at_resume_boundaries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let writer = live_writer(db.clone());
+    writer
+        .apply_mutations(
+            "q1",
+            &[
+                RowMutation {
+                    row_signature: 0,
+                    data: Some(b"first"),
+                },
+                RowMutation {
+                    row_signature: 2,
+                    data: Some(b"next"),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let limits = OutboxPageLimits {
+        max_records: std::num::NonZeroUsize::new(1).unwrap(),
+        max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
+    };
+    let mut key = b"q1\0".to_vec();
+    key.extend_from_slice(&0u64.to_be_bytes());
+    key.push(0);
+    db.put_cf(&db.cf_handle("live_results").unwrap(), &key, b"corrupt")
+        .unwrap();
+    assert!(matches!(
+        writer.read_page("q1", Some(0), limits).await,
+        Err(IndexError::CorruptedData)
+    ));
+    db.delete_cf(&db.cf_handle("live_results").unwrap(), &key)
+        .unwrap();
+    assert_eq!(
+        writer.read_page("q1", Some(0), limits).await.unwrap(),
+        vec![(2, b"next".to_vec())]
+    );
+}
+
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]

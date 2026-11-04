@@ -485,3 +485,28 @@ model DeleteChange {
   /** Metadata of the element being deleted */
   metadata: ElementMetadata;
 }
+
+/**
+ * Synthetic relationship definition used when configuring an element index.
+ * The native indexed-state transport is not yet implemented.
+ *
+ * Based on: core-types/src/models/mod.rs
+ */
+@jsonSchema
+model QueryJoinKey {
+  label: string;
+  property: string;
+}
+
+@jsonSchema
+model QueryJoin {
+  id: string;
+  keys: QueryJoinKey[];
+}
+
+/** Match slot numbers are platform-sized unsigned integers. */
+@jsonSchema
+model IndexJoin {
+  join: QueryJoin;
+  slots: uint64[];
+}

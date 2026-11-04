@@ -159,7 +159,7 @@ impl ComponentRecovery {
         self.admission.zip(self.replay_until.as_ref())
     }
 
-    pub(crate) fn with_output_bindings(
+    pub fn with_output_bindings(
         mut self,
         bindings: Arc<super::output_bindings::OutputBindingState>,
     ) -> Self {

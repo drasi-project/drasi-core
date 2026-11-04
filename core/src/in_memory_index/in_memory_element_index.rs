@@ -26,12 +26,14 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::{
-    interface::{ElementArchiveIndex, ElementIndex, ElementResult, ElementStream, IndexError},
+    interface::{
+        index_joins_by_label, ElementArchiveIndex, ElementIndex, ElementResult, ElementStream,
+        IndexError, IndexJoin, IndexJoinsByLabel,
+    },
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementTimestamp,
         ElementValue, QueryJoin, QueryJoinKey, TimestampBound, TimestampRange,
     },
-    path_solver::match_path::MatchPath,
 };
 
 #[allow(clippy::type_complexity)]
@@ -47,7 +49,7 @@ pub struct InMemoryElementIndex {
     element_archive: Arc<RwLock<HashMap<ElementReference, ElementArchive>>>,
     archive_enabled: bool,
 
-    join_spec_by_label: Arc<RwLock<HashMap<Arc<str>, Vec<(Arc<QueryJoin>, Vec<usize>)>>>>,
+    join_spec_by_label: Arc<RwLock<IndexJoinsByLabel>>,
 
     // [(join_label, field_value)] => [QueryJoinKey] => ElementReference[]
     partial_joins:
@@ -194,13 +196,13 @@ impl InMemoryElementIndex {
             } => {
                 let join_spec_by_label = self.join_spec_by_label.read().await;
                 for (label, joins) in join_spec_by_label.iter() {
-                    if !metadata.labels.contains(label) {
+                    if !metadata.labels.iter().any(|value| value.as_ref() == label) {
                         continue;
                     }
 
                     for (qj, slots) in joins {
                         for qjk in &qj.keys {
-                            if qjk.label.as_str() != label.as_ref() {
+                            if qjk.label != *label {
                                 continue;
                             }
 
@@ -343,13 +345,13 @@ impl InMemoryElementIndex {
             } => {
                 let join_spec_by_label = self.join_spec_by_label.read().await;
                 for (label, joins) in join_spec_by_label.iter() {
-                    if !metadata.labels.contains(label) {
+                    if !metadata.labels.iter().any(|value| value.as_ref() == label) {
                         continue;
                     }
 
                     for (qj, _slots) in joins {
                         for qjk in &qj.keys {
-                            if qjk.label.as_str() != label.as_ref() {
+                            if qjk.label != *label {
                                 continue;
                             }
 
@@ -614,10 +616,11 @@ impl ElementIndex for InMemoryElementIndex {
         Ok(())
     }
 
-    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        let joins_by_label = extract_join_spec_by_label(match_path, joins);
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
+        let joins_by_label = index_joins_by_label(joins)?;
         let mut join_spec_by_label = self.join_spec_by_label.write().await;
         join_spec_by_label.clone_from(&joins_by_label);
+        Ok(())
     }
 }
 
@@ -727,34 +730,6 @@ impl ElementArchive {
     }
 }
 
-fn extract_join_spec_by_label(
-    match_path: &MatchPath,
-    joins: &Vec<Arc<QueryJoin>>,
-) -> HashMap<Arc<str>, Vec<(Arc<QueryJoin>, Vec<usize>)>> {
-    let mut result: HashMap<Arc<str>, Vec<(Arc<QueryJoin>, Vec<usize>)>> = HashMap::new();
-
-    for join in joins {
-        let mut slots = Vec::new();
-        for (slot_num, slot) in match_path.slots.iter().enumerate() {
-            if slot.spec.labels.contains(&join.id.as_str().into()) {
-                slots.push(slot_num);
-            }
-        }
-        if slots.is_empty() {
-            continue;
-        }
-
-        for jk in &join.keys {
-            result
-                .entry(Arc::from(jk.label.clone()))
-                .or_default()
-                .push((join.clone(), slots.clone()));
-        }
-    }
-
-    result
-}
-
 fn get_join_virtual_ref(
     join: &QueryJoin,
     ref1: &ElementReference,
@@ -787,25 +762,21 @@ fn get_value_hash(value: &ElementValue) -> u64 {
 mod tests {
     use super::*;
     use crate::interface::ElementIndex;
-    use crate::path_solver::match_path::{MatchPath, MatchPathSlot, SlotElementSpec};
+    use crate::path_solver::match_path::MatchPath;
+    use drasi_query_ast::ast::{Annotation, MatchClause, NodeMatch, QueryPart};
     use std::collections::HashSet;
 
     /// Helper function to create a simple MatchPath with one slot containing a label
     fn create_match_path_with_label(label: &str) -> MatchPath {
-        MatchPath {
-            slots: vec![MatchPathSlot {
-                spec: SlotElementSpec {
-                    annotation: None,
-                    labels: vec![Arc::from(label)],
-                    predicates: vec![],
-                },
-                in_slots: vec![],
-                out_slots: vec![],
-                paths: HashSet::from([0]),
+        MatchPath::from_query(&QueryPart {
+            match_clauses: vec![MatchClause {
+                start: NodeMatch::new(Annotation::empty(), vec![Arc::from(label)], vec![]),
+                path: vec![],
                 optional: false,
             }],
-            optional_paths: HashSet::new(),
-        }
+            ..QueryPart::default()
+        })
+        .unwrap()
     }
 
     /// Helper function to create a test node element
@@ -907,6 +878,35 @@ mod tests {
     /// partial_joins doesn't contain the expected join key.
     ///
     /// Scenario:
+    #[tokio::test]
+    async fn invalid_join_configuration_does_not_replace_existing_configuration() {
+        let index = InMemoryElementIndex::new();
+        let join = Arc::new(QueryJoin {
+            id: "company_join".into(),
+            keys: vec![QueryJoinKey {
+                label: "Person".into(),
+                property: "company_id".into(),
+            }],
+        });
+        index
+            .set_joins(&[IndexJoin {
+                join: join.clone(),
+                slots: vec![0],
+            }])
+            .await
+            .unwrap();
+        let previous = index.join_spec_by_label.read().await.clone();
+
+        assert!(index
+            .set_joins(&[IndexJoin {
+                join,
+                slots: Vec::new(),
+            }])
+            .await
+            .is_err());
+        assert_eq!(*index.join_spec_by_label.read().await, previous);
+    }
+
     /// 1. Insert element with join-related label and property
     /// 2. Configure joins AFTER the element exists (simulating hot config change)
     /// 3. Delete the element - this should NOT panic
@@ -932,10 +932,13 @@ mod tests {
         });
 
         // Create a MatchPath where the slot has the join ID as a label
-        // (This is how extract_join_spec_by_label determines which slots use a join)
+        // The query path determines which slots use a join.
         let match_path = create_match_path_with_label("company_join");
 
-        index.set_joins(&match_path, &vec![join]).await;
+        index
+            .set_joins(&match_path.index_joins(&[join]))
+            .await
+            .unwrap();
 
         // Step 3: Delete the element
         // BEFORE THE FIX: This would panic at line 374 with:
@@ -980,7 +983,10 @@ mod tests {
         });
 
         let match_path = create_match_path_with_label("company_join");
-        index.set_joins(&match_path, &vec![join]).await;
+        index
+            .set_joins(&match_path.index_joins(&[join]))
+            .await
+            .unwrap();
 
         // Insert a Person with company_id
         let person =
@@ -1017,7 +1023,10 @@ mod tests {
         });
 
         let match_path = create_match_path_with_label("company_join");
-        index.set_joins(&match_path, &vec![join]).await;
+        index
+            .set_joins(&match_path.index_joins(&[join]))
+            .await
+            .unwrap();
 
         // Insert element with initial property value
         let person1 =
@@ -1057,7 +1066,10 @@ mod tests {
         });
 
         let match_path = create_match_path_with_label("company_join");
-        index.set_joins(&match_path, &vec![join]).await;
+        index
+            .set_joins(&match_path.index_joins(&[join]))
+            .await
+            .unwrap();
 
         // Insert some elements
         let person =

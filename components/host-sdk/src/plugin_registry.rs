@@ -184,6 +184,18 @@ impl PluginRegistry {
         self.computation_plugins.values()
     }
 
+    /// Resolve an unambiguous loaded query plugin for explicit host registration.
+    /// This never substitutes the library's linked reference implementation.
+    pub fn query_factory(
+        &self,
+    ) -> anyhow::Result<Option<Arc<dyn drasi_lib::computation::v1::ComponentFactory>>> {
+        crate::computation::select_query_factory(
+            self.computation_plugins
+                .values()
+                .flat_map(|plugin| plugin.factories()),
+        )
+    }
+
     pub fn computation_factory_registry(
         &self,
     ) -> anyhow::Result<drasi_lib::computation::v1::FactoryRegistry> {

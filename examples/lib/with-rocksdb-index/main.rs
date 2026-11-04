@@ -146,6 +146,12 @@ async fn main() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_host_sdk::computation::NativePlugin::from_definition(
+                    drasi_computation_transformer_query::plugin()?,
+                )?
+                .query_factory()?,
+            )
             .with_id("rocksdb-example")
             // Inject the RocksDB index provider under the name "rocksdb"
             .with_index_provider("rocksdb", Arc::new(rocksdb_provider))

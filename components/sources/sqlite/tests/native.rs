@@ -551,7 +551,7 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
             Endpoint::new(id(component), PortId::try_new(port).expect("test port"))
         };
         let graph = ComputationGraph::builder("native-sqlite")
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(sink));
         let graph = if factory_created {
             let factory = Arc::new(SqliteSourceFactory::default());

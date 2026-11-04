@@ -239,32 +239,35 @@ impl DrasiLib {
     pub fn default_middleware_registry() -> Arc<MiddlewareTypeRegistry> {
         let mut middleware_registry = MiddlewareTypeRegistry::new();
 
-        #[cfg(feature = "middleware-jq")]
-        middleware_registry.register(Arc::new(drasi_middleware::jq::JQFactory::new()));
-
-        #[cfg(feature = "middleware-map")]
-        middleware_registry.register(Arc::new(drasi_middleware::map::MapFactory::new()));
-
-        #[cfg(feature = "middleware-unwind")]
-        middleware_registry.register(Arc::new(drasi_middleware::unwind::UnwindFactory::new()));
-
-        #[cfg(feature = "middleware-relabel")]
-        middleware_registry.register(Arc::new(
-            drasi_middleware::relabel::RelabelMiddlewareFactory::new(),
-        ));
-
-        #[cfg(feature = "middleware-decoder")]
-        middleware_registry.register(Arc::new(drasi_middleware::decoder::DecoderFactory::new()));
-
-        #[cfg(feature = "middleware-parse-json")]
-        middleware_registry.register(Arc::new(
-            drasi_middleware::parse_json::ParseJsonFactory::new(),
-        ));
-
-        #[cfg(feature = "middleware-promote")]
-        middleware_registry.register(Arc::new(
-            drasi_middleware::promote::PromoteMiddlewareFactory::new(),
-        ));
+        #[cfg(any(
+            feature = "middleware-all",
+            feature = "middleware-jq",
+            feature = "middleware-bundled-jq",
+            feature = "middleware-map",
+            feature = "middleware-unwind",
+            feature = "middleware-relabel",
+            feature = "middleware-decoder",
+            feature = "middleware-parse-json",
+            feature = "middleware-promote",
+        ))]
+        for factory in drasi_middleware::source_middleware_factories() {
+            let enabled = cfg!(feature = "middleware-all")
+                || match factory.name().as_str() {
+                    "jq" => {
+                        cfg!(feature = "middleware-jq") || cfg!(feature = "middleware-bundled-jq")
+                    }
+                    "map" => cfg!(feature = "middleware-map"),
+                    "unwind" => cfg!(feature = "middleware-unwind"),
+                    "relabel" => cfg!(feature = "middleware-relabel"),
+                    "decoder" => cfg!(feature = "middleware-decoder"),
+                    "parse_json" => cfg!(feature = "middleware-parse-json"),
+                    "promote" => cfg!(feature = "middleware-promote"),
+                    _ => false,
+                };
+            if enabled {
+                middleware_registry.register(factory);
+            }
+        }
 
         Arc::new(middleware_registry)
     }
@@ -1018,6 +1021,18 @@ mod tests {
 
     async fn create_test_server() -> DrasiLib {
         DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test-server")
             .build()
             .await
@@ -1065,6 +1080,18 @@ mod tests {
         assert!(
             registry.get("promote").is_some(),
             "Promote factory should be registered"
+        );
+        #[cfg(feature = "middleware-all")]
+        for kind in ["jq", "map", "unwind", "relabel", "decoder", "parse_json", "promote"] {
+            assert!(
+                registry.get(kind).is_some(),
+                "middleware-all omitted {kind}"
+            );
+        }
+        #[cfg(feature = "middleware-bundled-jq")]
+        assert!(
+            registry.get("jq").is_some(),
+            "bundled JQ factory should be registered"
         );
     }
 
@@ -1169,7 +1196,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_minimal_instance() {
-        let result = DrasiLib::builder().with_id("test").build().await;
+        let result = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_id("test")
+            .build()
+            .await;
         assert!(result.is_ok(), "Minimal DrasiLib build should succeed");
     }
 
@@ -1210,6 +1252,18 @@ mod tests {
     #[tokio::test]
     async fn test_get_config_returns_runtime_config() {
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("config-test")
             .build()
             .await
@@ -1222,6 +1276,18 @@ mod tests {
     #[tokio::test]
     async fn test_component_graph_returns_graph_backed_read_facade() {
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("graph-test")
             .build()
             .await
@@ -1252,7 +1318,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_returns_drasi_lib_builder() {
-        let builder = DrasiLib::builder();
+        let builder = DrasiLib::builder().with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        );
         let result = builder.with_id("builder-test").build().await;
         assert!(
             result.is_ok(),
@@ -1471,6 +1548,18 @@ mod tests {
         async fn build_core_with_components() -> DrasiLib {
             let source = PropertiedSource::new("pg-source");
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("snapshot-test")
                 .with_source(source)
                 .with_query(
@@ -1512,7 +1601,23 @@ mod tests {
             // StateGuard is marked initialized during build(), so we test
             // with a manually constructed guard to verify the check exists.
             // This validates the guard is wired up in the snapshot method.
-            let core = DrasiLib::builder().with_id("uninit").build().await.unwrap();
+            let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
+                .with_id("uninit")
+                .build()
+                .await
+                .unwrap();
 
             // After build(), snapshot should succeed (initialized at build time)
             let result = core.snapshot_configuration().await;
@@ -1694,6 +1799,18 @@ mod tests {
             let s2 = TestMockSource::with_auto_start("src-b".to_string(), false).unwrap();
 
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("multi-test")
                 .with_source(s1)
                 .with_source(s2)
@@ -1785,6 +1902,18 @@ mod tests {
         async fn snapshot_captures_bootstrap_provider_from_graph() {
             let source = PropertiedSource::new("bp-source");
             let builder = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("bootstrap-test")
                 .with_source(source)
                 .with_query(
@@ -1826,6 +1955,18 @@ mod tests {
         async fn snapshot_bootstrap_json_round_trip() {
             let source = PropertiedSource::new("rt-source");
             let builder = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("bp-roundtrip")
                 .with_source(source);
             let builder = builder.with_bootstrap_for_source(
@@ -2036,6 +2177,18 @@ mod tests {
 
             let source = RawConfigSource::new("pg-source", raw_config.clone());
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("raw-config-test")
                 .with_source(source)
                 .with_query(
@@ -2095,6 +2248,18 @@ mod tests {
                 RawConfigReaction::new("http-reaction", vec!["q1".to_string()], raw_config);
 
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("raw-config-reaction-test")
                 .with_source(source)
                 .with_query(
@@ -2154,6 +2319,18 @@ mod tests {
 
             let source = RawConfigSource::new("pg-source", raw_config);
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("camelcase-test")
                 .with_source(source)
                 .with_query(
@@ -2207,6 +2384,18 @@ mod tests {
 
             let source = RawConfigSource::new("pg-source", raw_config);
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("mixed-config-test")
                 .with_source(source)
                 .with_query(
@@ -2318,6 +2507,18 @@ mod tests {
             bootstrap_props.insert("timeoutSeconds".to_string(), serde_json::json!(60));
 
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("builder-bp-test")
                 .with_source(source)
                 .with_bootstrap_for_source("http-src", "http", bootstrap_props.clone())
@@ -2378,6 +2579,18 @@ mod tests {
             );
 
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    crate::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &crate::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("rt-bp-test")
                 .with_source(source)
                 .with_bootstrap_for_source("rt-src", "http", props.clone())

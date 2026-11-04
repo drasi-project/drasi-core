@@ -90,6 +90,18 @@ fn values(snapshot: &GraphConfigurationSnapshot, name: &str) -> serde_json::Valu
 #[tokio::test]
 async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing_work() {
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("configuration-owner")
         .with_query(
             Query::cypher("ordinary")
@@ -264,7 +276,22 @@ async fn factory_definition_survives_creation_failure_and_exports_without_an_ins
         .component(definition.clone(), factory)
         .build()
         .unwrap();
-    let core = DrasiLib::builder().build().await.unwrap();
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     let report = core.add_components(batch.auto_start(false)).await.unwrap();
     assert!(matches!(
         report.creation[&id("configured")],

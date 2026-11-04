@@ -50,11 +50,6 @@ impl ComponentBatchBuilder {
         self
     }
 
-    pub fn query(mut self, query: Box<dyn Transformer>) -> Self {
-        self.inner = self.inner.query(query);
-        self
-    }
-
     pub fn sink(mut self, sink: Box<dyn EnvelopeSink>) -> Self {
         self.inner = self.inner.sink(sink);
         self

@@ -1,43 +1,12 @@
 // Copyright 2026 The Drasi Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed under the Apache License, Version 2.0.
 
-use crate::config::{
-    QueryConfig, QueryInputConfig, QueryJoinConfig, QueryResultConfig, SourceSubscriptionSettings,
-};
-use drasi_core::{
-    middleware::MiddlewareTypeRegistry, models::SourceMiddlewareConfig, query::QueryBuilder,
-};
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
-/// Native query execution settings, independent of the legacy QueryManager.
-/// The existing DTOs describe inputs, result options, joins and middleware without
-/// owning runtime state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QueryExecutionSettings {
-    #[serde(default)]
-    pub joins: Vec<QueryJoinConfig>,
-    #[serde(default)]
-    pub middleware: Vec<SourceMiddlewareConfig>,
-    #[serde(default)]
-    pub inputs: Vec<QueryInputConfig>,
-    #[serde(default, skip_serializing_if = "QueryResultConfig::is_default")]
-    pub result: QueryResultConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_transactions: Option<super::SourceTransactionLimits>,
-}
+use crate::config::{QueryConfig, SourceSubscriptionSettings};
+use drasi_computation_contracts::QueryConfigurationSource;
+pub use drasi_computation_contracts::QueryExecutionSettings;
+use drasi_core::middleware::MiddlewareTypeRegistry;
 
 pub struct QueryMiddlewareResource(pub Arc<MiddlewareTypeRegistry>);
 
@@ -51,125 +20,82 @@ pub(crate) struct OrdinaryQueryDeclaration {
     pub(crate) sources: Vec<Arc<super::SourcePluginHost>>,
 }
 
-impl QueryExecutionSettings {
-    pub(super) fn fingerprint_settings(&self) -> Self {
-        let mut settings = self.clone();
-        for input in &mut settings.inputs {
-            input.nodes.sort();
-            input.nodes.dedup();
-            input.relations.sort();
-            input.relations.dedup();
-        }
-        settings.joins.sort_by(|left, right| left.id.cmp(&right.id));
-        for join in &mut settings.joins {
-            join.keys.sort_by(|left, right| {
-                (&left.label, &left.property).cmp(&(&right.label, &right.property))
-            });
-        }
-        settings
-    }
+impl QueryConfigurationSource for QueryConfig {
+    type Subscription = SourceSubscriptionSettings;
 
-    pub(crate) fn query_configuration(
-        &self,
-        definition: &super::ContinuousQueryDefinition,
-        bootstrap: bool,
-        recovery: super::QueryRecoveryPolicy,
-    ) -> QueryConfig {
-        let mut config = crate::Query::cypher(definition.id.as_str())
-            .query(definition.query.clone())
-            .enable_bootstrap(bootstrap)
-            .with_outbox_capacity(definition.outbox_capacity.get())
-            .build();
-        config.query_language = match definition.language {
-            super::ComputationQueryLanguage::Cypher => crate::config::QueryLanguage::Cypher,
-            super::ComputationQueryLanguage::Gql => crate::config::QueryLanguage::GQL,
-        };
-        config.inputs = self.inputs.clone();
-        config.result = self.result.clone();
-        config.middleware = self.middleware.clone();
-        config.joins = (!self.joins.is_empty()).then(|| self.joins.clone());
-        config.recovery_policy = Some(match recovery {
-            super::QueryRecoveryPolicy::Strict => crate::RecoveryPolicy::Strict,
-            super::QueryRecoveryPolicy::AutoReset => crate::RecoveryPolicy::AutoReset,
-        });
-        config
-    }
-
-    pub fn from_legacy_config(config: &QueryConfig) -> Self {
-        Self {
-            joins: config.joins.clone().unwrap_or_default(),
-            middleware: config.middleware.clone(),
-            inputs: config.inputs.clone(),
-            result: config.result.clone(),
+    fn execution_settings(&self) -> QueryExecutionSettings {
+        QueryExecutionSettings {
+            joins: self.joins.clone().unwrap_or_default(),
+            middleware: self.middleware.clone(),
+            inputs: self.inputs.clone(),
+            result: self.result.clone(),
             source_transactions: None,
         }
     }
 
-    /// Derive exactly the same source label interests as the legacy configuration
-    /// path. The compatibility source adapter supplies its own scoped subscriber ID.
-    pub fn legacy_subscriptions(
-        config: &QueryConfig,
-    ) -> anyhow::Result<Vec<SourceSubscriptionSettings>> {
+    fn subscription_settings(&self) -> anyhow::Result<Vec<SourceSubscriptionSettings>> {
         let labels =
-            crate::queries::LabelExtractor::extract_labels(&config.query, &config.query_language)?;
-        crate::queries::SubscriptionSettingsBuilder::build_subscription_settings(config, &labels)
+            crate::queries::LabelExtractor::extract_labels(&self.query, &self.query_language)?;
+        crate::queries::SubscriptionSettingsBuilder::build_subscription_settings(self, &labels)
     }
+}
 
-    pub(super) fn is_empty(&self) -> bool {
-        self.joins.is_empty()
-            && self.middleware.is_empty()
-            && self.inputs.is_empty()
-            && self.result.is_default()
-            && self.source_transactions.is_none()
-    }
+pub(crate) fn query_configuration(
+    execution: &QueryExecutionSettings,
+    definition: &super::ContinuousQueryDefinition,
+    bootstrap: bool,
+    recovery: super::QueryRecoveryPolicy,
+) -> QueryConfig {
+    let mut config = crate::Query::cypher(definition.id.as_str())
+        .query(definition.query.clone())
+        .enable_bootstrap(bootstrap)
+        .with_outbox_capacity(definition.outbox_capacity.get())
+        .build();
+    config.query_language = match definition.language {
+        super::ComputationQueryLanguage::Cypher => crate::config::QueryLanguage::Cypher,
+        super::ComputationQueryLanguage::Gql => crate::config::QueryLanguage::GQL,
+    };
+    config.inputs = execution.inputs.clone();
+    config.result = execution.result.clone();
+    config.middleware = execution.middleware.clone();
+    config.joins = (!execution.joins.is_empty()).then(|| execution.joins.clone());
+    config.recovery_policy = Some(match recovery {
+        super::QueryRecoveryPolicy::Strict => crate::RecoveryPolicy::Strict,
+        super::QueryRecoveryPolicy::AutoReset => crate::RecoveryPolicy::AutoReset,
+    });
+    config
+}
 
-    pub(super) fn validate(&self, registry: Option<&MiddlewareTypeRegistry>) -> anyhow::Result<()> {
-        let mut joins = BTreeSet::new();
-        for join in &self.joins {
-            super::data::validate_identifier("join", &join.id)?;
-            if !joins.insert(&join.id) || join.keys.len() < 2 {
-                anyhow::bail!("synthetic joins require unique IDs and at least two keys");
-            }
-            for key in &join.keys {
-                super::data::validate_identifier("join label", &key.label)?;
-                super::data::validate_identifier("join property", &key.property)?;
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_configuration_preserves_borrowed_and_shared_callers() -> anyhow::Result<()> {
+        let config = crate::Query::cypher("query")
+            .query("MATCH (n:Item) RETURN n.value AS value")
+            .from_input("source")
+            .build();
+        let expected = serde_json::to_value(QueryExecutionSettings::from_legacy_config(&config))?;
+        let subscriptions =
+            serde_json::to_value(QueryExecutionSettings::legacy_subscriptions(&config)?)?;
+        let borrowed = &config;
+        let shared = Arc::new(config.clone());
+        let boxed = Box::new(config.clone());
+        for settings in [
+            QueryExecutionSettings::from_legacy_config(&borrowed),
+            QueryExecutionSettings::from_legacy_config(&shared),
+            QueryExecutionSettings::from_legacy_config(&boxed),
+        ] {
+            assert_eq!(serde_json::to_value(settings)?, expected);
         }
-        let middleware =
-            super::middleware::validate_middleware_configs(&self.middleware, registry)?;
-        self.result.validate()?;
-        let mut inputs = BTreeSet::new();
-        for input in &self.inputs {
-            input.validate()?;
-            if !inputs.insert(&input.component) {
-                anyhow::bail!("duplicate query input '{}'", input.component);
-            }
-            for name in &input.pipeline {
-                if !middleware.contains(name.as_str()) {
-                    anyhow::bail!("input pipeline references undeclared middleware {name}");
-                }
-            }
+        for settings in [
+            QueryExecutionSettings::legacy_subscriptions(&borrowed)?,
+            QueryExecutionSettings::legacy_subscriptions(&shared)?,
+            QueryExecutionSettings::legacy_subscriptions(&boxed)?,
+        ] {
+            assert_eq!(serde_json::to_value(settings)?, subscriptions);
         }
         Ok(())
-    }
-
-    pub(super) fn configure(
-        &self,
-        mut builder: QueryBuilder,
-        registry: Option<Arc<MiddlewareTypeRegistry>>,
-    ) -> anyhow::Result<QueryBuilder> {
-        self.validate(registry.as_deref())?;
-        if !self.middleware.is_empty() {
-            builder = builder.with_middleware_registry(registry.ok_or_else(|| {
-                anyhow::anyhow!("query middleware requires a registered middleware resource")
-            })?);
-        }
-        for config in &self.middleware {
-            builder = builder.with_source_middleware(Arc::new(config.clone()));
-        }
-        for input in &self.inputs {
-            builder = builder.with_source_pipeline(&input.component, &input.pipeline);
-        }
-        Ok(builder.with_joins(self.joins.iter().cloned().map(Into::into).collect()))
     }
 }

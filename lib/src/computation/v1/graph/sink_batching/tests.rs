@@ -42,7 +42,7 @@ fn completed(fail: bool) -> (SinkBatchState, Arc<FlowProgress>, Arc<Probe>) {
     let mut state = SinkBatchState::default();
     state.inputs.push_back(RetainedInput {
         edge: 0,
-        producer_role: crate::computation::v1::ComponentRole::Source,
+        producer: crate::computation::v1::ProducerBoundary::Origin,
         input,
         acknowledgement: Some(Box::new(Ack {
             probe: probe.clone(),
@@ -108,7 +108,7 @@ fn incoming(edge: usize, seconds: Option<i64>) -> Incoming {
     .unwrap();
     Incoming {
         edge,
-        producer_role: crate::computation::v1::ComponentRole::Source,
+        producer: crate::computation::v1::ProducerBoundary::Origin,
         port: PortId::try_new("in").unwrap(),
         receiver: Box::new(ClosedReceiver),
         acknowledgement_required: false,

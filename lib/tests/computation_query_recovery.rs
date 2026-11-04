@@ -767,7 +767,7 @@ async fn bootstrapped_query_delivers_live_updates_to_second_batch_consumers() ->
 {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         for (start_before_binding, factory_query) in [(false, false), (true, false), (false, true), (true, true)] {
-            let core = drasi_lib::DrasiLib::builder().build().await?;
+            let core = drasi_lib::DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).build().await?;
             let query = query(
                 Arc::new(InMemoryComputationProvider),
                 "MATCH (n:Person) RETURN collect({name:n.name}) AS records",
@@ -793,13 +793,13 @@ async fn bootstrapped_query_delivers_live_updates_to_second_batch_consumers() ->
                 ])?, sender })
             };
             let first = ComponentBatch::builder().source(Box::new(source))
-                .query(Box::new(quiet)).sink(Box::new(sink("early", early_sender)?));
+                .transformer(Box::new(quiet)).sink(Box::new(sink("early", early_sender)?));
             let first = if factory_query {
                 let indexes = ResourceId::try_new("late-binding-indexes")?;
                 let bootstrap = ResourceId::try_new("late-binding-bootstrap")?;
                 let factory = Arc::new(ContinuousQueryFactory::default());
                 let specification = ComponentSpecification {
-                    descriptor: query.descriptor().clone(), role: ComponentRole::Query, completion: None,
+                    descriptor: query.descriptor().clone(), role: ComponentRole::Transformer, completion: None,
                     implementation: factory.descriptor().implementation.clone(), configuration_version: 1,
                     configuration: std::collections::BTreeMap::from([
                         (Arc::from("query"), ConfigurationValue::Literal("MATCH (n:Person) RETURN collect({name:n.name}) AS records".into())),
@@ -821,7 +821,7 @@ async fn bootstrapped_query_delivers_live_updates_to_second_batch_consumers() ->
                         Arc::new(QueryBootstrapResource(Arc::new(Bootstrap { calls: Arc::new(AtomicUsize::new(0)), fail: false })))))?
                     .component(specification, factory)
             } else {
-                first.query(Box::new(query))
+                first.transformer(Box::new(query))
             };
             let first = first
                 .bind_stream(endpoint("source", "out"), StreamId::try_new("source/out")?)
@@ -914,7 +914,7 @@ async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components()
     };
     let mut graph = ComputationGraph::builder("snapshot-handoff")
         .source(Box::new(source))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .transformer(Box::new(replay))
         .sink(Box::new(sink))
         .bind_stream(

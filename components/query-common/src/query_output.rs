@@ -18,34 +18,34 @@
 //! committed sequence); there is no second copy of the rows. Their epoch is the
 //! same one the query stamps on its published output.
 
-use super::*;
-use crate::computation::internal::query_state::QueryOutputState;
+use crate::{QueryHistoryError, QueryOutputState, QueryResults};
 use async_trait::async_trait;
+use drasi_computation_contracts::*;
 use std::sync::Arc;
 
 type ReadResult<T> = std::result::Result<T, OutputReadError>;
 
 /// The query's declared output port.
-pub(super) const QUERY_OUTPUT_PORT: &str = "out";
+pub const QUERY_OUTPUT_PORT: &str = "out";
 
-pub(super) struct QueryOutputProvider {
+pub struct QueryOutputProvider {
     results: QueryResults,
     stream: StreamId,
 }
 
 impl QueryOutputProvider {
-    pub(super) fn new(results: &QueryResults, stream: &StreamId) -> Arc<Self> {
+    pub fn new(results: &QueryResults, stream: &StreamId) -> Arc<Self> {
         Arc::new(Self {
             results: results.clone(),
             stream: stream.clone(),
         })
     }
 
-    pub(super) fn results(&self) -> QueryResults {
+    pub fn results(&self) -> QueryResults {
         self.results.clone()
     }
 
-    pub(super) fn readers(self: &Arc<Self>) -> OutputReaders {
+    pub fn readers(self: &Arc<Self>) -> OutputReaders {
         let port = PortId::try_new(QUERY_OUTPUT_PORT).expect("static query output port");
         OutputReaders::new()
             .with_snapshot(port.clone(), self.clone())
@@ -67,6 +67,13 @@ impl QueryOutputProvider {
                 "query output is not ready".into(),
             ));
         }
+        self.cursor(state)
+    }
+
+    fn cursor(&self, state: &QueryOutputState) -> ReadResult<OutputCursor> {
+        if let Some(producer) = &state.producer {
+            return OutputCursor::try_new(producer.clone(), state.sequence);
+        }
         let identity = state.identity.as_ref().ok_or_else(|| {
             OutputReadError::NotReady("query output has no producer identity yet".into())
         })?;
@@ -85,15 +92,86 @@ impl QueryOutputProvider {
         )
     }
 
+    pub fn query_head(&self) -> ReadResult<(OutputCursor, u64)> {
+        let state = self.state()?;
+        Ok((self.head(&state)?, state.generation))
+    }
+
+    pub fn query_observation(&self) -> ReadResult<QueryOutputObservation> {
+        let state = self.state()?;
+        self.observation(&state, self.head(&state)?)
+    }
+
+    pub fn query_recovery_observation(&self) -> ReadResult<QueryOutputObservation> {
+        let state = self.state()?;
+        state.recovery_head()?;
+        self.observation(&state, self.cursor(&state)?)
+    }
+
+    fn observation(
+        &self,
+        state: &QueryOutputState,
+        cursor: OutputCursor,
+    ) -> ReadResult<QueryOutputObservation> {
+        Ok(QueryOutputObservation {
+            cursor,
+            generation: state.generation,
+            config_hash: state
+                .identity
+                .as_ref()
+                .ok_or_else(|| OutputReadError::NotReady("query has no recovery identity".into()))?
+                .configuration_hash(),
+            live_results: state.rows.len(),
+            outbox_size: state.outbox.len(),
+            oldest_sequence: state
+                .outbox
+                .front()
+                .map(|output| output.system().sequence()),
+        })
+    }
+
+    pub fn query_snapshot(&self) -> ReadResult<(OutputSnapshot, u64)> {
+        let state = self.state()?;
+        Ok((self.snapshot_at(&state)?, state.generation))
+    }
+
+    pub fn query_replay(&self, after: &OutputCursor) -> ReadResult<(OutputReplay, u64)> {
+        let state = self.state()?;
+        let head = self.head(&state)?;
+        after.ensure_same_epoch(&head)?;
+        let envelopes = state
+            .replay_after(after.sequence())
+            .map_err(|error| match error {
+                QueryHistoryError::Unavailable {
+                    requested,
+                    oldest,
+                    latest,
+                } => OutputReadError::Gap {
+                    requested,
+                    oldest: Some(oldest),
+                    latest,
+                },
+                other => OutputReadError::Failed(other.into()),
+            })?;
+        Ok((
+            OutputReplay::try_new(after.clone(), head, envelopes)?,
+            state.generation,
+        ))
+    }
+
     /// Query-facing metadata is captured alongside the same canonical snapshot
     /// and history used by the generic providers, never from a shadow row store.
-    pub(super) fn query_view(&self) -> ReadResult<super::plugin_reaction::OutputView> {
+    pub fn query_view(&self) -> ReadResult<QueryOutputView> {
+        self.query_view_with_cursor().map(|(_, view)| view)
+    }
+
+    pub fn query_view_with_cursor(&self) -> ReadResult<(OutputCursor, QueryOutputView)> {
         let state = self.state()?;
         let snapshot = self.snapshot_at(&state)?;
         let identity = state.identity.as_ref().ok_or_else(|| {
             OutputReadError::NotReady("query output has no producer identity yet".into())
         })?;
-        Ok(super::plugin_reaction::OutputView {
+        let view = QueryOutputView {
             snapshot: QueryResultSnapshot {
                 projector: state.projector.clone(),
                 as_of_sequence: snapshot.cursor().sequence(),
@@ -103,9 +181,26 @@ impl QueryOutputProvider {
             retained: state.outbox.iter().cloned().collect(),
             config_hash: identity.configuration_hash(),
             incarnation: identity.incarnation(),
-        })
+        };
+        Ok((snapshot.cursor().clone(), view))
+    }
+
+    pub fn query_recovery_view(&self) -> ReadResult<(OutputCursor, QueryOutputView)> {
+        let state = self.state()?;
+        let view = state.recovery_view(Some(0))?;
+        Ok((
+            self.cursor(&state)?,
+            QueryOutputView {
+                snapshot: view.snapshot,
+                retained: view.retained.expect("requested retained history"),
+                config_hash: view.identity.configuration_hash(),
+                incarnation: view.identity.incarnation(),
+            },
+        ))
     }
 }
+
+pub use drasi_computation_contracts::QueryOutputView;
 
 #[async_trait]
 impl SnapshotProvider for QueryOutputProvider {
@@ -133,31 +228,10 @@ impl SnapshotFollowProvider for QueryOutputProvider {
 #[async_trait]
 impl ReplayProvider for QueryOutputProvider {
     async fn committed_head(&self) -> ReadResult<OutputCursor> {
-        let state = self.state()?;
-        self.head(&state)
+        self.query_head().map(|(head, _)| head)
     }
 
     async fn replay_after(&self, after: &OutputCursor) -> ReadResult<OutputReplay> {
-        let (head, envelopes) = {
-            let state = self.state()?;
-            let head = self.head(&state)?;
-            after.ensure_same_epoch(&head)?;
-            let envelopes = state
-                .replay_after(after.sequence())
-                .map_err(|error| match error {
-                    QueryHistoryError::Unavailable {
-                        requested,
-                        oldest,
-                        latest,
-                    } => OutputReadError::Gap {
-                        requested,
-                        oldest: Some(oldest),
-                        latest,
-                    },
-                    other => OutputReadError::Failed(other.into()),
-                })?;
-            (head, envelopes)
-        };
-        OutputReplay::try_new(after.clone(), head, envelopes)
+        self.query_replay(after).map(|(replay, _)| replay)
     }
 }

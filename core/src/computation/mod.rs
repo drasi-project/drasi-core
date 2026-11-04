@@ -29,7 +29,6 @@ mod indexes;
 mod io_scope;
 pub(crate) mod operation;
 mod query_adapter;
-mod query_results;
 mod scoped_index;
 pub use io_scope::{
     BlockingFailures as ComputationIoFailures, BlockingScope as ComputationIoScope,
@@ -42,12 +41,12 @@ mod transaction_group;
 pub use crate::interface::{
     DurabilityRequirementError, FailureMode, FailureSurvival, StorageDurability,
 };
+pub use crate::query::TransactionResultError;
 pub use indexes::{
     ComputationIndexProvider, ComputationIndexes, ComputationResource, ComputationResourceCleanup,
     InMemoryComputationProvider,
 };
 pub use query_adapter::{ComputationQuery, QueryInputBatch};
-pub use query_results::TransactionResultError;
 pub use transaction::{AtomicResultTransaction, TransactionDomain};
 pub use transaction_group::{
     ComputationTransactionGroup, TransactionGroupContext, TransactionGroupError,

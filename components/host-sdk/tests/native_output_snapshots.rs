@@ -414,7 +414,22 @@ struct World {
 }
 
 async fn world(name: &str) -> Result<World> {
-    let core = DrasiLib::builder().with_id(name).build().await?;
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .with_id(name)
+        .build()
+        .await?;
     core.start().await?;
     let main = Output::new("multi", "out", &[("a", 1), ("b", 2)]);
     let alt = Output::new("multi", "alt", &[("only", 9)]);

@@ -494,6 +494,18 @@ mod tests {
     async fn build_core_with_query() -> DrasiLib {
         let source = TestMockSource::new("test-source".to_string()).unwrap();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test")
             .with_source(source)
             .with_query(

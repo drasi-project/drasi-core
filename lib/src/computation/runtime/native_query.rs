@@ -157,12 +157,7 @@ async fn request_query_start(
         .desired
         .specifications
         .get(id)
-        .filter(|spec| {
-            spec.implementation
-                == ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation
-        })
+        .filter(|spec| publication.has_query_authoring(spec))
         .and_then(|spec| spec.dependencies.get("declaration"))
         .and_then(|resources| resources.first())
         .map(|resource| {
@@ -618,11 +613,11 @@ impl Runtime {
             .ok_or_else(|| {
                 anyhow::anyhow!("query '{id}' has no reconstructible factory configuration")
             })?;
+        let factory = publication
+            .factory(&original.implementation)
+            .ok_or_else(|| anyhow::anyhow!("query '{id}' factory is unavailable"))?;
         anyhow::ensure!(
-            original.implementation
-                == ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation,
+            factory.query_authoring().is_some(),
             "query '{id}' does not support QueryConfig replacement"
         );
         let original_config: QueryConfig = match original.configuration.get("query_config") {
@@ -646,6 +641,7 @@ impl Runtime {
             self.config.global_priority_queue_capacity.unwrap_or(10_000),
             self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
         )?
+        .query_factory(factory)
         .with_catalog(catalog.as_ref().clone())
         .with_output_catalogue(
             self.config.id.clone(),
@@ -1103,7 +1099,7 @@ impl NativeQuery {
             &self.config.id,
             &api,
         )?;
-        let (receiver, _) = catalog.subscribe_query_at_head(&self.config.id)?;
+        let (receiver, _) = catalog.subscribe_query_at_head(&self.config.id).await?;
         self.handle.observed()?;
         Ok(NativeReceiver {
             receiver,
@@ -1130,6 +1126,7 @@ impl NativeQuery {
             query: self.clone(),
             receiver,
             generation: head.generation,
+            head,
             sequence: snapshot.as_of_sequence,
             replay: Vec::new().into_iter(),
         };
@@ -1146,6 +1143,18 @@ impl NativeQuery {
         &self,
         operation: impl std::future::Future<Output = Result<T, FetchError>>,
     ) -> Result<T, FetchError> {
+        tokio::time::timeout(
+            Duration::from_secs(self.config.bootstrap_timeout_secs),
+            self.guard_read(operation),
+        )
+        .await
+        .map_err(|_| FetchError::TimedOut)?
+    }
+
+    async fn guard_read<T>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T, FetchError>>,
+    ) -> Result<T, FetchError> {
         let mut observed = self.control.subscribe_observed();
         tokio::pin!(operation);
         loop {
@@ -1157,6 +1166,21 @@ impl NativeQuery {
                     | ComponentStatus::Reconfiguring
             ) {
                 return Err(FetchError::NotRunning { status });
+            }
+            if status == ComponentStatus::Starting {
+                let api = self.access().map_err(|error| {
+                    log::warn!("Query result access failed during activation: {error:#}");
+                    FetchError::NotRunning { status }
+                })?;
+                if api.reads_require_activation() {
+                    observed
+                        .changed()
+                        .await
+                        .map_err(|_| FetchError::NotRunning {
+                            status: ComponentStatus::Stopped,
+                        })?;
+                    continue;
+                }
             }
             tokio::select! {
                 result = &mut operation => {
@@ -1202,28 +1226,62 @@ struct QueryResultReader {
     query: Arc<NativeQuery>,
     receiver: NativeReceiver,
     generation: u64,
+    head: QuerySubscriptionHead,
     sequence: u64,
     replay: std::vec::IntoIter<Arc<QueryResult>>,
 }
 
 impl QueryResultReader {
-    fn require_current(&self) -> anyhow::Result<()> {
-        self.receiver.require_current()?;
-        anyhow::ensure!(
-            self.query.access()?.generation()? == self.generation,
-            "query output generation changed; recreate the subscription"
-        );
-        Ok(())
+    async fn require_current(&self) -> anyhow::Result<()> {
+        let mut observed = self.query.control.subscribe_observed();
+        loop {
+            self.receiver.require_current()?;
+            if matches!(
+                self.query.status_now(),
+                ComponentStatus::Running | ComponentStatus::Reconfiguring
+            ) {
+                let api = self.query.access()?;
+                tokio::select! {
+                    result = api.validate_subscription(&self.head) => {
+                        self.receiver.require_current()?;
+                        if matches!(self.query.status_now(), ComponentStatus::Running | ComponentStatus::Reconfiguring) {
+                            return result;
+                        }
+                    }
+                    changed = observed.changed() => { changed?; }
+                }
+            } else {
+                match self.query.status_now() {
+                    ComponentStatus::Error => {
+                        if let Some(failure) = self.query.handle.observed()?.failure {
+                            return Err(GraphError::Reported {
+                                cause: failure.cause,
+                            }
+                            .into());
+                        }
+                        anyhow::bail!("query failed while its result subscription was active");
+                    }
+                    ComponentStatus::Removed => return Err(GraphError::StaleGeneration.into()),
+                    _ => {}
+                }
+                observed.changed().await?;
+            }
+        }
     }
 
     async fn recv(&mut self) -> anyhow::Result<Arc<QueryResult>> {
+        let mut observed = self.query.control.subscribe_observed();
         loop {
-            self.require_current()?;
+            self.require_current().await?;
             if let Some(result) = self.replay.next() {
                 self.sequence = result.sequence;
                 return Ok(result);
             }
-            let result = match self.receiver.recv().await {
+            let received = tokio::select! {
+                result = self.receiver.recv() => result,
+                changed = observed.changed() => { changed?; continue; }
+            };
+            let result = match received {
                 Ok(result) => Some(result),
                 Err(error)
                     if matches!(
@@ -1235,7 +1293,7 @@ impl QueryResultReader {
                 }
                 Err(error) => return Err(error),
             };
-            self.require_current()?;
+            self.require_current().await?;
             if let Some(result) = result {
                 if result.sequence <= self.sequence {
                     continue;
@@ -1246,7 +1304,7 @@ impl QueryResultReader {
                 }
             }
             let replay = self.query.fetch_outbox(self.sequence).await?;
-            self.require_current()?;
+            self.require_current().await?;
             anyhow::ensure!(
                 replay.output_generation == self.generation,
                 "query output generation changed during subscription recovery"
@@ -1421,7 +1479,11 @@ impl Query for NativeQuery {
         .await
     }
     async fn output_generation(&self) -> u64 {
-        match self.access().and_then(|api| api.generation()) {
+        let generation = match self.access() {
+            Ok(api) => api.generation().await,
+            Err(error) => Err(error),
+        };
+        match generation {
             Ok(generation) => generation,
             Err(error) => {
                 log::warn!("Query generation is unavailable: {error:#}");
@@ -1431,7 +1493,7 @@ impl Query for NativeQuery {
     }
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         match self.access() {
-            Ok(api) => Some(api.metrics.clone()),
+            Ok(api) => api.output_metrics(),
             Err(error) => {
                 log::warn!("Query metrics are unavailable: {error:#}");
                 None

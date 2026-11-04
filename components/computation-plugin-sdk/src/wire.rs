@@ -64,6 +64,8 @@ pub struct CreateRequest {
 pub struct InstanceMetadata {
     pub descriptor: ComponentDescriptor,
     pub capabilities: Capabilities,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub queries: std::collections::BTreeMap<PortId, drasi_computation_contracts::QueryDescription>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +108,8 @@ pub struct OutputBatch<'a> {
     #[serde(borrow)]
     pub outputs: Vec<Envelope<'a>>,
     pub pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_observation: Option<crate::output_reads::WireQueryObservation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,6 +232,7 @@ mod tests {
                 envelope: Cow::Borrowed(&bytes),
             }],
             pending: true,
+            query_observation: None,
         };
         let packet = encode(&batch).unwrap();
         let decoded: OutputBatch<'_> = decode(&packet).unwrap();

@@ -18,7 +18,7 @@ help:
 	@echo "  clippy                    - Run cargo clippy with same configuration as CI"
 	@echo "  build-test-plugins        - Build cdylib plugins needed for host-sdk integration tests"
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
-	@echo "  build-native-plugins      - Build all native plugin libraries (host-loaded, no query engine dependency)"
+	@echo "  build-native-plugins      - Build selected native plugin libraries"
 	@echo "  build-native-standard-plugins - Build native counter, middleware, capture and arithmetic libraries"
 	@echo "  build-native-network-plugins - Build native HTTP/gRPC/SSE and HTTP bootstrap libraries"
 	@echo "  build-native-mysql-plugins - Build native MySQL source, bootstrap and stored-procedure libraries"
@@ -27,7 +27,7 @@ help:
 	@echo "  test-native-network       - Build native network plugins and run wire/loopback tests"
 	@echo "  test-native-mysql         - Build native MySQL plugins and run isolated Podman consumer tests"
 	@echo "  test-native-sqlite        - Build native SQLite plugins and run Host component tests"
-	@echo "  check-native-dependencies - Reject runtime/query-engine dependencies in native plugin builds"
+	@echo "  check-native-dependencies - Check native plugin dependency isolation"
 	@echo "  build-plugins             - Build all dynamic plugins (debug)"
 	@echo "  build-plugins-release     - Build all dynamic plugins (release)"
 	@echo "  list-plugins              - List all discovered dynamic plugin crates"
@@ -90,7 +90,7 @@ build-test-plugins: build-native-plugins
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
 	cargo build -p drasi-host-sdk --example native_recovery --example native_consumer_progress_metadata \
 		--example native_bootstrap_coordination_metadata --example native_bootstrap_coordination_partial \
-		--example native_activation_credentials
+		--example native_activation_credentials --example native_custom_query
 	cargo build -p drasi-instance-host --example instance_host_fixture --features drasi-instance-host/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="

@@ -292,22 +292,95 @@ not reproduce.
 
 ## 8. Finish loadable query support and application definitions (CW-43)
 
-**Kind:** Optional capability. **Area:** Core, native SDK/Host, Server.
-**Priority:** High only when this packaging capability is selected. **Effort:** Large.
+**Kind:** Native ordinary-query integration implemented; remaining parity and qualification.
+**Area:** Core, native SDK/Host, Server.
+**Priority:** High for the selected standard-transformer migration. **Effort:** Large.
 **Origin:** CG-11.
 
-**Work:** Resolve the separate performance/design investigation, then make query
-processing an independently loadable component using the existing evaluator.
-Carry its real storage, initial loading, scheduled work and result-reading
-capabilities across that boundary. Built-in native queries and query chaining
-already work without a dynamically loaded query engine. Do not duplicate that
-implemented path. Remaining Server composition workflows belong to
+**Design:** [Continuous queries as standard plugin transformers](computation-graph-query-transformer-design.md)
+contains the shared implementation boundaries and preservation requirements.
+The [plugin guide](../../components/computation-plugins/transformers/query/README.md)
+describes current registration and supported profiles.
+
+**Work:** Make query processing an ordinary `Transformer` plugin using the
+existing evaluator, not a privileged dynamic `Query` role or a proxy back to the
+built-in engine. Preserve storage/transaction ownership, every supported bootstrap
+and recovery mode, scheduling, readers, subscriptions and existing query APIs.
+All query, bootstrap and recovery tests remain required; no new skips, weaker
+assertions or volatile fallbacks are allowed. Measure the real native service
+boundary rather than treating an earlier narrow performance proof as the current
+production baseline. Built-in native queries and query chaining already work;
+extract that implementation rather than duplicate it. Remaining Server
+composition workflows belong to
 [CW-45](#cw-45); general reconstructible definitions, including merger/provider
 recipes, are tracked in [CW-70](#cw-70).
 
-**Finish when:** Applications work with query support present or absent, missing
-support is reported clearly, and loaded queries preserve required results,
-transactions, restart and cleanup behavior.
+**Implemented:** Ordinary builders, runtime additions and computation pipelines
+require an explicitly registered query factory. The Host SDK supplies an
+ordinary-query adapter for the loaded indexed factory, using the actual selected
+storage, progress, bootstrap, catalogue and scheduling resources. Empty instances
+work without query support; unregistered query creation fails explicitly. There
+is no automatic linked fallback. Server resolves the unique eligible loaded
+factory before config/API query creation; programmatic hosts can register one.
+
+The plugin reuses Core evaluation and `drasi-query-common` configuration,
+builder setup, result ownership, recovery and delivery helpers. It supports
+Cypher/GQL, relationships and synthetic joins, aggregates, archives, input-local
+middleware, complete source transactions on atomic storage, Core future work and
+the existing deterministic test clocks. Plugin-owned middleware factories stay
+inside their library; host Rust registry entries are not transferred through FFI.
+
+Ordinary memory providers retain the actual evaluator and indexes across healthy
+stop/start, without an atomicity or process-restart claim. Persistent atomic
+providers retain indexes, committed input, canonical rows, output and delivery
+obligations. Actual SQLite file/coordinated bootstrap, composites, query chains,
+partial-bootstrap recovery, Strict/AutoReset, separate/shared journal fanout,
+replacement and deletion use the real owners. Pending output and provider
+retirement requirements cannot be bypassed to force reset.
+
+Explicit persistent non-atomic publication reuses the linked implementation's
+evaluating/prepared/completed markers and reset-generation rules. Input progress
+is not exposed between evaluation commit and completed output publication.
+Independent persistent writers, partial publication, Strict refusal, existing
+SQLite AutoReset, process exits during publication/reset, timers and ordinary
+APIs are covered. Shared transaction-group destinations remain atomic-only.
+RocksDB and Garnet expose actual staged checkpoint clearing.
+
+Ordinary snapshots, outbox, generation, channel/broadcast subscriptions and
+reactions read the plugin's canonical state through the existing catalogue and
+outlet. Native snapshot/history and snapshot/live attachment transfer one frozen
+observation in bounded pages, without whole-result row/envelope/byte caps or a
+host result mirror. Individual records/envelopes remain bounded. Input/output
+progress metrics use a coherent metadata-only observation, including no-op input.
+Canonical row/outbox gauges initialize from bootstrap/recovered state and travel
+with output replies. Replay does not increment logical result advances. Retained
+recovery readers wait for both native STOP and Host cleanup, keep ordinary stopped
+reads fenced, and reuse the existing consumer recovery policies and checkpointed
+sinks. Contiguous delivery reads only heads, not full snapshots.
+
+**Remaining:**
+
+- Complete final combined preservation/Server/performance qualification and the
+  broader non-query scheduling proof. Keep linked reference tests distinguished
+  from native execution, qualify individual oversized-item handling, and update
+  generated architecture artifacts.
+
+[`run-query-plugin.sh`](../tests/run-query-plugin.sh) selects focused gates.
+`smoke` rebuilds the actual native libraries and includes ordinary APIs, large
+reads and test clocks; `ordinary` isolates factory registration and ordinary
+native queries; `non-atomic` isolates the weaker publication/reset protocol and
+its real interruption boundaries; `retained-recovery` covers output observations,
+stopped recovery readers and consumer policy/cleanup fencing. All standalone ordinary-query examples
+explicitly register the native plugin. Other groups cover subscriptions, evaluator lifetime, scheduling,
+archives, middleware, joins, bootstrap, progress and recovery. The library's
+linked-reference gates remain preservation baselines, not native evidence.
+
+**Finish when:** The graph executes queries through the standard Transformer
+contract, applications work with query support present or absent, missing support
+is explicit, and static/loaded query implementations preserve every supported
+result, transaction, bootstrap, reading, restart and cleanup contract. The
+implemented profiles are not evidence that every final qualification gate has
+completed.
 
 <a id="cw-47"></a>
 

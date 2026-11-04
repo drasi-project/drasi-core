@@ -766,9 +766,39 @@ async fn instance_batches() {
             .build()
             .expect("batch");
         let (builder, later) = if initial {
-            (drasi_lib::DrasiLib::builder().with_components(batch), None)
+            (
+                drasi_lib::DrasiLib::builder()
+                    .with_query_factory(
+                        drasi_lib::computation::v1::FactoryRegistry::standard()
+                            .get(
+                                &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                    "drasi/continuous-query",
+                                    "1",
+                                )
+                                .expect("reference query identity"),
+                            )
+                            .expect("reference query factory")
+                            .clone(),
+                    )
+                    .with_components(batch),
+                None,
+            )
         } else {
-            (drasi_lib::DrasiLib::builder(), Some(batch))
+            (
+                drasi_lib::DrasiLib::builder().with_query_factory(
+                    drasi_lib::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                ),
+                Some(batch),
+            )
         };
         let drasi = builder.build().await.expect("instance");
         if let Some(batch) = later {

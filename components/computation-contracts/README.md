@@ -8,6 +8,9 @@ There is no graph executor, query evaluator, language parser or storage backend
 in this package. Sources, transformers and query outputs share the graph-change
 contract; query-specific metadata is optional for generic graph consumers.
 Shared graph values come from `drasi-core-types`.
+`QueryJoinConfig` and `QueryJoinKeyConfig`, their validation, and semantic-order
+normalization are shared by ordinary and native query factories. They convert to
+the existing Core join models; join matching and indexing do not live here.
 Owned-worker helpers use the caller's Tokio runtime and do not create an executor.
 `OperationFailures` preserves all typed operation/cleanup causes without requiring
 the runtime; `drasi_lib::error` re-exports that same type. `SourceProgressView`

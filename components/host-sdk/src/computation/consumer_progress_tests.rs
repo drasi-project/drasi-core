@@ -542,7 +542,7 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
             })?
             .provide_resource(resource, handle)?
             .component(specification, factory.clone())
-            .query(Box::new(query(owner).await?))
+            .transformer(Box::new(query(owner).await?))
             .sink(Box::new(Drain(ComponentDescriptor::try_new(
                 id("drain"),
                 vec![PortDescriptor::new(
@@ -1021,6 +1021,18 @@ mod graph_fanout {
         binding: BindingCase,
     ) -> anyhow::Result<()> {
         let core = drasi_lib::DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id(instance)
             .build()
             .await?;
@@ -1115,7 +1127,7 @@ mod graph_fanout {
                 .with_source_progress(owner.clone())?;
                 results.push((name.to_owned(), query.results()));
                 builder = builder
-                    .query(Box::new(query))
+                    .transformer(Box::new(query))
                     .bind_stream(
                         endpoint(name, "out"),
                         StreamId::try_new(format!("{name}/out"))?,

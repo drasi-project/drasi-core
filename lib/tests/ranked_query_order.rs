@@ -241,6 +241,18 @@ async fn scenario() {
     let earlier = OrderedSource::new("early");
     let quiet = OrderedSource::new("quiet");
     let mut builder = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(z.clone())
         .with_source(a.clone())
         .with_source(earlier.clone())
@@ -392,7 +404,7 @@ async fn query_specific_source_ranks_do_not_use_lexical_or_effective_time_orderi
 #[tokio::test]
 async fn scheduled_batches_keep_original_source_provenance() {
     let source = OrderedSource::new("source");
-    let core = DrasiLib::builder()
+    let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
             .with_source(source.clone())
             .with_query(drasi_lib::Query::cypher("timed")
                 .query("MATCH (n:Item) WHERE drasi.trueFor(n.ready, duration({seconds:5})) RETURN n.name AS name")

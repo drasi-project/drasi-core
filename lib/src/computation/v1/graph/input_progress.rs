@@ -125,7 +125,7 @@ impl InputProgress {
     fn prepare_with(
         &self,
         input: &ChangeEnvelope,
-        producer_role: ComponentRole,
+        producer: super::super::ProducerBoundary,
         snapshot: &SourceProgressSnapshot,
         owners: &BTreeMap<SourceProgressKey, InputOwner>,
     ) -> anyhow::Result<PreparedInput> {
@@ -133,11 +133,8 @@ impl InputProgress {
             self.claimed && snapshot.ready && snapshot.admitting && snapshot.failure.is_none(),
             "volatile input progress is not active"
         );
-        let (progress, query_owner) = GraphInputProgress::from_processing_input(
-            input,
-            Some(&self.progress),
-            Some(producer_role),
-        )?;
+        let (progress, query_owner) =
+            GraphInputProgress::from_processing_input(input, Some(&self.progress), Some(producer))?;
         let progress = progress
             .with_consumer_boundary(input, Some(&self.progress))?
             .with_transport(input);
@@ -217,26 +214,21 @@ impl InputProgress {
     pub(super) fn prepare(
         &self,
         input: &ChangeEnvelope,
-        producer_role: ComponentRole,
+        producer: super::super::ProducerBoundary,
     ) -> anyhow::Result<Box<PreparedInput>> {
-        self.prepare_with(
-            input,
-            producer_role,
-            &self.progress.snapshot(),
-            &self.owners,
-        )
-        .map(Box::new)
+        self.prepare_with(input, producer, &self.progress.snapshot(), &self.owners)
+            .map(Box::new)
     }
 
     pub(super) fn prepare_batch<'a>(
         &self,
-        inputs: impl Iterator<Item = (&'a ChangeEnvelope, ComponentRole)>,
+        inputs: impl Iterator<Item = (&'a ChangeEnvelope, super::super::ProducerBoundary)>,
     ) -> anyhow::Result<Vec<PreparedInput>> {
         let mut snapshot = self.progress.snapshot().as_ref().clone();
         let mut owners = self.owners.clone();
         inputs
-            .map(|(input, producer_role)| {
-                let prepared = self.prepare_with(input, producer_role, &snapshot, &owners)?;
+            .map(|(input, producer)| {
+                let prepared = self.prepare_with(input, producer, &snapshot, &owners)?;
                 Self::record(&prepared, &mut snapshot, &mut owners);
                 Ok(prepared)
             })
@@ -335,7 +327,10 @@ mod tests {
         first.start().expect("claim");
         first.ready();
         let prepared = first
-            .prepare(&input(1, None), ComponentRole::Source)
+            .prepare(
+                &input(1, None),
+                crate::computation::v1::ProducerBoundary::Origin,
+            )
             .expect("prepare");
         first.confirm([*prepared]);
         let generation = owner.snapshot().reset_generation;
@@ -356,7 +351,10 @@ mod tests {
         first.ready();
         assert!(
             first
-                .prepare(&input(1, None), ComponentRole::Source)
+                .prepare(
+                    &input(1, None),
+                    crate::computation::v1::ProducerBoundary::Origin
+                )
                 .expect("old input")
                 .duplicate
         );
@@ -393,7 +391,7 @@ mod tests {
         owner
             .bind_input_boundary(
                 &ComponentId::try_new("source").expect("source"),
-                ComponentRole::Source,
+                crate::computation::v1::ProducerBoundary::Origin,
                 Some(Arc::new(
                     InputPositionPolicy::new(
                         SourceProgressKey::Stream(stream.clone()),
@@ -409,7 +407,11 @@ mod tests {
         tracker.ready();
         let inputs = [input(1, Some(&[10])), input(2, Some(&[10])), input(3, Some(&[20]))];
         let batch = tracker
-            .prepare_batch(inputs.iter().map(|input| (input, ComponentRole::Source)))
+            .prepare_batch(
+                inputs
+                    .iter()
+                    .map(|input| (input, crate::computation::v1::ProducerBoundary::Origin)),
+            )
             .expect("batch");
         assert_eq!(
             batch
@@ -423,7 +425,10 @@ mod tests {
         let key = SourceProgressKey::Stream(stream.clone());
         let checkpoint = owner.snapshot().checkpoints[&key].clone();
         let old = tracker
-            .prepare(&input(4, Some(&[10])), ComponentRole::Source)
+            .prepare(
+                &input(4, Some(&[10])),
+                crate::computation::v1::ProducerBoundary::Origin,
+            )
             .expect("old physical position");
         assert!(old.duplicate);
         tracker.confirm([*old]);
@@ -431,15 +436,24 @@ mod tests {
         assert_eq!(owner.snapshot().transport_sequences[&stream], 4);
         assert!(
             tracker
-                .prepare(&input(2, Some(&[30])), ComponentRole::Source)
+                .prepare(
+                    &input(2, Some(&[30])),
+                    crate::computation::v1::ProducerBoundary::Origin
+                )
                 .is_err(),
             "new positions cannot regress counters"
         );
         assert!(tracker
-            .prepare(&input(5, None), ComponentRole::Source)
+            .prepare(
+                &input(5, None),
+                crate::computation::v1::ProducerBoundary::Origin
+            )
             .is_err());
         assert!(tracker
-            .prepare(&input(5, Some(&[1, 2])), ComponentRole::Source)
+            .prepare(
+                &input(5, Some(&[1, 2])),
+                crate::computation::v1::ProducerBoundary::Origin
+            )
             .is_err());
         assert_eq!(owner.snapshot().checkpoints[&key], checkpoint);
         tracker.stopped().expect("stop");

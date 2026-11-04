@@ -125,6 +125,12 @@ async fn main() -> Result<()> {
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_host_sdk::computation::NativePlugin::from_definition(
+                drasi_computation_transformer_query::plugin()?,
+            )?
+            .query_factory()?,
+        )
         .with_id("open511-example")
         .with_source(open511_source)
         .with_query(query)

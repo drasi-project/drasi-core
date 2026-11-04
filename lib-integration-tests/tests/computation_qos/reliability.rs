@@ -20,7 +20,7 @@ async fn crash_worker(name: &str, root: &Path, phase: usize) -> Result<std::proc
 #[tokio::test]
 #[ignore = "isolated log-capture worker invoked by the parent"]
 async fn skip_notification_worker() -> Result<()> {
-    let core = drasi_lib::DrasiLib::builder().build().await?;
+    let core = lib_integration_tests::query_builder().build().await?;
     let desired = definition(false, RetentionPolicy::PruneOldest, 1);
     let channel = QosChannel::volatile(desired.clone())?;
     let mut pipe = endpoint(&channel, &desired, "slow", true)?;

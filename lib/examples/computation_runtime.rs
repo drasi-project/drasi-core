@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         for addition in [
             ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
                 .bind_stream(PortId::try_new("out")?, source_stream),
-            ComponentAddition::new(ConstructedComponent::query(Box::new(query)))
+            ComponentAddition::new(ConstructedComponent::transformer(Box::new(query)))
                 .bind_stream(PortId::try_new("out")?, query_stream),
             ComponentAddition::new(ConstructedComponent::sink(Box::new(reaction))),
         ] {

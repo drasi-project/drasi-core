@@ -170,19 +170,13 @@ impl Runtime {
             .and_then(|spec| spec.configuration.get("query_config"))
         {
             serde_json::from_value(value.clone())?
-        } else if let Some(spec) =
-            publication
-                .desired
-                .specifications
-                .get(component)
-                .filter(|spec| {
-                    spec.implementation
-                        == ContinuousQueryFactory::default()
-                            .descriptor()
-                            .implementation
-                })
+        } else if let Some(config) = publication
+            .desired
+            .specifications
+            .get(component)
+            .and_then(|spec| publication.authored_query_configuration(spec))
         {
-            ContinuousQueryFactory::query_configuration(spec, &publication.desired.id)?
+            config?
         } else {
             anyhow::bail!("Query '{id}' exists but does not expose ordinary query configuration in its current construction state");
         };

@@ -14,8 +14,8 @@ workspace = true
 
 [features]
 default = ["engine-adapter"]
-# Existing query-engine middleware interfaces; native map/relabel do not need them.
-engine-adapter = ["dep:drasi-core"]
+# Shared middleware interface adapters; no query-evaluator dependency.
+engine-adapter = []
 
 # Individual middleware features
 jq = ["engine-adapter", "dep:jq-rs"]
@@ -36,7 +36,6 @@ features = ["bundled-jq", "decoder", "map", "parse_json", "promote", "relabel", 
 [dependencies]
 # Core dependencies (always needed)
 async-trait = "0.1.68"
-drasi-core = { workspace = true, optional = true }
 drasi-core-types = { workspace = true }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -53,4 +52,5 @@ urlencoding = "2.1.2"    # Used by decoder
 jq-rs = { version = "0.4.1", optional = true }
 
 [dev-dependencies]
+drasi-core.workspace = true
 ordered-float = "3.7.0"  # Used by parse_json tests

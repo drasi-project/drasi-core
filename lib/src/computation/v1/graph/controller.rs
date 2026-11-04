@@ -2207,7 +2207,9 @@ fn construct_pipe(
     let provider = graph.providers[&index].clone();
     let resources = graph.resource_handles.clone();
     let edge = edge.clone();
-    let producer_role = graph.nodes[graph.ids[&edge.definition.from.component]].role;
+    let producer = super::super::ProducerBoundary::of(
+        &graph.nodes[graph.ids[&edge.definition.from.component]],
+    );
     let identity = super::execution::GraphIdentity {
         graph: graph.snapshot.id.clone(),
         run_epoch: graph.observed().run_epoch,
@@ -2266,7 +2268,7 @@ fn construct_pipe(
                                     })?,
                                 };
                                 let incoming = Incoming {
-                    edge: index, producer_role, port: edge.definition.to.port.clone(), receiver,
+                    edge: index, producer, port: edge.definition.to.port.clone(), receiver,
                     acknowledgement_required: edge.capabilities.supported()
                         .contains(&crate::computation::v1::PipeCapability::ExplicitAcknowledgement),
                     pending: None, exhausted: false, progress,
@@ -6164,6 +6166,8 @@ fn handle_command<'a>(
                 Some(Command::MutateMembers { members, changes, bindings, deprovision, management_access, reply }) => {
                     let result = async {
                         configuration_access(graph, management_access)?;
+                        let affected = member_indices(graph, &members)?;
+                        reconcile::settle_propagated_stops(graph, operations, controls, cancel, commands, &affected).await?;
                         member_indices(graph, &members)?;
                         let mut preview = reconcile::preview(graph, changes)?;
                         if !management_access {

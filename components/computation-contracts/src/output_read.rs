@@ -339,6 +339,7 @@ pub struct OutputPortReaders {
     snapshot: Option<Arc<dyn SnapshotProvider>>,
     replay: Option<Arc<dyn ReplayProvider>>,
     snapshot_follow: Option<Arc<dyn SnapshotFollowProvider>>,
+    query: Option<Arc<dyn crate::QueryViewProvider>>,
 }
 
 impl OutputPortReaders {
@@ -350,6 +351,9 @@ impl OutputPortReaders {
     }
     pub fn snapshot_follow(&self) -> Option<&Arc<dyn SnapshotFollowProvider>> {
         self.snapshot_follow.as_ref()
+    }
+    pub fn query(&self) -> Option<&Arc<dyn crate::QueryViewProvider>> {
+        self.query.as_ref()
     }
 }
 
@@ -381,6 +385,11 @@ impl OutputReaders {
         provider: Arc<dyn SnapshotFollowProvider>,
     ) -> Self {
         self.ports.entry(port).or_default().snapshot_follow = Some(provider);
+        self
+    }
+
+    pub fn with_query(mut self, port: PortId, provider: Arc<dyn crate::QueryViewProvider>) -> Self {
+        self.ports.entry(port).or_default().query = Some(provider);
         self
     }
 
@@ -421,6 +430,7 @@ impl OutputReaders {
                             snapshot: readers.snapshot.as_ref().map(Arc::downgrade),
                             replay: readers.replay.as_ref().map(Arc::downgrade),
                             snapshot_follow: readers.snapshot_follow.as_ref().map(Arc::downgrade),
+                            query: readers.query.as_ref().map(Arc::downgrade),
                         },
                     )
                 })
@@ -434,9 +444,18 @@ pub struct WeakOutputPortReaders {
     snapshot: Option<std::sync::Weak<dyn SnapshotProvider>>,
     replay: Option<std::sync::Weak<dyn ReplayProvider>>,
     snapshot_follow: Option<std::sync::Weak<dyn SnapshotFollowProvider>>,
+    query: Option<std::sync::Weak<dyn crate::QueryViewProvider>>,
 }
 
 impl WeakOutputPortReaders {
+    pub fn upgrade_query(
+        &self,
+    ) -> Result<Option<Arc<dyn crate::QueryViewProvider>>, OutputReadError> {
+        self.query
+            .as_ref()
+            .map(|provider| provider.upgrade().ok_or(OutputReadError::Retired))
+            .transpose()
+    }
     pub fn snapshot_is_provided(&self) -> bool {
         self.snapshot.is_some()
     }
@@ -487,6 +506,7 @@ impl WeakOutputPortReaders {
         same(&self.snapshot, &other.snapshot)
             && same(&self.replay, &other.replay)
             && same(&self.snapshot_follow, &other.snapshot_follow)
+            && same(&self.query, &other.query)
     }
 }
 

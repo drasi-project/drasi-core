@@ -170,7 +170,7 @@ async fn row_graph(
             ),
         )?
         .component(specification, factory)
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(sink))
         .bind_stream(endpoint("source", "out"), StreamId::try_new("changes")?)
         .bind_stream(endpoint("query", "out"), StreamId::try_new("results")?)
@@ -184,6 +184,18 @@ async fn row_graph(
         )
         .build()?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(INSTANCE)
         .with_components(batch)
         .build()
@@ -640,7 +652,7 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
         )?;
         let batch = ComponentBatch::builder()
             .source(Box::new(ingress))
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(sink))
             .bind_stream(
                 endpoint("external", "out"),
@@ -657,6 +669,18 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
             )
             .build()?;
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id(INSTANCE)
             .with_components(batch)
             .build()

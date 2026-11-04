@@ -277,7 +277,7 @@ mod persistent_progress {
             owners.push(owner);
             let sink = format!("{name}-sink");
             builder = builder
-                .query(Box::new(query))
+                .transformer(Box::new(query))
                 .sink(Box::new(Sink {
                     descriptor: ComponentDescriptor::try_new(
                         ComponentId::try_new(sink.as_str())?,
@@ -620,7 +620,7 @@ mod persistent_progress {
         };
         let query = ComponentSpecification {
             descriptor: query_definition().descriptor(),
-            role: ComponentRole::Query,
+            role: ComponentRole::Transformer,
             completion: None,
             implementation: query_factory.descriptor().implementation.clone(),
             configuration_version: 1,

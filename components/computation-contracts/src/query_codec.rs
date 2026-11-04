@@ -27,6 +27,7 @@ use bincode::Options;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use drasi_core_types::evaluation::context::{QueryPartEvaluationContext, QueryVariables};
+use drasi_core_types::interface::{IndexError, RowMutation};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -196,6 +197,74 @@ impl QueryChangeCodec {
     /// Query output uses the ordinary graph-change schema.
     pub fn schema() -> Arc<Schema> {
         GraphChangeCodec::schema()
+    }
+
+    /// Apply full-image result operations produced by this codec or
+    /// `ResultNodeProjector` to the canonical current rows.
+    pub fn apply_result_operations(
+        rows: &mut im::HashMap<RecordId, Record>,
+        operations: &[ChangeOperation],
+    ) {
+        for operation in operations {
+            match operation {
+                ChangeOperation::Added { after, .. } | ChangeOperation::Updated { after, .. } => {
+                    rows.insert(after.identity().clone(), after.clone());
+                }
+                ChangeOperation::Deleted { identity, .. } => {
+                    rows.remove(identity.identity());
+                }
+            }
+        }
+    }
+
+    /// The canonical live-row storage mutations for this output's own scope.
+    pub fn live_row_mutations<'a>(
+        projector: &ResultNodeProjector,
+        output: &'a ChangeEnvelope,
+    ) -> Result<Vec<RowMutation<'a>>, IndexError> {
+        let projection = Self::projection(output).map_err(IndexError::other)?;
+        if projection.projector() != projector {
+            return Err(IndexError::CorruptedData);
+        }
+        output
+            .changes()
+            .operations()
+            .iter()
+            .zip(projection.operations())
+            .map(|(operation, metadata)| {
+                let row_signature =
+                    Self::row_signature(&metadata.row_identity).ok_or(IndexError::CorruptedData)?;
+                let data = match operation {
+                    ChangeOperation::Added { after, .. }
+                    | ChangeOperation::Updated { after, .. } => Some(after.payload().as_ref()),
+                    ChangeOperation::Deleted { .. } => None,
+                };
+                Ok(RowMutation {
+                    row_signature,
+                    data,
+                })
+            })
+            .collect()
+    }
+
+    /// Restore a stored payload and verify its signature, dataset and label.
+    pub fn restore_live_row(
+        projector: &ResultNodeProjector,
+        signature: u64,
+        payload: Bytes,
+    ) -> Result<Record, QueryCodecError> {
+        let reference =
+            GraphChangeCodec::element_reference(&projector.reference(&signature.to_be_bytes())?)?;
+        let row = Record::try_new(
+            &Self::schema(),
+            reference.identity().clone(),
+            crate::RecordImage::Full,
+            payload,
+        )?;
+        if Self::decode_row_in(projector, &row)?.signature != Some(signature) {
+            return Err(QueryCodecError::InvalidRow);
+        }
+        Ok(row)
     }
 
     /// Whether the newest projection annotation was written for this envelope's
@@ -980,6 +1049,76 @@ mod test_support {
         )
         .unwrap()
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod live_row_storage_tests {
+    use super::test_support::*;
+    use super::*;
+
+    #[test]
+    fn live_row_storage_uses_the_same_signatures_payloads_and_scope() {
+        let scope = projector("stored-query");
+        let output = encode(
+            None,
+            "query",
+            &scope,
+            &[adding("first", 0), adding("last", u64::MAX)],
+        );
+        let mutations = QueryChangeCodec::live_row_mutations(&scope, &output).unwrap();
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|mutation| mutation.row_signature)
+                .collect::<Vec<_>>(),
+            [0, u64::MAX]
+        );
+        for (mutation, operation) in mutations.iter().zip(output.changes().operations()) {
+            let restored = QueryChangeCodec::restore_live_row(
+                &scope,
+                mutation.row_signature,
+                Bytes::copy_from_slice(mutation.data.unwrap()),
+            )
+            .unwrap();
+            assert_eq!(restored.identity(), operation.identity());
+            assert_eq!(
+                QueryChangeCodec::decode_row(&restored).unwrap().signature,
+                Some(mutation.row_signature)
+            );
+        }
+        assert!(matches!(
+            QueryChangeCodec::live_row_mutations(&projector("other-query"), &output),
+            Err(IndexError::CorruptedData)
+        ));
+        assert!(QueryChangeCodec::restore_live_row(
+            &scope,
+            1,
+            Bytes::copy_from_slice(mutations[0].data.unwrap())
+        )
+        .is_err());
+        assert!(
+            QueryChangeCodec::restore_live_row(&scope, 0, Bytes::from_static(b"invalid row"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn live_row_storage_preserves_deletion_without_a_replacement_payload() {
+        let scope = projector("stored-query");
+        let output = encode(
+            None,
+            "query",
+            &scope,
+            &[QueryPartEvaluationContext::Removing {
+                before: vars("old"),
+                row_signature: 0,
+            }],
+        );
+        let mutations = QueryChangeCodec::live_row_mutations(&scope, &output).unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].row_signature, 0);
+        assert!(mutations[0].data.is_none());
     }
 }
 

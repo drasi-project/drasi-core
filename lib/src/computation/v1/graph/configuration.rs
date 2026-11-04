@@ -43,7 +43,7 @@ impl Component {
     pub(super) fn capture_configuration(&self) -> anyhow::Result<CapturedComponentConfiguration> {
         let result = match self {
             Self::Source(component) => component.configuration(),
-            Self::Transformer(component) | Self::Query(component) => component.configuration(),
+            Self::Transformer(component) => component.configuration(),
             Self::Sink(component) => component.configuration(),
             Self::Service(component) => component.configuration(),
             Self::Deferred { specification, .. } => {

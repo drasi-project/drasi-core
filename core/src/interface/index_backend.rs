@@ -30,41 +30,7 @@ use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
 
-use super::{
-    CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, LiveResultsWriter,
-    OutboxWriter, ResultIndex, SessionControl,
-};
-
-/// Set of indexes for a query.
-///
-/// Groups the index types and session control needed for query evaluation into
-/// a single unit.
-/// This enables backends to create all indexes from a shared underlying resource
-/// (e.g., a single RocksDB instance or Redis connection).
-pub struct IndexSet {
-    /// Element index for storing graph elements
-    pub element_index: Arc<dyn ElementIndex>,
-    /// Archive index for storing historical elements (for past() function)
-    pub archive_index: Arc<dyn ElementArchiveIndex>,
-    /// Result index for storing query results
-    pub result_index: Arc<dyn ResultIndex>,
-    /// Future queue for temporal queries
-    pub future_queue: Arc<dyn FutureQueue>,
-    /// Session control for atomic transaction lifecycle
-    pub session_control: Arc<dyn SessionControl>,
-}
-
-impl fmt::Debug for IndexSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndexSet")
-            .field("element_index", &"<trait object>")
-            .field("archive_index", &"<trait object>")
-            .field("result_index", &"<trait object>")
-            .field("future_queue", &"<trait object>")
-            .field("session_control", &"<trait object>")
-            .finish()
-    }
-}
+use super::{CheckpointStore, IndexError, IndexSet, LiveResultsWriter, OutboxWriter};
 
 /// Result of [`IndexBackendPlugin::create_indexes`].
 ///

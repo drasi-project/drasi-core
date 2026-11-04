@@ -49,7 +49,7 @@ use axum::{
 };
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_log::LogReaction;
+use drasi_reaction_log::{LogReaction, QueryConfig as LogQueryConfig, TemplateSpec};
 use drasi_source_http::HttpSource;
 
 #[tokio::main]
@@ -161,12 +161,18 @@ async fn main() -> Result<()> {
         .from_query("all-prices_query")
         .from_query("gainers_query")
         .from_query("high-volume_query")
-        .with_added_template("[{{query_name}}] + {{after.symbol}}: ${{after.price}}")
-        .with_updated_template(
-            "[{{query_name}}] ~ {{after.symbol}}: ${{before.price}} -> ${{after.price}}",
-        )
-        .with_deleted_template("[{{query_name}}] - {{before.symbol}} removed")
-        .build();
+        .with_default_template(LogQueryConfig {
+            added: Some(TemplateSpec::new(
+                "[{{query_name}}] + {{after.symbol}}: ${{after.price}}",
+            )),
+            updated: Some(TemplateSpec::new(
+                "[{{query_name}}] ~ {{after.symbol}}: ${{before.price}} -> ${{after.price}}",
+            )),
+            deleted: Some(TemplateSpec::new(
+                "[{{query_name}}] - {{before.symbol}} removed",
+            )),
+        })
+        .build()?;
 
     // =========================================================================
     // Step 5: Build DrasiLib
@@ -176,6 +182,12 @@ async fn main() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_host_sdk::computation::NativePlugin::from_definition(
+                    drasi_computation_transformer_query::plugin()?,
+                )?
+                .query_factory()?,
+            )
             .with_id("stock-monitor")
             .with_source(http_source)
             .with_query(all_prices_query)

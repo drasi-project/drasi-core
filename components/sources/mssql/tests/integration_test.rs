@@ -253,6 +253,18 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
             .build();
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-integration-test")
             .with_source(source)
             .with_query(query)
@@ -582,6 +594,18 @@ async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
             .context("Failed to build MSSQL source")?;
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-schema-test")
             .with_source(source)
             .build()
@@ -832,6 +856,18 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             .build();
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-types-test")
             .with_source(source)
             .with_query(query)
@@ -1170,6 +1206,18 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-recovery-test")
             .with_source(source)
             .with_query(query)
@@ -1322,7 +1370,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .build();
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
-        let core = DrasiLib::builder()
+        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
             .with_id("mssql-bootstrap-resume-test")
             .with_source(source)
             .with_query(query)
@@ -1482,6 +1530,18 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-full-restart-test")
             .with_source(source)
             .with_query(query)
@@ -1681,6 +1741,18 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-multi-query-test")
             .with_source(source)
             .with_query(query1)
@@ -2020,6 +2092,18 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .build();
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mssql-ffi-restart-test")
             .with_source(source)
             .with_query(query)
@@ -2505,7 +2589,7 @@ async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
             .with_query(QUERY_ID)
             .build();
 
-        let core = DrasiLib::builder()
+        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
             .with_id("mssql-dup-test")
             .with_source(source)
             .with_query(query)

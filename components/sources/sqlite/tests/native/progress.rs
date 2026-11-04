@@ -111,7 +111,7 @@ async fn graph_recovery_rejects_external_and_same_named_substitute_readers() -> 
         };
         let graph = ComputationGraph::builder("native-sqlite")
             .source(Box::new(producer))
-            .query(Box::new(consumer))
+            .transformer(Box::new(consumer))
             .sink(Box::new(sink))
             .bind_stream(endpoint("source", "out"), stream("changes"))
             .bind_stream(endpoint("query", "out"), stream("results"))

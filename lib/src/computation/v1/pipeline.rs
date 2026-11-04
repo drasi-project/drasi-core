@@ -24,6 +24,7 @@ use drasi_core::{
     interface::{CreatedIndexes, IndexBackendPlugin, IndexError},
     middleware::MiddlewareTypeRegistry,
 };
+use drasi_query_common::QueryExecutionSettingsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -216,6 +217,7 @@ pub struct ComputationPipelineBuilder {
     services: LegacyPluginServices,
     catalog: QueryResultsCatalog,
     middleware: Arc<MiddlewareTypeRegistry>,
+    query_factory: Option<Arc<dyn ComponentFactory>>,
     indexes: Arc<IndexFactory>,
     default_recovery: RecoveryPolicy,
     input_capacity: usize,
@@ -263,6 +265,7 @@ impl ComputationPipelineBuilder {
             services,
             catalog: QueryResultsCatalog::new(graph_id)?,
             middleware,
+            query_factory: None,
             indexes,
             default_recovery,
             input_capacity,
@@ -297,7 +300,7 @@ impl ComputationPipelineBuilder {
         self.services.clone()
     }
     pub fn source_component_id(query: &str, source: &str) -> Result<ComponentId> {
-        ComponentId::try_new(format!("source/{}/{}", encoded(query), encoded(source)))
+        drasi_computation_contracts::query_source_component_id(query, source)
     }
     pub fn reaction_component_id(reaction: &str) -> Result<ComponentId> {
         ComponentId::try_new(format!("reaction/{}", encoded(reaction)))
@@ -419,6 +422,12 @@ impl ComputationPipelineBuilder {
         self.middleware = registry;
         self
     }
+
+    /// Select query execution without changing ordinary query authoring or source assembly.
+    pub fn query_factory(mut self, factory: Arc<dyn ComponentFactory>) -> Self {
+        self.query_factory = Some(factory);
+        self
+    }
     pub fn query_provider(
         mut self,
         query: &str,
@@ -438,6 +447,18 @@ impl ComputationPipelineBuilder {
     }
     pub fn build(self) -> GraphResult<ComponentBatch> {
         let invalid = |reason: String| GraphError::Topology { reason };
+        let query_authoring = self
+            .query_factory
+            .as_ref()
+            .map(|factory| {
+                factory.query_authoring().ok_or_else(|| {
+                    invalid("selected factory does not support ordinary query authoring".into())
+                })
+            })
+            .transpose()?;
+        if !self.queries.is_empty() && query_authoring.is_none() {
+            return Err(invalid(QueryFactoryNotRegistered.to_string()));
+        }
         let mut native_inputs = Vec::new();
         let mut query_ids = BTreeSet::new();
         let mut prepared = Vec::new();
@@ -456,8 +477,9 @@ impl ComputationPipelineBuilder {
                 return Err(invalid("duplicate query".into()));
             }
             let execution = QueryExecutionSettings::from_legacy_config(query);
-            execution
-                .validate(Some(&self.middleware))
+            query_authoring
+                .expect("query authoring was required")
+                .validate_execution(&execution, Some(&self.middleware))
                 .map_err(|error| invalid(format!("{error:#}")))?;
             let settings = if query.inputs.is_empty() {
                 Vec::new()
@@ -613,7 +635,7 @@ impl ComputationPipelineBuilder {
             })?;
         }
         let source_factory = builtin_factory::<SourcePluginAdapterFactory>();
-        let query_factory = builtin_factory::<ContinuousQueryFactory>();
+        let query_factory = self.query_factory.clone();
         let outlet_id = ComponentId::try_new(match assembly {
             Some(query) => format!("query-results/{}", encoded(query)),
             None => "__computation_results__".into(),
@@ -1139,10 +1161,18 @@ impl ComputationPipelineBuilder {
             builder = builder
                 .component(
                     ComponentSpecification {
-                        descriptor: definition.descriptor(),
-                        role: ComponentRole::Query,
+                        descriptor: query_authoring
+                            .expect("query authoring was required")
+                            .query_descriptor(query_id.clone())
+                            .map_err(|error| invalid(format!("{error:#}")))?,
+                        role: ComponentRole::Transformer,
                         completion: None,
-                        implementation: query_factory.descriptor().implementation.clone(),
+                        implementation: query_factory
+                            .as_ref()
+                            .expect("query factory was required")
+                            .descriptor()
+                            .implementation
+                            .clone(),
                         configuration_version: 1,
                         configuration: BTreeMap::from([
                             (
@@ -1222,7 +1252,10 @@ impl ComputationPipelineBuilder {
                         .chain(bootstrap_id.map(|id| (Arc::from("bootstrap"), vec![id])))
                         .collect(),
                     },
-                    query_factory.clone(),
+                    query_factory
+                        .as_ref()
+                        .expect("query factory was required")
+                        .clone(),
                 )
                 .lifecycle_policy(
                     query_id.clone(),

@@ -419,7 +419,7 @@ pub(super) async fn late_query_group(output: SharedOutput) -> Result<()> {
         );
         let late_definition = declaration(
             late.descriptor().clone(),
-            ComponentRole::Query,
+            ComponentRole::Transformer,
             Some(StreamId::try_new("late-results")?),
             None,
         );
@@ -471,7 +471,7 @@ pub(super) async fn late_query_group(output: SharedOutput) -> Result<()> {
         );
         bindings
             .components
-            .insert("late".into(), ConstructedComponent::query(Box::new(late)));
+            .insert("late".into(), ConstructedComponent::transformer(Box::new(late)));
         bindings.components.insert(
             "late-sink".into(),
             ConstructedComponent::sink(Box::new(sink)),

@@ -18,9 +18,7 @@ use async_trait::async_trait;
 
 use crate::models::{SourceChange, SourceMiddlewareConfig};
 
-use super::ElementIndex;
-
-pub use drasi_core_types::interface::{MiddlewareError, MiddlewareSetupError};
+use super::{ElementIndex, MiddlewareError, MiddlewareSetupError};
 
 #[async_trait]
 pub trait SourceMiddleware: Send + Sync {
@@ -37,5 +35,4 @@ pub trait SourceMiddlewareFactory: Send + Sync {
         &self,
         config: &SourceMiddlewareConfig,
     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError>;
-    //todo: inject dependencies such as element index, expression evaluator, etc.
 }

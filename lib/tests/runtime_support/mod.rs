@@ -15,7 +15,18 @@
 use drasi_lib::{DrasiLib, DrasiLibBuilder};
 
 pub fn builder() -> DrasiLibBuilder {
-    DrasiLib::builder()
+    DrasiLib::builder().with_query_factory(
+        drasi_lib::computation::v1::FactoryRegistry::standard()
+            .get(
+                &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                    "drasi/continuous-query",
+                    "1",
+                )
+                .expect("reference query identity"),
+            )
+            .expect("reference query factory")
+            .clone(),
+    )
 }
 
 #[allow(dead_code)]

@@ -696,7 +696,7 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
             let indexes = ResourceId::try_new("indexes").unwrap();
             let mut specification = ComponentSpecification {
                 descriptor: definition().descriptor(),
-                role: ComponentRole::Query,
+                role: ComponentRole::Transformer,
                 completion: None,
                 implementation: factory.descriptor().implementation.clone(),
                 configuration_version: 1,
@@ -743,7 +743,7 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
                 .unwrap()
                 .component(specification, factory)
         } else {
-            graph.query(Box::new(query(directory.path(), 3).await))
+            graph.transformer(Box::new(query(directory.path(), 3).await))
         };
         let mut graph = graph
             .bind_stream(

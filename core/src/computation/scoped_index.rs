@@ -21,11 +21,10 @@ use crate::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
         AccumulatorIndex, ElementArchiveIndex, ElementIndex, ElementStream, FutureElementRef,
-        FutureQueue, IndexError, LazySortedSetStore, PushType, ResultIndex, ResultKey, ResultOwner,
-        ResultSequence, ResultSequenceCounter,
+        FutureQueue, IndexError, IndexJoin, LazySortedSetStore, PushType, ResultIndex, ResultKey,
+        ResultOwner, ResultSequence, ResultSequenceCounter,
     },
-    models::{Element, ElementReference, ElementTimestamp, QueryJoin, TimestampRange},
-    path_solver::match_path::MatchPath,
+    models::{Element, ElementReference, ElementTimestamp, TimestampRange},
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -165,8 +164,8 @@ impl<T: ElementIndex + ?Sized + 'static> ElementIndex for ScopedIndex<T> {
             .await
     }
 
-    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        self.inner.set_joins(match_path, joins).await;
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
+        self.inner.set_joins(joins).await
     }
 }
 

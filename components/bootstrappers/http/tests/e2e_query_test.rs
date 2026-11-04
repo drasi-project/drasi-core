@@ -192,6 +192,18 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
 
     // Build DrasiLib with source + query
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(source)
         .with_query(
             Query::cypher("user-query")
@@ -313,6 +325,18 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
     let source = BootstrapTestSource::new("product-src", provider).unwrap();
 
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(source)
         .with_query(
             Query::cypher("product-query")
@@ -445,6 +469,18 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
     let source = BootstrapTestSource::new("social-src", provider).unwrap();
 
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(source)
         .with_query(
             Query::cypher("friends-query")

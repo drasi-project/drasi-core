@@ -21,6 +21,7 @@ pub mod metadata;
 pub mod output_reads;
 pub mod output_snapshots;
 mod port_formats;
+pub mod processing;
 pub mod progress;
 mod transaction;
 pub mod transport;
@@ -48,6 +49,7 @@ pub use metadata::{
 pub use output_snapshots::{
     NativeOutputSnapshot, NativeOutputSnapshots, OutputSnapshotHeader, SnapshotOpen,
 };
+pub use processing::{NativeProcessing, NativeProcessingContext};
 pub use progress::NativeSourceProgress;
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
 pub use wire::{CreateRequest, Scope};
@@ -127,6 +129,17 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_processing_v1(
+        ) -> *const $crate::abi::processing::PluginProcessingV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.processing(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
         pub extern "C" fn drasi_computation_plugin_recovery_v1(
         ) -> *const $crate::abi::recovery::PluginRecoveryV1 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -171,8 +184,8 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_output_reads_v1(
-        ) -> *const $crate::abi::output_reads::PluginOutputReadsV1 {
+        pub extern "C" fn drasi_computation_plugin_output_reads_v2(
+        ) -> *const $crate::abi::output_reads::PluginOutputReadsV2 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.output_reads(),
@@ -182,8 +195,8 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_output_follow_v1(
-        ) -> *const $crate::abi::output_follow::PluginOutputFollowV1 {
+        pub extern "C" fn drasi_computation_plugin_output_follow_v2(
+        ) -> *const $crate::abi::output_follow::PluginOutputFollowV2 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.output_follow(),

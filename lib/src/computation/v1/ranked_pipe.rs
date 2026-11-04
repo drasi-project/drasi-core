@@ -502,6 +502,7 @@ mod tests {
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
+    use drasi_query_common::QueryExecutionSettingsExt;
     use futures::{stream::FuturesUnordered, StreamExt};
     use std::time::Duration;
 

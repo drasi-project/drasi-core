@@ -64,12 +64,16 @@ pub(crate) async fn build(
     reactions: Vec<ReactionRegistration>,
     bootstraps: Vec<BootstrapRegistration>,
     wal: Option<Arc<dyn crate::wal::WalProvider>>,
+    query_factory: Option<Arc<dyn ComponentFactory>>,
     #[cfg(feature = "test-support")] test_controls: BTreeMap<
         String,
         crate::test_support::QueryTestControl,
     >,
 ) -> crate::Result<DrasiLib> {
     let mut core = DrasiLib::new_with_wal(config.clone(), wal);
+    if let Some(factory) = query_factory {
+        core.register_query_factory(factory)?;
+    }
     #[cfg(feature = "test-support")]
     core.computation_runtime
         .test_controls
@@ -318,6 +322,7 @@ pub(crate) struct Runtime {
     config: Arc<RuntimeConfig>,
     services: LegacyPluginServices,
     middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
+    query_factory: OnceLock<Arc<dyn ComponentFactory>>,
     events: Arc<events::Events>,
     parent: OnceLock<ComputationHandle>,
     instance_owner: OnceLock<Weak<super::instance::InstanceGraph>>,
@@ -354,6 +359,7 @@ impl Runtime {
             config,
             services,
             middleware,
+            query_factory: OnceLock::new(),
             events: events::Events::new(),
             parent: OnceLock::new(),
             instance_owner: OnceLock::new(),
@@ -448,21 +454,44 @@ impl Runtime {
         self.services.clone()
     }
 
+    pub(crate) fn query_factory(&self) -> Option<Arc<dyn ComponentFactory>> {
+        self.query_factory.get().cloned()
+    }
+
+    pub(crate) fn register_query_factory(
+        &self,
+        factory: Arc<dyn ComponentFactory>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            factory.descriptor().role == ComponentRole::Transformer
+                && factory.query_authoring().is_some(),
+            "selected factory does not support ordinary query authoring"
+        );
+        if let Err(requested) = self.query_factory.set(factory) {
+            anyhow::ensure!(self.query_factory.get().is_some_and(|current| Arc::ptr_eq(current, &requested)),
+                "query factory is already registered; create a new instance to select another implementation");
+        }
+        Ok(())
+    }
+
     pub(crate) async fn bind_batch_source_dependencies(
         &self,
         batch: &mut ComponentBatch,
     ) -> anyhow::Result<()> {
         let mut subscriptions = BTreeSet::new();
         let mut records = None;
+        let publication = self.control()?.registry_snapshot();
         for node in &batch.definition.components {
             let ComponentConstruction::Factory(spec) = &node.construction else {
                 continue;
             };
-            if spec.implementation
-                != ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation
-            {
+            let factory = batch
+                .bindings
+                .factories
+                .get(&spec.implementation)
+                .cloned()
+                .or_else(|| publication.factory(&spec.implementation));
+            if !factory.is_some_and(|factory| factory.query_authoring().is_some()) {
                 continue;
             }
             let config = match spec.configuration.get("query_config") {
@@ -679,7 +708,9 @@ impl Runtime {
         let api = publication
             .query_api(&ComponentId::try_new(id)?)
             .ok_or_else(|| anyhow::anyhow!("query '{id}' has no result subscription capability"))?;
-        Self::native_result_catalog(&publication, id, &api)?.subscribe_query(id)
+        Self::native_result_catalog(&publication, id, &api)?
+            .subscribe_query(id)
+            .await
     }
 
     async fn link_query_output(&self, id: &str) -> anyhow::Result<()> {
@@ -996,14 +1027,7 @@ impl Runtime {
                 .iter()
                 .any(|node| node.descriptor.id() == &id)
         {
-            let implementation = ContinuousQueryFactory::default()
-                .descriptor()
-                .implementation
-                .clone();
-            let factory = FactoryRegistry::standard()
-                .get(&implementation)
-                .expect("standard query factory")
-                .clone();
+            let factory = self.query_factory().ok_or(QueryFactoryNotRegistered)?;
             let specification = factory.specification_from_config(
                 id.clone(),
                 serde_json::json!({
@@ -1018,7 +1042,7 @@ impl Runtime {
                 .add_component(ComponentAddition {
                     definition: DesiredComponent {
                         descriptor: specification.descriptor.clone(),
-                        role: ComponentRole::Query,
+                        role: ComponentRole::Transformer,
                         completion: None,
                         streams: BTreeMap::new(),
                         lifecycle: LifecyclePolicy { auto_start: false },

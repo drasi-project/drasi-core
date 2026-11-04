@@ -13,19 +13,18 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{ElementReference, ElementTimestamp};
 
-use super::IndexError;
+use super::{FutureElementRef, IndexError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushType {
     Always,
     IfNotExists,
     Overwrite,
 }
-
-pub use drasi_core_types::interface::FutureElementRef;
 
 #[async_trait]
 pub trait FutureQueue: Send + Sync {

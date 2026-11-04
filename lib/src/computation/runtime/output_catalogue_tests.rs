@@ -1560,6 +1560,13 @@ async fn query_input_middleware_uses_the_upstream_component_for_snapshot_and_liv
         None,
     );
     let mut core = DrasiLib::new_with_middleware(Arc::new(config), Arc::new(middleware));
+    core.register_query_factory(
+        FactoryRegistry::standard()
+            .get(&ImplementationIdentity::try_new("drasi/continuous-query", "1").unwrap())
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
     core.initialize().await.unwrap();
     let (source, _) = ControlledSource::new("source");
     core.add_source(source).await.unwrap();
@@ -1774,6 +1781,13 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
         )),
     );
     let mut core = DrasiLib::new_with_middleware(Arc::new(config), Arc::new(middleware));
+    core.register_query_factory(
+        FactoryRegistry::standard()
+            .get(&ImplementationIdentity::try_new("drasi/continuous-query", "1").unwrap())
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
     core.initialize().await.unwrap();
     let inventory = Shared::persistent("inventory", 1, 3);
     inventory.apply("a", 1);

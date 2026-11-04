@@ -284,6 +284,26 @@ impl DrasiLib {
         super::v1::ReactionPluginHost::borrowed(reaction, catalog)
             .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))
     }
+    /// Register the query plugin used by subsequent ordinary query declarations.
+    /// The selected implementation cannot be replaced underneath existing queries.
+    pub fn register_query_factory(
+        &self,
+        factory: std::sync::Arc<dyn super::v1::ComponentFactory>,
+    ) -> Result<()> {
+        if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(DrasiError::invalid_state(
+                "cannot register a query factory after shutdown",
+            ));
+        }
+        self.computation_runtime
+            .register_query_factory(factory)
+            .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))
+    }
+
+    pub fn query_factory_implementation(&self) -> Option<super::v1::ImplementationIdentity> {
+        self.computation_runtime.query_factory().map(|factory| factory.descriptor().implementation.clone())
+    }
+
     pub fn computation_pipeline(&self) -> Result<super::v1::ComputationPipelineBuilder> {
         let services = self.computation_plugin_services()?;
         super::v1::ComputationPipelineBuilder::new(
@@ -295,6 +315,10 @@ impl DrasiLib {
             self.config.global_priority_queue_capacity.unwrap_or(10_000),
             self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
         )
+        .map(|builder| match self.computation_runtime.query_factory() {
+            Some(factory) => builder.query_factory(factory),
+            None => builder,
+        })
         .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))
     }
     pub(crate) async fn start_parallel_components(&self) -> anyhow::Result<()> {
