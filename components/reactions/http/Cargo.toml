@@ -58,6 +58,8 @@ drasi-core.workspace = true
 wiremock = "0.6"
 tokio = { version = "1.0", features = ["full", "test-util"] }
 env_logger = "0.11"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [features]
 # default = []

@@ -27,7 +27,8 @@ use chrono::Utc;
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
 use drasi_lib::context::workers::{
-    join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned, WorkerCompletion,
+    join_owned_worker_gracefully, spawn_owned_component_worker, WorkerAlreadyOwned,
+    WorkerCompletion,
 };
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
@@ -150,7 +151,7 @@ impl Source for CloudflareRadarSource {
             )
             .await;
         let status = self.base.status_handle();
-        spawn_owned_worker(&self.polling_task, async move {
+        spawn_owned_component_worker(&self.polling_task, async move {
             let result =
                 polling_loop(&source_id, config, client, base, state_store, shutdown_rx).await;
             if let Err(error) = &result {
@@ -1383,7 +1384,7 @@ mod tests {
                 .with_category("bgp_hijacks", true)
                 .build()?;
             *source.cleanup_required.lock().await = true;
-            spawn_owned_worker(&source.polling_task, async move {
+            spawn_owned_component_worker(&source.polling_task, async move {
                 assert!(!panic, "injected Cloudflare polling panic");
                 Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionReset,

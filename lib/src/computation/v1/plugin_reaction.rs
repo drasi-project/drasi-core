@@ -875,7 +875,9 @@ impl ReactionPluginHost {
             for result in entries {
                 self.observations
                     .drive(
-                        reaction.enqueue_query_result(result.as_ref().clone()),
+                        crate::observability::ExecutionScope::capture()
+                            .with_context(Default::default())
+                            .scope(reaction.enqueue_query_result(result.as_ref().clone())),
                         false,
                     )
                     .await?;
@@ -1142,7 +1144,11 @@ impl ReactionPluginHost {
                         for result in replay.results {
                             self.observations
                                 .drive(
-                                    reaction.enqueue_query_result(result.as_ref().clone()),
+                                    crate::observability::ExecutionScope::capture()
+                                        .with_context(Default::default())
+                                        .scope(
+                                            reaction.enqueue_query_result(result.as_ref().clone()),
+                                        ),
                                     false,
                                 )
                                 .await?;

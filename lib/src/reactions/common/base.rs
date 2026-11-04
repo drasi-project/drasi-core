@@ -126,6 +126,7 @@ pub struct ReactionBase {
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
     pub priority_queue: PriorityQueue<QueryResult>,
+    worker_telemetry: Arc<RwLock<crate::observability::WorkerTelemetry>>,
     /// Handles to subscription forwarder tasks
     pub subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Handle to the main processing task
@@ -149,6 +150,7 @@ impl ReactionBase {
     pub fn new(params: ReactionBaseParams) -> Self {
         Self {
             priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
+            worker_telemetry: Arc::new(RwLock::new(Default::default())),
             id: params.id.clone(),
             queries: params.queries,
             auto_start: params.auto_start,
@@ -176,6 +178,7 @@ impl ReactionBase {
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
     /// - `resource_observer`: Optional reporting of the actual selected providers
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
+        *self.worker_telemetry.write().await = crate::observability::WorkerTelemetry::capture();
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
@@ -318,6 +321,7 @@ impl ReactionBase {
             resource_report_lock: self.resource_report_lock.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
+            worker_telemetry: self.worker_telemetry.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
@@ -375,6 +379,10 @@ impl ReactionBase {
     pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
         self.priority_queue.enqueue_wait(Arc::new(result)).await;
         Ok(())
+    }
+
+    pub async fn worker_telemetry(&self) -> crate::observability::WorkerTelemetry {
+        self.worker_telemetry.read().await.clone()
     }
 
     // ========================================================================
@@ -612,8 +620,10 @@ impl ReactionBase {
                 _ = &mut shutdown_rx => {
                     break;
                 }
-                event = self.priority_queue.dequeue() => event,
+                event = self.priority_queue.dequeue_message() => event,
             };
+            let context = event.execution_context;
+            let event = event.payload;
 
             let query_id = &event.query_id;
             let seq = event.sequence;
@@ -631,7 +641,13 @@ impl ReactionBase {
 
             // Invoke the user-provided side effect. The durable checkpoint
             // advances only after this returns success.
-            match handler(Arc::clone(&event)).await {
+            match self
+                .worker_telemetry()
+                .await
+                .reaction(&context, event.results.len())?
+                .run(handler(Arc::clone(&event)))
+                .await
+            {
                 Err(e) => {
                     error!(
                         "[{}] Handler error for query={}, seq={}: {:#}",

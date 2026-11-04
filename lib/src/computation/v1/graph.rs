@@ -3031,12 +3031,13 @@ async fn run_node(
                     component
                 {
                     if transformer.has_pending_emissions() {
-                        break 'input_work execution_scope
-                            .scope(transformer.continue_transform())
-                            .await
-                            .map_err(|source| {
-                                component_error(node, "recovered processing", source)
-                            })?;
+                        break 'input_work process_transformer(
+                            transformer.as_mut(),
+                            node,
+                            &mut processing_scope,
+                            TransformerCall::Continue,
+                        )
+                        .await?;
                     }
                 }
                 if ready.is_empty() {
@@ -3074,12 +3075,13 @@ async fn run_node(
                     if scheduled {
                         match component {
                             Component::Transformer(transformer) | Component::Query(transformer) => {
-                                break 'input_work execution_scope
-                                    .scope(transformer.on_wakeup())
-                                    .await
-                                    .map_err(|source| {
-                                        component_error(node, "scheduled processing", source)
-                                    })?;
+                                break 'input_work process_transformer(
+                                    transformer.as_mut(),
+                                    node,
+                                    &mut processing_scope,
+                                    TransformerCall::Wakeup,
+                                )
+                                .await?;
                             }
                             _ => return Err(topology("non-transformer received scheduled work")),
                         }
@@ -3175,24 +3177,44 @@ async fn run_node(
                 }
                 match component {
                     Component::Transformer(transformer) | Component::Query(transformer) => {
-                        let observation = observe(
-                            node,
-                            crate::observability::ObservedOperation::Transform,
-                            &input.execution_context,
-                            crate::observability::OperationFields {
-                                input_port: Some(input.port.as_str()),
-                                input_count: Some(1),
-                                change_count: Some(input.envelope.changes().operations().len()),
-                                completion: Some("transformed"),
-                                ..Default::default()
-                            },
-                        )?;
-                        processing_scope =
-                            execution_scope.with_context(observation.context().clone());
-                        observation
-                            .run_outputs(transformer.transform(input))
-                            .await
-                            .map_err(|source| component_error(node, "transform", source))?
+                        if transformer.observes_input(&input) {
+                            let observation = crate::observability::ComponentObservations::current_or_disabled()
+                                .begin_untraced(
+                                    crate::observability::ObservedOperation::Transform,
+                                    &input.execution_context,
+                                    crate::observability::OperationFields {
+                                        input_port: Some(input.port.as_str()),
+                                        input_count: Some(1),
+                                        change_count: Some(input.envelope.changes().operations().len()),
+                                        completion: Some("transformed"),
+                                        ..Default::default()
+                                    },
+                                ).map_err(|error| component_error(node, "observe callback", error.into()))?;
+                            let outputs = observation.run(transformer.transform(input)).await
+                                .map_err(|source| component_error(node, "transform", source))?;
+                            processing_scope = execution_scope.with_context(
+                                transformer.processing_context().ok_or_else(|| {
+                                    topology("an observation-owning transformer must supply its processing context")
+                                })?,
+                            );
+                            outputs
+                        } else {
+                            let observation = observe(
+                                node,
+                                crate::observability::ObservedOperation::Transform,
+                                &input.execution_context,
+                                crate::observability::OperationFields {
+                                    input_port: Some(input.port.as_str()),
+                                    input_count: Some(1),
+                                    change_count: Some(input.envelope.changes().operations().len()),
+                                    completion: Some("transformed"),
+                                    ..Default::default()
+                                },
+                            )?;
+                            processing_scope = execution_scope.with_context(observation.context().clone());
+                            observation.run_outputs(transformer.transform(input)).await
+                                .map_err(|source| component_error(node, "transform", source))?
+                        }
                     }
                     Component::Sink(sink) => {
                         let observation = observe(
@@ -3286,18 +3308,13 @@ async fn run_node(
                         yield_node.await;
                     }
                     Some(
-                        observe(
+                        process_transformer(
+                            transformer.as_mut(),
                             node,
-                            crate::observability::ObservedOperation::Continue,
-                            processing_scope.context(),
-                            crate::observability::OperationFields {
-                                input_count: Some(0),
-                                ..Default::default()
-                            },
-                        )?
-                        .run_outputs(transformer.continue_transform())
-                        .await
-                        .map_err(|source| component_error(node, "continue transform", source))?,
+                            &mut processing_scope,
+                            TransformerCall::Continue,
+                        )
+                        .await?,
                     )
                 }
                 _ => None,
@@ -3328,6 +3345,62 @@ async fn run_node(
         }
         drop(consumed);
     }
+}
+
+enum TransformerCall {
+    Continue,
+    Wakeup,
+}
+
+async fn process_transformer(
+    transformer: &mut dyn super::Transformer,
+    node: &NodeSnapshot,
+    scope: &mut crate::observability::ExecutionScope,
+    call: TransformerCall,
+) -> GraphResult<Vec<OutputEnvelope>> {
+    let owns_observation = transformer.processing_context().is_some();
+    let observation = if matches!(&call, TransformerCall::Wakeup) {
+        None
+    } else {
+        let (operation, parent, fields) = match &call {
+            TransformerCall::Continue => (
+                crate::observability::ObservedOperation::Continue,
+                scope.context(),
+                crate::observability::OperationFields {
+                    input_count: Some(0),
+                    ..Default::default()
+                },
+            ),
+            TransformerCall::Wakeup => unreachable!(),
+        };
+        Some(if owns_observation {
+            crate::observability::ComponentObservations::current_or_disabled()
+                .begin_untraced(operation, parent, fields)
+                .map_err(|error| component_error(node, "observe callback", error.into()))?
+        } else {
+            observe(node, operation, parent, fields)?
+        })
+    };
+    if let Some(observation) = &observation {
+        *scope = scope.with_context(observation.context().clone());
+    }
+    let future = async {
+        match call {
+            TransformerCall::Continue => transformer.continue_transform().await,
+            TransformerCall::Wakeup => transformer.on_wakeup().await,
+        }
+    };
+    let result = match observation {
+        Some(observation) if owns_observation => observation.run(future).await,
+        Some(observation) => observation.run_outputs(future).await,
+        None => scope.scope(future).await,
+    };
+    if owns_observation {
+        if let Some(context) = transformer.processing_context() {
+            *scope = scope.with_context(context);
+        }
+    }
+    result.map_err(|source| component_error(node, "processing", source))
 }
 
 fn observe(

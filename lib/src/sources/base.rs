@@ -191,6 +191,7 @@ pub struct SourceBase {
         Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
+    worker_telemetry: Arc<RwLock<crate::observability::WorkerTelemetry>>,
     /// Serializes inventory snapshots so concurrent setters cannot publish stale state.
     resource_report_lock: Arc<Mutex<()>>,
     /// State store provider (extracted from context for convenience)
@@ -360,6 +361,7 @@ impl SourceBase {
             status_handle: ComponentStatusHandle::new(&params.id),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
+            worker_telemetry: Arc::new(RwLock::new(Default::default())),
             resource_report_lock: Arc::new(Mutex::new(())),
             state_store: Arc::new(RwLock::new(params.state_store)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
@@ -441,6 +443,7 @@ impl SourceBase {
     /// - `state_store`: Optional persistent state storage
     /// - `resource_observer`: Optional reporting of the actual selected providers
     pub async fn initialize(&self, context: SourceRuntimeContext) {
+        *self.worker_telemetry.write().await = crate::observability::WorkerTelemetry::capture();
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
@@ -808,6 +811,7 @@ impl SourceBase {
             status_handle: self.status_handle.clone(),
             dispatchers: self.dispatchers.clone(),
             context: self.context.clone(),
+            worker_telemetry: self.worker_telemetry.clone(),
             resource_report_lock: self.resource_report_lock.clone(),
             state_store: self.state_store.clone(),
             task_handle: self.task_handle.clone(),
@@ -1383,15 +1387,17 @@ impl SourceBase {
                 component_id = %source_id,
                 component_type = "source"
             );
+            let execution = crate::observability::ExecutionScope::capture();
             tokio::spawn(
-                async move {
-                    let outcome = provider
-                        .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
-                        .await;
+                execution
+                    .scope(async move {
+                        let outcome = provider
+                            .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
+                            .await;
 
-                    match &outcome {
-                        Ok(result) => {
-                            info!(
+                        match &outcome {
+                            Ok(result) => {
+                                info!(
                                 "Bootstrap completed successfully for query '{}', sent {} events \
                                  (source_position: {} bytes)",
                                 settings_clone.query_id,
@@ -1403,34 +1409,34 @@ impl SourceBase {
                                     .unwrap_or(0)
                             );
 
-                            // Publish the bootstrap-to-CDC boundary for the
-                            // first-ever bootstrap so the source's CDC stream
-                            // starts exactly at the snapshot boundary. Only the
-                            // first non-None boundary wins.
-                            if is_initial_bootstrap {
-                                if let Some(position) = result.source_position.clone() {
-                                    if publish_boundary_token(&boundary, position) {
-                                        info!(
+                                // Publish the bootstrap-to-CDC boundary for the
+                                // first-ever bootstrap so the source's CDC stream
+                                // starts exactly at the snapshot boundary. Only the
+                                // first non-None boundary wins.
+                                if is_initial_bootstrap {
+                                    if let Some(position) = result.source_position.clone() {
+                                        if publish_boundary_token(&boundary, position) {
+                                            info!(
                                             "Published bootstrap-to-CDC boundary for query '{}'",
                                             settings_clone.query_id
                                         );
+                                        }
                                     }
                                 }
                             }
+                            Err(e) => {
+                                error!(
+                                    "Bootstrap failed for query '{}': {e}",
+                                    settings_clone.query_id
+                                );
+                            }
                         }
-                        Err(e) => {
-                            error!(
-                                "Bootstrap failed for query '{}': {e}",
-                                settings_clone.query_id
-                            );
-                        }
-                    }
 
-                    // Send the result (or error) to the query manager for handover.
-                    // If the receiver was dropped (query stopped), this is a no-op.
-                    let _ = result_tx.send(outcome);
-                }
-                .instrument(span),
+                        // Send the result (or error) to the query manager for handover.
+                        // If the receiver was dropped (query stopped), this is a no-op.
+                        let _ = result_tx.send(outcome);
+                    })
+                    .instrument(span),
             );
 
             Ok(Some((bootstrap_rx, result_rx)))
@@ -1501,6 +1507,23 @@ impl SourceBase {
     }
 
     async fn dispatch_event_ordered(
+        &self,
+        wrapper: SourceEventWrapper,
+        last_dispatch_ts: tokio::sync::MutexGuard<'_, chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
+        let context = crate::observability::ExecutionContext::current();
+        self.worker_telemetry
+            .read()
+            .await
+            .clone()
+            .scope_context(
+                context,
+                self.dispatch_event_inner(wrapper, last_dispatch_ts),
+            )
+            .await
+    }
+
+    async fn dispatch_event_inner(
         &self,
         mut wrapper: SourceEventWrapper,
         mut last_dispatch_ts: tokio::sync::MutexGuard<'_, chrono::DateTime<chrono::Utc>>,
@@ -1603,6 +1626,16 @@ impl SourceBase {
     /// Sequences are preserved. Allocate and dispatch each batch in source
     /// order, serializing producers just as for [`Self::dispatch_event`].
     pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
+        let context = crate::observability::ExecutionContext::current();
+        self.worker_telemetry
+            .read()
+            .await
+            .clone()
+            .scope_context(context, self.dispatch_batch_inner(events))
+            .await
+    }
+
+    async fn dispatch_batch_inner(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }

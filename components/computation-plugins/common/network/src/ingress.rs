@@ -3,7 +3,7 @@
 
 use crate::config::IngressConfig;
 use anyhow::{Context, Result};
-use drasi_computation_contracts::workers::spawn_owned_worker;
+use drasi_computation_contracts::workers::spawn_owned_component_worker;
 use drasi_computation_contracts::{
     ComponentDescriptor, GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress,
     OutputEnvelope, PortId,
@@ -61,6 +61,7 @@ impl Ingress {
         changes: Vec<SourceChange>,
     ) -> std::result::Result<usize, AdmissionError> {
         let mut accepted = 0;
+        let execution_context = drasi_computation_contracts::telemetry::ExecutionContext::current();
         let submit = async {
             let AdmissionMode::Volatile { sequence, identity } = &self.mode else {
                 anyhow::bail!("durable source requires the versioned admission protocol");
@@ -86,7 +87,7 @@ impl Ingress {
                 // while waiting for capacity cannot consume an event sequence.
                 *sequence = next;
                 permit.send(OutputEnvelope {
-                    execution_context: Default::default(),
+                    execution_context: execution_context.clone(),
                     port: PortId::try_new("out")?,
                     envelope,
                 });
@@ -290,7 +291,7 @@ impl SourceRuntime {
                 target: 1,
             }),
         });
-        spawn_owned_worker(
+        spawn_owned_component_worker(
             &self.running.as_ref().expect("installed owner").listener,
             async move {
                 let _cancel = stopped.clone().drop_guard();

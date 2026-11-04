@@ -150,3 +150,6 @@ drasi-reaction-application = { path = "../components/reactions/application" }
 
 # Additional testing dependencies
 rstest = "0.18"
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "testing"] }
+tracing-opentelemetry = { version = "0.32", default-features = false }

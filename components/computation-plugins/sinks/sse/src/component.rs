@@ -12,7 +12,7 @@ use axum::{
     Router,
 };
 use drasi_computation_contracts::{
-    workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
+    workers::{join_owned_worker_gracefully, spawn_owned_component_worker, WorkerCompletion},
     *,
 };
 use drasi_computation_plugin_sdk::{
@@ -535,7 +535,7 @@ impl NativeComponent for SseSink {
             cancel: cancel.clone(),
             server: RwLock::new(None),
         });
-        spawn_owned_worker(
+        spawn_owned_component_worker(
             &self.running.as_ref().expect("installed owner").server,
             async move {
                 let _stopped = cancel.clone().drop_guard();
@@ -730,7 +730,7 @@ mod tests {
             cancel: CancellationToken::new(),
             server: RwLock::new(None),
         });
-        spawn_owned_worker(&sink.running.as_ref().expect("owner").server, async {
+        spawn_owned_component_worker(&sink.running.as_ref().expect("owner").server, async {
             wait.await.expect("release server");
             Ok(())
         })

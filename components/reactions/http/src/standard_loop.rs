@@ -24,7 +24,7 @@ use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::config::{HttpReactionConfig, TemplateRouting};
 use crate::output::DefaultChangeNotification;
-use crate::process::{post_default_notification, process_result};
+use crate::process::{post_default_notification, process_result, DeliveryOutcome};
 use drasi_lib::reactions::common::{CheckpointState, FailureAction};
 
 /// Run the standard (per-result) processing loop. Blocks until the
@@ -40,6 +40,8 @@ pub(crate) async fn run_standard_loop(
     mut checkpoints: CheckpointState,
     policy: ReactionRecoveryPolicy,
 ) {
+    let telemetry = base.worker_telemetry().await;
+    telemetry.scope(async {
     let status_handle = base.status_handle();
 
     loop {
@@ -49,9 +51,9 @@ pub(crate) async fn run_standard_loop(
                 debug!("[{reaction_name}] Received shutdown signal, exiting standard loop");
                 break;
             }
-            result = base.priority_queue.dequeue() => result,
+            result = base.priority_queue.dequeue_message() => result,
         };
-        let query_result = query_result_arc.as_ref();
+        let query_result = query_result_arc.payload.as_ref();
 
         if query_result.results.is_empty() {
             continue;
@@ -65,7 +67,18 @@ pub(crate) async fn run_standard_loop(
             query_result.results.len()
         );
 
+        let change_count = query_result.results.iter()
+            .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+        let observation = if change_count == 0 {
+            None
+        } else {
+            telemetry.reaction(&query_result_arc.execution_context, change_count)
+                .map_err(|e| warn!("Failed to observe HTTP processing: {e}")).ok()
+        };
+        let mut stop = false;
+        let process = async {
         let mut delivery_failed = false;
+        let mut dropped = false;
         for result in &query_result.results {
             let notification = match DefaultChangeNotification::from_diff(query_result, result) {
                 Some(n) => n,
@@ -101,12 +114,16 @@ pub(crate) async fn run_standard_loop(
                 }
             };
 
-            if let Err(e) = outcome {
-                error!("[{reaction_name}] Failed to process result: {e}");
-                delivery_failed = true;
-                // Under fail-stop, don't keep emitting the rest of this result.
-                if FailureAction::from_policy(policy) == FailureAction::Stop {
-                    break;
+            match outcome {
+                Ok(DeliveryOutcome::Delivered) => {}
+                Ok(DeliveryOutcome::Dropped) => dropped = true,
+                Err(e) => {
+                    error!("[{reaction_name}] Failed to process result: {e}");
+                    delivery_failed = true;
+                    // Under fail-stop, don't keep emitting the rest of this result.
+                    if FailureAction::from_policy(policy) == FailureAction::Stop {
+                        break;
+                    }
                 }
             }
         }
@@ -127,7 +144,8 @@ pub(crate) async fn run_standard_loop(
                             )),
                         )
                         .await;
-                    return;
+                    stop = true;
+                    return Err(());
                 }
                 FailureAction::SkipAndContinue => {
                     warn!(
@@ -147,7 +165,7 @@ pub(crate) async fn run_standard_loop(
                     {
                         // AutoSkipGap: a checkpoint-write failure is non-fatal.
                     }
-                    continue;
+                    return Err(());
                 }
             }
         }
@@ -173,6 +191,20 @@ pub(crate) async fn run_standard_loop(
                     )),
                 )
                 .await;
+            stop = true;
+            return Err(());
+        }
+        if dropped {
+            Err(())
+        } else {
+            Ok(())
+        }
+        };
+        let _ = match observation {
+            Some(observation) => observation.run(process).await,
+            None => process.await,
+        };
+        if stop {
             return;
         }
     }
@@ -184,6 +216,7 @@ pub(crate) async fn run_standard_loop(
             Some("HTTP reaction processing task stopped".to_string()),
         )
         .await;
+    }).await;
 }
 
 /// Advance the per-query checkpoint, logging (but not propagating) the error so

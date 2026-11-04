@@ -69,12 +69,12 @@ struct DeliveryConfiguration {
 }
 #[derive(Clone)]
 enum Subscriber {
-    Channel(tokio::sync::mpsc::Sender<ChangeEnvelope>),
-    Broadcast(tokio::sync::broadcast::Sender<ChangeEnvelope>),
+    Channel(tokio::sync::mpsc::Sender<super::EnvelopeMessage>),
+    Broadcast(tokio::sync::broadcast::Sender<super::EnvelopeMessage>),
 }
 enum SubscriberReceiver {
-    Channel(tokio::sync::mpsc::Receiver<ChangeEnvelope>),
-    Broadcast(tokio::sync::broadcast::Receiver<ChangeEnvelope>),
+    Channel(tokio::sync::mpsc::Receiver<super::EnvelopeMessage>),
+    Broadcast(tokio::sync::broadcast::Receiver<super::EnvelopeMessage>),
 }
 pub(crate) struct CatalogSubscription {
     receiver: SubscriberReceiver,
@@ -106,6 +106,10 @@ impl CatalogSubscription {
     }
 
     pub(crate) async fn receive(&mut self) -> anyhow::Result<ChangeEnvelope> {
+        Ok(self.receive_message().await?.envelope)
+    }
+
+    pub(crate) async fn receive_message(&mut self) -> anyhow::Result<super::EnvelopeMessage> {
         match &mut self.receiver {
             SubscriberReceiver::Channel(receiver) => receiver
                 .recv()
@@ -116,17 +120,23 @@ impl CatalogSubscription {
     }
 
     pub(crate) async fn receive_after_head(&mut self) -> anyhow::Result<ChangeEnvelope> {
+        Ok(self.receive_message_after_head().await?.envelope)
+    }
+
+    pub(crate) async fn receive_message_after_head(
+        &mut self,
+    ) -> anyhow::Result<super::EnvelopeMessage> {
         loop {
-            let envelope = self.receive().await?;
+            let message = self.receive_message().await?;
             if let Some(head) = &self.head {
                 let current = head.results.snapshot()?;
                 if current.generation == head.generation
-                    && QueryChangeCodec::query_sequence(&envelope)? <= head.sequence
+                    && QueryChangeCodec::query_sequence(&message.envelope)? <= head.sequence
                 {
                     continue;
                 }
             }
-            return Ok(envelope);
+            return Ok(message);
         }
     }
 }
@@ -209,6 +219,15 @@ impl QueryResultsCatalog {
         self.0.events.subscribe()
     }
     pub(super) async fn publish(&self, envelope: ChangeEnvelope) -> anyhow::Result<()> {
+        self.publish_message(super::EnvelopeMessage::new(
+            envelope,
+            crate::observability::ExecutionContext::current(),
+        ))
+        .await
+    }
+
+    async fn publish_message(&self, message: super::EnvelopeMessage) -> anyhow::Result<()> {
+        let envelope = &message.envelope;
         let id = ComponentId::try_new(QueryChangeCodec::metadata(&envelope)?.query_id)?;
         if self.get(&id)?.is_none() {
             anyhow::bail!("query publication is not registered in this catalogue");
@@ -224,11 +243,11 @@ impl QueryResultsCatalog {
             .map(|(key, subscriber)| (key.clone(), subscriber.clone()))
             .collect();
         let deliveries = subscribers.into_iter().map(|(key, subscriber)| {
-            let envelope = envelope.clone();
+            let message = message.clone();
             async move {
                 let closed = match subscriber {
-                    Subscriber::Channel(sender) => sender.send(envelope).await.is_err(),
-                    Subscriber::Broadcast(sender) => sender.send(envelope).is_err(),
+                    Subscriber::Channel(sender) => sender.send(message).await.is_err(),
+                    Subscriber::Broadcast(sender) => sender.send(message).is_err(),
                 };
                 (key, closed)
             }
@@ -244,7 +263,7 @@ impl QueryResultsCatalog {
                 log::trace!("Retired a closed native query output subscription");
             }
         }
-        if self.0.events.send(envelope).is_err() {
+        if self.0.events.send(message.envelope).is_err() {
             log::trace!("Native query publication has no live subscribers; retained results remain available");
         }
         Ok(())
@@ -504,7 +523,12 @@ impl EnvelopeSink for QueryResultsOutlet {
         SinkCompletion::Handled
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        self.catalog.publish(input.envelope).await
+        self.catalog
+            .publish_message(super::EnvelopeMessage::new(
+                input.envelope,
+                input.execution_context,
+            ))
+            .await
     }
 }
 

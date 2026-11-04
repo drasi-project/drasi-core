@@ -12,7 +12,9 @@ use drasi_lib::{
         AdmissionOptions, ComponentDescriptor, ComponentRecovery, ComponentRole,
         ComputationComponent, EnvelopeSource, OutputEnvelope, SourceAdmission,
     },
-    context::workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
+    context::workers::{
+        join_owned_worker_gracefully, spawn_owned_component_worker, WorkerCompletion,
+    },
 };
 use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch, RwLock};
@@ -207,7 +209,7 @@ impl ComputationComponent for BridgeSource {
             let receiver = receiver.clone();
             let admission = self.admission.clone();
             let failures = failures.clone();
-            spawn_owned_worker(&runtime.workers[index], async move {
+            spawn_owned_component_worker(&runtime.workers[index], async move {
                 let operation = async {
                     if index == 0 {
                         receiver.listen_data(listener).await

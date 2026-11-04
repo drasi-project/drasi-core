@@ -167,6 +167,7 @@ use tracing::Instrument;
 struct InternalEvent {
     change: SourceChange,
     wal_seq: Option<u64>,
+    execution_context: drasi_lib::observability::ExecutionContext,
 }
 
 /// Handle for programmatic event injection into an Application Source
@@ -190,6 +191,7 @@ impl ApplicationSourceHandle {
     /// If WAL durability is enabled, the event is persisted to the WAL before
     /// being acknowledged (returned Ok). This ensures the WAL-before-ACK guarantee.
     pub async fn send(&self, change: SourceChange) -> Result<()> {
+        let execution_context = drasi_lib::observability::ExecutionContext::current();
         let _enqueue_guard = self.enqueue_order.lock().await;
         // WAL append before ACK (if durability is enabled)
         let wal_seq = {
@@ -214,7 +216,11 @@ impl ApplicationSourceHandle {
         };
 
         self.tx
-            .send(InternalEvent { change, wal_seq })
+            .send(InternalEvent {
+                change,
+                wal_seq,
+                execution_context,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("Failed to send event: channel closed"))?;
         Ok(())
@@ -379,6 +385,7 @@ pub struct ApplicationSource {
 struct ApplicationInput {
     receiver: mpsc::Receiver<InternalEvent>,
     pending: Option<SourceEventWrapper>,
+    pending_context: drasi_lib::observability::ExecutionContext,
 }
 
 impl ApplicationSource {
@@ -438,6 +445,7 @@ impl ApplicationSource {
             app_rx: Arc::new(tokio::sync::Mutex::new(ApplicationInput {
                 receiver: app_rx,
                 pending: None,
+                pending_context: Default::default(),
             })),
             app_tx,
             wal: shared_wal,
@@ -493,7 +501,7 @@ impl ApplicationSource {
             component_id = %source_id,
             component_type = "source"
         );
-        let handle = tokio::spawn(
+        let handle = drasi_lib::context::workers::spawn_component_worker(
             async move {
                 info!("ApplicationSource '{source_name}' event processor started");
 
@@ -531,16 +539,22 @@ impl ApplicationSource {
                             wrapper.source_position =
                                 Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                         }
+                        input.pending_context = event.execution_context;
                         input.pending = Some(wrapper);
                     }
 
-                    if let Err(e) = base
-                        .dispatch_event(input.pending.as_ref().expect("pending input").clone())
-                        .await
+                    if let Err(e) =
+                        drasi_lib::observability::ExecutionScope::capture()
+                            .with_context(input.pending_context.clone())
+                            .scope(base.dispatch_event(
+                                input.pending.as_ref().expect("pending input").clone(),
+                            ))
+                            .await
                     {
                         debug!("Failed to dispatch change (no subscribers): {e}");
                     }
                     input.pending = None;
+                    input.pending_context = Default::default();
                 }
 
                 info!("ApplicationSource '{source_name}' event processor stopped");
@@ -639,7 +653,7 @@ impl Source for ApplicationSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
+            drasi_lib::context::workers::spawn_owned_component_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;

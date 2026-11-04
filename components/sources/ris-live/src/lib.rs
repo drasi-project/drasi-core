@@ -167,7 +167,7 @@ impl Source for RisLiveSource {
             component_type = "source"
         );
 
-        let task_handle = tokio::spawn(
+        let task_handle = drasi_lib::context::workers::spawn_component_worker(
             async move {
                 if let Err(error) = stream::run_stream_loop(
                     source_id.clone(),

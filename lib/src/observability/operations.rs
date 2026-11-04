@@ -34,6 +34,12 @@ pub(crate) enum ObservedOperation {
     Evaluate,
     Commit,
     Control,
+    Bootstrap,
+    Snapshot,
+    Scheduled,
+    Reaction,
+    ReactionBatch,
+    ServiceWork,
 }
 
 impl ObservedOperation {
@@ -74,6 +80,12 @@ impl ObservedOperation {
             Self::Evaluate => "evaluate",
             Self::Commit => "commit",
             Self::Control => "control",
+            Self::Bootstrap => "bootstrap",
+            Self::Snapshot => "snapshot",
+            Self::Scheduled => "scheduled",
+            Self::Reaction => "reaction",
+            Self::ReactionBatch => "reaction_batch",
+            Self::ServiceWork => "service_work",
         }
     }
 
@@ -93,6 +105,12 @@ impl ObservedOperation {
             Self::Evaluate => "query.evaluate",
             Self::Commit => "query.commit",
             Self::Control => "control.apply",
+            Self::Bootstrap => "query.bootstrap",
+            Self::Snapshot => "bootstrap.snapshot",
+            Self::Scheduled => "component.scheduled",
+            Self::Reaction => "reaction.process",
+            Self::ReactionBatch => "reaction.process_batch",
+            Self::ServiceWork => "component.process",
         })
     }
 
@@ -142,6 +160,8 @@ pub(crate) struct OperationFields<'a> {
     pub queue_id: Option<&'a str>,
     pub handling_outcome: Option<&'static str>,
     pub target_count: Option<usize>,
+    pub work_kind: Option<&'static str>,
+    pub source_count: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -386,12 +406,48 @@ impl ComponentObservations {
         self.begin_with_links(operation, parent, fields, &[], false)
     }
 
+    pub(crate) fn begin_untraced(
+        self: &Arc<Self>,
+        operation: ObservedOperation,
+        parent: &ExecutionContext,
+        fields: OperationFields<'_>,
+    ) -> Result<OperationObservation, TelemetryError> {
+        self.begin_operation(operation, parent, fields, &[], false, false)
+    }
+
+    pub(crate) fn root(
+        self: &Arc<Self>,
+        operation: ObservedOperation,
+        link: &ExecutionContext,
+        fields: OperationFields<'_>,
+    ) -> Result<OperationObservation, TelemetryError> {
+        self.begin_with_links(
+            operation,
+            &ExecutionContext::default(),
+            fields,
+            link.trace().map(std::slice::from_ref).unwrap_or_default(),
+            false,
+        )
+    }
+
     pub(crate) fn batch<'a>(
         self: &Arc<Self>,
         contexts: impl IntoIterator<Item = &'a ExecutionContext>,
         fields: OperationFields<'_>,
     ) -> Result<OperationObservation, TelemetryError> {
-        let selected = if self.config.policy().allows_span("sink.handle_batch") {
+        self.batch_operation(ObservedOperation::HandleBatch, contexts, fields)
+    }
+
+    pub(crate) fn batch_operation<'a>(
+        self: &Arc<Self>,
+        operation: ObservedOperation,
+        contexts: impl IntoIterator<Item = &'a ExecutionContext>,
+        fields: OperationFields<'_>,
+    ) -> Result<OperationObservation, TelemetryError> {
+        let selected = if operation
+            .span_name()
+            .is_some_and(|name| self.config.policy().allows_span(name))
+        {
             BatchTraceParent::select(contexts, self.config.link_limits())
         } else {
             BatchTraceParent {
@@ -401,7 +457,7 @@ impl ComponentObservations {
             }
         };
         self.begin_with_links(
-            ObservedOperation::HandleBatch,
+            operation,
             &selected.parent,
             fields,
             &selected.links,
@@ -417,9 +473,29 @@ impl ComponentObservations {
         links: &[super::TraceContextV1],
         truncated: bool,
     ) -> Result<OperationObservation, TelemetryError> {
-        let eligible = operation
-            .span_name()
-            .is_some_and(|name| self.config.policy().allows_span(name));
+        self.begin_operation(operation, parent, fields, links, truncated, true)
+    }
+
+    fn begin_operation(
+        self: &Arc<Self>,
+        operation: ObservedOperation,
+        parent: &ExecutionContext,
+        fields: OperationFields<'_>,
+        links: &[super::TraceContextV1],
+        truncated: bool,
+        trace: bool,
+    ) -> Result<OperationObservation, TelemetryError> {
+        let eligible = trace
+            && !(operation == ObservedOperation::Evaluate && fields.change_count == Some(0))
+            && operation
+                .span_name()
+                .is_some_and(|name| self.config.policy().allows_span(name));
+        let eligible = eligible
+            && self
+                .state
+                .lock()
+                .map_err(|_| TelemetryError::Poisoned)?
+                .active;
         let sampled = !eligible
             || self.config.context_adapter().is_some()
             || self.config.policy().sampling().decide(
@@ -464,11 +540,19 @@ impl ComponentObservations {
                 .config
                 .policy()
                 .allows_metric("drasi.component.operation.duration");
+        let mut scope = ExecutionScope::capture()
+            .with_context(context)
+            .with_adapter(self.config.context_adapter().cloned());
+        if ExecutionScope::current_component().is_none() {
+            if let Some(identity) = self.config.scope() {
+                scope = scope.with_component(identity.clone(), self.generation);
+            }
+        }
         Ok(OperationObservation {
             owner: self.clone(),
             operation,
             span,
-            scope: ExecutionScope::capture().with_context(context),
+            scope,
             started: timed.then(Instant::now),
             finished: false,
             input_count: fields.input_count.unwrap_or(0),
@@ -491,6 +575,10 @@ pub(crate) struct OperationObservation {
 impl OperationObservation {
     pub(crate) fn context(&self) -> &ExecutionContext {
         self.scope.context()
+    }
+
+    pub(crate) fn span(&self) -> Span {
+        self.span.clone()
     }
 }
 
@@ -568,12 +656,17 @@ impl OperationObservation {
         mut self,
         future: impl Future<Output = Result<Vec<crate::computation::v1::OutputEnvelope>, E>>,
     ) -> Result<Vec<crate::computation::v1::OutputEnvelope>, E> {
-        let result = self
+        let mut result = self
             .owner
             .scope(self.scope.scope(future.instrument(self.span.clone())))
             .await;
-        if let Ok(outputs) = &result {
+        if let Ok(outputs) = &mut result {
             self.record("output_count", trace_count(outputs.len()));
+            for output in outputs {
+                if output.execution_context.is_empty() {
+                    output.execution_context = self.context().clone();
+                }
+            }
         }
         self.finish(if result.is_ok() { 0 } else { 1 });
         result
@@ -651,7 +744,14 @@ impl OperationObservation {
                     metrics.errors.increment(1);
                 }
             }
-            if outcome == 0 {
+            if outcome == 0
+                && matches!(
+                    self.operation,
+                    ObservedOperation::Transform
+                        | ObservedOperation::Handle
+                        | ObservedOperation::HandleBatch
+                )
+            {
                 if let Some(index) = self.completion.and_then(|completion| {
                     ["transformed", "accepted", "handled"]
                         .iter()
@@ -700,6 +800,8 @@ fn operation_span(
                 queue_id = fields.queue_id, handling_outcome = fields.handling_outcome,
                 query_id = scope.filter(|scope| scope.semantic_kind() == Some(drasi_computation_contracts::ComponentSemanticKind::Query)).and_then(TelemetryScope::component_id).map(|id| id.as_str()),
                 target_count = fields.target_count.map(trace_count),
+                work_kind = fields.work_kind,
+                source_count = fields.source_count.map(trace_count),
                 links_truncated = truncated, acceptance = Empty)
         };
     }
@@ -717,6 +819,12 @@ fn operation_span(
         ObservedOperation::Evaluate => span!("query.evaluate"),
         ObservedOperation::Commit => span!("query.commit"),
         ObservedOperation::Control => span!("control.apply"),
+        ObservedOperation::Bootstrap => span!("query.bootstrap"),
+        ObservedOperation::Snapshot => span!("bootstrap.snapshot"),
+        ObservedOperation::Scheduled => span!("component.scheduled"),
+        ObservedOperation::Reaction => span!("reaction.process"),
+        ObservedOperation::ReactionBatch => span!("reaction.process_batch"),
+        ObservedOperation::ServiceWork => span!("component.process"),
         ObservedOperation::Next | ObservedOperation::Run => Span::none(),
     }
 }

@@ -1264,14 +1264,23 @@ impl QueryResultReader {
 #[async_trait]
 impl crate::channels::ChangeReceiver<crate::channels::QueryResult> for NativeReceiver {
     async fn recv(&mut self) -> anyhow::Result<Arc<crate::channels::QueryResult>> {
+        Ok(self.recv_message().await?.payload)
+    }
+
+    async fn recv_message(
+        &mut self,
+    ) -> anyhow::Result<crate::channels::ChangeMessage<crate::channels::QueryResult>> {
         let mut observed = self.control.subscribe_observed();
         loop {
             self.require_current()?;
             tokio::select! {
-                result = self.receiver.receive_after_head() => {
-                    let envelope = result?;
+                result = self.receiver.receive_message_after_head() => {
+                    let message = result?;
                     self.require_current()?;
-                    return Ok(Arc::new(QueryChangeCodec::to_legacy_result(&envelope)?));
+                    return Ok(crate::channels::ChangeMessage::new(
+                        Arc::new(QueryChangeCodec::to_legacy_result(&message.envelope)?),
+                        message.execution_context,
+                    ));
                 }
                 result = observed.changed() => { result?; }
             }

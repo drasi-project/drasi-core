@@ -103,15 +103,25 @@ The SDK re-exports `ExecutionContext`, `TraceContextV1` and `ExecutionScope` und
 `telemetry`. Inputs and outputs have a transient `execution_context` field.
 Use constructors instead of old two-field struct literals; explicitly preserve
 an input's context when forwarding, or call `with_current_context()` on an output
-produced under the current operation. An empty output context is intentional,
-not an instruction to borrow a later caller's trace.
+produced under the current operation. Raw constructors are context-free. The
+host fills a missing processing-output context from that callback's actual
+operation; it never borrows a later unrelated caller's trace.
 
-Capture an `ExecutionScope` before spawning and pass `scope.scope(future)` to the
-shared owned-worker helper. For blocking work use `scope.in_scope(closure)`.
+Use the shared `spawn_owned_component_worker` for a long-lived worker: it
+captures the component binding but clears the startup parent. A bounded child
+operation, such as a snapshot, uses `spawn_owned_scoped_worker` or
+`spawn_owned_scoped_blocking_worker`. Alternatively capture an `ExecutionScope`
+explicitly and use `scope.scope(future)` or `scope.in_scope(closure)`.
 Worker queues must retain each item's `ExecutionContext` and restore it using
 the receiving worker's binding, not one context captured at worker startup.
 The helpers restore state on suspension and cancellation/drop; never hold an
 entered-span or context guard across an await.
+
+Bootstrap and scheduled/replay framework spans remain host-owned. A wakeup is
+not proof that work exists, and saved output replay is not new evaluation.
+Do not persist trace context with snapshots, future-queue items, output records,
+or producer progress. Context-aware worker adoption does not enable export of
+completed native internal spans.
 
 With the SDK's `otel-context` feature, the context adapter uses the plugin's
 locally composed `tracing-opentelemetry` layer. Keep its default context

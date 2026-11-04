@@ -365,7 +365,7 @@ async fn connect_pg_client(config: &PostgresSourceConfig) -> Result<tokio_postgr
 
             debug!("PostgreSQL query connection: connecting with SSL (require)");
             let (client, connection) = pg_config.connect(connector).await?;
-            tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_component_worker(async move {
                 if let Err(e) = connection.await {
                     log::warn!("PostgreSQL query connection closed: {e}");
                 }
@@ -384,7 +384,7 @@ async fn connect_pg_client(config: &PostgresSourceConfig) -> Result<tokio_postgr
             pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
             debug!("PostgreSQL query connection: connecting with SSL (prefer)");
             let (client, connection) = pg_config.connect(connector).await?;
-            tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_component_worker(async move {
                 if let Err(e) = connection.await {
                     log::warn!("PostgreSQL query connection closed: {e}");
                 }
@@ -394,7 +394,7 @@ async fn connect_pg_client(config: &PostgresSourceConfig) -> Result<tokio_postgr
         SslMode::Disable => {
             debug!("PostgreSQL query connection: connecting without SSL");
             let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
-            tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_component_worker(async move {
                 if let Err(e) = connection.await {
                     log::warn!("PostgreSQL query connection closed: {e}");
                 }
@@ -655,7 +655,7 @@ impl PostgresReplicationSource {
             "PostgreSQL source '{}' must join its previous replication worker before starting",
             self.base.id
         );
-        let task = tokio::spawn(
+        let task = drasi_lib::context::workers::spawn_component_worker(
             async move {
                 info!("Starting replication for source {source_id}");
                 let mut startup_tx = Some(startup_tx);

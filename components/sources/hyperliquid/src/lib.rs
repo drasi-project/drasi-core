@@ -184,32 +184,36 @@ impl Source for HyperliquidSource {
             .unwrap_or_default();
 
         let span_source_id = source_id.clone();
-        let stream_task = tokio::spawn(
+        let stream_task = drasi_lib::context::workers::spawn_component_worker(
             async move {
-                let ws_handle = tokio::spawn(run_ws_stream(WsStreamParams {
-                    source_id: source_id.clone(),
-                    ws_url,
-                    config: config.clone(),
-                    coins,
-                    base: base.clone_shared(),
-                    state_store: state_store.clone(),
-                    stream_state: stream_state.clone(),
-                    shutdown_rx: shutdown_rx.clone(),
-                    start_timestamp,
-                }));
-
-                let funding_handle = if config.enable_funding_rates {
-                    let rest_client = HyperliquidRestClient::new(config.network.rest_url());
-                    Some(tokio::spawn(run_funding_poll(FundingPollParams {
+                let ws_handle = drasi_lib::context::workers::spawn_component_worker(run_ws_stream(
+                    WsStreamParams {
                         source_id: source_id.clone(),
-                        rest_client,
+                        ws_url,
                         config: config.clone(),
+                        coins,
                         base: base.clone_shared(),
                         state_store: state_store.clone(),
                         stream_state: stream_state.clone(),
                         shutdown_rx: shutdown_rx.clone(),
                         start_timestamp,
-                    })))
+                    },
+                ));
+
+                let funding_handle = if config.enable_funding_rates {
+                    let rest_client = HyperliquidRestClient::new(config.network.rest_url());
+                    Some(drasi_lib::context::workers::spawn_component_worker(
+                        run_funding_poll(FundingPollParams {
+                            source_id: source_id.clone(),
+                            rest_client,
+                            config: config.clone(),
+                            base: base.clone_shared(),
+                            state_store: state_store.clone(),
+                            stream_state: stream_state.clone(),
+                            shutdown_rx: shutdown_rx.clone(),
+                            start_timestamp,
+                        }),
+                    ))
                 } else {
                     None
                 };

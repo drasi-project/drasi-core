@@ -389,7 +389,7 @@ impl Source for GrpcSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        drasi_lib::context::workers::spawn_owned_worker(
+        drasi_lib::context::workers::spawn_owned_component_worker(
             &self.base.task_handle,
             async move {
                 reporter
@@ -423,24 +423,27 @@ impl Source for GrpcSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(30));
-                let mut stopping = base.subscribe_wal_pruning_stop();
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = stopping.wait_for(|stopping| *stopping) => break,
-                        _ = interval.tick() => {}
-                    }
-                    match base.prune_confirmed_wal(wal.as_ref()).await {
-                        Ok(pruned) if pruned > 0 => {
-                            debug!("[{source_id}] WAL pruned: count={pruned}");
+            drasi_lib::context::workers::spawn_owned_component_worker(
+                &self.prune_task,
+                async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(30));
+                    let mut stopping = base.subscribe_wal_pruning_stop();
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = stopping.wait_for(|stopping| *stopping) => break,
+                            _ = interval.tick() => {}
                         }
-                        Ok(_) => {}
-                        Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
+                        match base.prune_confirmed_wal(wal.as_ref()).await {
+                            Ok(pruned) if pruned > 0 => {
+                                debug!("[{source_id}] WAL pruned: count={pruned}");
+                            }
+                            Ok(_) => {}
+                            Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
+                        }
                     }
-                }
-            })
+                },
+            )
             .await
             .with_context(|| format!("gRPC source '{}' WAL pruner registration", self.base.id))?;
         }
@@ -661,7 +664,7 @@ impl SourceService for GrpcSourceService {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        tokio::spawn(
+        drasi_lib::context::workers::spawn_scoped_worker(
             async move {
                 let mut events_processed = 0u64;
 
@@ -791,7 +794,7 @@ impl SourceService for GrpcSourceService {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        tokio::spawn(
+        drasi_lib::context::workers::spawn_scoped_worker(
             async move {
                 let _ = tx
                     .send(Ok(BootstrapResponse {

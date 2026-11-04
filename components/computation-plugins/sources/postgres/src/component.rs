@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::GraphChangeCodec;
 use drasi_computation_contracts::{
-    workers::{join_owned_worker, spawn_owned_worker, WorkerCompletion},
+    workers::{join_owned_worker, spawn_owned_component_worker, WorkerCompletion},
     ComponentDescriptor, ComponentId, ConsumerProgressSnapshot, ConsumerProgressView,
     InputPositionPolicy, OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId,
     SourceProgressSnapshot, SourceProgressUpdates, SourceProgressView, SourceTransactionCodec,
@@ -629,7 +629,7 @@ impl NativeComponent for PostgresTransactionSource {
         self.shutdown.send_replace(false);
         let mut shutdown = self.shutdown.subscribe();
         let shared = self.shared.is_some();
-        spawn_owned_worker(&self.worker, async move {
+        spawn_owned_component_worker(&self.worker, async move {
             let result = tokio::select! {
                 biased;
                 _ = shutdown.wait_for(|stopped| *stopped) => Ok(()),

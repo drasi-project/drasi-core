@@ -853,15 +853,30 @@ Enabled profiles instrument the owning graph's actual operation boundaries:
 
 | Detail | Supported spans |
 |---|---|
-| Basic | Source publication, transformer/query processing, single/batch sink handling, start/stop/reconfigure, and control requests |
+| Basic | Source publication, transformer/query processing, single/batch sink handling, bootstrap, scheduled/replay attempts, ordinary reaction workers, start/stop/reconfigure, and control requests |
 | Debug | Inner query evaluation, query-owned commits, pipe acceptance, output confirmation, and supported acknowledgements |
 
 Publication excludes idle `next()` waiting; batch handling excludes collection.
 Processing excludes later forwarding, confirmation, and acknowledgement. Sink
 completion stays `accepted` or `handled` according to its declared contract.
 Ordinary reaction enqueue acceptance is not completed reaction processing.
-Output-only replay does not imply another evaluation. Bootstrap, scheduled-work
-narratives and broad component-internal worker instrumentation remain separate.
+Output-only replay does not imply another evaluation. `component.scheduled`
+starts only for an actual bounded future-queue, input-replay or output-replay unit;
+idle wakeups and final empty drain probes have no processing trace. Scheduled
+attempts use new roots, never a stored historical event parent. Real replay
+bookkeeping commits can still have debug spans.
+
+`query.bootstrap` is one aggregate root linked to its initiating start operation.
+It includes awaited initialization and completion, with bounded
+`bootstrap.snapshot` detail and aggregate counts, not a span per snapshot row.
+Restart/rebootstrap suppresses per-row evaluator and commit detail too. Tracing
+does not change startup readiness or cancellation-safe provider cleanup.
+
+Ordinary reaction workers emit `reaction.process` or `reaction.process_batch`
+around actual effects, separately from enqueue acceptance. Batches choose a
+shared parent or bounded links before sampling; collection is outside handling.
+These trace-only observations do not add handling metrics, acknowledgements,
+or stronger delivery guarantees.
 
 The common component instruments count operation attempts, successfully processed
 input envelopes, and validated output envelopes before fan-out. Source dispatch
@@ -975,8 +990,11 @@ builds; native component-authored children still require their own local tracing
 integration, and production transport of completed native spans is separate.
 
 `ExecutionScope::capture()` captures local execution bindings for explicitly
-spawned work. Wrap its future with `scope.scope(future)` and pass that future to
-the existing owned-worker helper; use `scope.in_scope(closure)` for blocking work.
+spawned work. The shared `spawn_owned_component_worker` helper keeps those
+bindings but clears the startup operation's parent for a long-lived worker.
+Use `spawn_owned_scoped_worker` for short child work such as one snapshot, or
+`spawn_owned_scoped_blocking_worker` for its blocking equivalent. The original
+ownership-only helpers remain available and do not implicitly capture context.
 For a queue, retain each item's `ExecutionContext`, then use the receiving scope's
 `with_context(...)`. An explicitly empty scope clears inherited context.
 The component identity is the actual runtime construction/logging identity:
@@ -984,13 +1002,29 @@ an ordinary instance uses its instance ID, while a standalone graph's execution
 scope remains its graph ID. A separate configured telemetry namespace does not
 rename existing component log keys.
 
+Ordinary dispatchers and priority queues have transient `ChangeMessage<T>`
+sidecars. Use `recv_message`, `dequeue_message`, and `try_dequeue_message` in
+workers; payload-only convenience methods intentionally discard context.
+Persisted replay has an empty historical context, while replay-then-live
+receivers preserve subsequent live sidecars. No event/WAL/checkpoint format
+or receipt digest contains this metadata.
+
+`ReactionBase::worker_telemetry()` provides the receiving component's binding.
+Use its `reaction`/`reaction_batch` observation at actual handling, not while
+waiting for a queue. Services can use `WorkerTelemetry::capture().service_work`
+for a bounded unit; do not instrument a status watcher or the whole service
+lifetime as processing. Scope futures per poll and blocking closures with
+`ExecutionScope::in_scope`; never hold an entered guard across an await.
+
 ### Rust API migration
 
 - `InputEnvelope` and `OutputEnvelope` now have `execution_context`. Prefer
   `new(port, envelope)` and `with_execution_context(...)` to two-field literals.
 - Constructors are context-free. Forward an input's context explicitly, or use
   `OutputEnvelope::with_current_context()` inside a restored producing scope.
-  Empty transformer/replay output contexts are not filled from ambient work.
+  Graph-owned processing fills a missing output context from that actual
+  producing operation, not a later unrelated caller. Replay explicitly creates
+  a fresh attempt context rather than borrowing a historical input parent.
   A graph-owned source publication can explicitly create and carry its own
   operation context; that does not reconstruct historical traces.
 - `EnvelopeSender` implementors must implement `send_message(EnvelopeMessage)`.
@@ -1006,8 +1040,10 @@ rename existing component log keys.
 
 Native context transport uses a negotiated extension, not appended fields in
 frozen vtables or legacy Source/Reaction payloads. Missing required capabilities
-fail explicitly. Broader component-worker adoption, production spans, native
-completed-span/log collection and metric callbacks remain follow-up work.
+fail explicitly. Completed native-span/log collection and metric callbacks
+remain follow-up work. Legacy Source/Reaction cdylibs without context transport
+retain their loading/logging behavior, but cannot provide transparent worker
+trace continuity through their unchanged ABI.
 
 ---
 

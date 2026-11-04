@@ -386,7 +386,7 @@ impl Source for MsSqlSource {
         let subscriber_resume_lsns = self.subscriber_resume_lsns.clone();
 
         // Spawn CDC polling task
-        let task_handle = tokio::spawn(async move {
+        let task_handle = drasi_lib::context::workers::spawn_component_worker(async move {
             if let Err(e) = stream::run_cdc_stream(
                 source_id.clone(),
                 config,

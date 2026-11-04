@@ -21,6 +21,7 @@
 mod component_status;
 pub mod dispatcher;
 pub mod events;
+mod message;
 pub mod priority_queue;
 
 #[cfg(test)]
@@ -32,4 +33,5 @@ pub use dispatcher::{
     ChannelChangeDispatcher, ChannelChangeReceiver, DispatchMode, ReplayThenLiveReceiver,
 };
 pub use events::*;
+pub use message::ChangeMessage;
 pub use priority_queue::{PriorityQueue, PriorityQueueMetrics};

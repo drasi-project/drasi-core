@@ -299,37 +299,58 @@ impl Reaction for DashboardReaction {
         let priority_queue = self.base.priority_queue.clone();
         let websocket_hub = self.websocket_hub.clone();
         let snapshot_store = self.snapshot_store.clone();
+        let telemetry = self.base.worker_telemetry().await;
         spawn_owned_worker(&self.base.processing_task, async move {
-            info!("[{reaction_id}] dashboard processing task started");
+            telemetry
+                .scope(async {
+                    info!("[{reaction_id}] dashboard processing task started");
 
-            loop {
-                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
-                    info!("[{reaction_id}] dashboard reaction no longer running");
-                    break;
-                }
+                    loop {
+                        if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
+                            info!("[{reaction_id}] dashboard reaction no longer running");
+                            break;
+                        }
 
-                let query_result = tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => {
-                        debug!("[{reaction_id}] dashboard processing shutdown signal");
-                        break;
+                        let query_result = tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => {
+                                debug!("[{reaction_id}] dashboard processing shutdown signal");
+                                break;
+                            }
+                            result = priority_queue.dequeue_message() => result,
+                        };
+
+                        let payload = query_result.payload.as_ref();
+                        let change_count = payload
+                            .results
+                            .iter()
+                            .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop))
+                            .count();
+                        let observation = if change_count == 0 {
+                            None
+                        } else {
+                            telemetry
+                                .reaction(&query_result.execution_context, change_count)
+                                .map_err(|e| log::warn!("Failed to observe dashboard update: {e}"))
+                                .ok()
+                        };
+                        let update = snapshot_store.apply_and_broadcast(payload, &websocket_hub);
+                        let outcome = match observation {
+                            Some(observation) => observation.run(update).await,
+                            None => update.await,
+                        };
+                        if let Err(err) = outcome {
+                            error!("[{reaction_id}] dashboard snapshot update failed: {err}");
+                            status_handle
+                                .set_status(ComponentStatus::Error, Some(err.to_string()))
+                                .await;
+                            break;
+                        }
                     }
-                    result = priority_queue.dequeue() => result,
-                };
 
-                if let Err(err) = snapshot_store
-                    .apply_and_broadcast(query_result.as_ref(), &websocket_hub)
-                    .await
-                {
-                    error!("[{reaction_id}] dashboard snapshot update failed: {err}");
-                    status_handle
-                        .set_status(ComponentStatus::Error, Some(err.to_string()))
-                        .await;
-                    break;
-                }
-            }
-
-            info!("[{reaction_id}] dashboard processing task ended");
+                    info!("[{reaction_id}] dashboard processing task ended");
+                })
+                .await;
         })
         .await?;
 
@@ -337,19 +358,25 @@ impl Reaction for DashboardReaction {
         let heartbeat_hub = self.websocket_hub.clone();
         let heartbeat_status_handle = self.base.status_handle();
         let heartbeat_reaction_id = self.base.id.clone();
+        let telemetry = self.base.worker_telemetry().await;
         spawn_owned_worker(&self.heartbeat_task, async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
-            loop {
-                ticker.tick().await;
-                if !matches!(
-                    heartbeat_status_handle.get_status().await,
-                    ComponentStatus::Running
-                ) {
-                    debug!("[{heartbeat_reaction_id}] heartbeat task stopped");
-                    break;
-                }
-                heartbeat_hub.broadcast_heartbeat(chrono::Utc::now().timestamp_millis());
-            }
+            telemetry
+                .scope(async {
+                    let mut ticker =
+                        tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
+                    loop {
+                        ticker.tick().await;
+                        if !matches!(
+                            heartbeat_status_handle.get_status().await,
+                            ComponentStatus::Running
+                        ) {
+                            debug!("[{heartbeat_reaction_id}] heartbeat task stopped");
+                            break;
+                        }
+                        heartbeat_hub.broadcast_heartbeat(chrono::Utc::now().timestamp_millis());
+                    }
+                })
+                .await;
         })
         .await?;
 
@@ -369,66 +396,71 @@ impl Reaction for DashboardReaction {
         self.shutdown_tx.send_replace(false);
         let mut server_shutdown_rx = self.shutdown_tx.subscribe();
         let ws_shutdown_rx = self.shutdown_tx.subscribe();
+        let telemetry = self.base.worker_telemetry().await;
         spawn_owned_worker(&self.server_handle, async move {
-            let cors = CorsLayer::new()
-                .allow_origin(tower_http::cors::AllowOrigin::exact(
-                    format!("http://{host}:{port}")
-                        .parse()
-                        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("null")),
-                ))
-                .allow_methods([
-                    Method::GET,
-                    Method::POST,
-                    Method::PUT,
-                    Method::DELETE,
-                    Method::OPTIONS,
-                ])
-                .allow_headers(Any);
+            telemetry
+                .scope(async {
+                    let cors = CorsLayer::new()
+                        .allow_origin(tower_http::cors::AllowOrigin::exact(
+                            format!("http://{host}:{port}")
+                                .parse()
+                                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("null")),
+                        ))
+                        .allow_methods([
+                            Method::GET,
+                            Method::POST,
+                            Method::PUT,
+                            Method::DELETE,
+                            Method::OPTIONS,
+                        ])
+                        .allow_headers(Any);
 
-            let websocket_hub_for_route = websocket_hub.clone();
-            let query_ids_for_route = query_ids.clone();
-            let ws_shutdown_for_route = ws_shutdown_rx.clone();
-            let app = Router::new()
-                .route("/", get(index_handler))
-                .route("/dashboard/:id", get(dashboard_page_handler))
-                .route("/assets/*path", get(asset_handler))
-                .route(
-                    "/ws",
-                    get(move |upgrade: WebSocketUpgrade| {
-                        crate::websocket::ws_upgrade(
-                            upgrade,
-                            websocket_hub_for_route.clone(),
-                            websocket_snapshots.clone(),
-                            query_ids_for_route.clone(),
-                            ws_shutdown_for_route.clone(),
+                    let websocket_hub_for_route = websocket_hub.clone();
+                    let query_ids_for_route = query_ids.clone();
+                    let ws_shutdown_for_route = ws_shutdown_rx.clone();
+                    let app = Router::new()
+                        .route("/", get(index_handler))
+                        .route("/dashboard/:id", get(dashboard_page_handler))
+                        .route("/assets/*path", get(asset_handler))
+                        .route(
+                            "/ws",
+                            get(move |upgrade: WebSocketUpgrade| {
+                                crate::websocket::ws_upgrade(
+                                    upgrade,
+                                    websocket_hub_for_route.clone(),
+                                    websocket_snapshots.clone(),
+                                    query_ids_for_route.clone(),
+                                    ws_shutdown_for_route.clone(),
+                                )
+                            }),
                         )
-                    }),
-                )
-                .merge(api::router().with_state(api_state))
-                .layer(cors);
+                        .merge(api::router().with_state(api_state))
+                        .layer(cors);
 
-            let bound_addr = listener
-                .local_addr()
-                .map(|address| address.to_string())
-                .unwrap_or_else(|_| format!("{host}:{port}"));
-            info!("dashboard server listening on {bound_addr}");
+                    let bound_addr = listener
+                        .local_addr()
+                        .map(|address| address.to_string())
+                        .unwrap_or_else(|_| format!("{host}:{port}"));
+                    info!("dashboard server listening on {bound_addr}");
 
-            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-                // Resolves when stop() sets the flag to `true`, or if the sender
-                // is dropped (treated as shutdown).
-                let _ = server_shutdown_rx.wait_for(|signalled| *signalled).await;
-            });
-            let result = server.await;
-            if let Err(err) = &result {
-                error!("dashboard server error: {err}");
-                server_status_handle
-                    .set_status(
-                        ComponentStatus::Error,
-                        Some(format!("Dashboard server failed: {err}")),
-                    )
-                    .await;
-            }
-            result
+                    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                        // Resolves when stop() sets the flag to `true`, or if the sender
+                        // is dropped (treated as shutdown).
+                        let _ = server_shutdown_rx.wait_for(|signalled| *signalled).await;
+                    });
+                    let result = server.await;
+                    if let Err(err) = &result {
+                        error!("dashboard server error: {err}");
+                        server_status_handle
+                            .set_status(
+                                ComponentStatus::Error,
+                                Some(format!("Dashboard server failed: {err}")),
+                            )
+                            .await;
+                    }
+                    result
+                })
+                .await
         })
         .await?;
 

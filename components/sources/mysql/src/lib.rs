@@ -43,7 +43,8 @@ use tracing::Instrument;
 
 use drasi_lib::channels::{ComponentStatus, DispatchMode};
 use drasi_lib::context::workers::{
-    join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned, WorkerCompletion,
+    join_owned_worker_gracefully, spawn_owned_component_worker, WorkerAlreadyOwned,
+    WorkerCompletion,
 };
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
@@ -174,7 +175,7 @@ impl Source for MySqlReplicationSource {
         );
 
         let (started, ready) = oneshot::channel();
-        spawn_owned_worker(
+        spawn_owned_component_worker(
             &self.replication_task,
             async move {
                 let mut stream = ReplicationStream::new(

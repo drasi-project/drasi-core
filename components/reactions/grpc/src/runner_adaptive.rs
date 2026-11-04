@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
 
 use drasi_lib::channels::ComponentStatus;
+use drasi_lib::observability::ExecutionContext;
 use drasi_lib::reactions::common::{base::ReactionBase, AdaptiveBatchConfig};
 use drasi_lib::ReactionRecoveryPolicy;
 
@@ -40,7 +41,14 @@ use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState,
 /// terminal (last) item of its originating `QueryResult`. The terminal flag
 /// keeps checkpoint advancement at-least-once correct when a `QueryResult` is
 /// split across batches — the sequence only advances once its terminal acks.
-type BatcherItem = (BatchKey, ProtoQueryResultItem, bool);
+struct BatcherItem {
+    key: BatchKey,
+    item: ProtoQueryResultItem,
+    is_terminal: bool,
+    execution_context: ExecutionContext,
+    // Sequence IDs can repeat on replay; this identifies the dequeued input.
+    input_id: u64,
+}
 
 pub(crate) struct AdaptiveRunnerParams {
     pub reaction_name: String,
@@ -53,6 +61,8 @@ pub(crate) struct AdaptiveRunnerParams {
 }
 
 pub(crate) async fn run(params: AdaptiveRunnerParams) {
+    let telemetry = params.base.worker_telemetry().await;
+    telemetry.scope(async {
     let AdaptiveRunnerParams {
         reaction_name,
         adaptive,
@@ -103,6 +113,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
         .filter(|t| t.has_renderable_templates())
         .map(|_| TemplateEngine::new());
 
+    let batcher_telemetry = telemetry.clone();
     let batcher = async move {
         let mut checkpoints = checkpoints;
         let mut batcher = AdaptiveBatcher::new(batch_rx, runtime_cfg);
@@ -124,12 +135,18 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             // at-least-once rationale.
             let mut meta = Vec::with_capacity(batch.len());
             let mut batches_by_key: HashMap<BatchKey, Vec<ProtoQueryResultItem>> = HashMap::new();
-            for (key, item, is_terminal) in batch {
+            let change_count = batch.len();
+            let mut contexts = HashMap::new();
+            for BatcherItem { key, item, is_terminal, execution_context, input_id } in batch {
+                contexts.entry(input_id).or_insert(execution_context);
                 meta.push((key.query_id.clone(), item.sequence, is_terminal));
                 batches_by_key.entry(key).or_default().push(item);
             }
             let (completed, seen) = batch_checkpoint_candidates(meta);
 
+            let observation = batcher_telemetry.reaction_batch(contexts.values(), contexts.len(), change_count)
+                .map_err(|e| warn!("Failed to observe adaptive gRPC batch: {e}")).ok();
+            let deliver = async {
             if client.is_none() {
                 match create_client_with_retry(
                     &batcher_endpoint,
@@ -154,7 +171,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                                 ),
                             )
                             .await;
-                            return;
+                            return Err(true);
                         }
                         FailureAction::SkipAndContinue => {
                             failed_sends += 1;
@@ -165,7 +182,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                             for (q, s) in &seen {
                                 let _ = checkpoints.advance(&batcher_base, q, *s).await;
                             }
-                            continue;
+                            return Err(false);
                         }
                     },
                 }
@@ -210,7 +227,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                                 ),
                             )
                             .await;
-                            return;
+                            return Err(true);
                         }
                         FailureAction::SkipAndContinue => {
                             warn!(
@@ -254,8 +271,17 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                         ),
                     )
                     .await;
-                    return;
+                    return Err(true);
                 }
+            }
+            if failed_queries.is_empty() { Ok(()) } else { Err(false) }
+            };
+            let outcome = match observation {
+                Some(observation) => observation.run(deliver).await,
+                None => deliver.await,
+            };
+            if matches!(outcome, Err(true)) {
+                return;
             }
         }
 
@@ -269,6 +295,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     let engine_for_loop = template_engine;
 
     let forward = async {
+        let mut next_input_id = 0u64;
         loop {
             let query_result = tokio::select! {
                 biased;
@@ -282,8 +309,12 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                     debug!("[{reaction_name}] Batcher exited; exiting adaptive processing loop");
                     break;
                 }
-                result = priority_queue.dequeue() => result,
+                result = priority_queue.dequeue_message() => result,
             };
+            let execution_context = query_result.execution_context;
+            let query_result = query_result.payload;
+            let input_id = next_input_id;
+            next_input_id = next_input_id.wrapping_add(1);
 
             if query_result.results.is_empty() {
                 debug!("[{reaction_name}] Received empty result set from query");
@@ -321,7 +352,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             let last_idx = built_items.len().saturating_sub(1);
             for (i, (key, item)) in built_items.into_iter().enumerate() {
                 let is_terminal = i == last_idx;
-                if batch_tx.send((key, item, is_terminal)).await.is_err() {
+                if batch_tx.send(BatcherItem {
+                    key, item, is_terminal, execution_context: execution_context.clone(), input_id,
+                }).await.is_err() {
                     let msg = "failed to send item to adaptive batcher".to_string();
                     error!("[{reaction_name}] {msg}");
                     status_handle
@@ -349,6 +382,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             Some("Adaptive gRPC reaction stopped".to_string()),
         )
         .await;
+    }).await;
 }
 
 /// Set the reaction to `Error` and record that a fail-stop occurred so the main

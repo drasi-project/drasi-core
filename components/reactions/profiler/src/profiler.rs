@@ -505,75 +505,106 @@ impl Reaction for ProfilerReaction {
         let report_interval = self.report_interval_secs;
         let priority_queue = self.base.priority_queue.clone();
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
+        let telemetry = self.base.worker_telemetry().await;
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
-            let mut report_timer =
-                tokio::time::interval(tokio::time::Duration::from_secs(report_interval));
-            report_timer.tick().await; // Skip first immediate tick
+            telemetry
+                .scope(async {
+                    let mut report_timer =
+                        tokio::time::interval(tokio::time::Duration::from_secs(report_interval));
+                    report_timer.tick().await; // Skip first immediate tick
 
-            loop {
-                let query_result = tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => break,
-                    result = async {
-                        tokio::select! {
-                            result = priority_queue.dequeue() => Some(result),
-                            _ = report_timer.tick() => None,
+                    loop {
+                        let query_result = tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => break,
+                            result = async {
+                                tokio::select! {
+                                    result = priority_queue.dequeue_message() => Some(result),
+                                    _ = report_timer.tick() => None,
+                                }
+                            } => result,
+                        };
+                        if let Some(query_result) = query_result {
+                            if let Some(profiling) = query_result.payload.profiling.clone() {
+                                let change_count = query_result
+                                    .payload
+                                    .results
+                                    .iter()
+                                    .filter(|diff| {
+                                        !matches!(diff, drasi_lib::channels::ResultDiff::Noop)
+                                    })
+                                    .count();
+                                let observation = if change_count == 0 {
+                                    None
+                                } else {
+                                    telemetry
+                                        .reaction(&query_result.execution_context, change_count)
+                                        .map_err(|e| {
+                                            log::warn!("Failed to observe profiling sample: {e}")
+                                        })
+                                        .ok()
+                                };
+                                let add_sample = async {
+                                    stats.write().await.add_sample(profiling);
+                                };
+                                match observation {
+                                    Some(observation) => {
+                                        observation.run_infallible(add_sample).await
+                                    }
+                                    None => add_sample.await,
+                                }
+                            }
+                        } else {
+                            let stats_guard = stats.read().await;
+
+                            if stats_guard.count == 0 {
+                                info!("[{reaction_name}] No profiling data collected yet");
+                                continue;
+                            }
+
+                            info!("[{reaction_name}] ========== Profiling Report ==========");
+
+                            let source_to_query = stats_guard.get_source_to_query_stats();
+                            info!(
+                                "[{}] {}",
+                                reaction_name,
+                                Self::format_stats("Source→Query", &source_to_query)
+                            );
+
+                            let query_processing = stats_guard.get_query_processing_stats();
+                            info!(
+                                "[{}] {}",
+                                reaction_name,
+                                Self::format_stats("Query Processing", &query_processing)
+                            );
+
+                            let query_to_reaction = stats_guard.get_query_to_reaction_stats();
+                            info!(
+                                "[{}] {}",
+                                reaction_name,
+                                Self::format_stats("Query→Reaction", &query_to_reaction)
+                            );
+
+                            let reaction_processing = stats_guard.get_reaction_processing_stats();
+                            info!(
+                                "[{}] {}",
+                                reaction_name,
+                                Self::format_stats("Reaction Processing", &reaction_processing)
+                            );
+
+                            let total = stats_guard.get_total_latency_stats();
+                            info!(
+                                "[{}] {}",
+                                reaction_name,
+                                Self::format_stats("Total End-to-End", &total)
+                            );
+
+                            info!("[{reaction_name}] ======================================");
                         }
-                    } => result,
-                };
-                if let Some(query_result) = query_result {
-                    if let Some(profiling) = query_result.profiling.clone() {
-                        stats.write().await.add_sample(profiling);
                     }
-                } else {
-                    let stats_guard = stats.read().await;
-
-                    if stats_guard.count == 0 {
-                        info!("[{reaction_name}] No profiling data collected yet");
-                        continue;
-                    }
-
-                    info!("[{reaction_name}] ========== Profiling Report ==========");
-
-                    let source_to_query = stats_guard.get_source_to_query_stats();
-                    info!(
-                        "[{}] {}",
-                        reaction_name,
-                        Self::format_stats("Source→Query", &source_to_query)
-                    );
-
-                    let query_processing = stats_guard.get_query_processing_stats();
-                    info!(
-                        "[{}] {}",
-                        reaction_name,
-                        Self::format_stats("Query Processing", &query_processing)
-                    );
-
-                    let query_to_reaction = stats_guard.get_query_to_reaction_stats();
-                    info!(
-                        "[{}] {}",
-                        reaction_name,
-                        Self::format_stats("Query→Reaction", &query_to_reaction)
-                    );
-
-                    let reaction_processing = stats_guard.get_reaction_processing_stats();
-                    info!(
-                        "[{}] {}",
-                        reaction_name,
-                        Self::format_stats("Reaction Processing", &reaction_processing)
-                    );
-
-                    let total = stats_guard.get_total_latency_stats();
-                    info!(
-                        "[{}] {}",
-                        reaction_name,
-                        Self::format_stats("Total End-to-End", &total)
-                    );
-
-                    info!("[{reaction_name}] ======================================");
-                }
-            }
+                })
+                .await;
         })
         .await?;
         self.base

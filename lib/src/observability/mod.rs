@@ -17,6 +17,8 @@
 //! These utilities observe components; they do not own component membership,
 //! processing or lifecycle.
 
+#[cfg(all(test, feature = "otel-context"))]
+mod async_tests;
 mod component_log;
 mod event_history;
 mod log_runtime;
@@ -25,6 +27,7 @@ mod operations;
 mod queues;
 mod telemetry;
 mod tracing_layer;
+mod worker;
 
 pub use component_log::*;
 pub use event_history::*;
@@ -35,3 +38,4 @@ pub use queues::QueueObservations;
 pub(crate) use queues::{discarded_pending, pending_depth, QueueBinding};
 pub use telemetry::*;
 pub use tracing_layer::*;
+pub use worker::{WorkerObservation, WorkerTelemetry};

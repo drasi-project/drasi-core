@@ -619,7 +619,8 @@ impl Receiver {
                 position: request.sequence,
             };
             permit.send(OutputEnvelope {
-                execution_context: Default::default(),
+                execution_context:
+                    drasi_computation_contracts::telemetry::ExecutionContext::current(),
                 port: PortId::try_new("out").expect("constant port"),
                 envelope: output,
             });

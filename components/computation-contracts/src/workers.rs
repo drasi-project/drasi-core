@@ -23,6 +23,80 @@ where
     register_owned_worker(slot, || tokio::spawn(future)).await
 }
 
+/// A long-lived component worker retains its binding, never its start parent.
+#[cfg(feature = "tracing-context")]
+pub fn spawn_component_worker<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let scope = crate::telemetry::ExecutionScope::capture()
+        .with_context(crate::telemetry::ExecutionContext::default());
+    tokio::spawn(scope.scope(future))
+}
+
+#[cfg(feature = "tracing-context")]
+pub fn spawn_scoped_worker<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(crate::telemetry::ExecutionScope::capture().scope(future))
+}
+
+#[cfg(feature = "tracing-context")]
+pub async fn spawn_owned_component_worker<F>(
+    slot: &RwLock<Option<JoinHandle<F::Output>>>,
+    future: F,
+) -> Result<(), WorkerAlreadyOwned>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    register_owned_worker(slot, || spawn_component_worker(future)).await
+}
+
+/// Short-lived work such as one snapshot preserves the initiating context.
+#[cfg(feature = "tracing-context")]
+pub async fn spawn_owned_scoped_worker<F>(
+    slot: &RwLock<Option<JoinHandle<F::Output>>>,
+    future: F,
+) -> Result<(), WorkerAlreadyOwned>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let scope = crate::telemetry::ExecutionScope::capture();
+    spawn_owned_worker(slot, scope.scope(future)).await
+}
+
+#[cfg(feature = "tracing-context")]
+pub async fn spawn_owned_scoped_blocking_worker<F, T>(
+    slot: &RwLock<Option<JoinHandle<T>>>,
+    work: F,
+) -> Result<(), WorkerAlreadyOwned>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let scope = crate::telemetry::ExecutionScope::capture();
+    spawn_owned_blocking_worker(slot, move || scope.in_scope(work)).await
+}
+
+#[cfg(feature = "tracing-context")]
+pub async fn spawn_owned_component_blocking_worker<F, T>(
+    slot: &RwLock<Option<JoinHandle<T>>>,
+    work: F,
+) -> Result<(), WorkerAlreadyOwned>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let scope = crate::telemetry::ExecutionScope::capture()
+        .with_context(crate::telemetry::ExecutionContext::default());
+    spawn_owned_blocking_worker(slot, move || scope.in_scope(work)).await
+}
+
 /// Registers in an already available ownership slot without suspending.
 ///
 /// Intended for an owner's short registration/commit section. A busy slot is
@@ -169,6 +243,66 @@ mod tests {
         Arc,
     };
     use tokio::sync::{oneshot, Notify};
+
+    #[cfg(feature = "tracing-context")]
+    async fn scoped_workers() {
+        use crate::telemetry::{ExecutionContext, ExecutionScope, TelemetryScope, TraceContextV1};
+        let context = ExecutionContext::new(TraceContextV1::new([1; 16], [2; 8], 0, None).unwrap());
+        let scope = ExecutionScope::new(context.clone()).with_component(
+            TelemetryScope::graph("instance", "graph")
+                .unwrap()
+                .component(
+                    crate::ComponentId::try_new("source").unwrap(),
+                    crate::ComponentRole::Source,
+                    crate::ComponentSemanticKind::Source,
+                ),
+            7,
+        );
+        scope
+            .scope(async {
+                let component = spawn_component_worker(async {
+                    assert!(ExecutionContext::current().is_empty());
+                    tokio::task::yield_now().await;
+                    let owner = ExecutionScope::current_component().unwrap();
+                    assert_eq!(owner.generation, 7);
+                    assert_eq!(owner.identity.component_id().unwrap().as_str(), "source");
+                });
+                let expected = context.clone();
+                let child = spawn_scoped_worker(async move {
+                    tokio::task::yield_now().await;
+                    assert_eq!(ExecutionContext::current(), expected);
+                });
+                component.await.unwrap();
+                child.await.unwrap();
+                let slot = RwLock::new(None);
+                let expected = context.clone();
+                spawn_owned_scoped_blocking_worker(&slot, move || {
+                    assert_eq!(ExecutionContext::current(), expected);
+                    assert_eq!(ExecutionScope::current_component().unwrap().generation, 7);
+                })
+                .await
+                .unwrap();
+                join_owned_worker(&mut *slot.write().await, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                assert_eq!(ExecutionContext::current(), context);
+            })
+            .await;
+        assert!(ExecutionContext::current().is_empty());
+        assert!(ExecutionScope::current_component().is_none());
+    }
+
+    #[cfg(feature = "tracing-context")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_worker_scopes_current_thread() {
+        scoped_workers().await;
+    }
+
+    #[cfg(feature = "tracing-context")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_worker_scopes_multi_thread() {
+        scoped_workers().await;
+    }
 
     struct Exit(Arc<AtomicUsize>);
     impl Drop for Exit {

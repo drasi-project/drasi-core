@@ -366,6 +366,7 @@ pub struct ContinuousQueryTransformer {
     declaration: Option<Arc<super::query_configuration::OrdinaryQueryDeclaration>>,
     scheduling: Option<Arc<super::QuerySchedulingResource>>,
     draining_futures: bool,
+    processing_context: crate::observability::ExecutionContext,
     #[cfg(feature = "test-support")]
     test_session: Option<crate::test_support::QueryTestSession>,
     #[cfg(feature = "test-support")]
@@ -489,6 +490,7 @@ impl ContinuousQueryTransformer {
             publication_identity: Arc::new(RwLock::new(Some(uuid::Uuid::new_v4()))),
             scheduling: None,
             draining_futures: false,
+            processing_context: Default::default(),
             #[cfg(feature = "test-support")]
             test_session: None,
             #[cfg(feature = "test-support")]
@@ -1728,7 +1730,11 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if self.query.is_none() {
             self.build().await?;
         }
-        self.initialize_recovery().await?;
+        self.query
+            .as_mut()
+            .expect("constructed query")
+            .set_observer(None)?;
+        Box::pin(self.initialize_recovery()).await?;
         self.prepare_delivery().await?;
         self.pending_input_replay = match &self.bootstrap {
             Some(provider) => provider.take_input_replay()?.into(),
@@ -1814,6 +1820,15 @@ impl ComputationComponent for ContinuousQueryTransformer {
 
 #[async_trait]
 impl Transformer for ContinuousQueryTransformer {
+    fn processing_context(&self) -> Option<crate::observability::ExecutionContext> {
+        Some(self.processing_context.clone())
+    }
+
+    fn observes_input(&self, input: &InputEnvelope) -> bool {
+        self.execution.source_transactions.is_none()
+            && GraphChangeCodec::is_futures_due(&input.envelope)
+    }
+
     async fn bind_output_destinations(
         &mut self,
         bindings: &super::OutputBindings,
@@ -1827,56 +1842,8 @@ impl Transformer for ContinuousQueryTransformer {
 
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         let scope = crate::observability::ExecutionScope::for_input(&input.execution_context);
-        scope
-            .scope(async {
-                anyhow::ensure!(
-                    self.pending_output.is_empty(),
-                    "drain recovered query output before accepting input"
-                );
-                let futures_due = self.execution.source_transactions.is_none()
-                    && GraphChangeCodec::is_futures_due(&input.envelope);
-                let progress = if futures_due {
-                    super::GraphProducerProgress::from_envelope(&input.envelope)?
-                } else {
-                    None
-                };
-                if futures_due
-                    && progress.as_ref().map_or(true, |progress| {
-                        !progress.identity().persistent() && self.provider.is_volatile()
-                    })
-                {
-                    self.draining_futures = true;
-                    return self.on_wakeup().await;
-                }
-                let _timer = TransactionTimer {
-                    metrics: self.metrics.clone(),
-                    started: std::time::Instant::now(),
-                };
-                let mut guard = ProcessingGuard {
-                    failure: self.failure.clone(),
-                    complete: false,
-                    progress: self.source_progress.clone(),
-                };
-                let mut result = match self.execution.source_transactions {
-                    Some(limits) => tokio::time::timeout(
-                        limits.duration(),
-                        Box::pin(self.process::<true>(input)),
-                    )
-                    .await
-                    .map_err(|_| super::SourceTransactionError::Deadline)?,
-                    None => self.process::<false>(input).await,
-                };
-                if futures_due && result.is_ok() {
-                    // The empty batch commits the middleware's logical input progress.
-                    // Due work already belongs to the query's durable future queue, so
-                    // an interruption between this checkpoint and draining is replayable.
-                    self.draining_futures = true;
-                    result = self.on_wakeup().await;
-                }
-                guard.complete = result.is_ok();
-                result
-            })
-            .await
+        self.processing_context = scope.context().clone();
+        scope.scope(self.transform_input(input)).await
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
@@ -1920,16 +1887,19 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.processing_context = Default::default();
         if !self.pending_output.is_empty() {
-            return self.replay_output().await;
+            let observation = self.scheduled_observation("output_replay")?;
+            return observation.run_outputs(self.replay_output()).await;
         }
         if let Some(envelope) = self.pending_input_replay.front().cloned() {
-            let output = self
-                .transform(InputEnvelope {
+            let observation = self.scheduled_observation("input_replay")?;
+            let output = observation
+                .run_outputs(self.transform_input(InputEnvelope {
                     execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope,
-                })
+                }))
                 .await?;
             self.pending_input_replay.pop_front();
             return Ok(output);
@@ -1989,121 +1959,204 @@ impl Transformer for ContinuousQueryTransformer {
             guard.complete = true;
             return Ok(Vec::new());
         }
-        let query = self.query()?;
-        let reservations = if self.output_bindings.has_shared() {
-            Some(self.output_bindings.reserve().await?)
-        } else {
-            None
-        };
-        self.begin_non_atomic().await?;
-        let prepared = Mutex::new(None);
-        let owner = &*self;
-        let hook = |due: Arc<drasi_core::computation::ComputationFutureResult>| {
-            let prepared = &prepared;
-            async move {
-                let sequence = if due.results.iter().any(|result| {
-                    !matches!(
-                        result,
-                        drasi_core::evaluation::context::QueryPartEvaluationContext::Noop
-                    )
-                }) {
-                    owner
-                        .next_sequence()
-                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?
+        let observation = self.scheduled_observation("future_queue")?;
+        observation
+            .run_outputs(Box::pin(async {
+                let query = self.query()?;
+                let reservations = if self.output_bindings.has_shared() {
+                    Some(self.output_bindings.reserve().await?)
                 } else {
-                    0
+                    None
                 };
-                let timestamp = chrono::DateTime::from_timestamp_millis(
-                    i64::try_from(due.future.due_time).map_err(IndexError::other)?,
-                )
-                .ok_or(IndexError::CorruptedData)?;
-                let trigger = GraphChangeCodec::encode_change(
-                    drasi_core::models::SourceChange::Future {
-                        future_ref: due.future.clone(),
-                    },
-                    StreamId::try_new(format!("{}/future", owner.definition.id))
-                        .map_err(IndexError::other)?,
-                    sequence,
-                    Some(timestamp),
-                )
-                .map_err(IndexError::other)?;
-                let mut output = QueryChangeCodec::encode_evaluation(
-                    Some(&trigger),
-                    &owner.definition.id,
-                    SystemMetadata::new(owner.definition.output_stream.clone(), sequence)
-                        .with_timestamp(timestamp),
-                    &owner.projector,
-                    &due.results,
-                    QueryOutputMetadata {
-                        query_id: owner.definition.id.to_string(),
-                        source_id: Some(due.source_id.to_string()),
-                        timestamp: Utc::now(),
-                        metadata: HashMap::new(),
-                        profiling: Some(ProfilingMetadata::new()),
-                    },
-                )
-                .map_err(IndexError::other)?;
-                if let Some(output) = &mut output {
-                    owner
-                        .stamp_output_identity(output)
-                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-                }
-                if owner.output_persistent {
-                    if let Some(output) = &output {
-                        if owner.options.publication == QueryPublicationMode::Atomic {
-                            owner.stage_output(output).await?;
+                self.begin_non_atomic().await?;
+                let prepared = Mutex::new(None);
+                let owner = &*self;
+                let hook = |due: Arc<drasi_core::computation::ComputationFutureResult>| {
+                    let prepared = &prepared;
+                    async move {
+                        let sequence = if due.results.iter().any(|result| {
+                            !matches!(
+                                result,
+                                drasi_core::evaluation::context::QueryPartEvaluationContext::Noop
+                            )
+                        }) {
+                            owner
+                                .next_sequence()
+                                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?
+                        } else {
+                            0
+                        };
+                        let timestamp = chrono::DateTime::from_timestamp_millis(
+                            i64::try_from(due.future.due_time).map_err(IndexError::other)?,
+                        )
+                        .ok_or(IndexError::CorruptedData)?;
+                        let trigger = GraphChangeCodec::encode_change(
+                            drasi_core::models::SourceChange::Future {
+                                future_ref: due.future.clone(),
+                            },
+                            StreamId::try_new(format!("{}/future", owner.definition.id))
+                                .map_err(IndexError::other)?,
+                            sequence,
+                            Some(timestamp),
+                        )
+                        .map_err(IndexError::other)?;
+                        let mut output = QueryChangeCodec::encode_evaluation(
+                            Some(&trigger),
+                            &owner.definition.id,
+                            SystemMetadata::new(owner.definition.output_stream.clone(), sequence)
+                                .with_timestamp(timestamp),
+                            &owner.projector,
+                            &due.results,
+                            QueryOutputMetadata {
+                                query_id: owner.definition.id.to_string(),
+                                source_id: Some(due.source_id.to_string()),
+                                timestamp: Utc::now(),
+                                metadata: HashMap::new(),
+                                profiling: Some(ProfilingMetadata::new()),
+                            },
+                        )
+                        .map_err(IndexError::other)?;
+                        if let Some(output) = &mut output {
+                            owner
+                                .stamp_output_identity(output)
+                                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                        }
+                        if owner.output_persistent {
+                            if let Some(output) = &output {
+                                if owner.options.publication == QueryPublicationMode::Atomic {
+                                    owner.stage_output(output).await?;
+                                } else {
+                                    query
+                                        .resources()
+                                        .checkpoint_store()
+                                        .ok_or(IndexError::NotSupported)?
+                                        .stage_checkpoint(
+                                            PENDING_OUTPUT,
+                                            output.system().sequence(),
+                                            None,
+                                        )
+                                        .await?;
+                                }
+                            }
+                        }
+                        *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
+                        Ok(())
+                    }
+                };
+                match query.resources().atomic_result_transaction() {
+                    Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
+                        if let Some(reservations) = reservations {
+                            query
+                                .process_due_futures_with_transaction_group(&transaction, |due| {
+                                    let pending = hook(due);
+                                    let prepared = &prepared;
+                                    async move {
+                                        pending.await?;
+                                        let output = prepared
+                                            .lock()
+                                            .map_err(|_| IndexError::CorruptedData)?;
+                                        owner.shared_delivery_mutations(
+                                            reservations,
+                                            output.as_ref(),
+                                        )
+                                    }
+                                })
+                                .await?;
                         } else {
                             query
-                                .resources()
-                                .checkpoint_store()
-                                .ok_or(IndexError::NotSupported)?
-                                .stage_checkpoint(PENDING_OUTPUT, output.system().sequence(), None)
+                                .process_due_futures_with_result_hook(&transaction, hook)
                                 .await?;
                         }
                     }
+                    _ if self.provider.is_volatile()
+                        || self.options.publication == QueryPublicationMode::NonAtomic =>
+                    {
+                        query
+                            .process_due_futures_with_non_atomic_result_hook(hook)
+                            .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => unreachable!(),
                 }
-                *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
-                Ok(())
-            }
+                let output = prepared
+                    .into_inner()
+                    .map_err(|_| anyhow::anyhow!("prepared future output poisoned"))?;
+                if self.options.publication == QueryPublicationMode::NonAtomic
+                    && self.output_persistent
+                {
+                    self.finish_non_atomic(output.as_ref()).await?;
+                }
+                let result = self.publish(output);
+                guard.complete = result.is_ok();
+                result
+            }))
+            .await
+    }
+}
+
+impl ContinuousQueryTransformer {
+    fn scheduled_observation(
+        &mut self,
+        work_kind: &'static str,
+    ) -> anyhow::Result<crate::observability::OperationObservation> {
+        let observation = crate::observability::ComponentObservations::current_or_disabled().root(
+            crate::observability::ObservedOperation::Scheduled,
+            &Default::default(),
+            crate::observability::OperationFields {
+                input_count: Some(0),
+                work_kind: Some(work_kind),
+                ..Default::default()
+            },
+        )?;
+        self.processing_context = observation.context().clone();
+        Ok(observation)
+    }
+
+    async fn transform_input(
+        &mut self,
+        input: InputEnvelope,
+    ) -> anyhow::Result<Vec<OutputEnvelope>> {
+        anyhow::ensure!(
+            self.pending_output.is_empty(),
+            "drain recovered query output before accepting input"
+        );
+        let futures_due = self.execution.source_transactions.is_none()
+            && GraphChangeCodec::is_futures_due(&input.envelope);
+        let progress = if futures_due {
+            super::GraphProducerProgress::from_envelope(&input.envelope)?
+        } else {
+            None
         };
-        match query.resources().atomic_result_transaction() {
-            Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
-                if let Some(reservations) = reservations {
-                    query
-                        .process_due_futures_with_transaction_group(&transaction, |due| {
-                            let pending = hook(due);
-                            let prepared = &prepared;
-                            async move {
-                                pending.await?;
-                                let output =
-                                    prepared.lock().map_err(|_| IndexError::CorruptedData)?;
-                                owner.shared_delivery_mutations(reservations, output.as_ref())
-                            }
-                        })
-                        .await?;
-                } else {
-                    query
-                        .process_due_futures_with_result_hook(&transaction, hook)
-                        .await?;
-                }
-            }
-            _ if self.provider.is_volatile()
-                || self.options.publication == QueryPublicationMode::NonAtomic =>
-            {
-                query
-                    .process_due_futures_with_non_atomic_result_hook(hook)
-                    .await?;
-            }
-            Err(error) => return Err(error.into()),
-            Ok(_) => unreachable!(),
+        if futures_due
+            && progress.as_ref().map_or(true, |progress| {
+                !progress.identity().persistent() && self.provider.is_volatile()
+            })
+        {
+            self.draining_futures = true;
+            return self.on_wakeup().await;
         }
-        let output = prepared
-            .into_inner()
-            .map_err(|_| anyhow::anyhow!("prepared future output poisoned"))?;
-        if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
-            self.finish_non_atomic(output.as_ref()).await?;
+        let _timer = TransactionTimer {
+            metrics: self.metrics.clone(),
+            started: std::time::Instant::now(),
+        };
+        let mut guard = ProcessingGuard {
+            failure: self.failure.clone(),
+            complete: false,
+            progress: self.source_progress.clone(),
+        };
+        let mut result = match self.execution.source_transactions {
+            Some(limits) => {
+                tokio::time::timeout(limits.duration(), Box::pin(self.process::<true>(input)))
+                    .await
+                    .map_err(|_| super::SourceTransactionError::Deadline)?
+            }
+            None => self.process::<false>(input).await,
+        };
+        if futures_due && result.is_ok() {
+            // Notification progress is committed before draining the durable queue.
+            self.draining_futures = true;
+            result = self.on_wakeup().await;
         }
-        let result = self.publish(output);
         guard.complete = result.is_ok();
         result
     }

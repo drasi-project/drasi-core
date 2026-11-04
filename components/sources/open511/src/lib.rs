@@ -36,7 +36,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use drasi_lib::channels::*;
 use drasi_lib::context::workers::{
-    join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned, WorkerCompletion,
+    join_owned_worker_gracefully, spawn_owned_component_worker, WorkerAlreadyOwned,
+    WorkerCompletion,
 };
 use drasi_lib::profiling::{timestamp_ns, ProfilingMetadata};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -173,7 +174,7 @@ impl Source for Open511Source {
             )
             .await;
         let status = self.base.status_handle();
-        spawn_owned_worker(
+        spawn_owned_component_worker(
             &self.polling_task,
             async move {
                 let result =
@@ -794,7 +795,7 @@ mod tests {
                 .with_base_url("http://127.0.0.1:1")
                 .build()?;
             *source.cleanup_required.lock().await = true;
-            spawn_owned_worker(&source.polling_task, async move {
+            spawn_owned_component_worker(&source.polling_task, async move {
                 assert!(!panic, "injected Open511 polling panic");
                 Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionReset,

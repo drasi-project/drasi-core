@@ -148,7 +148,7 @@ impl WebSocketSource {
 
         let base = self.base.clone_shared();
         let config = self.config.clone();
-        let task = tokio::spawn(run_worker(
+        let task = drasi_lib::context::workers::spawn_component_worker(run_worker(
             base,
             config,
             shutdown_rx,

@@ -123,9 +123,10 @@ appending to a file, or updating a UI.
 
 ### Bundled completion boundaries
 
-All 20 bundled legacy reaction crates reach ComputationGraph through
-`ReactionPluginAdapter`, whose successful call means **Accepted**, not handled
-or durably completed. Its factory rejects stronger declarations. Internal
+The bundled legacy reactions use queued acceptance through the ordinary
+`DrasiLib` catalog service or `ReactionPluginAdapter`. Successful enqueue means
+**Accepted**, not handled or durably completed. The adapter's factory rejects
+stronger declarations. Internal
 checkpoints, broker replies, or a persistent destination do not change that
 boundary. None currently qualifies for graph-level handled-input or once-only
 external-effect guarantees through the legacy adapter.
@@ -511,21 +512,31 @@ impl Reaction for MyReaction {
         let endpoint = self.config.endpoint.clone();
         let queue = self.base.priority_queue.clone();
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
+        let telemetry = self.base.worker_telemetry().await;
 
         // Run a dequeue → handle loop until shutdown.
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            telemetry.scope(async {
             info!("[{id}] dispatching to endpoint='{endpoint}'");
             loop {
-                let arc_result = tokio::select! {
+                let message = tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
                         debug!("[{id}] shutdown received");
                         break;
                     }
-                    r = queue.dequeue() => r,
+                    r = queue.dequeue_message() => r,
                 };
 
-                for diff in &arc_result.results {
+                let change_count = message.payload.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                if change_count == 0 {
+                    continue;
+                }
+                let observation = telemetry.reaction(&message.execution_context, change_count)
+                    .map_err(|e| log::warn!("Could not observe reaction work: {e}")).ok();
+                let work = async {
+                for diff in &message.payload.results {
                     match diff {
                         ResultDiff::Add { data, .. } => {
                             info!("[{id}] ADD {data}");
@@ -542,7 +553,13 @@ impl Reaction for MyReaction {
                         ResultDiff::Noop => {}
                     }
                 }
+                };
+                match observation {
+                    Some(observation) => observation.run_infallible(work).await,
+                    None => work.await,
+                }
             }
+            }).await;
         }).await?;
 
         self.base
@@ -689,16 +706,38 @@ inbound result into it. The queue:
   blocking `enqueue_wait` strategy slows incoming events instead of
   dropping them.
 
-You consume the queue by calling `priority_queue.dequeue().await` in
-your processing task. The standard pattern is:
+Production workers MUST consume the context-preserving message API,
+`priority_queue.dequeue_message().await` (or `try_dequeue_message`), rather
+than the payload-only compatibility methods. The public `QueryResult` remains
+unchanged; its transient `ExecutionContext` travels separately in `ChangeMessage`.
+The standard receive pattern is:
 
 ```rust
-let arc_result = tokio::select! {
+let message = tokio::select! {
     biased;
     _ = &mut shutdown_rx => break,
-    r = queue.dequeue() => r,
+    r = queue.dequeue_message() => r,
 };
+let result = message.payload;
 ```
+
+Capture `base.worker_telemetry().await` before spawning and wrap the complete
+long-lived worker future in `telemetry.scope(...)`. This retains the receiving
+component's log/trace binding while clearing any lifecycle event parent on each
+poll. Do not retain startup spans or entered span guards across awaits.
+
+After empty-result, Noop and dedup checks, create
+`telemetry.reaction(&message.execution_context, change_count)` and run the actual
+handler future with `observation.run(work).await`. The future MUST return an
+error for caught effect failures, even when the existing delivery policy logs,
+drops, checkpoints or continues. Apply that policy without changing its behavior.
+Use `run_infallible` only for work that cannot fail. An observation-creation
+failure MUST NOT discard otherwise valid work. Queue waits and batch collection
+MUST remain outside effects spans.
+
+These `reaction.process` / `reaction.process_batch` spans observe worker work;
+they do not strengthen the legacy adapter's `sink.handle(completion=accepted)`
+boundary, add metrics, or establish durable/once-only delivery.
 
 > 🔴 **MUST** — Use `tokio::select!` with `biased;` and the shutdown
 > receiver. Without it your reaction will not stop promptly when the
@@ -1141,6 +1180,7 @@ Methods you call from your `Reaction` implementation, alphabetical:
 | `stop_common()` | Send shutdown and join owned workers. Timeout requests abort and returns an error with the handle retained. Only success drains the queue and sets `Stopped`. |
 | `stop_common_gracefully()` | The same cleanup ordering without aborting the processor. Timeout/cancellation leaves it owned and `Stopping`; later cleanup is required before restart. |
 | `write_checkpoint(query_id, ckpt)` | Persist a checkpoint (state store required). |
+| `worker_telemetry()` | Clone the initialize-time component binding for context-preserving worker observations. |
 
 Public fields you may read or pass to spawned tasks: `id`, `queries`,
 `priority_queue`.
@@ -2330,6 +2370,15 @@ buffer, and start over. Through all of this you keep the standard
 `tokio::select! { biased; ... }` shutdown receiver so the `drasi-lib` instance can
 stop the reaction promptly.
 
+Carry each dequeued message's execution context alongside custom payload,
+rendered-item and routing-key buffers until actual dispatch. A flush MUST use
+`reaction_batch(contexts, input_count, change_count)` with the contexts of the
+represented inputs, not the most recently dequeued input or a startup context.
+The helper applies the shared same-origin parent / mixed-origin link policy.
+Keep contexts out of public wire payloads and persisted checkpoints.
+Count represented dequeues, not rendered diff items, as inputs. Replays may
+repeat query/sequence identities; do not collapse distinct dequeues' contexts.
+
 A complete, buildable implementation:
 
 ```rust
@@ -2340,9 +2389,33 @@ use anyhow::Result;
 use log::{debug, error};
 use tokio::sync::oneshot;
 
-use drasi_lib::channels::QueryResult;
+use drasi_lib::channels::{ChangeMessage, QueryResult, ResultDiff};
+use drasi_lib::observability::WorkerTelemetry;
 use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use drasi_lib::reactions::common::base::ReactionBase;
+
+async fn flush_observed<F, Fut>(
+    telemetry: &WorkerTelemetry,
+    batch: Vec<ChangeMessage<QueryResult>>,
+    flush: &F,
+) -> Result<()>
+where
+    F: Fn(Vec<Arc<QueryResult>>) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let change_count = batch.iter().map(|message| message.payload.results.iter()
+        .filter(|diff| !matches!(diff, ResultDiff::Noop)).count()).sum();
+    let observation = telemetry.reaction_batch(
+        batch.iter().map(|message| &message.execution_context),
+        batch.len(),
+        change_count,
+    ).map_err(|e| log::warn!("Could not observe batch work: {e}")).ok();
+    let work = flush(batch.into_iter().map(|message| message.payload).collect());
+    match observation {
+        Some(observation) => observation.run(work).await,
+        None => work.await,
+    }
+}
 
 /// Run a batched processing loop over the reaction's priority queue.
 ///
@@ -2360,11 +2433,13 @@ where
     F: Fn(Vec<Arc<QueryResult>>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
+    let telemetry = base.worker_telemetry().await;
+    telemetry.scope(async {
     let queue = &base.priority_queue;
     let timeout = Duration::from_millis(cfg.adaptive_batch_timeout_ms);
     let max = cfg.adaptive_max_batch_size.max(1);
 
-    let mut batch: Vec<Arc<QueryResult>> = Vec::with_capacity(max);
+    let mut batch: Vec<ChangeMessage<QueryResult>> = Vec::with_capacity(max);
     let mut batch_started_at: Option<Instant> = None;
 
     loop {
@@ -2373,8 +2448,11 @@ where
             let next = tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
-                r = queue.dequeue() => r,
+                r = queue.dequeue_message() => r,
             };
+            if next.payload.results.iter().all(|diff| matches!(diff, ResultDiff::Noop)) {
+                continue;
+            }
             batch.push(next);
             batch_started_at = Some(Instant::now());
             continue;
@@ -2389,17 +2467,20 @@ where
         let outcome = tokio::select! {
             biased;
             _ = &mut shutdown_rx => break,
-            r = queue.dequeue() => Some(r),
+            r = queue.dequeue_message() => Some(r),
             _ = tokio::time::sleep(remaining) => None,
         };
 
         match outcome {
             Some(item) => {
+                if item.payload.results.iter().all(|diff| matches!(diff, ResultDiff::Noop)) {
+                    continue;
+                }
                 batch.push(item);
                 if batch.len() >= max {
                     let drained = std::mem::take(&mut batch);
                     batch_started_at = None;
-                    if let Err(e) = flush(drained).await {
+                    if let Err(e) = flush_observed(&telemetry, drained, &flush).await {
                         error!("batched flush failed: {e:#}");
                     }
                 }
@@ -2408,7 +2489,7 @@ where
                 // Timeout fired with a non-empty batch — flush.
                 let drained = std::mem::take(&mut batch);
                 batch_started_at = None;
-                if let Err(e) = flush(drained).await {
+                if let Err(e) = flush_observed(&telemetry, drained, &flush).await {
                     error!("batched flush failed: {e:#}");
                 }
             }
@@ -2418,12 +2499,13 @@ where
     // Final drain after shutdown so we do not lose buffered events.
     if !batch.is_empty() {
         debug!("flushing {} pending events on shutdown", batch.len());
-        if let Err(e) = flush(batch).await {
+        if let Err(e) = flush_observed(&telemetry, batch, &flush).await {
             error!("batched final flush failed: {e:#}");
         }
     }
 
     Ok(())
+    }).await
 }
 ```
 
@@ -2627,6 +2709,12 @@ Walk this list before publishing your reaction.
 - [ ] Uses `tokio::select!` with `biased;` and the shutdown receiver.
 - [ ] Handles every `ResultDiff` variant.
 - [ ] Treats `ResultDiff::Noop` and empty `results` as no-ops.
+- [ ] Uses message-preserving dequeue APIs and restores the initialize-time
+      worker component scope without inheriting startup event parents.
+- [ ] Observes actual handler/flush work, not waiting or batch collection;
+      caught effect failures remain errors in the worker span.
+- [ ] Keeps per-input contexts through custom batches; empty/dedup items
+      do not create effects spans.
 
 #### Configuration
 

@@ -172,6 +172,19 @@ pub trait EnvelopeSource: ComputationComponent {
 /// A stateful transformer with declared input and output ports.
 #[async_trait]
 pub trait Transformer: ComputationComponent {
+    /// Built-in query instrumentation selects its processing boundary only once
+    /// actual input, replay or scheduled work is known. Other transformers leave
+    /// observation with the graph. The returned context also covers zero outputs.
+    #[doc(hidden)]
+    fn processing_context(&self) -> Option<super::ExecutionContext> {
+        None
+    }
+
+    #[doc(hidden)]
+    fn observes_input(&self, _input: &InputEnvelope) -> bool {
+        false
+    }
+
     /// Called after startup and before processing/replay, with the graph's actual
     /// receipt-tracked destinations. Participating producers persist these using
     /// their existing transaction and reject changes while output is unconfirmed.

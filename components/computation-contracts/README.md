@@ -48,6 +48,14 @@ layer using its default context activation. It installs no subscriber/exporter.
 The adapter feature brings the tracing integration's OpenTelemetry dependencies;
 DTO-only builds do not enable them.
 
+With `tracing-context`, owned worker helpers distinguish component lifetimes
+from child operations. `spawn_owned_component_worker` (and its blocking variant)
+retains the receiving component binding with an empty default event context.
+`spawn_owned_scoped_worker` / `spawn_owned_scoped_blocking_worker` preserve a
+short initiating operation, such as a snapshot. All retain the existing
+ownership-before-spawn and cancellation-safe joining contract. The original
+`spawn_owned_worker` remains ownership-only.
+
 `TraceContextAdapter::prepare_operation` supplies parent/root and bounded links
 before the first span context extraction or entry. `BatchTraceParent` selects a
 shared parent or ordered, deduplicated links without retaining an unbounded
@@ -60,8 +68,10 @@ an automatically installed provider or exporter.
 Rust callers must migrate input/output struct literals to include
 `execution_context`, or use the new context-free constructors. Forward the input
 context explicitly, or use `OutputEnvelope::with_current_context()` when producing
-work inside a restored scope. Empty outputs stay empty; replay must not acquire
-an unrelated caller's trace. See the [runtime migration guide](../../lib/README.md#portable-execution-context).
+work inside a restored scope. Raw constructors remain context-free; the host
+fills missing processing-output context from the actual producing operation.
+Query replay explicitly chooses a new attempt context, never a persisted or
+unrelated caller's trace. See the [runtime migration guide](../../lib/README.md#portable-execution-context).
 
 Published envelopes have a maximum ancestry depth of 1,024
 (`MAX_LINEAGE_DEPTH`). JSON and binary decoding, encoding and binary size

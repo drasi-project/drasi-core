@@ -724,7 +724,7 @@ impl Source for DataverseSource {
                 entity = %entity_name
             );
 
-            let handle = tokio::spawn(
+            let handle = drasi_lib::context::workers::spawn_component_worker(
                 async move {
                     Self::run_entity_worker(
                         source_id,
@@ -748,7 +748,7 @@ impl Source for DataverseSource {
         // Store the shutdown sender for stop()
         // We use a combined task that waits for all workers
         let source_id = self.base.id.clone();
-        let combined_handle = tokio::spawn(async move {
+        let combined_handle = drasi_lib::context::workers::spawn_component_worker(async move {
             for (i, handle) in task_handles.into_iter().enumerate() {
                 if let Err(e) = handle.await {
                     log::error!("[{source_id}] Entity worker {i} terminated with error: {e}");
@@ -764,7 +764,7 @@ impl Source for DataverseSource {
             let mut lock = self.base.shutdown_tx.write().await;
             let shutdown_tx_for_stop = shutdown_tx.clone();
             let (bridge_tx, bridge_rx) = tokio::sync::oneshot::channel::<()>();
-            tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_component_worker(async move {
                 let _ = bridge_rx.await;
                 let _ = shutdown_tx_for_stop.send(true);
             });

@@ -439,6 +439,7 @@ pub struct LegacySourceSubscription {
     progress: Option<Arc<QuerySourceProgress>>,
     phase: watch::Sender<SubscriptionPhase>,
     state: Mutex<SubscriptionState>,
+    bootstrap_execution: Mutex<crate::observability::ExecutionContext>,
 }
 
 impl LegacySourceSubscription {
@@ -476,6 +477,7 @@ impl LegacySourceSubscription {
             id: subscriber_id.to_owned(),
             progress,
             phase: watch::channel(SubscriptionPhase::New).0,
+            bootstrap_execution: Mutex::new(Default::default()),
             state: Mutex::new(SubscriptionState {
                 bootstrap: None,
                 result: None,
@@ -655,7 +657,12 @@ impl LegacySourceSubscription {
                     .lock()
                     .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
                     .requested_position = settings.request_position_handle;
-                let response = match source.subscribe(settings).await {
+                let bootstrap_execution = self.bootstrap_execution.lock()
+                    .map_err(|_| anyhow::anyhow!("bootstrap execution context poisoned"))?
+                    .clone();
+                let scope = crate::observability::ExecutionScope::capture()
+                    .with_context(bootstrap_execution);
+                let response = match scope.scope(source.subscribe(settings)).await {
                     Ok(response) => response,
                     Err(error)
                         if error
@@ -891,8 +898,10 @@ impl EnvelopeSource for SourcePluginAdapter {
                     if let Some(progress) = &mut progress { let _ = progress.changed().await; }
                     else { std::future::pending::<()>().await; }
                 } => continue,
-                event = receiver.recv() => event?,
+                event = receiver.recv_message() => event?,
             };
+            let execution_context = event.execution_context;
+            let event = event.payload;
             if matches!(
                 &event.event,
                 SourceEvent::Control(crate::channels::SourceControl::Subscription { .. })
@@ -914,7 +923,7 @@ impl EnvelopeSource for SourcePluginAdapter {
             )?;
             self.sequence.store(sequence, Ordering::Release);
             return Ok(Some(OutputEnvelope {
-                execution_context: Default::default(),
+                execution_context,
                 port: PortId::try_new("out")?,
                 envelope,
             }));
@@ -933,6 +942,19 @@ impl LegacySourceBootstrap {
 }
 #[async_trait]
 impl ComputationBootstrapProvider for LegacySourceBootstrap {
+    fn bind_execution_context(
+        &self,
+        context: crate::observability::ExecutionContext,
+    ) -> anyhow::Result<()> {
+        for subscription in &self.subscriptions {
+            *subscription
+                .bootstrap_execution
+                .lock()
+                .map_err(|_| anyhow::anyhow!("bootstrap execution context poisoned"))? =
+                context.clone();
+        }
+        Ok(())
+    }
     fn input_origin(&self, stream: &StreamId) -> anyhow::Result<Option<super::OutputEndpoint>> {
         for subscription in &self.subscriptions {
             if stream == &StreamId::try_new(format!("{}/bootstrap", subscription.stream))? {

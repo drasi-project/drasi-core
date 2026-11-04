@@ -5,7 +5,7 @@ use crate::PostgresStoredProcConfig;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    workers::{join_owned_worker, spawn_owned_worker, WorkerCompletion},
+    workers::{join_owned_worker, spawn_owned_component_worker, WorkerCompletion},
     ComponentDescriptor, ComponentId, DeliveryHandler, DeliveryItem, GraphChangeCodec,
     InputBinding, PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs,
 };
@@ -204,7 +204,7 @@ impl NativeComponent for PostgresStoredProcSink {
                 templates: self.templates.clone(),
             },
         ));
-        spawn_owned_worker(&self.driver, async move {
+        spawn_owned_component_worker(&self.driver, async move {
             let result = connection.await;
             if let Err(error) = &result {
                 log::error!("Native PostgreSQL delivery connection failed: {error}");

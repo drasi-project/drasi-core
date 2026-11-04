@@ -14,13 +14,14 @@
 
 //! Fixed-size batching runner.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use log::{debug, error, info, trace, warn};
 use tokio::sync::oneshot;
 use tonic::transport::Channel;
 
 use drasi_lib::channels::ComponentStatus;
+use drasi_lib::observability::ExecutionContext;
 use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
@@ -51,6 +52,8 @@ enum FlushControl {
 }
 
 pub(crate) async fn run(params: FixedRunnerParams) {
+    let telemetry = params.base.worker_telemetry().await;
+    telemetry.scope(async {
     let FixedRunnerParams {
         reaction_name,
         batch_size,
@@ -86,6 +89,9 @@ pub(crate) async fn run(params: FixedRunnerParams) {
     let base_backoff = Duration::from_millis(500);
     let max_backoff = Duration::from_secs(30);
     let mut pending: Option<PendingBatch> = None;
+    // Keep distinct dequeues even when a replay repeats a sequence ID.
+    let mut pending_contexts = HashMap::new();
+    let mut next_input_id = 0u64;
 
     let flush_timeout = Duration::from_millis(batch_flush_timeout_ms);
     let mut flush_timer = tokio::time::interval(flush_timeout);
@@ -114,6 +120,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                         base_backoff,
                         max_backoff,
                         &mut pending,
+                        &mut pending_contexts,
                         &base,
                         &mut checkpoints,
                         policy,
@@ -125,8 +132,12 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 }
                 continue;
             }
-            result = priority_queue.dequeue() => result,
+            result = priority_queue.dequeue_message() => result,
         };
+        let execution_context = query_result.execution_context;
+        let query_result = query_result.payload;
+        let input_id = next_input_id;
+        next_input_id = next_input_id.wrapping_add(1);
 
         debug!(
             "Dequeued query result with {} items for processing",
@@ -188,6 +199,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     base_backoff,
                     max_backoff,
                     &mut pending,
+                    &mut pending_contexts,
                     &base,
                     &mut checkpoints,
                     policy,
@@ -202,6 +214,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 Some(batch) => batch.push(item, is_terminal),
                 None => pending = Some(PendingBatch::new(key, item, is_terminal)),
             }
+            pending_contexts.entry(input_id).or_insert_with(|| execution_context.clone());
 
             if pending
                 .as_ref()
@@ -220,6 +233,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     base_backoff,
                     max_backoff,
                     &mut pending,
+                    &mut pending_contexts,
                     &base,
                     &mut checkpoints,
                     policy,
@@ -248,6 +262,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             base_backoff,
             max_backoff,
             &mut pending,
+            &mut pending_contexts,
             &base,
             &mut checkpoints,
             policy,
@@ -260,6 +275,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
     }
 
     finish(&reaction_name, &status_handle).await;
+    }).await;
 }
 
 async fn finish(
@@ -290,6 +306,7 @@ async fn flush_pending(
     base_backoff: Duration,
     max_backoff: Duration,
     pending: &mut Option<PendingBatch>,
+    pending_contexts: &mut HashMap<u64, ExecutionContext>,
     base: &ReactionBase,
     checkpoints: &mut CheckpointState,
     policy: ReactionRecoveryPolicy,
@@ -302,103 +319,123 @@ async fn flush_pending(
     let completed_seq = batch.completed_seq;
     let seen_seq = batch.seen_seq;
 
-    ensure_client(
-        client,
-        connection_state,
-        endpoint,
-        initial_connection_timeout_ms,
-        connection_retry_attempts,
-        consecutive_failures,
-        last_connection_attempt,
-        base_backoff,
-        max_backoff,
-    )
-    .await;
-
-    let sent = if client.is_none() {
-        // No connection could be (re)established within the current backoff
-        // window — treat as a sustained delivery failure.
-        warn!(
-            "[{reaction_name}] No gRPC connection available for batch of {item_count} item(s) \
-             for query '{query_id}'"
-        );
-        false
-    } else {
-        send_with_swap(
+    let telemetry = base.worker_telemetry().await;
+    let observation = telemetry
+        .reaction_batch(
+            pending_contexts.values(),
+            pending_contexts.len(),
+            item_count,
+        )
+        .map_err(|e| warn!("Failed to observe gRPC batch: {e}"))
+        .ok();
+    let flush = async {
+        let Some(batch) = pending.as_ref() else {
+            return Ok(FlushControl::Continue);
+        };
+        ensure_client(
             client,
-            &batch.items,
-            &batch.key.query_id,
-            &batch.key.metadata_map(),
-            max_retries,
-            endpoint,
-            timeout_ms,
-            reaction_name,
             connection_state,
+            endpoint,
+            initial_connection_timeout_ms,
+            connection_retry_attempts,
             consecutive_failures,
             last_connection_attempt,
+            base_backoff,
+            max_backoff,
         )
-        .await
-    };
+        .await;
 
-    // The batch is consumed whether delivered or dropped, so a stuck downstream
-    // cannot grow `pending` without bound.
-    *pending = None;
+        let sent = if client.is_none() {
+            // No connection could be (re)established within the current backoff
+            // window — treat as a sustained delivery failure.
+            warn!(
+                "[{reaction_name}] No gRPC connection available for batch of {item_count} item(s) \
+             for query '{query_id}'"
+            );
+            false
+        } else {
+            send_with_swap(
+                client,
+                &batch.items,
+                &batch.key.query_id,
+                &batch.key.metadata_map(),
+                max_retries,
+                endpoint,
+                timeout_ms,
+                reaction_name,
+                connection_state,
+                consecutive_failures,
+                last_connection_attempt,
+            )
+            .await
+        };
 
-    if sent {
-        // Advance the checkpoint to the batch's max fully-acked (terminal)
-        // sequence after the side effect committed.
-        if let Some(seq) = completed_seq {
-            if let Err(e) = checkpoints
-                .advance_with_policy(base, &query_id, seq, policy)
-                .await
-            {
-                error!(
-                    "[{reaction_name}] Failed to write checkpoint for query '{query_id}' \
+        // The batch is consumed whether delivered or dropped, so a stuck downstream
+        // cannot grow `pending` without bound.
+        *pending = None;
+        pending_contexts.clear();
+
+        if sent {
+            // Advance the checkpoint to the batch's max fully-acked (terminal)
+            // sequence after the side effect committed.
+            if let Some(seq) = completed_seq {
+                if let Err(e) = checkpoints
+                    .advance_with_policy(base, &query_id, seq, policy)
+                    .await
+                {
+                    error!(
+                        "[{reaction_name}] Failed to write checkpoint for query '{query_id}' \
                      (seq {seq}): {e}"
+                    );
+                    base.status_handle()
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!(
+                                "gRPC checkpoint write failed for query '{query_id}' (seq {seq}); \
+                             stopped per recovery policy"
+                            )),
+                        )
+                        .await;
+                    return Err(FlushControl::Stop);
+                }
+            }
+            return Ok(FlushControl::Continue);
+        }
+
+        // Sustained delivery failure: apply the recovery policy.
+        match FailureAction::from_policy(policy) {
+            FailureAction::Stop => {
+                error!(
+                    "[{reaction_name}] Failed to deliver batch of {item_count} item(s) for query \
+                 '{query_id}' after retries; stopping per Strict recovery policy — the batch \
+                 replays from the outbox on restart"
                 );
                 base.status_handle()
                     .set_status(
                         ComponentStatus::Error,
                         Some(format!(
-                            "gRPC checkpoint write failed for query '{query_id}' (seq {seq}); \
-                             stopped per recovery policy"
-                        )),
-                    )
-                    .await;
-                return FlushControl::Stop;
-            }
-        }
-        return FlushControl::Continue;
-    }
-
-    // Sustained delivery failure: apply the recovery policy.
-    match FailureAction::from_policy(policy) {
-        FailureAction::Stop => {
-            error!(
-                "[{reaction_name}] Failed to deliver batch of {item_count} item(s) for query \
-                 '{query_id}' after retries; stopping per Strict recovery policy — the batch \
-                 replays from the outbox on restart"
-            );
-            base.status_handle()
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!(
                         "gRPC delivery failed for query '{query_id}'; stopped per recovery policy"
                     )),
-                )
-                .await;
-            FlushControl::Stop
-        }
-        FailureAction::SkipAndContinue => {
-            warn!(
-                "[{reaction_name}] Failed to deliver batch of {item_count} item(s) for query \
+                    )
+                    .await;
+                Err(FlushControl::Stop)
+            }
+            FailureAction::SkipAndContinue => {
+                warn!(
+                    "[{reaction_name}] Failed to deliver batch of {item_count} item(s) for query \
                  '{query_id}' after retries; skipping and advancing checkpoint per AutoSkipGap \
                  recovery policy"
-            );
-            let _ = checkpoints.advance(base, &query_id, seen_seq).await;
-            FlushControl::Continue
+                );
+                let _ = checkpoints.advance(base, &query_id, seen_seq).await;
+                Err(FlushControl::Continue)
+            }
         }
+    };
+    match observation {
+        Some(observation) => observation.run(flush).await,
+        None => flush.await,
     }
+    .unwrap_or_else(|control| control)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -346,7 +346,9 @@ impl Entry {
             });
                 publication.finish(outcome);
             };
-        crate::context::workers::try_spawn_owned_worker(&entry.task, work)
+        let scope = crate::observability::ExecutionScope::capture()
+            .with_context(Default::default());
+        crate::context::workers::try_spawn_owned_worker(&entry.task, scope.scope(work))
             .expect("new instance owns a vacant driver slot");
         entry
     }
@@ -580,7 +582,8 @@ impl InstanceGraph {
         &self,
         work: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> anyhow::Result<()> {
-        crate::context::workers::try_spawn_owned_worker(&self.startup_task, work)?;
+        let scope = crate::observability::ExecutionScope::capture();
+        crate::context::workers::try_spawn_owned_worker(&self.startup_task, scope.scope(work))?;
         Ok(())
     }
 

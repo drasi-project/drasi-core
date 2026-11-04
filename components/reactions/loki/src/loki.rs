@@ -449,8 +449,10 @@ impl Reaction for LokiReaction {
         let labels = self.config.labels.clone();
         let routes = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
+        let telemetry = self.base.worker_telemetry().await;
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            telemetry.scope(async {
             info!(
                 "[{reaction_name}] config - endpoint: {endpoint}, timeout_ms: {timeout_ms}, labels: {}, routes: {}, token: {}, basic_auth: {}, tenant_id: {}",
                 labels.len(),
@@ -480,10 +482,10 @@ impl Reaction for LokiReaction {
                         break;
                     }
 
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
 
-                let query_result = query_result_arc.as_ref();
+                let query_result = query_result_arc.payload.as_ref();
                 debug!(
                     "[{reaction_name}] received result for query '{}' with {} results",
                     query_result.query_id,
@@ -589,16 +591,21 @@ impl Reaction for LokiReaction {
                     payload.streams.len()
                 );
 
-                if let Err(e) = Self::push_to_loki(
+                let observation = telemetry.reaction(&query_result_arc.execution_context, total_values)
+                    .map_err(|e| warn!("Failed to observe Loki push: {e}")).ok();
+                let push = Self::push_to_loki(
                     &client,
                     &endpoint,
                     &token,
                     &basic_auth,
                     &tenant_id,
                     &payload,
-                )
-                .await
-                {
+                );
+                let outcome = match observation {
+                    Some(observation) => observation.run(push).await,
+                    None => push.await,
+                };
+                if let Err(e) = outcome {
                     warn!(
                         "[{reaction_name}] failed to push query '{query_name}' results to Loki (streams: {}, values: {total_values}): {e}",
                         payload.streams.len()
@@ -612,6 +619,7 @@ impl Reaction for LokiReaction {
             }
 
             info!("[{reaction_name}] Loki reaction stopped");
+            }).await;
         })
         .await?;
         self.base

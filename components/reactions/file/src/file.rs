@@ -410,7 +410,8 @@ impl FileReaction {
         repaired_files: &Arc<Mutex<HashSet<String>>>,
         query_result: &QueryResult,
         reaction_name: &str,
-    ) {
+    ) -> Result<()> {
+        let mut failure = None;
         for diff in &query_result.results {
             if matches!(diff, ResultDiff::Noop) {
                 continue;
@@ -438,13 +439,16 @@ impl FileReaction {
                             output_file.to_string_lossy(),
                             e
                         );
+                        failure = Some(e);
                     }
                 }
                 Err(e) => {
                     error!("[{reaction_name}] Failed to render output: {e}");
+                    failure = Some(e);
                 }
             }
         }
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -665,8 +669,10 @@ impl Reaction for FileReaction {
         let file_locks = self.file_locks.clone();
         let repaired_files = self.repaired_files.clone();
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
+        let telemetry = self.base.worker_telemetry().await;
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            telemetry.scope(async {
             loop {
                 let query_result_arc = tokio::select! {
                     biased;
@@ -674,19 +680,32 @@ impl Reaction for FileReaction {
                         debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                         break;
                     }
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
 
-                Self::process_result(
+                let query_result = query_result_arc.payload.as_ref();
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                if change_count == 0 {
+                    continue;
+                }
+                let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
+                    .map_err(|e| log::warn!("Failed to observe file output: {e}"))
+                    .ok();
+                let output = Self::process_result(
                     &config,
                     &handlebars,
                     &file_locks,
                     &repaired_files,
-                    query_result_arc.as_ref(),
+                    query_result,
                     &reaction_name,
-                )
-                .await;
+                );
+                let _ = match observation {
+                    Some(observation) => observation.run(output).await,
+                    None => output.await,
+                };
             }
+            }).await;
         }).await?;
         self.base
             .set_status(

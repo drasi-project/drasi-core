@@ -558,8 +558,10 @@ impl Reaction for ApplicationReaction {
         let reaction_name = self.base.id.clone();
         let app_tx = self.app_tx.clone();
         let query_filter = self.base.queries.clone();
+        let telemetry = self.base.worker_telemetry().await;
 
         let processing_task = tokio::spawn(async move {
+            telemetry.scope(async {
             info!("ApplicationReaction '{reaction_name}' result processor started");
 
             loop {
@@ -572,11 +574,11 @@ impl Reaction for ApplicationReaction {
                         break;
                     }
 
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
 
                 // Clone to get owned QueryResult
-                let mut query_result = (*query_result_arc).clone();
+                let mut query_result = (*query_result_arc.payload).clone();
                 if let Some(profiling) = &mut query_result.profiling {
                     profiling.reaction_receive_ns = Some(drasi_lib::profiling::timestamp_ns());
                 }
@@ -593,18 +595,35 @@ impl Reaction for ApplicationReaction {
                     query_result.results.len()
                 );
 
-                let permit = match app_tx.reserve().await {
-                    Ok(permit) => permit,
-                    Err(e) => {
-                        error!("Failed to send result to application: {e}");
-                        break;
-                    }
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+                let observation = if change_count == 0 {
+                    None
+                } else {
+                    telemetry.reaction(&query_result_arc.execution_context, change_count)
+                        .map_err(|e| log::warn!("Failed to observe application forwarding: {e}"))
+                        .ok()
                 };
-                if let Some(profiling) = &mut query_result.profiling {
-                    profiling.reaction_complete_ns = Some(drasi_lib::profiling::timestamp_ns());
+                let forward = async {
+                    let permit = app_tx.reserve().await?;
+                    if let Some(profiling) = &mut query_result.profiling {
+                        profiling.reaction_complete_ns = Some(drasi_lib::profiling::timestamp_ns());
+                    }
+                    permit.send(query_result);
+                    Ok::<_, mpsc::error::SendError<()>>(())
+                };
+                let outcome = match observation {
+                    Some(observation) => observation.run(forward).await,
+                    None => drasi_lib::observability::ExecutionScope::capture()
+                        .with_context(query_result_arc.execution_context.clone())
+                        .scope(forward).await,
+                };
+                if let Err(e) = outcome {
+                    error!("Failed to send result to application: {e}");
+                    break;
                 }
-                permit.send(query_result);
             }
+            }).await;
         });
 
         // Store the processing task handle

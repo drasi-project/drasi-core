@@ -254,7 +254,9 @@ impl Reaction for SseReaction {
             self.config.routes.clone(),
             self.config.default_template.clone(),
         );
+        let telemetry = self.base.worker_telemetry().await;
         spawn_owned_worker(&self.base.processing_task, async move {
+            telemetry.scope(async {
             info!("[{reaction_id}] SSE result processing task started");
 
             loop {
@@ -275,8 +277,10 @@ impl Reaction for SseReaction {
                         break;
                     }
 
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
+                let query_result_context = query_result.execution_context;
+                let query_result = query_result.payload;
 
                 info!(
                     "[{}] Processing result from query '{}' with {} items",
@@ -285,8 +289,18 @@ impl Reaction for SseReaction {
                     query_result.results.len()
                 );
 
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+                if change_count == 0 {
+                    continue;
+                }
+                let observation = telemetry.reaction(&query_result_context, change_count)
+                    .map_err(|e| log::warn!("Failed to observe SSE broadcast: {e}")).ok();
+                let broadcast = async {
+                let mut render_failed = false;
                 let timestamp = chrono::Utc::now().timestamp_millis();
                 for event in renderer.render(&query_result, timestamp, |message| {
+                    render_failed = true;
                     error!("[{reaction_id}] {message}");
                 }) {
                     let broadcaster = {
@@ -312,26 +326,42 @@ impl Reaction for SseReaction {
                         ),
                     }
                 }
+                if render_failed {
+                    anyhow::bail!("SSE template rendering failed; fallback output was used");
+                }
+                Ok::<_, anyhow::Error>(())
+                };
+                let _ = match observation {
+                    Some(observation) => observation.run(broadcast).await,
+                    None => broadcast.await,
+                };
             }
             info!("[{reaction_id}] SSE result processing task ended");
+            }).await;
         })
         .await?;
 
         // Heartbeat task - sends to all paths
         let broadcasters_hb = self.broadcasters.clone();
         let interval = self.config.heartbeat_interval_ms;
+        let telemetry = self.base.worker_telemetry().await;
         spawn_owned_worker(&self.heartbeat_task, async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(interval));
-            loop {
-                ticker.tick().await;
-                let beat = json!({"type":"heartbeat","ts": chrono::Utc::now().timestamp_millis()})
-                    .to_string();
-                // Send heartbeat to all broadcasters
-                let broadcasters_read = broadcasters_hb.read().await;
-                for broadcaster in broadcasters_read.values() {
-                    let _ = broadcaster.send(beat.clone());
-                }
-            }
+            telemetry
+                .scope(async {
+                    let mut ticker = tokio::time::interval(Duration::from_millis(interval));
+                    loop {
+                        ticker.tick().await;
+                        let beat =
+                            json!({"type":"heartbeat","ts": chrono::Utc::now().timestamp_millis()})
+                                .to_string();
+                        // Send heartbeat to all broadcasters
+                        let broadcasters_read = broadcasters_hb.read().await;
+                        for broadcaster in broadcasters_read.values() {
+                            let _ = broadcaster.send(beat.clone());
+                        }
+                    }
+                })
+                .await;
         })
         .await?;
 
@@ -348,89 +378,95 @@ impl Reaction for SseReaction {
             .await
             .and_then(|ctx| ctx.snapshot_fetcher.clone());
 
+        let telemetry = self.base.worker_telemetry().await;
         spawn_owned_worker(&self.server_task, async move {
-            // Configure CORS to allow all origins
-            let cors = CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods([Method::GET, Method::OPTIONS])
-                .allow_headers(Any);
+            telemetry
+                .scope(async {
+                    // Configure CORS to allow all origins
+                    let cors = CorsLayer::new()
+                        .allow_origin(Any)
+                        .allow_methods([Method::GET, Method::OPTIONS])
+                        .allow_headers(Any);
 
-            // Create a handler that checks for matching paths dynamically
-            let broadcasters_clone = broadcasters_server.clone();
-            let handler = get(move |req: axum::http::Request<axum::body::Body>| {
-                let broadcasters = broadcasters_clone.clone();
-                let shutdown = subscriber_shutdown.clone();
-                async move {
-                    let path = req.uri().path().to_string();
+                    // Create a handler that checks for matching paths dynamically
+                    let broadcasters_clone = broadcasters_server.clone();
+                    let handler = get(move |req: axum::http::Request<axum::body::Body>| {
+                        let broadcasters = broadcasters_clone.clone();
+                        let shutdown = subscriber_shutdown.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
 
-                    // Try to find a broadcaster for this path
-                    let broadcaster = {
-                        let broadcasters_read = broadcasters.read().await;
-                        broadcasters_read.get(&path).cloned()
-                    };
+                            // Try to find a broadcaster for this path
+                            let broadcaster = {
+                                let broadcasters_read = broadcasters.read().await;
+                                broadcasters_read.get(&path).cloned()
+                            };
 
-                    if let Some(broadcaster) = broadcaster {
-                        let rx = broadcaster.subscribe();
-                        let stream = subscriber_events(rx, path, shutdown);
-                        Sse::new(stream)
-                            .keep_alive(
-                                KeepAlive::new()
-                                    .interval(Duration::from_secs(30))
-                                    .text("keep-alive"),
-                            )
-                            .into_response()
-                    } else {
-                        // Return 404 for unknown paths
-                        axum::http::StatusCode::NOT_FOUND.into_response()
-                    }
-                }
-            });
+                            if let Some(broadcaster) = broadcaster {
+                                let rx = broadcaster.subscribe();
+                                let stream = subscriber_events(rx, path, shutdown);
+                                Sse::new(stream)
+                                    .keep_alive(
+                                        KeepAlive::new()
+                                            .interval(Duration::from_secs(30))
+                                            .text("keep-alive"),
+                                    )
+                                    .into_response()
+                            } else {
+                                // Return 404 for unknown paths
+                                axum::http::StatusCode::NOT_FOUND.into_response()
+                            }
+                        }
+                    });
 
-            let app = Router::new()
-                .route(
-                    "/snapshot/:query_id",
-                    get({
-                        let sf = snapshot_fetcher.clone();
-                        move |axum::extract::Path(query_id): axum::extract::Path<String>| {
-                            let sf = sf.clone();
-                            async move {
-                                let fetcher = match sf.as_ref() {
-                                    Some(f) => f,
-                                    None => {
-                                        return (
-                                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                                            "Snapshot fetcher not available",
-                                        )
-                                            .into_response();
-                                    }
-                                };
-                                match fetcher.fetch_snapshot(&query_id).await {
-                                    Ok(snapshot) => {
-                                        // Stream the snapshot as a JSON array using chunked
-                                        // transfer encoding. This keeps memory proportional to
-                                        // a single row rather than the full result set.
-                                        let is_first = std::sync::Arc::new(
-                                            std::sync::atomic::AtomicBool::new(true),
-                                        );
-                                        let row_stream = snapshot.map(move |row| {
-                                            let json = serde_json::to_string(&row)
-                                                .unwrap_or_else(|_| "null".into());
-                                            if is_first
-                                                .swap(false, std::sync::atomic::Ordering::Relaxed)
-                                            {
-                                                json
-                                            } else {
-                                                format!(",{json}")
+                    let app = Router::new()
+                        .route(
+                            "/snapshot/:query_id",
+                            get({
+                                let sf = snapshot_fetcher.clone();
+                                move |axum::extract::Path(query_id): axum::extract::Path<String>| {
+                                    let sf = sf.clone();
+                                    async move {
+                                        let fetcher = match sf.as_ref() {
+                                            Some(f) => f,
+                                            None => {
+                                                return (
+                                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                                    "Snapshot fetcher not available",
+                                                )
+                                                    .into_response();
                                             }
-                                        });
+                                        };
+                                        match fetcher.fetch_snapshot(&query_id).await {
+                                            Ok(snapshot) => {
+                                                // Stream the snapshot as a JSON array using chunked
+                                                // transfer encoding. This keeps memory proportional to
+                                                // a single row rather than the full result set.
+                                                let is_first = std::sync::Arc::new(
+                                                    std::sync::atomic::AtomicBool::new(true),
+                                                );
+                                                let row_stream = snapshot.map(move |row| {
+                                                    let json = serde_json::to_string(&row)
+                                                        .unwrap_or_else(|_| "null".into());
+                                                    if is_first.swap(
+                                                        false,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    ) {
+                                                        json
+                                                    } else {
+                                                        format!(",{json}")
+                                                    }
+                                                });
 
-                                        let full_stream = tokio_stream::once("[".to_string())
-                                            .chain(row_stream)
-                                            .chain(tokio_stream::once("]".to_string()))
-                                            .map(Ok::<_, std::convert::Infallible>);
+                                                let full_stream =
+                                                    tokio_stream::once("[".to_string())
+                                                        .chain(row_stream)
+                                                        .chain(tokio_stream::once("]".to_string()))
+                                                        .map(Ok::<_, std::convert::Infallible>);
 
-                                        let body = axum::body::Body::from_stream(full_stream);
-                                        match axum::response::Response::builder()
+                                                let body =
+                                                    axum::body::Body::from_stream(full_stream);
+                                                match axum::response::Response::builder()
                                             .header("content-type", "application/json")
                                             .body(body)
                                         {
@@ -441,35 +477,38 @@ impl Reaction for SseReaction {
                                             )
                                                 .into_response(),
                                         }
-                                    }
-                                    Err(e) => {
-                                        let msg = format!("Failed to fetch snapshot: {e}");
-                                        (axum::http::StatusCode::NOT_FOUND, msg).into_response()
+                                            }
+                                            Err(e) => {
+                                                let msg = format!("Failed to fetch snapshot: {e}");
+                                                (axum::http::StatusCode::NOT_FOUND, msg)
+                                                    .into_response()
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                    }),
-                )
-                .fallback(handler)
-                .layer(cors);
+                            }),
+                        )
+                        .fallback(handler)
+                        .layer(cors);
 
-            info!("Starting SSE server on {host}:{port} with CORS enabled");
-            let result = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = server_shutdown.wait_for(|stopped| *stopped).await;
+                    info!("Starting SSE server on {host}:{port} with CORS enabled");
+                    let result = axum::serve(listener, app)
+                        .with_graceful_shutdown(async move {
+                            let _ = server_shutdown.wait_for(|stopped| *stopped).await;
+                        })
+                        .await;
+                    if let Err(error) = &result {
+                        error!("SSE server error: {error}");
+                        server_status
+                            .set_status(
+                                ComponentStatus::Error,
+                                Some(format!("SSE server failed: {error}")),
+                            )
+                            .await;
+                    }
+                    result
                 })
-                .await;
-            if let Err(error) = &result {
-                error!("SSE server error: {error}");
-                server_status
-                    .set_status(
-                        ComponentStatus::Error,
-                        Some(format!("SSE server failed: {error}")),
-                    )
-                    .await;
-            }
-            result
+                .await
         })
         .await?;
 

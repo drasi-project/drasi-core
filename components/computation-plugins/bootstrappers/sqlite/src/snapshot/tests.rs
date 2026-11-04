@@ -432,7 +432,7 @@ fn cancelled_and_timed_out_cleanup_keep_the_actual_blocking_owner() -> Result<()
         *snapshot.shared.run.lock().expect("run lock") = Some(run.clone());
         let (entered, ready) = tokio::sync::oneshot::channel();
         let (release, hold) = std::sync::mpsc::channel();
-        spawn_owned_blocking_worker(&snapshot.shared.worker, move || {
+        spawn_owned_scoped_blocking_worker(&snapshot.shared.worker, move || {
             entered
                 .send(())
                 .map_err(|_| anyhow::anyhow!("test lost entry receiver"))?;

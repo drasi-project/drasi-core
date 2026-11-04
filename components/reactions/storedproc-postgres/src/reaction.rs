@@ -148,6 +148,8 @@ impl PostgresStoredProcReaction {
         executor: Arc<PostgresExecutor>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
+        let telemetry = base.worker_telemetry().await;
+        telemetry.scope(async {
         let reaction_id = base.id.clone();
         info!("[{reaction_id}] Starting processing loop");
 
@@ -158,9 +160,9 @@ impl PostgresStoredProcReaction {
                     debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
                     break;
                 }
-                result = base.priority_queue.dequeue() => result,
+                result = base.priority_queue.dequeue_message() => result,
             };
-            let query_result = query_result_arc.as_ref();
+            let query_result = query_result_arc.payload.as_ref();
 
             // Empty result sets are no-ops.
             if query_result.results.is_empty() {
@@ -173,6 +175,15 @@ impl PostgresStoredProcReaction {
                 query_result.query_id
             );
 
+            let change_count = query_result.results.iter()
+                .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+            if change_count == 0 {
+                continue;
+            }
+            let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
+                .map_err(|e| log::warn!("Failed to observe PostgreSQL processing: {e}")).ok();
+            let process = async {
+            let mut failure = None;
             for result_item in &query_result.results {
                 // Noop variants carry no change; skip them.
                 let render_input = match render::build_render_input(query_result, result_item) {
@@ -208,6 +219,7 @@ impl PostgresStoredProcReaction {
                             "[{reaction_id}] No compiled template found for query '{}', skipping",
                             query_result.query_id
                         );
+                        failure = Some(anyhow::anyhow!("No compiled template found"));
                         continue;
                     }
                 };
@@ -218,6 +230,7 @@ impl PostgresStoredProcReaction {
                             "[{reaction_id}] Failed to render command for query '{}': {e}",
                             query_result.query_id
                         );
+                        failure = Some(e);
                         continue;
                     }
                 };
@@ -230,11 +243,19 @@ impl PostgresStoredProcReaction {
 
                 if let Err(e) = executor.execute_command(&command, params).await {
                     error!("[{reaction_id}] Failed to execute command: {e}");
+                    failure = Some(e);
                 }
             }
+            failure.map_or(Ok(()), Err)
+            };
+            let _ = match observation {
+                Some(observation) => observation.run(process).await,
+                None => process.await,
+            };
         }
 
         info!("[{reaction_id}] PostgreSQL StoredProc processing loop stopped");
+        }).await;
     }
 }
 

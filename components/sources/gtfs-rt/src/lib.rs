@@ -104,7 +104,7 @@ impl Source for GtfsRtSource {
             component_type = "source"
         );
 
-        let task = tokio::spawn(
+        let task = drasi_lib::context::workers::spawn_component_worker(
             async move {
                 let mut poller = GtfsRtPoller::new(config.clone(), client);
 

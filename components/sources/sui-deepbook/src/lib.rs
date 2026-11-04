@@ -162,7 +162,7 @@ impl Source for SuiDeepBookSource {
         let state_store = self.state_store.read().await.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
 
-        let task_handle = tokio::spawn(async move {
+        let task_handle = drasi_lib::context::workers::spawn_component_worker(async move {
             let result = match config.transport {
                 Transport::Grpc => {
                     run_grpc_stream(&source_id, config, &base, state_store, &mut shutdown_rx).await

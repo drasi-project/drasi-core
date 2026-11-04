@@ -485,84 +485,105 @@ impl Reaction for EventGridReaction {
         let config = self.config.clone();
         let reaction_name = self.base.id.clone();
         let status_handle = self.base.status_handle();
+        let telemetry = self.base.worker_telemetry().await;
 
         let handle = tokio::spawn(async move {
-            let handlebars = build_handlebars();
-            let content_type = config.schema.content_type();
+            telemetry
+                .scope(async {
+                    let handlebars = build_handlebars();
+                    let content_type = config.schema.content_type();
 
-            status_handle
-                .set_status(
-                    ComponentStatus::Running,
-                    Some("Event Grid reaction started".to_string()),
-                )
-                .await;
+                    status_handle
+                        .set_status(
+                            ComponentStatus::Running,
+                            Some("Event Grid reaction started".to_string()),
+                        )
+                        .await;
 
-            loop {
-                let query_result_arc = tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => {
-                        debug!("[{reaction_name}] Shutdown signal received");
-                        break;
-                    }
-                    result = base.priority_queue.dequeue() => result,
-                };
-                let query_result = query_result_arc.as_ref();
+                    loop {
+                        let query_result_arc = tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => {
+                                debug!("[{reaction_name}] Shutdown signal received");
+                                break;
+                            }
+                            result = base.priority_queue.dequeue_message() => result,
+                        };
+                        let query_result = query_result_arc.payload.as_ref();
 
-                if query_result.results.is_empty() {
-                    continue;
-                }
+                        if query_result.results.is_empty() {
+                            continue;
+                        }
 
-                let events = build_events(
-                    &reaction_name,
-                    &config,
-                    &handlebars,
-                    query_result,
-                    &reaction_name,
-                );
-                if events.is_empty() {
-                    continue;
-                }
+                        let events = build_events(
+                            &reaction_name,
+                            &config,
+                            &handlebars,
+                            query_result,
+                            &reaction_name,
+                        );
+                        if events.is_empty() {
+                            continue;
+                        }
 
-                let body = encode_batch(&events, config.schema, &reaction_name);
+                        let body = encode_batch(&events, config.schema, &reaction_name);
 
-                let auth =
-                    match resolve_auth_with_retry(&config, &base, &reaction_name, &mut shutdown_rx)
+                        let auth = match resolve_auth_with_retry(
+                            &config,
+                            &base,
+                            &reaction_name,
+                            &mut shutdown_rx,
+                        )
                         .await
-                    {
-                        AuthOutcome::Ok(a) => a,
-                        AuthOutcome::Shutdown => break,
-                    };
+                        {
+                            AuthOutcome::Ok(a) => a,
+                            AuthOutcome::Shutdown => break,
+                        };
 
-                if let Err(e) = publish(
-                    &client,
-                    &config.endpoint,
-                    &auth,
-                    content_type,
-                    &body,
-                    &reaction_name,
-                )
-                .await
-                {
-                    error!(
+                        let change_count = query_result
+                            .results
+                            .iter()
+                            .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop))
+                            .count();
+                        let observation = telemetry
+                            .reaction(&query_result_arc.execution_context, change_count)
+                            .map_err(|e| warn!("Failed to observe Event Grid publication: {e}"))
+                            .ok();
+                        let publish = publish(
+                            &client,
+                            &config.endpoint,
+                            &auth,
+                            content_type,
+                            &body,
+                            &reaction_name,
+                        );
+                        let outcome = match observation {
+                            Some(observation) => observation.run(publish).await,
+                            None => publish.await,
+                        };
+                        if let Err(e) = outcome {
+                            error!(
                         "[{reaction_name}] Failed to publish {} event(s) for query '{}': {e:#}",
                         events.len(),
                         query_result.query_id
                     );
-                } else {
-                    debug!(
-                        "[{reaction_name}] Published {} event(s) for query '{}'",
-                        events.len(),
-                        query_result.query_id
-                    );
-                }
-            }
+                        } else {
+                            debug!(
+                                "[{reaction_name}] Published {} event(s) for query '{}'",
+                                events.len(),
+                                query_result.query_id
+                            );
+                        }
+                    }
 
-            info!("[{reaction_name}] Event Grid reaction stopped");
-            status_handle
-                .set_status(
-                    ComponentStatus::Stopped,
-                    Some("Event Grid reaction processing task stopped".to_string()),
-                )
+                    info!("[{reaction_name}] Event Grid reaction stopped");
+                    status_handle
+                        .set_status(
+                            ComponentStatus::Stopped,
+                            Some("Event Grid reaction processing task stopped".to_string()),
+                        )
+                        .await;
+                })
                 .await;
         });
 

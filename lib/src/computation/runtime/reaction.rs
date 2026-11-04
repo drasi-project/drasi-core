@@ -218,9 +218,9 @@ impl RuntimeComponent for ReactionInstance {
             ) -> (
                 &'a str,
                 &'a mut CatalogSubscription,
-                anyhow::Result<ChangeEnvelope>,
+                anyhow::Result<crate::computation::v1::EnvelopeMessage>,
             ) {
-                let result = receiver.receive().await;
+                let result = receiver.receive_message().await;
                 (query, receiver, result)
             }
             let mut receivers: FuturesUnordered<_> = inputs
@@ -236,7 +236,23 @@ impl RuntimeComponent for ReactionInstance {
                     // Drop the idle status reader before the enqueue/recovery
                     // operation drives and drains that same observation channel.
                     match result {
-                        Ok(envelope) => host.handle_envelope(&envelope).await?,
+                        Ok(message) => {
+                            crate::observability::ComponentObservations::current_or_disabled()
+                                .begin(
+                                    crate::observability::ObservedOperation::Handle,
+                                    &message.execution_context,
+                                    crate::observability::OperationFields {
+                                        input_count: Some(1),
+                                        change_count: Some(
+                                            message.envelope.changes().operations().len(),
+                                        ),
+                                        completion: Some("accepted"),
+                                        ..Default::default()
+                                    },
+                                )?
+                                .run(host.handle_envelope(&message.envelope))
+                                .await?;
+                        }
                         Err(error)
                             if matches!(
                                 error.downcast_ref::<tokio::sync::broadcast::error::RecvError>(),

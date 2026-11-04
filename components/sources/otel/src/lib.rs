@@ -368,7 +368,7 @@ impl Source for OtelSource {
                 Some("OpenTelemetry source listening".to_string()),
             )
             .await;
-        drasi_lib::context::workers::spawn_owned_worker(
+        drasi_lib::context::workers::spawn_owned_component_worker(
             &self.base.task_handle,
             async move {
                 if let Err(e) = receiver::serve(runtime, endpoints, shutdown_rx).await {
@@ -388,17 +388,20 @@ impl Source for OtelSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-                    if let Some(confirmed) = base.compute_confirmed_position().await {
-                        if let Err(e) = wal.prune_up_to(&source_id, confirmed).await {
-                            warn!("[{source_id}] WAL prune failed: {e}");
+            drasi_lib::context::workers::spawn_owned_component_worker(
+                &self.prune_task,
+                async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(30));
+                    loop {
+                        interval.tick().await;
+                        if let Some(confirmed) = base.compute_confirmed_position().await {
+                            if let Err(e) = wal.prune_up_to(&source_id, confirmed).await {
+                                warn!("[{source_id}] WAL prune failed: {e}");
+                            }
                         }
                     }
-                }
-            })
+                },
+            )
             .await
             .with_context(|| format!("OTel source '{}' WAL pruner registration", self.base.id))?;
         }

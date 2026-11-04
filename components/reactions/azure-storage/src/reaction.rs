@@ -380,8 +380,10 @@ impl Reaction for AzureStorageReaction {
         let config = self.config.clone();
         let target = self.config.target.clone();
         let reaction_name = self.base.id.clone();
+        let telemetry = self.base.worker_telemetry().await;
 
         let processing_task = tokio::spawn(async move {
+            telemetry.scope(async {
             let mut handlebars = Handlebars::new();
             handlebars.register_helper(
                 "json",
@@ -409,14 +411,23 @@ impl Reaction for AzureStorageReaction {
                         debug!("[{reaction_name}] Shutdown signal received");
                         break;
                     }
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
-                let query_result = query_result_arc.as_ref();
+                let query_result = query_result_arc.payload.as_ref();
 
                 if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                if change_count == 0 {
+                    continue;
+                }
+                let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
+                    .map_err(|e| warn!("Failed to observe Azure Storage processing: {e}")).ok();
+                let process = async {
+                let mut failure = None;
                 for result in &query_result.results {
                     let op_and_data: Result<Option<(OperationType, &str, Value)>> = match result {
                         ResultDiff::Add { data, .. } => {
@@ -447,6 +458,7 @@ impl Reaction for AzureStorageReaction {
                                 "[{reaction_name}] Failed to prepare payload for query {}: {}",
                                 query_result.query_id, err
                             );
+                            failure = Some(err);
                             continue;
                         }
                     }) else {
@@ -469,8 +481,15 @@ impl Reaction for AzureStorageReaction {
                             "[{reaction_name}] Failed processing {} operation for query {}: {}",
                             operation_name, query_result.query_id, err
                         );
+                        failure = Some(err);
                     }
                 }
+                failure.map_or(Ok(()), Err)
+                };
+                let _ = match observation {
+                    Some(observation) => observation.run(process).await,
+                    None => process.await,
+                };
             }
 
             info!("[{reaction_name}] Azure Storage reaction stopped");
@@ -480,6 +499,7 @@ impl Reaction for AzureStorageReaction {
                     Some("Azure Storage reaction processing task stopped".to_string()),
                 )
                 .await;
+            }).await;
         });
 
         self.base.set_processing_task(processing_task).await;

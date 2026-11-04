@@ -133,7 +133,7 @@ impl Source for OracleSource {
             .lock()
             .expect("oracle shutdown mutex poisoned") = Some(shutdown_tx);
 
-        let task_handle = tokio::spawn(async move {
+        let task_handle = drasi_lib::context::workers::spawn_component_worker(async move {
             if let Err(error) = stream::run_logminer_stream(
                 source_id.clone(),
                 config,

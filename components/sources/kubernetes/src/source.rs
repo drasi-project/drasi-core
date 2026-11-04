@@ -199,7 +199,7 @@ impl Source for KubernetesSource {
                 Some("Kubernetes source started".to_string()),
             )
             .await;
-        let task = tokio::spawn(
+        let task = drasi_lib::context::workers::spawn_component_worker(
             async move {
                 let run_result =
                     run_source_stream(&source_id, config, base, stream, shutdown_rx).await;

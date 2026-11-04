@@ -130,13 +130,14 @@ async fn process_query_result(
     config: &MsSqlStoredProcReactionConfig,
     executor: &MsSqlExecutor,
     query_result: &QueryResult,
-) {
+) -> Result<()> {
     debug!(
         "[{reaction_id}] Processing {} result(s) from query: {}",
         query_result.results.len(),
         query_result.query_id
     );
 
+    let mut failure = None;
     for diff in &query_result.results {
         // Noop items produce no context and no command.
         if matches!(diff, ResultDiff::Noop) {
@@ -172,6 +173,7 @@ async fn process_query_result(
             Ok(rendered) => rendered,
             Err(e) => {
                 error!("[{reaction_id}] Failed to render command template: {e}");
+                failure = Some(e);
                 continue;
             }
         };
@@ -187,9 +189,11 @@ async fn process_query_result(
             }
             Err(e) => {
                 error!("[{reaction_id}] Failed to execute command: {e}");
+                failure = Some(e);
             }
         }
     }
+    failure.map_or(Ok(()), Err)
 }
 
 /// Run the processing loop until the shutdown signal fires or the queue closes.
@@ -200,24 +204,43 @@ async fn run_processing_loop(
     executor: Arc<MsSqlExecutor>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    info!("[{reaction_id}] Starting processing loop");
+    let telemetry = base.worker_telemetry().await;
+    telemetry
+        .scope(async {
+            info!("[{reaction_id}] Starting processing loop");
 
-    loop {
-        let query_result = tokio::select! {
-            biased;
-            _ = &mut shutdown_rx => {
-                debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
-                break;
+            loop {
+                let query_result = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
+                        break;
+                    }
+                    result = base.priority_queue.dequeue_message() => result,
+                };
+                let payload = query_result.payload.as_ref();
+
+                let change_count = payload
+                    .results
+                    .iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop))
+                    .count();
+                if change_count == 0 {
+                    continue;
+                }
+
+                let observation = telemetry
+                    .reaction(&query_result.execution_context, change_count)
+                    .map_err(|e| log::warn!("Failed to observe MS SQL processing: {e}"))
+                    .ok();
+                let process = process_query_result(&reaction_id, &config, &executor, payload);
+                let _ = match observation {
+                    Some(observation) => observation.run(process).await,
+                    None => process.await,
+                };
             }
-            result = base.priority_queue.dequeue() => result,
-        };
-
-        if query_result.results.is_empty() {
-            continue;
-        }
-
-        process_query_result(&reaction_id, &config, &executor, query_result.as_ref()).await;
-    }
+        })
+        .await;
 }
 
 #[async_trait]

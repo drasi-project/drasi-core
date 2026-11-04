@@ -591,6 +591,16 @@ impl Drop for Cursor {
 
 #[async_trait]
 impl ComputationBootstrapProvider for CompositeBootstrapProvider {
+    fn bind_execution_context(
+        &self,
+        context: crate::observability::ExecutionContext,
+    ) -> Result<()> {
+        for member in &self.members {
+            member.provider.bind_execution_context(context.clone())?;
+        }
+        Ok(())
+    }
+
     fn validate_query_scope(
         &self,
         instance: &str,

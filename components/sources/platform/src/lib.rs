@@ -725,7 +725,7 @@ impl PlatformSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_component_worker(async move {
             info!(
                 "Starting platform source consumer for source '{}' on stream '{}'",
                 source_id, platform_config.stream_key

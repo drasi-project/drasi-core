@@ -223,7 +223,7 @@ impl Source for KafkaSource {
         let source_id = self.base.id.clone();
         let base_for_status = self.base.clone_shared();
 
-        tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_component_worker(async move {
             match consumer_task.run().await {
                 Ok(()) => {
                     info!("[{source_id}] Kafka consumer task completed");

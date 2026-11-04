@@ -3851,6 +3851,8 @@ dependencies = [
  "log",
  "metrics",
  "mockall 0.12.1",
+ "opentelemetry 0.31.0",
+ "opentelemetry_sdk 0.31.0",
  "ordered-float 3.9.2",
  "pretty_assertions",
  "rand 0.8.8",
@@ -3870,6 +3872,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-log",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid 1.29.0",
 ]
@@ -4293,6 +4296,8 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
+ "tracing",
+ "tracing-subscriber",
  "utoipa",
  "uuid 1.29.0",
 ]
@@ -4316,6 +4321,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "utoipa",
  "wiremock",
 ]
@@ -7346,6 +7353,8 @@ dependencies = [
  "drasi-state-store-redb",
  "drasi-wal-redb",
  "futures",
+ "opentelemetry 0.31.0",
+ "opentelemetry_sdk 0.31.0",
  "prost-types 0.14.4",
  "rmp-serde",
  "rusqlite",
@@ -7361,6 +7370,8 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

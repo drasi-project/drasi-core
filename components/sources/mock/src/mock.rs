@@ -314,7 +314,7 @@ impl Source for MockSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        let task = tokio::spawn(
+        let task = drasi_lib::context::workers::spawn_component_worker(
             async move {
                 // Set Running status inside the task to avoid a race condition where
                 // the loop checks status before the caller sets it after spawn.

@@ -943,6 +943,30 @@ Begin ingestion. This usually means:
 Do not block forever inside `start()`. Spawn long-running work and return after
 startup succeeds.
 
+#### Worker execution context
+
+Long-lived workers SHOULD use
+`drasi_lib::context::workers::spawn_owned_component_worker` (or
+`spawn_owned_component_blocking_worker`): these preserve the component binding
+without making the start operation every future event's parent. Short snapshot
+workers use the corresponding `spawn_owned_scoped_worker` /
+`spawn_owned_scoped_blocking_worker` helpers to preserve the initiating context.
+Their ownership and cleanup requirements are unchanged.
+
+Worker queues MUST carry each available `ExecutionContext` separately from
+event data and restore it per unit using the receiving `ExecutionScope`.
+`SourceBase` dispatch and ordinary dispatcher `recv_message` paths preserve
+these transient sidecars; payload-only `recv` intentionally does not. Replay
+from persisted data has no historical trace context. Do not put tracing
+metadata in source positions, WAL records, payload properties or event IDs.
+An empty event context MUST clear a previous event's parent, not reuse it.
+
+Scope futures per poll and blocking closures with `in_scope`; never hold an
+entered tracing/context guard across an await. Optional fetch/decode detail
+belongs around real bounded work, not an idle listener lifetime. Legacy
+Source cdylibs without portable context support remain a documented boundary;
+this does not change their ABI or log routing.
+
 #### `stop` — **MUST**
 
 Stop ingestion and clean up local resources. Use `SourceBase::stop_common()` if

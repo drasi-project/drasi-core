@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::events::Timestamped;
+use super::ChangeMessage;
 use log::{debug, trace};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -333,7 +334,7 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     /// Internal heap storing events (min-heap by timestamp)
-    heap: Arc<Mutex<OrderedHeap<T>>>,
+    heap: Arc<Mutex<OrderedHeap<ChangeMessage<T>>>>,
     next_enqueue_order: Arc<AtomicU64>,
     /// Notification mechanism for waiting on new events
     notify: Arc<Notify>,
@@ -369,6 +370,11 @@ where
     /// Enqueue an event into the priority queue
     /// Returns true if enqueued, false if queue is at capacity
     pub async fn enqueue(&self, event: Arc<T>) -> bool {
+        self.enqueue_message(ChangeMessage::capture(event)).await
+    }
+
+    pub async fn enqueue_message(&self, message: ChangeMessage<T>) -> bool {
+        let event = Arc::new(message);
         let mut heap = self.heap.lock().await;
 
         // Check capacity
@@ -437,6 +443,12 @@ where
     /// WARNING: Do NOT use with Broadcast dispatch mode - will cause deadlock!
     /// In broadcast mode, use the non-blocking `enqueue()` method instead.
     pub async fn enqueue_wait(&self, event: Arc<T>) {
+        self.enqueue_message_wait(ChangeMessage::capture(event))
+            .await;
+    }
+
+    pub async fn enqueue_message_wait(&self, message: ChangeMessage<T>) {
+        let event = Arc::new(message);
         loop {
             // Register notified future BEFORE acquiring lock to avoid race
             let notified = self.notify.notified();
@@ -507,6 +519,12 @@ where
     /// Dequeue the oldest event from the priority queue (non-blocking)
     /// Returns None if queue is empty
     pub async fn try_dequeue(&self) -> Option<Arc<T>> {
+        self.try_dequeue_message()
+            .await
+            .map(|message| message.payload)
+    }
+
+    pub async fn try_dequeue_message(&self) -> Option<ChangeMessage<T>> {
         let mut heap = self.heap.lock().await;
         let event = heap.pop();
 
@@ -523,11 +541,15 @@ where
             self.notify.notify_one();
         }
 
-        event
+        event.map(|message| (*message).clone())
     }
 
     /// Dequeue the oldest event, waiting if the queue is empty
     pub async fn dequeue(&self) -> Arc<T> {
+        self.dequeue_message().await.payload
+    }
+
+    pub async fn dequeue_message(&self) -> ChangeMessage<T> {
         loop {
             // Register the Notified future BEFORE checking the heap.
             // This avoids a race where an enqueue + notify_one() happens
@@ -548,7 +570,7 @@ where
                 // Notify waiting enqueuers that space is available
                 self.notify.notify_one();
 
-                return event;
+                return (*event).clone();
             }
 
             // Enable the notified future while still holding the lock,
@@ -600,7 +622,10 @@ where
     /// Drain all events from the queue (for shutdown)
     pub async fn drain(&self) -> Vec<Arc<T>> {
         let mut heap = self.heap.lock().await;
-        let events: Vec<Arc<T>> = heap.drain().collect();
+        let events: Vec<Arc<T>> = heap
+            .drain()
+            .map(|message| message.payload.clone())
+            .collect();
 
         self.metrics.current_depth.store(0, AtomicOrdering::Relaxed);
 
