@@ -28,6 +28,7 @@ mod future_element;
 mod previous_distinct_value;
 mod previous_value;
 mod sliding_window;
+mod state_codec;
 mod true_for;
 mod true_later;
 mod true_now_or_later;
