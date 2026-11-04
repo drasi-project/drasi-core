@@ -431,7 +431,10 @@ async fn supported_acknowledgements_record_physical_queue_and_input_identity() {
             .unwrap()
             .provide_resource(
                 resource.clone(),
-                ResourceHandle::new(ResourceRole::StateStore, Arc::new(RetainedStoreResource(store))),
+                ResourceHandle::new(
+                    ResourceRole::StateStore,
+                    Arc::new(RetainedStoreResource(store)),
+                ),
             )
             .unwrap()
             .source(Box::new(FiniteSource::new(
@@ -589,6 +592,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
         let control = run.control();
         let (driver, ()) = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(run, async {
+                control.startup_report().await.unwrap();
                 admission.wait_active().await.unwrap();
                 let session = admission
                     .register_producer(component("client"))
@@ -600,6 +604,9 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
                 );
                 let input = root("client", 1, &[1]);
                 let receipt = admission.admit(&session, 1, &input).await.unwrap();
+                while channel.progress().await.unwrap().processed["sink"] < receipt.position {
+                    tokio::task::yield_now().await;
+                }
                 let duplicate = admission.admit(&session, 1, &input).await.unwrap();
                 assert_eq!(receipt, duplicate);
                 assert!(admission
@@ -608,9 +615,6 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
                     .is_err());
                 admission.producer_status(&session).await.unwrap();
                 admission.admission_receipt(&session, 1).await.unwrap();
-                while channel.progress().await.unwrap().processed["sink"] < receipt.position {
-                    tokio::task::yield_now().await;
-                }
                 assert_eq!(received.lock().unwrap().len(), 1);
                 control.cancel();
             })
@@ -638,28 +642,36 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
         1
     );
     assert_eq!(metrics.count("drasi.errors", &[]), 1);
-    let spans = spans.0.lock().unwrap();
-    assert_eq!(
-        spans
+    {
+        let spans = spans.0.lock().unwrap();
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|span| span.name == "source.publish")
+                .count(),
+            3
+        );
+        let sends: Vec<_> = spans
             .iter()
-            .filter(|span| span.name == "source.publish")
-            .count(),
-        3
-    );
-    let sends: Vec<_> = spans
-        .iter()
-        .filter(|span| span.name == "pipe.send")
-        .collect();
-    assert_eq!(sends.len(), 3);
-    assert_eq!(
+            .filter(|span| span.name == "pipe.send")
+            .collect();
+        assert_eq!(sends.len(), 3);
+        assert_eq!(
         sends
             .iter()
             .filter(|span| span.fields.get("acceptance").map(String::as_str) == Some("accepted"))
             .count(),
         2
     );
-    assert_eq!(sends.iter().filter(|span| span.fields.get("acceptance").map(String::as_str) == Some("not_accepted")).count(), 1);
-    drop(spans);
+        assert_eq!(
+            sends
+                .iter()
+                .filter(|span| span.fields.get("acceptance").map(String::as_str)
+                    == Some("not_accepted"))
+                .count(),
+            1
+        );
+    }
     channel.shutdown().await.unwrap();
 }
 

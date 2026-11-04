@@ -1,0 +1,25 @@
+[package]
+name = "drasi-source-traces-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+drasi-lib = { path = "../..", features = ["otel-context"] }
+drasi-core = { path = "../../../core", features = ["computation"] }
+drasi-host-sdk = { path = "../../../components/host-sdk", features = ["otel-context"] }
+drasi-computation-source-http = { path = "../../../components/computation-plugins/sources/http" }
+drasi-computation-source-postgres = { path = "../../../components/computation-plugins/sources/postgres" }
+drasi-reaction-application = { path = "../../../components/reactions/application" }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = "0.1"
+tracing-opentelemetry = { version = "0.32", default-features = false }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

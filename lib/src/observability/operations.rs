@@ -312,6 +312,17 @@ impl ComponentObservations {
         })
     }
 
+    pub(crate) fn query_observer(
+        self: &Arc<Self>,
+    ) -> Option<Arc<dyn drasi_core::computation::QueryObserver>> {
+        (self.config.policy().allows_span("query.evaluate")
+            || self.config.policy().allows_span("query.commit"))
+        .then(|| {
+            Arc::new(QueryOperationObserver(self.clone()))
+                as Arc<dyn drasi_core::computation::QueryObserver>
+        })
+    }
+
     pub(crate) async fn scope<T>(self: &Arc<Self>, future: impl Future<Output = T>) -> T {
         let mut future = std::pin::pin!(future);
         poll_fn(|cx| {
@@ -522,7 +533,7 @@ impl drasi_core::computation::QueryObservation for OperationObservation {
 
     fn finish(&mut self, success: bool, result_count: Option<usize>) {
         if let Some(count) = result_count {
-            self.record("result_change_count", count as u64);
+            self.record("result_change_count", trace_count(count));
         }
         self.finish(if success { 0 } else { 1 });
     }
@@ -562,7 +573,7 @@ impl OperationObservation {
             .scope(self.scope.scope(future.instrument(self.span.clone())))
             .await;
         if let Ok(outputs) = &result {
-            self.record("output_count", outputs.len() as u64);
+            self.record("output_count", trace_count(outputs.len()));
         }
         self.finish(if result.is_ok() { 0 } else { 1 });
         result
@@ -613,9 +624,7 @@ impl OperationObservation {
             "acceptance",
             match &result {
                 Ok(_) => "accepted",
-                Err(PipeError::AcceptanceUnknown { .. }) => {
-                    "unknown"
-                }
+                Err(PipeError::AcceptanceUnknown { .. }) => "unknown",
                 Err(_) => "not_accepted",
             },
         );
@@ -661,6 +670,11 @@ impl Drop for OperationObservation {
     }
 }
 
+// OpenTelemetry has signed integer attributes; u64 fields fall back to strings.
+fn trace_count(count: usize) -> i64 {
+    i64::try_from(count).expect("envelope/change collection lengths fit signed trace counts")
+}
+
 fn operation_span(
     operation: ObservedOperation,
     scope: Option<&TelemetryScope>,
@@ -678,14 +692,14 @@ fn operation_span(
                 role = scope.and_then(TelemetryScope::role).map(|role| role.as_str()), generation,
                 operation = operation.label(), outcome = Empty, error_kind = Empty,
                 input_port = fields.input_port, output_port = fields.output_port,
-                input_count = fields.input_count.map(|count| count as u64),
-                output_count = fields.output_count.map(|count| count as u64),
-                change_count = fields.change_count.map(|count| count as u64),
+                input_count = fields.input_count.map(trace_count),
+                output_count = fields.output_count.map(trace_count),
+                change_count = fields.change_count.map(trace_count),
                 result_change_count = Empty,
                 completion = fields.completion, publication_mode = fields.publication_mode,
                 queue_id = fields.queue_id, handling_outcome = fields.handling_outcome,
                 query_id = scope.filter(|scope| scope.semantic_kind() == Some(drasi_computation_contracts::ComponentSemanticKind::Query)).and_then(TelemetryScope::component_id).map(|id| id.as_str()),
-                target_count = fields.target_count.map(|count| count as u64),
+                target_count = fields.target_count.map(trace_count),
                 links_truncated = truncated, acceptance = Empty)
         };
     }
@@ -704,5 +718,45 @@ fn operation_span(
         ObservedOperation::Commit => span!("query.commit"),
         ObservedOperation::Control => span!("control.apply"),
         ObservedOperation::Next | ObservedOperation::Run => Span::none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observability::{TelemetryOptions, TelemetryProfile, TelemetrySettings};
+    use drasi_computation_contracts::{ComponentId, ComponentSemanticKind};
+
+    #[test]
+    fn query_hooks_stay_unbound_when_detail_collection_is_disabled() {
+        for profile in [
+            TelemetryProfile::Off,
+            TelemetryProfile::Basic,
+            TelemetryProfile::Persistence,
+            TelemetryProfile::Debug,
+        ] {
+            for tracing in [false, true] {
+                let graph = TelemetryOptions::new(
+                    TelemetrySettings::new(profile)
+                        .with_metrics(false)
+                        .with_tracing(tracing),
+                )
+                .with_instance_id("instance")
+                .resolve("graph", None)
+                .unwrap();
+                let owner = graph
+                    .observations(
+                        ComponentId::try_new("query").unwrap(),
+                        ComponentRole::Query,
+                        ComponentSemanticKind::Query,
+                        1,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    owner.query_observer().is_some(),
+                    profile == TelemetryProfile::Debug && tracing
+                );
+            }
+        }
     }
 }

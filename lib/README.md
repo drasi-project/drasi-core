@@ -946,6 +946,10 @@ owner.
 
 ## Portable execution context
 
+For a runnable, host-exported HTTP/PostgreSQL source -> query -> handled callback
+trace, see the [source tracing demonstration](examples/observability/README.md).
+It includes a local Jaeger setup and an exact trace-shape verifier.
+
 Execution context is transient metadata accompanying work, not the envelope's
 persisted `ProcessingContext`/annotations. It holds an optional sending trace ID,
 span ID, flags and bounded W3C trace state. Unsampled contexts remain valid.

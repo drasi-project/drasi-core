@@ -6,7 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
-       build-native-context-fixtures test-native-context \
+       build-native-context-fixtures test-native-context observability-demo observability-demo-smoke \
        build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
@@ -20,6 +20,8 @@ help:
 	@echo "  build-test-plugins        - Build cdylib plugins needed for host-sdk integration tests"
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
 	@echo "  test-native-context       - Build SDK-only context fixtures and qualify the native context ABI"
+	@echo "  observability-demo        - Run HTTP/PostgreSQL tracing demo with Jaeger; Ctrl-C cleans up"
+	@echo "  observability-demo-smoke  - Run, verify both traces, and clean up automatically"
 	@echo "  build-native-plugins      - Build all native plugin libraries (host-loaded, no query engine dependency)"
 	@echo "  build-native-standard-plugins - Build native counter, middleware, capture and arithmetic libraries"
 	@echo "  build-native-network-plugins - Build native HTTP/gRPC/SSE and HTTP bootstrap libraries"
@@ -129,6 +131,12 @@ build-native-context-fixtures:
 
 test-native-context: build-native-context-fixtures
 	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --locked -- --test-threads=1
+
+observability-demo:
+	bash lib/examples/observability/demo.sh
+
+observability-demo-smoke:
+	bash lib/examples/observability/demo.sh --smoke
 
 build-native-network-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_NETWORK_PACKAGES),-p $(package)) --features dynamic-plugin
