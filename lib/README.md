@@ -1016,6 +1016,33 @@ for a bounded unit; do not instrument a status watcher or the whole service
 lifetime as processing. Scope futures per poll and blocking closures with
 `ExecutionScope::in_scope`; never hold an entered guard across an await.
 
+For a reaction's real async processing loop:
+
+```rust,ignore
+let telemetry = base.worker_telemetry().await;
+let message = base.priority_queue.dequeue_message().await;
+telemetry.reaction(&message.execution_context, message.payload.results.len())?
+    .run(process_result(message.payload))
+    .await?;
+```
+
+For one bounded blocking snapshot operation, preserve its context while keeping
+the join handle in the existing owner:
+
+```rust,ignore
+drasi_lib::context::workers::spawn_owned_scoped_blocking_worker(
+    &snapshot_worker,
+    move || read_snapshot(),
+).await?;
+```
+
+Providers that start snapshot work during preparation can use
+`BootstrapTrace::current()` and call `start()` immediately before that actual
+initialization, then scope the work with its returned context. Calling this for
+replay-only preparation would create a false bootstrap trace. The
+`ComputationBootstrapProvider::bind_bootstrap_trace` hook passes the same lazy
+run to subscription-owned initialization; it is host-local, not an ABI frame.
+
 ### Rust API migration
 
 - `InputEnvelope` and `OutputEnvelope` now have `execution_context`. Prefer

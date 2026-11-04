@@ -1388,6 +1388,10 @@ impl SourceBase {
                 component_type = "source"
             );
             let execution = crate::observability::ExecutionScope::capture();
+            let execution = match crate::observability::BootstrapTrace::current() {
+                Some(trace) => execution.with_context(trace.start()?),
+                None => execution,
+            };
             tokio::spawn(
                 execution
                     .scope(async move {
@@ -1512,10 +1516,8 @@ impl SourceBase {
         last_dispatch_ts: tokio::sync::MutexGuard<'_, chrono::DateTime<chrono::Utc>>,
     ) -> Result<()> {
         let context = crate::observability::ExecutionContext::current();
-        self.worker_telemetry
-            .read()
-            .await
-            .clone()
+        let worker = self.worker_telemetry.read().await.clone();
+        worker
             .scope_context(
                 context,
                 self.dispatch_event_inner(wrapper, last_dispatch_ts),
@@ -1627,10 +1629,8 @@ impl SourceBase {
     /// order, serializing producers just as for [`Self::dispatch_event`].
     pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
         let context = crate::observability::ExecutionContext::current();
-        self.worker_telemetry
-            .read()
-            .await
-            .clone()
+        let worker = self.worker_telemetry.read().await.clone();
+        worker
             .scope_context(context, self.dispatch_batch_inner(events))
             .await
     }

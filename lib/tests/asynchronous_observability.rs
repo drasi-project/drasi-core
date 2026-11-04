@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![cfg(test)]
+
 use drasi_lib::{
     channels::{
         BroadcastChangeDispatcher, ChangeDispatcher, ChangeMessage, ChannelChangeDispatcher,
@@ -77,6 +79,29 @@ async fn priority_queue_context_is_not_an_ordering_key_or_persisted_payload() {
         context(2, true)
     );
     assert_eq!(queue.depth().await, 0);
+}
+
+#[tokio::test]
+async fn blocked_ordinary_enqueue_keeps_the_waiting_items_context() {
+    let queue = PriorityQueue::new(1);
+    queue
+        .enqueue_message_wait(ChangeMessage::new(event(1), context(1, true)))
+        .await;
+    {
+        let waiting = ExecutionScope::new(context(2, false)).scope(queue.enqueue_wait(event(2)));
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert_eq!(
+            queue.dequeue_message().await.execution_context,
+            context(1, true)
+        );
+        waiting.await;
+    }
+    let message = queue.dequeue_message().await;
+    assert_eq!(message.execution_context, context(2, false));
+    assert_eq!(message.payload.sequence, 2);
+    queue.enqueue_wait(event(3)).await;
+    assert!(queue.dequeue_message().await.execution_context.is_empty());
 }
 
 #[cfg(feature = "otel-context")]
@@ -422,5 +447,105 @@ mod traces {
             field(bootstrap, "input_count"),
             Some(&opentelemetry::Value::I64(2))
         );
+    }
+
+    struct WorkService {
+        descriptor: ComponentDescriptor,
+        inputs: tokio::sync::mpsc::Receiver<ExecutionContext>,
+        done: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ComputationComponent for WorkService {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ComputationService for WorkService {
+        async fn run(&mut self) -> anyhow::Result<()> {
+            let worker = drasi_lib::observability::WorkerTelemetry::capture();
+            let mut processed = 0;
+            while let Some(context) = self.inputs.recv().await {
+                worker
+                    .service_work(&context)?
+                    .run(async {
+                        tokio::task::yield_now().await;
+                        assert_eq!(
+                            ExecutionScope::current_component()
+                                .unwrap()
+                                .identity
+                                .component_id()
+                                .unwrap()
+                                .as_str(),
+                            "worker-service",
+                        );
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await?;
+                processed += 1;
+                if processed == 2 {
+                    self.done.notify_one();
+                }
+            }
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_service_traces_actual_units_not_its_idle_lifetime() {
+        let spans = collect(async {
+            let (send, receive) = tokio::sync::mpsc::channel(2);
+            let done = Arc::new(tokio::sync::Notify::new());
+            let mut graph = ComputationGraph::builder("async-tests")
+                .with_telemetry(telemetry())
+                .service(Box::new(WorkService {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::try_new("worker-service").unwrap(),
+                        vec![],
+                    )
+                    .unwrap(),
+                    inputs: receive,
+                    done: done.clone(),
+                }))
+                .build()
+                .unwrap();
+            let run = graph.start().unwrap();
+            let control = run.control();
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::join!(run, async {
+                    for id in [21, 22] {
+                        send.send(context(id, true)).await.unwrap();
+                    }
+                    done.notified().await;
+                    control.cancel();
+                })
+            })
+            .await
+            .unwrap();
+            assert!(matches!(result, Err(GraphError::Cancelled)));
+            graph.shutdown().await.unwrap();
+        })
+        .await;
+        let work: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "component.process")
+            .collect();
+        assert_eq!(work.len(), 2);
+        for id in [21, 22] {
+            assert!(work
+                .iter()
+                .any(|span| span.span_context.trace_id().to_bytes() == [id; 16]
+                    && span.parent_span_id.to_bytes() == [id; 8]));
+        }
+        assert!(work.iter().all(|span| field(span, "component_id")
+            == Some(&opentelemetry::Value::String("worker-service".into()))));
     }
 }

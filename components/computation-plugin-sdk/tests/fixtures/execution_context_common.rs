@@ -4,7 +4,10 @@
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     emission_id,
-    workers::{join_owned_worker, spawn_owned_worker, WorkerCompletion},
+    workers::{
+        join_owned_worker, spawn_owned_component_worker, spawn_owned_scoped_worker,
+        WorkerCompletion,
+    },
     ComponentDescriptor, ComponentRole, GraphChangeCodec, ImplementationIdentity, InputEnvelope,
     OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId, SinkBatching,
     SinkCompletion, StreamId, SystemMetadata,
@@ -203,21 +206,47 @@ impl Probe {
 
     async fn worker(&self) -> anyhow::Result<()> {
         let expected = ExecutionContext::current();
-        let scope = ExecutionScope::capture();
-        spawn_owned_worker(
-            &self.worker,
-            scope.scope(async {
-                tokio::task::yield_now().await;
-                ExecutionContext::current()
-            }),
-        )
+        spawn_owned_scoped_worker(&self.worker, async {
+            tokio::task::yield_now().await;
+            ExecutionContext::current()
+        })
         .await?;
         let mut worker = self.worker.write().await;
         match join_owned_worker(&mut worker, Duration::from_secs(2)).await? {
             WorkerCompletion::Completed(actual) => {
-                anyhow::ensure!(actual == expected, "native worker lost context")
+                anyhow::ensure!(actual == expected, "native worker lost context");
             }
             _ => anyhow::bail!("native worker did not complete"),
+        }
+        drop(worker);
+        let expected_component = ExecutionScope::current_component();
+        spawn_owned_component_worker(&self.worker, async move {
+            tokio::task::yield_now().await;
+            let actual = ExecutionScope::current_component();
+            assert_eq!(
+                actual.as_ref().map(|scope| scope.generation),
+                expected_component.as_ref().map(|scope| scope.generation)
+            );
+            assert_eq!(
+                actual
+                    .as_ref()
+                    .and_then(|scope| scope.identity.component_id()),
+                expected_component
+                    .as_ref()
+                    .and_then(|scope| scope.identity.component_id()),
+            );
+            ExecutionContext::current()
+        })
+        .await?;
+        let mut worker = self.worker.write().await;
+        match join_owned_worker(&mut worker, Duration::from_secs(2)).await? {
+            WorkerCompletion::Completed(actual) => {
+                anyhow::ensure!(
+                    actual.is_empty(),
+                    "native component worker inherited a lifecycle parent"
+                );
+            }
+            _ => anyhow::bail!("native component worker did not complete"),
         }
         Ok(())
     }

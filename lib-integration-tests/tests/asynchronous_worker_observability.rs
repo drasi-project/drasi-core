@@ -65,11 +65,14 @@ async fn ordinary_workers(instance: &str) {
             })),
     );
     async {
-        let (source, input) =
-            ApplicationSource::new("source", ApplicationSourceConfig {
+        let (source, input) = ApplicationSource::new(
+            "source",
+            ApplicationSourceConfig {
                 properties: Default::default(),
                 durability: None,
-            }).unwrap();
+            },
+        )
+        .unwrap();
         let (reaction, output) = ApplicationReactionBuilder::new("reaction")
             .with_query("query")
             .with_auto_start(true)

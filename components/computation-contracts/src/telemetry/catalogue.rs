@@ -81,7 +81,7 @@ macro_rules! span {
 /// lists only additional fields. Durations use local monotonic clocks.
 pub const SPANS: &[SpanDefinition] = &[
     span!("source.publish", Basic, "graph source publication", "One available-envelope publication attempt, excluding idle next() waiting", ["output_port", "publication_mode", "change_count"]),
-    span!("component.process", Basic, "graph transformer execution", "One transform or input-driven continuation call, excluding subsequent forwarding; a continuation consumes no new input", ["input_port", "input_count", "output_count"]),
+    span!("component.process", Basic, "graph transformer execution or actual service work owner", "One transform, input-driven continuation or bounded service work unit, excluding idle waiting and subsequent forwarding; a continuation consumes no new input", ["input_port", "input_count", "output_count"]),
     span!("query.evaluate", Debug, "query evaluator", "Actual inner evaluation only, excluding result hooks and commit; never output-only replay", ["query_id", "change_count", "result_change_count"]),
     span!("query.commit", Debug, "query transaction owner", "One actual commit attempt, not downstream handling", ["query_id"]),
     span!("component.confirm_outputs", Debug, "graph delivery_completed invocation", "One confirmation hook after outgoing acceptance; an empty emission batch is allowed", ["output_count"]),

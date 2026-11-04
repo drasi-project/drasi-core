@@ -97,10 +97,11 @@ pub trait BootstrapRetirement: Send + Sync {
 /// widening the query's single bootstrap slot or its transaction authority.
 #[async_trait]
 pub trait ComputationBootstrapProvider: Send + Sync {
-    /// Host-local context for subscription-owned snapshot workers. Never persisted.
-    fn bind_execution_context(
+    /// Host-local lazy trace for subscription-owned snapshot initialization.
+    /// Start it only when actual snapshot work begins, never for replay alone.
+    fn bind_bootstrap_trace(
         &self,
-        _context: crate::observability::ExecutionContext,
+        _trace: crate::observability::BootstrapTrace,
     ) -> anyhow::Result<()> {
         Ok(())
     }

@@ -17,8 +17,10 @@
 //! These utilities observe components; they do not own component membership,
 //! processing or lifecycle.
 
-#[cfg(all(test, feature = "otel-context"))]
+#[cfg(test)]
+#[cfg(feature = "otel-context")]
 mod async_tests;
+mod bootstrap;
 mod component_log;
 mod event_history;
 mod log_runtime;
@@ -29,6 +31,7 @@ mod telemetry;
 mod tracing_layer;
 mod worker;
 
+pub use bootstrap::BootstrapTrace;
 pub use component_log::*;
 pub use event_history::*;
 pub use log_runtime::*;

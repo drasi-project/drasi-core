@@ -346,8 +346,8 @@ impl Entry {
             });
                 publication.finish(outcome);
             };
-        let scope = crate::observability::ExecutionScope::capture()
-            .with_context(Default::default());
+        let scope =
+            crate::observability::ExecutionScope::capture().with_context(Default::default());
         crate::context::workers::try_spawn_owned_worker(&entry.task, scope.scope(work))
             .expect("new instance owns a vacant driver slot");
         entry

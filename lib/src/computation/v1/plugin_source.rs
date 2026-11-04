@@ -439,7 +439,7 @@ pub struct LegacySourceSubscription {
     progress: Option<Arc<QuerySourceProgress>>,
     phase: watch::Sender<SubscriptionPhase>,
     state: Mutex<SubscriptionState>,
-    bootstrap_execution: Mutex<crate::observability::ExecutionContext>,
+    bootstrap_execution: Mutex<Option<crate::observability::BootstrapTrace>>,
 }
 
 impl LegacySourceSubscription {
@@ -660,9 +660,10 @@ impl LegacySourceSubscription {
                 let bootstrap_execution = self.bootstrap_execution.lock()
                     .map_err(|_| anyhow::anyhow!("bootstrap execution context poisoned"))?
                     .clone();
-                let scope = crate::observability::ExecutionScope::capture()
-                    .with_context(bootstrap_execution);
-                let response = match scope.scope(source.subscribe(settings)).await {
+                let response = match match bootstrap_execution {
+                    Some(trace) => trace.scope(source.subscribe(settings)).await?,
+                    None => source.subscribe(settings).await,
+                } {
                     Ok(response) => response,
                     Err(error)
                         if error
@@ -942,16 +943,16 @@ impl LegacySourceBootstrap {
 }
 #[async_trait]
 impl ComputationBootstrapProvider for LegacySourceBootstrap {
-    fn bind_execution_context(
+    fn bind_bootstrap_trace(
         &self,
-        context: crate::observability::ExecutionContext,
+        trace: crate::observability::BootstrapTrace,
     ) -> anyhow::Result<()> {
         for subscription in &self.subscriptions {
             *subscription
                 .bootstrap_execution
                 .lock()
                 .map_err(|_| anyhow::anyhow!("bootstrap execution context poisoned"))? =
-                context.clone();
+                Some(trace.clone());
         }
         Ok(())
     }

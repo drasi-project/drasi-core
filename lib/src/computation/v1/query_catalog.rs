@@ -228,7 +228,7 @@ impl QueryResultsCatalog {
 
     async fn publish_message(&self, message: super::EnvelopeMessage) -> anyhow::Result<()> {
         let envelope = &message.envelope;
-        let id = ComponentId::try_new(QueryChangeCodec::metadata(&envelope)?.query_id)?;
+        let id = ComponentId::try_new(QueryChangeCodec::metadata(envelope)?.query_id)?;
         if self.get(&id)?.is_none() {
             anyhow::bail!("query publication is not registered in this catalogue");
         }

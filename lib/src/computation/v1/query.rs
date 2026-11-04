@@ -2046,8 +2046,9 @@ impl Transformer for ContinuousQueryTransformer {
                 match query.resources().atomic_result_transaction() {
                     Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
                         if let Some(reservations) = reservations {
-                            query
-                                .process_due_futures_with_transaction_group(&transaction, |due| {
+                            Box::pin(query.process_due_futures_with_transaction_group(
+                                &transaction,
+                                |due| {
                                     let pending = hook(due);
                                     let prepared = &prepared;
                                     async move {
@@ -2060,19 +2061,20 @@ impl Transformer for ContinuousQueryTransformer {
                                             output.as_ref(),
                                         )
                                     }
-                                })
-                                .await?;
+                                },
+                            ))
+                            .await?;
                         } else {
-                            query
-                                .process_due_futures_with_result_hook(&transaction, hook)
-                                .await?;
+                            Box::pin(
+                                query.process_due_futures_with_result_hook(&transaction, hook),
+                            )
+                            .await?;
                         }
                     }
                     _ if self.provider.is_volatile()
                         || self.options.publication == QueryPublicationMode::NonAtomic =>
                     {
-                        query
-                            .process_due_futures_with_non_atomic_result_hook(hook)
+                        Box::pin(query.process_due_futures_with_non_atomic_result_hook(hook))
                             .await?;
                     }
                     Err(error) => return Err(error.into()),

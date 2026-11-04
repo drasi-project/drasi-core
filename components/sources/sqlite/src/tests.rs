@@ -92,7 +92,7 @@ async fn cancelled_start_and_panicked_database_keep_cleanup_required() -> Result
     assert!(source.start().await.unwrap_err().is::<WorkerAlreadyOwned>());
     source.stop().await?;
 
-    spawn_owned_blocking_worker(&source.database_worker, || panic!("database panic")).await?;
+    spawn_owned_component_blocking_worker(&source.database_worker, || panic!("database panic")).await?;
     let error = source.stop().await.unwrap_err();
     assert!(
         matches!(error.downcast_ref::<WorkerCleanupError>(), Some(WorkerCleanupError::Join(cause)) if cause.is_panic())

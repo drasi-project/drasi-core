@@ -91,7 +91,7 @@ async fn failed_and_panicked_replication_require_cleanup_even_in_error_status() 
                 Some("injected worker failure".into()),
             )
             .await;
-        spawn_owned_worker(&source.replication_task, async move {
+        spawn_owned_component_worker(&source.replication_task, async move {
             assert!(!panic, "injected MySQL worker panic");
             Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,

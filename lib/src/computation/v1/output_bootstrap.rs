@@ -133,7 +133,13 @@ impl OutputBootstrapProvider {
                 });
                 replay.extend(suffix.into_envelopes());
             } else {
-                let snapshot = handle.snapshot().await?;
+                let snapshot = match crate::observability::BootstrapTrace::current() {
+                    Some(trace) => {
+                        trace.start()?;
+                        trace.scope(handle.snapshot()).await??
+                    }
+                    None => handle.snapshot().await?,
+                };
                 anyhow::ensure!(
                     snapshot.schema() == GraphChangeCodec::schema().descriptor(),
                     "query bootstrap requires graph-change input"

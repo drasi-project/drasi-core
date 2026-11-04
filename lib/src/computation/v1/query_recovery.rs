@@ -204,29 +204,25 @@ impl ContinuousQueryTransformer {
             }
             self.reset_for_bootstrap().await?;
         }
-        if self.bootstrap.is_some() && !self.bootstrap_complete.load(Ordering::Acquire) {
-            let observation = crate::observability::ComponentObservations::current_or_disabled()
-                .root(
-                    crate::observability::ObservedOperation::Bootstrap,
-                    &crate::observability::ExecutionContext::current(),
-                    Default::default(),
-                )?;
-            if let Some(provider) = &self.bootstrap {
-                provider.bind_execution_context(observation.context().clone())?;
+        let trace = crate::observability::BootstrapTrace::capture();
+        let guard = trace.guard();
+        if let Some(provider) = &self.bootstrap {
+            provider.bind_bootstrap_trace(trace.clone())?;
+            if !self.bootstrap_complete.load(Ordering::Acquire) {
+                trace.start()?;
             }
-            return observation
-                .run(Box::pin(self.initialize_bootstrap(true)))
-                .await;
         }
-        Box::pin(self.initialize_bootstrap(false)).await
+        let result = trace
+            .scope(Box::pin(self.initialize_bootstrap(&trace)))
+            .await?;
+        guard.finish(result.is_ok());
+        result
     }
 
-    async fn initialize_bootstrap(&mut self, traced: bool) -> anyhow::Result<()> {
-        if !traced {
-            if let Some(provider) = &self.bootstrap {
-                provider.bind_execution_context(Default::default())?;
-            }
-        }
+    async fn initialize_bootstrap(
+        &mut self,
+        trace: &crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
         self.publish_source_progress(false).await?;
         if let Some(provider) = self.bootstrap.clone() {
             let preparation = provider
@@ -252,36 +248,27 @@ impl ContinuousQueryTransformer {
                 }
                 Err(error) => return Err(error),
             };
-            if !traced
-                && (preparation != super::super::BootstrapPreparation::Ready
-                    || provider.has_pending_snapshot()?)
+            if preparation != super::super::BootstrapPreparation::Ready
+                || provider.has_pending_snapshot()?
             {
-                let observation =
-                    crate::observability::ComponentObservations::current_or_disabled().root(
-                        crate::observability::ObservedOperation::Bootstrap,
-                        &crate::observability::ExecutionContext::current(),
-                        Default::default(),
-                    )?;
-                provider.bind_execution_context(observation.context().clone())?;
-                return observation
-                    .run(Box::pin(self.finish_bootstrap_preparation(
-                        provider,
-                        preparation,
-                        true,
-                    )))
-                    .await;
+                trace.start()?;
             }
-            return Box::pin(self.finish_bootstrap_preparation(provider, preparation, traced))
-                .await;
+            return trace
+                .scope(Box::pin(self.finish_bootstrap_preparation(
+                    provider,
+                    preparation,
+                    trace,
+                )))
+                .await?;
         }
-        self.finish_bootstrap(traced).await
+        self.finish_bootstrap(trace).await
     }
 
     async fn finish_bootstrap_preparation(
         &mut self,
         provider: Arc<dyn super::super::ComputationBootstrapProvider>,
         preparation: super::super::BootstrapPreparation,
-        traced: bool,
+        trace: &crate::observability::BootstrapTrace,
     ) -> anyhow::Result<()> {
         if preparation != super::super::BootstrapPreparation::Ready {
             if preparation == super::super::BootstrapPreparation::RefreshVolatile
@@ -302,14 +289,17 @@ impl ContinuousQueryTransformer {
             // A new prepared cut must initialize a new output incarnation.
             self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
         }
-        self.finish_bootstrap(traced).await
+        self.finish_bootstrap(trace).await
     }
 
-    async fn finish_bootstrap(&mut self, traced: bool) -> anyhow::Result<()> {
+    async fn finish_bootstrap(
+        &mut self,
+        trace: &crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
         if let Some(progress) = &self.source_progress {
             progress.admit();
         }
-        Box::pin(self.run_bootstrap(traced)).await
+        Box::pin(self.run_bootstrap(trace)).await
     }
 
     async fn reset_and_prepare_bootstrap(
@@ -523,7 +513,10 @@ impl ContinuousQueryTransformer {
         Ok(())
     }
 
-    async fn run_bootstrap(&self, traced: bool) -> anyhow::Result<()> {
+    async fn run_bootstrap(
+        &self,
+        trace: &crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
         let Some(provider) = &self.bootstrap else {
             return Ok(());
         };
@@ -535,19 +528,10 @@ impl ContinuousQueryTransformer {
             !self.bootstrap_complete.load(Ordering::Acquire),
             QueryRecoveryError::SourceResetRequired
         );
-        if !traced {
-            let observation = crate::observability::ComponentObservations::current_or_disabled()
-                .root(
-                    crate::observability::ObservedOperation::Bootstrap,
-                    &crate::observability::ExecutionContext::current(),
-                    Default::default(),
-                )?;
-            provider.bind_execution_context(observation.context().clone())?;
-            return observation
-                .run(Box::pin(self.load_bootstrap(provider, requested_snapshot)))
-                .await;
-        }
-        Box::pin(self.load_bootstrap(provider, requested_snapshot)).await
+        trace.start()?;
+        trace
+            .scope(Box::pin(self.load_bootstrap(provider, requested_snapshot)))
+            .await?
     }
 
     async fn load_bootstrap(

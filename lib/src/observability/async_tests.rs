@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![cfg(test)]
+
 use super::*;
 use crate::computation::v1::*;
 use drasi_core::{
@@ -9,7 +11,14 @@ use drasi_core::{
 };
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
-use std::{future::Future, num::NonZeroUsize, sync::Arc};
+use std::{
+    future::Future,
+    num::NonZeroUsize,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+};
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::{filter::filter_fn, prelude::*};
 
@@ -220,6 +229,210 @@ async fn worker_handling_keeps_parentage_and_batch_links_without_metrics_or_star
         field(batch, "outcome"),
         Some(&opentelemetry::Value::String("error".into()))
     );
+}
+
+struct ReplayBootstrap {
+    pending: AtomicBool,
+    replay: Mutex<Vec<ChangeEnvelope>>,
+    preparations: Mutex<Vec<ExecutionContext>>,
+}
+
+#[async_trait::async_trait]
+impl ComputationBootstrapProvider for ReplayBootstrap {
+    async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
+        if self.pending.load(Ordering::Acquire) {
+            let trace = BootstrapTrace::current().expect("query preparation binds lazy tracing");
+            let context = trace.start()?;
+            let scope = ExecutionScope::capture().with_context(context.clone());
+            let work = drasi_computation_contracts::workers::spawn_scoped_worker(scope.scope(
+                async move {
+                    tokio::task::yield_now().await;
+                    assert_eq!(ExecutionContext::current(), context);
+                },
+            ));
+            work.await?;
+            self.preparations.lock().unwrap().push(trace.start()?);
+        }
+        Ok(BootstrapPreparation::Ready)
+    }
+
+    fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
+        Ok(self.pending.load(Ordering::Acquire))
+    }
+
+    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        self.pending.store(false, Ordering::Release);
+        if let Some(context) = self.preparations.lock().unwrap().last() {
+            assert_eq!(
+                ExecutionContext::current().trace().unwrap().trace_id(),
+                context.trace().unwrap().trace_id()
+            );
+        }
+        Ok(ComputationBootstrapSnapshot {
+            changes: Box::pin(futures::stream::iter([Ok(input(1).envelope)])),
+            watermarks: vec![],
+        })
+    }
+
+    fn take_input_replay(&self) -> anyhow::Result<Vec<ChangeEnvelope>> {
+        Ok(std::mem::take(&mut *self.replay.lock().unwrap()))
+    }
+}
+
+#[tokio::test]
+async fn prepared_input_replay_is_not_bootstrap_and_does_not_duplicate_processing() {
+    let spans = record(async {
+        let bootstrap = Arc::new(ReplayBootstrap {
+            pending: AtomicBool::new(true),
+            replay: Mutex::new(vec![]),
+            preparations: Mutex::new(vec![]),
+        });
+        let mut query = ContinuousQueryTransformer::new(
+            definition("MATCH (n:Item) RETURN n.name AS name"),
+            Arc::new(InMemoryComputationProvider),
+        )
+        .await
+        .unwrap()
+        .with_bootstrap(bootstrap.clone());
+        query.start().await.unwrap();
+        query.stop().await.unwrap();
+        bootstrap.replay.lock().unwrap().push(input(2).envelope);
+        query.start().await.unwrap();
+        let outputs = query.on_wakeup().await.unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(
+            outputs[0].execution_context,
+            query.processing_context().unwrap()
+        );
+        query.delivery_completed(&outputs).await.unwrap();
+        assert!(query.on_wakeup().await.unwrap().is_empty());
+        query.stop().await.unwrap();
+        bootstrap.pending.store(true, Ordering::Release);
+        query.start().await.unwrap();
+        query.stop().await.unwrap();
+        let contexts = bootstrap.preparations.lock().unwrap();
+        assert!(contexts.len() >= 2);
+        assert_ne!(
+            contexts[0].trace().unwrap().trace_id(),
+            contexts.last().unwrap().trace().unwrap().trace_id()
+        );
+    })
+    .await;
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.name == "query.bootstrap")
+            .count(),
+        2
+    );
+    let scheduled: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "component.scheduled")
+        .collect();
+    assert_eq!(scheduled.len(), 1);
+    assert_eq!(
+        field(scheduled[0], "work_kind"),
+        Some(&opentelemetry::Value::String("input_replay".into()))
+    );
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.name == "query.evaluate")
+            .count(),
+        1
+    );
+    assert!(!spans.iter().any(|span| span.name == "component.process"));
+    let evaluation = spans
+        .iter()
+        .find(|span| span.name == "query.evaluate")
+        .unwrap();
+    assert_eq!(
+        evaluation.parent_span_id,
+        scheduled[0].span_context.span_id()
+    );
+}
+
+#[tokio::test]
+async fn service_work_is_bounded_and_idle_waiting_has_no_processing_span() {
+    let spans = record(async {
+        let worker = WorkerTelemetry::capture();
+        for id in 1..=2 {
+            let context =
+                ExecutionContext::new(TraceContextV1::new([id; 16], [id; 8], 1, None).unwrap());
+            worker
+                .service_work(&context)
+                .unwrap()
+                .run(async {
+                    tokio::task::yield_now().await;
+                    assert_eq!(
+                        ExecutionContext::current().trace().unwrap().trace_id(),
+                        [id; 16]
+                    );
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .unwrap();
+        }
+        worker
+            .scope(async {
+                tokio::task::yield_now().await;
+                assert!(ExecutionContext::current().is_empty());
+            })
+            .await;
+    })
+    .await;
+    let processing: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "component.process")
+        .collect();
+    assert_eq!(processing.len(), 2);
+    assert!(processing.iter().all(|span| field(span, "operation")
+        == Some(&opentelemetry::Value::String("service_work".into()))));
+}
+
+struct PendingBootstrap;
+
+#[async_trait::async_trait]
+impl ComputationBootstrapProvider for PendingBootstrap {
+    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        Ok(ComputationBootstrapSnapshot {
+            changes: Box::pin(futures::stream::pending()),
+            watermarks: vec![],
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancelled_bootstrap_closes_its_root_without_publishing_success() {
+    let spans = record(async {
+        let mut query = ContinuousQueryTransformer::new(
+            definition("MATCH (n:Item) RETURN n.name AS name"),
+            Arc::new(InMemoryComputationProvider),
+        )
+        .await
+        .unwrap()
+        .with_bootstrap(Arc::new(PendingBootstrap));
+        {
+            let start = query.start();
+            tokio::pin!(start);
+            assert!(futures::poll!(&mut start).is_pending());
+        }
+        assert!(BootstrapTrace::current().is_none());
+        query.stop().await.unwrap();
+    })
+    .await;
+    for name in ["query.bootstrap", "bootstrap.snapshot"] {
+        let matched: Vec<_> = spans.iter().filter(|span| span.name == name).collect();
+        assert_eq!(matched.len(), 1);
+        assert_eq!(
+            field(matched[0], "outcome"),
+            Some(&opentelemetry::Value::String("cancelled".into()))
+        );
+        assert_eq!(
+            field(matched[0], "input_count"),
+            Some(&opentelemetry::Value::I64(0))
+        );
+    }
 }
 
 #[cfg(feature = "computation-rocksdb-tests")]

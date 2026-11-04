@@ -191,7 +191,7 @@ mod lifecycle {
     async fn panic_and_cancelled_base_cleanup_block_restart_until_joined() -> Result<()> {
         let source = source("http://127.0.0.1:1").build()?;
         *source.cleanup_required.lock().await = true;
-        spawn_owned_worker(&source.task_handle, async {
+        spawn_owned_component_worker(&source.task_handle, async {
             panic!("injected HERE polling panic")
         })
         .await?;

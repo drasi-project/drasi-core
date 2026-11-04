@@ -3178,19 +3178,27 @@ async fn run_node(
                 match component {
                     Component::Transformer(transformer) | Component::Query(transformer) => {
                         if transformer.observes_input(&input) {
-                            let observation = crate::observability::ComponentObservations::current_or_disabled()
-                                .begin_untraced(
-                                    crate::observability::ObservedOperation::Transform,
-                                    &input.execution_context,
-                                    crate::observability::OperationFields {
-                                        input_port: Some(input.port.as_str()),
-                                        input_count: Some(1),
-                                        change_count: Some(input.envelope.changes().operations().len()),
-                                        completion: Some("transformed"),
-                                        ..Default::default()
-                                    },
-                                ).map_err(|error| component_error(node, "observe callback", error.into()))?;
-                            let outputs = observation.run(transformer.transform(input)).await
+                            let observation =
+                                crate::observability::ComponentObservations::current_or_disabled()
+                                    .begin_untraced(
+                                        crate::observability::ObservedOperation::Transform,
+                                        &input.execution_context,
+                                        crate::observability::OperationFields {
+                                            input_port: Some(input.port.as_str()),
+                                            input_count: Some(1),
+                                            change_count: Some(
+                                                input.envelope.changes().operations().len(),
+                                            ),
+                                            completion: Some("transformed"),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .map_err(|error| {
+                                        component_error(node, "observe callback", error.into())
+                                    })?;
+                            let outputs = observation
+                                .run(transformer.transform(input))
+                                .await
                                 .map_err(|source| component_error(node, "transform", source))?;
                             processing_scope = execution_scope.with_context(
                                 transformer.processing_context().ok_or_else(|| {
@@ -3211,8 +3219,11 @@ async fn run_node(
                                     ..Default::default()
                                 },
                             )?;
-                            processing_scope = execution_scope.with_context(observation.context().clone());
-                            observation.run_outputs(transformer.transform(input)).await
+                            processing_scope =
+                                execution_scope.with_context(observation.context().clone());
+                            observation
+                                .run_outputs(transformer.transform(input))
+                                .await
                                 .map_err(|source| component_error(node, "transform", source))?
                         }
                     }
