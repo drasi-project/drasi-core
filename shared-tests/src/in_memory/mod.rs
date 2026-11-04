@@ -545,6 +545,12 @@ mod before {
     }
 
     #[tokio::test]
+    async fn before_value_types() {
+        let test_config = InMemoryQueryConfig::new();
+        before::value_types(&test_config).await;
+    }
+
+    #[tokio::test]
     async fn before_sum() {
         let test_config = InMemoryQueryConfig::new();
         before::before_sum(&test_config).await;
