@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![cfg(test)]
+
 use async_trait::async_trait;
 use drasi_core::{
     computation::InMemoryComputationProvider,
@@ -304,7 +306,7 @@ async fn bootstrap_evaluates_rows_without_claiming_result_stream_emission() {
         let bootstrap = (1..=rows)
             .map(|row| {
                 input(
-                    row as u64,
+                    row,
                     vec![SourceChange::Insert {
                         element: element(&row.to_string(), "Name", "Person"),
                     }],
