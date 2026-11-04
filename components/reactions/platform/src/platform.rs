@@ -76,27 +76,28 @@ async fn publish_batch_observed(
     publisher: &RedisStreamPublisher,
     telemetry: &WorkerTelemetry,
     events: Vec<CloudEvent<ResultEvent>>,
-    contexts: &[(ExecutionContext, usize)],
+    contexts: &[(ExecutionContext, String, usize)],
 ) -> Result<Vec<String>> {
-    let change_count = contexts.iter().map(|(_, count)| count).sum();
+    let change_count = contexts.iter().map(|(_, _, count)| count).sum();
     let observation = if change_count == 0 {
         None
     } else {
         telemetry
             .reaction_batch(
-                contexts.iter().map(|(context, _)| context),
+                contexts.iter().map(|(context, _, _)| context),
                 contexts.len(),
                 change_count,
             )
             .map_err(|e| log::warn!("Failed to observe platform batch: {e}"))
             .ok()
     };
+    let mut work = (change_count > 0).then(|| telemetry.reaction_batch_work());
     let publish = publisher.publish_batch_with_retry(events, 3);
-    match observation {
+    let outcome = match observation {
         Some(observation) => observation.run(publish).await,
         None => {
             let selected = BatchTraceParent::select(
-                contexts.iter().map(|(context, _)| context),
+                contexts.iter().map(|(context, _, _)| context),
                 TraceLinkLimits::default(),
             );
             ExecutionScope::capture()
@@ -104,7 +105,18 @@ async fn publish_batch_observed(
                 .scope(publish)
                 .await
         }
+    };
+    if let Some(work) = &mut work {
+        if outcome.is_ok() {
+            for (_, query, rows) in contexts {
+                if *rows > 0 {
+                    work.handled(query, *rows, 1);
+                }
+            }
+        }
+        work.finish(outcome.is_ok());
     }
+    outcome
 }
 
 /// Platform Reaction for publishing to Redis Streams
@@ -473,7 +485,7 @@ impl Reaction for PlatformReaction {
                             event_buffer.push(cloud_event);
                             let change_count = query_result_mut.results.iter()
                                 .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
-                            event_contexts.push((execution_context.clone(), change_count));
+                            event_contexts.push((execution_context.clone(), query_result_mut.query_id.clone(), change_count));
 
                             // Check if we should flush the buffer
                             let should_flush = event_buffer.len() >= batch_max_size
@@ -522,6 +534,7 @@ impl Reaction for PlatformReaction {
                                 telemetry.reaction(&execution_context, change_count)
                                     .map_err(|e| log::warn!("Failed to observe platform publication: {e}")).ok()
                             };
+                            let mut work = (change_count > 0).then(|| telemetry.reaction_work());
                             let publish = publisher.publish_with_retry(cloud_event, 3);
                             let outcome = match observation {
                                 Some(observation) => observation.run(publish).await,
@@ -529,6 +542,12 @@ impl Reaction for PlatformReaction {
                                     .with_context(execution_context.clone())
                                     .scope(publish).await,
                             };
+                            if let Some(work) = &mut work {
+                                if outcome.is_ok() {
+                                    work.handled(&query_result_mut.query_id, change_count, 1);
+                                }
+                                work.finish(outcome.is_ok());
+                            }
                             match outcome {
                                 Ok(message_id) => {
                                     log::debug!(

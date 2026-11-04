@@ -593,6 +593,7 @@ impl Reaction for LokiReaction {
 
                 let observation = telemetry.reaction(&query_result_arc.execution_context, total_values)
                     .map_err(|e| warn!("Failed to observe Loki push: {e}")).ok();
+                let mut work = telemetry.reaction_work();
                 let push = Self::push_to_loki(
                     &client,
                     &endpoint,
@@ -605,6 +606,12 @@ impl Reaction for LokiReaction {
                     Some(observation) => observation.run(push).await,
                     None => push.await,
                 };
+                if outcome.is_ok() {
+                    let input_rows = query_result.results.iter()
+                        .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+                    work.handled(query_name, total_values, usize::from(total_values == input_rows));
+                }
+                work.finish(outcome.is_ok());
                 if let Err(e) = outcome {
                     warn!(
                         "[{reaction_name}] failed to push query '{query_name}' results to Loki (streams: {}, values: {total_values}): {e}",

@@ -15,10 +15,9 @@ use drasi_lib::{
         TELEMETRY_TARGET,
     },
 };
-use metrics::{
-    Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
-    SharedString, Unit,
-};
+#[path = "computation_support/metrics.rs"]
+mod recording_metrics;
+use recording_metrics::RecordingMetrics;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -196,9 +195,15 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
         ),
         1
     );
-    assert!(metrics
-        .matching("drasi.query.events_processed", &[])
-        .is_empty());
+    assert_eq!(metrics.count("drasi.query.events_processed", &[]), 1);
+    assert_eq!(
+        metrics.count("drasi.query.results_emitted", &[("change_kind", "add")]),
+        1
+    );
+    assert_eq!(
+        metrics.histogram("drasi.query.engine.duration", &[]).len(),
+        1
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -675,110 +680,6 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
     channel.shutdown().await.unwrap();
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct MetricKey(String, BTreeMap<String, String>);
-
-impl From<&Key> for MetricKey {
-    fn from(key: &Key) -> Self {
-        Self(
-            key.name().into(),
-            key.labels()
-                .map(|label| (label.key().into(), label.value().into()))
-                .collect(),
-        )
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-struct Values {
-    counter: u64,
-    gauge: f64,
-    histogram: Vec<f64>,
-    gauge_samples: Vec<f64>,
-}
-
-#[derive(Default)]
-struct Measurement(Mutex<Values>);
-
-impl CounterFn for Measurement {
-    fn increment(&self, value: u64) {
-        self.0.lock().unwrap().counter += value;
-    }
-    fn absolute(&self, value: u64) {
-        let mut current = self.0.lock().unwrap();
-        current.counter = current.counter.max(value);
-    }
-}
-impl GaugeFn for Measurement {
-    fn increment(&self, value: f64) {
-        self.0.lock().unwrap().gauge += value;
-    }
-    fn decrement(&self, value: f64) {
-        self.0.lock().unwrap().gauge -= value;
-    }
-    fn set(&self, value: f64) {
-        let mut current = self.0.lock().unwrap();
-        current.gauge = value;
-        current.gauge_samples.push(value);
-    }
-}
-impl HistogramFn for Measurement {
-    fn record(&self, value: f64) {
-        self.0.lock().unwrap().histogram.push(value);
-    }
-}
-
-#[derive(Default, Clone)]
-struct RecordingMetrics(Arc<Mutex<BTreeMap<MetricKey, Arc<Measurement>>>>);
-
-impl RecordingMetrics {
-    fn instrument(&self, key: &Key) -> Arc<Measurement> {
-        self.0
-            .lock()
-            .unwrap()
-            .entry(key.into())
-            .or_default()
-            .clone()
-    }
-
-    fn matching(&self, name: &str, labels: &[(&str, &str)]) -> Vec<Values> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(key, _)| {
-                key.0 == name
-                    && labels
-                        .iter()
-                        .all(|(label, value)| key.1.get(*label).map(String::as_str) == Some(*value))
-            })
-            .map(|(_, measurement)| measurement.0.lock().unwrap().clone())
-            .collect()
-    }
-
-    fn count(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
-        self.matching(name, labels)
-            .iter()
-            .map(|value| value.counter)
-            .sum()
-    }
-}
-
-impl Recorder for RecordingMetrics {
-    fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-    fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-    fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-    fn register_counter(&self, key: &Key, _: &Metadata<'_>) -> Counter {
-        Counter::from_arc(self.instrument(key))
-    }
-    fn register_gauge(&self, key: &Key, _: &Metadata<'_>) -> Gauge {
-        Gauge::from_arc(self.instrument(key))
-    }
-    fn register_histogram(&self, key: &Key, _: &Metadata<'_>) -> Histogram {
-        Histogram::from_arc(self.instrument(key))
-    }
-}
-
 #[derive(Default, Debug)]
 struct SpanFields(BTreeMap<String, String>);
 
@@ -1054,7 +955,7 @@ async fn off_has_no_production_series_or_operation_spans() {
     }
     .with_subscriber(tracing_subscriber::registry().with(spans.clone()))
     .await;
-    assert!(metrics.0.lock().unwrap().is_empty());
+    assert!(metrics.is_empty());
     assert!(spans.0.lock().unwrap().is_empty());
 }
 

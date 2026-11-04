@@ -451,6 +451,7 @@ impl ContinuousQueryTransformer {
                 projector.clone(),
             ))),
             notify: Arc::new(tokio::sync::Notify::new()),
+            telemetry: Arc::new(crate::observability::QueryProgressObservations::default()),
         };
         let mut instance = Self {
             output_reader: super::query_output::QueryOutputProvider::new(
@@ -779,6 +780,7 @@ impl ContinuousQueryTransformer {
         let query = ComputationQuery::try_build(builder, resources).await?;
         let checkpoint = query.resources().checkpoint_store().cloned();
         self.query = Some(query);
+        self.bind_query_observer(crate::observability::QueryPhase::Bootstrap, false)?;
         *self
             .checkpoint_view
             .write()
@@ -795,6 +797,25 @@ impl ContinuousQueryTransformer {
             .write()
             .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? =
             Some(self.output_persistent);
+        Ok(())
+    }
+
+    fn bind_query_observer(
+        &mut self,
+        phase: crate::observability::QueryPhase,
+        detail: bool,
+    ) -> anyhow::Result<()> {
+        let observer = match crate::observability::ComponentObservations::current() {
+            Some(owner) => {
+                owner.bind_query_metrics()?;
+                owner.query_observer_for(phase, detail)
+            }
+            None => None,
+        };
+        self.query
+            .as_mut()
+            .expect("constructed query")
+            .set_observer(observer)?;
         Ok(())
     }
 
@@ -1184,22 +1205,25 @@ impl ContinuousQueryTransformer {
                     metrics.record_seq_advance();
                 }
                 self.sync_metrics()?;
+                let delivery = self.live_delivery(output)?;
+                crate::observability::ComponentObservations::current_or_disabled()
+                    .query_results(&delivery);
                 Ok(vec![OutputEnvelope {
                     execution_context: crate::observability::ExecutionContext::current(),
                     port: PortId::try_new("out")?,
-                    envelope: self.live_delivery(output)?,
+                    envelope: delivery,
                 }])
             }
             None => Ok(Vec::new()),
         }
     }
     fn sync_metrics(&self) -> anyhow::Result<()> {
+        let state = self
+            .results
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
         if let Some(metrics) = &self.metrics {
-            let state = self
-                .results
-                .state
-                .read()
-                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
             metrics.update_outbox(
                 state.outbox.len(),
                 state
@@ -1210,6 +1234,26 @@ impl ContinuousQueryTransformer {
             );
             metrics.record_live_results_count(state.rows.len());
         }
+        let (outbox, live) = (state.outbox.len(), state.rows.len());
+        let head = if state.ready {
+            state
+                .identity
+                .as_ref()
+                .map(|identity| crate::observability::QueryHead {
+                    sequence: state.sequence,
+                    epoch: crate::observability::QueryEpoch {
+                        generation: state.generation,
+                        config_hash: identity.configuration_hash(),
+                        incarnation: identity.incarnation(),
+                    },
+                })
+        } else {
+            None
+        };
+        drop(state);
+        crate::observability::ComponentObservations::current_or_disabled()
+            .query_state(outbox, live);
+        self.results.telemetry.publish(head);
         Ok(())
     }
 
@@ -1515,6 +1559,10 @@ impl ContinuousQueryTransformer {
             )?;
         }
         let outputs = self.publish(output)?;
+        if SOURCE_TRANSACTION || !GraphChangeCodec::is_futures_due(&input.envelope) {
+            crate::observability::ComponentObservations::current_or_disabled()
+                .query_input(crate::observability::QueryPhase::Steady);
+        }
         if let Some(confirmation) = &self.source_progress {
             confirmation.confirm_input(&progress.graph);
         }
@@ -1730,10 +1778,8 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if self.query.is_none() {
             self.build().await?;
         }
-        self.query
-            .as_mut()
-            .expect("constructed query")
-            .set_observer(None)?;
+        self.results.telemetry.publish(None);
+        self.bind_query_observer(crate::observability::QueryPhase::Bootstrap, false)?;
         Box::pin(self.initialize_recovery()).await?;
         self.prepare_delivery().await?;
         self.pending_input_replay = match &self.bootstrap {
@@ -1765,12 +1811,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if let Some(scheduling) = &self.scheduling {
             scheduling.ready(self.query()?.scheduling_queue());
         }
-        let observer = crate::observability::ComponentObservations::current()
-            .and_then(|observations| observations.query_observer());
-        self.query
-            .as_mut()
-            .expect("started query")
-            .set_observer(observer)?;
+        self.bind_query_observer(crate::observability::QueryPhase::Steady, true)?;
         Ok(())
     }
 
@@ -1798,6 +1839,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
             state.ready = false;
             state.follow.retire()?;
         }
+        self.results.telemetry.publish(None);
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
         }

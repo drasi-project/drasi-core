@@ -22,9 +22,12 @@
 mod async_tests;
 mod bootstrap;
 mod component_log;
+mod detail_metrics;
 mod event_history;
 mod log_runtime;
 mod logging;
+#[cfg(test)]
+mod metric_tests;
 mod operations;
 mod queues;
 mod telemetry;
@@ -33,6 +36,7 @@ mod worker;
 
 pub use bootstrap::BootstrapTrace;
 pub use component_log::*;
+pub(crate) use detail_metrics::*;
 pub use event_history::*;
 pub use log_runtime::*;
 pub use logging::*;
@@ -41,4 +45,4 @@ pub use queues::QueueObservations;
 pub(crate) use queues::{discarded_pending, pending_depth, QueueBinding};
 pub use telemetry::*;
 pub use tracing_layer::*;
-pub use worker::{WorkerObservation, WorkerTelemetry};
+pub use worker::{ReactionInput, ReactionWork, WorkerObservation, WorkerTelemetry};

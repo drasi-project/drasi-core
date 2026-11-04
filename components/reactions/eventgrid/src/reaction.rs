@@ -549,6 +549,7 @@ impl Reaction for EventGridReaction {
                             .reaction(&query_result_arc.execution_context, change_count)
                             .map_err(|e| warn!("Failed to observe Event Grid publication: {e}"))
                             .ok();
+                        let mut work = telemetry.reaction_work();
                         let publish = publish(
                             &client,
                             &config.endpoint,
@@ -561,6 +562,14 @@ impl Reaction for EventGridReaction {
                             Some(observation) => observation.run(publish).await,
                             None => publish.await,
                         };
+                        if outcome.is_ok() {
+                            work.handled(
+                                &query_result.query_id,
+                                events.len(),
+                                usize::from(events.len() == change_count),
+                            );
+                        }
+                        work.finish(outcome.is_ok());
                         if let Err(e) = outcome {
                             error!(
                         "[{reaction_name}] Failed to publish {} event(s) for query '{}': {e:#}",

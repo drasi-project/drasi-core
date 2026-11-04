@@ -462,6 +462,7 @@ impl Reaction for LogReaction {
                     telemetry.reaction(&query_result_arc.execution_context, change_count)
                         .map_err(|e| log::warn!("Failed to observe log output: {e}")).ok()
                 };
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
                 let output = async {
                 let mut render_failed = false;
                 #[allow(clippy::print_stdout)]
@@ -610,6 +611,9 @@ impl Reaction for LogReaction {
                     }
                 }
 
+                if let Some(work) = &work {
+                    work.handled(&query_result.query_id, change_count, 0);
+                }
                 // Capture reaction_complete_ns timestamp
                 if let Some(ref mut profiling) = query_result.profiling {
                     profiling.reaction_complete_ns = Some(drasi_lib::profiling::timestamp_ns());
@@ -625,6 +629,10 @@ impl Reaction for LogReaction {
                             total_latency_ns as f64 / 1_000_000.0
                         );
                     }
+                }
+                if let Some(work) = &mut work {
+                    work.handled(&query_result.query_id, 0, 1);
+                    work.finish(!render_failed);
                 }
                 if render_failed {
                     anyhow::bail!("One or more log templates failed; raw output was used");

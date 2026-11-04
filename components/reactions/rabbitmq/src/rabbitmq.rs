@@ -627,6 +627,8 @@ impl Reaction for RabbitMQReaction {
                     telemetry.reaction(&query_result_arc.execution_context, change_count)
                         .map_err(|e| log::warn!("Failed to observe RabbitMQ publication: {e}")).ok()
                 };
+                let processing = telemetry.reaction_input(query_name, change_count);
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
                 let process = async {
                 let mut publish_failed = false;
                 for result in &query_result.results {
@@ -652,6 +654,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled(1);
                                 }
                             }
                         }
@@ -676,6 +680,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled(1);
                                 }
                             }
                         }
@@ -705,6 +711,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled(1);
                                 }
                             }
                         }
@@ -729,6 +737,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled(1);
                                 }
                             }
                         }
@@ -738,6 +748,9 @@ impl Reaction for RabbitMQReaction {
                     }
                 }
 
+                if let Some(work) = &mut work {
+                    work.finish(!publish_failed);
+                }
                 // Advance checkpoint only if all publishes succeeded.
                 if !publish_failed {
                     let config_hash = checkpoints

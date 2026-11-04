@@ -604,6 +604,7 @@ impl Reaction for ApplicationReaction {
                         .map_err(|e| log::warn!("Failed to observe application forwarding: {e}"))
                         .ok()
                 };
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
                 let forward = async {
                     let permit = app_tx.reserve().await?;
                     if let Some(profiling) = &mut query_result.profiling {
@@ -618,6 +619,12 @@ impl Reaction for ApplicationReaction {
                         .with_context(query_result_arc.execution_context.clone())
                         .scope(forward).await,
                 };
+                if let Some(work) = &mut work {
+                    if outcome.is_ok() {
+                        work.handled(&query_result_arc.payload.query_id, change_count, 1);
+                    }
+                    work.finish(outcome.is_ok());
+                }
                 if let Err(e) = outcome {
                     error!("Failed to send result to application: {e}");
                     break;

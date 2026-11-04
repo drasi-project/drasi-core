@@ -411,7 +411,9 @@ impl FileReaction {
         query_result: &QueryResult,
         reaction_name: &str,
     ) -> Result<()> {
+        let mut work = drasi_lib::observability::WorkerTelemetry::capture().reaction_work();
         let mut failure = None;
+        let mut handled = 0;
         for diff in &query_result.results {
             if matches!(diff, ResultDiff::Noop) {
                 continue;
@@ -440,6 +442,9 @@ impl FileReaction {
                             e
                         );
                         failure = Some(e);
+                    } else {
+                        handled += 1;
+                        work.handled(&query_result.query_id, 1, 0);
                     }
                 }
                 Err(e) => {
@@ -448,6 +453,15 @@ impl FileReaction {
                 }
             }
         }
+        let input_rows = query_result
+            .results
+            .iter()
+            .filter(|diff| !matches!(diff, ResultDiff::Noop))
+            .count();
+        if handled == input_rows && handled > 0 {
+            work.handled(&query_result.query_id, 0, 1);
+        }
+        work.finish(failure.is_none());
         failure.map_or(Ok(()), Err)
     }
 }

@@ -545,6 +545,8 @@ impl Reaction for ProfilerReaction {
                                         })
                                         .ok()
                                 };
+                                let mut work =
+                                    (change_count > 0).then(|| telemetry.reaction_work());
                                 let add_sample = async {
                                     stats.write().await.add_sample(profiling);
                                 };
@@ -553,6 +555,10 @@ impl Reaction for ProfilerReaction {
                                         observation.run_infallible(add_sample).await
                                     }
                                     None => add_sample.await,
+                                }
+                                if let Some(work) = &mut work {
+                                    work.handled(&query_result.payload.query_id, change_count, 1);
+                                    work.finish(true);
                                 }
                             }
                         } else {

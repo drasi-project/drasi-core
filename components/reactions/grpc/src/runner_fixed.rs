@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 use tonic::transport::Channel;
 
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::observability::ExecutionContext;
+use drasi_lib::observability::{ExecutionContext, ReactionInput};
 use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
@@ -50,6 +50,8 @@ enum FlushControl {
     Continue,
     Stop,
 }
+
+type PendingInputs = HashMap<u64, (ExecutionContext, ReactionInput, usize)>;
 
 pub(crate) async fn run(params: FixedRunnerParams) {
     let telemetry = params.base.worker_telemetry().await;
@@ -179,6 +181,9 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         }
 
         let last_idx = built_items.len().saturating_sub(1);
+        let input_rows = query_result.results.iter()
+            .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+        let processing = telemetry.reaction_input(&query_id, input_rows);
         for (i, (key, item)) in built_items.into_iter().enumerate() {
             let is_terminal = i == last_idx;
 
@@ -214,7 +219,8 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 Some(batch) => batch.push(item, is_terminal),
                 None => pending = Some(PendingBatch::new(key, item, is_terminal)),
             }
-            pending_contexts.entry(input_id).or_insert_with(|| execution_context.clone());
+            pending_contexts.entry(input_id)
+                .or_insert_with(|| (execution_context.clone(), processing.clone(), 0)).2 += 1;
 
             if pending
                 .as_ref()
@@ -306,7 +312,7 @@ async fn flush_pending(
     base_backoff: Duration,
     max_backoff: Duration,
     pending: &mut Option<PendingBatch>,
-    pending_contexts: &mut HashMap<u64, ExecutionContext>,
+    pending_contexts: &mut PendingInputs,
     base: &ReactionBase,
     checkpoints: &mut CheckpointState,
     policy: ReactionRecoveryPolicy,
@@ -322,12 +328,13 @@ async fn flush_pending(
     let telemetry = base.worker_telemetry().await;
     let observation = telemetry
         .reaction_batch(
-            pending_contexts.values(),
+            pending_contexts.values().map(|(context, _, _)| context),
             pending_contexts.len(),
             item_count,
         )
         .map_err(|e| warn!("Failed to observe gRPC batch: {e}"))
         .ok();
+    let mut work = telemetry.reaction_batch_work();
     let flush = async {
         let Some(batch) = pending.as_ref() else {
             return Ok(FlushControl::Continue);
@@ -372,6 +379,12 @@ async fn flush_pending(
 
         // The batch is consumed whether delivered or dropped, so a stuck downstream
         // cannot grow `pending` without bound.
+        if sent {
+            for (_, input, rows) in pending_contexts.values() {
+                input.handled(*rows);
+            }
+        }
+        work.finish(sent);
         *pending = None;
         pending_contexts.clear();
 

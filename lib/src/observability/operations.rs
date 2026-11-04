@@ -2,8 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
-    BatchTraceParent, ExecutionContext, ExecutionScope, GraphTelemetry, TelemetryError,
-    TelemetryScope, TELEMETRY_TARGET,
+    BatchTraceParent, ExecutionContext, ExecutionScope, GraphTelemetry, QueryMetrics, QueryPhase,
+    ReactionSubscriptionMetrics, ReactionSubscriptions, TelemetryError, TelemetryScope,
+    TELEMETRY_TARGET,
 };
 use drasi_computation_contracts::ComponentRole;
 use metrics::{Counter, Gauge, Histogram};
@@ -43,7 +44,7 @@ pub(crate) enum ObservedOperation {
 }
 
 impl ObservedOperation {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 19] = [
         Self::Next,
         Self::Publish,
         Self::Send,
@@ -60,6 +61,9 @@ impl ObservedOperation {
         Self::Evaluate,
         Self::Commit,
         Self::Control,
+        Self::Reaction,
+        Self::ReactionBatch,
+        Self::ServiceWork,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -134,6 +138,7 @@ impl ObservedOperation {
                 ComponentRole::Transformer | ComponentRole::Query | ComponentRole::Sink
             ),
             Self::Run => role == ComponentRole::Service,
+            Self::ServiceWork => role == ComponentRole::Service,
             _ => false,
         }
     }
@@ -179,6 +184,10 @@ pub(crate) struct ComponentObservations {
     inputs: [Counter; 3],
     outputs: Counter,
     dispatched: [Counter; 2],
+    storage_errors: Counter,
+    worker_owned: std::sync::atomic::AtomicBool,
+    query: std::sync::OnceLock<QueryMetrics>,
+    subscriptions: Mutex<ReactionSubscriptions>,
     state: Mutex<BindingState>,
 }
 
@@ -217,10 +226,15 @@ impl ComponentObservations {
         {
             for operation in ObservedOperation::ALL.into_iter().filter(|operation| {
                 operation.common()
-                    && config
+                    && (config
                         .scope()
                         .and_then(TelemetryScope::role)
                         .is_some_and(|role| operation.applies_to(role))
+                        || (matches!(
+                            operation,
+                            ObservedOperation::Reaction | ObservedOperation::ReactionBatch
+                        ) && config.scope().and_then(TelemetryScope::semantic_kind)
+                            == Some(drasi_computation_contracts::ComponentSemanticKind::Reaction)))
             }) {
                 let labels = vec![("operation".into(), operation.label().into())];
                 let duration = |outcome: &str| {
@@ -262,13 +276,19 @@ impl ComponentObservations {
                     .zip(["transformed", "accepted", "handled"])
             {
                 let role = config.scope().and_then(TelemetryScope::role);
-                let supported = match completion {
-                    "transformed" => matches!(
-                        role,
-                        Some(ComponentRole::Transformer | ComponentRole::Query)
-                    ),
-                    _ => role == Some(ComponentRole::Sink),
-                };
+                let supported =
+                    match completion {
+                        "transformed" => matches!(
+                            role,
+                            Some(ComponentRole::Transformer | ComponentRole::Query)
+                        ),
+                        "handled" => role == Some(ComponentRole::Sink)
+                            || config.scope().and_then(TelemetryScope::semantic_kind)
+                                == Some(
+                                    drasi_computation_contracts::ComponentSemanticKind::Reaction,
+                                ),
+                        _ => role == Some(ComponentRole::Sink),
+                    };
                 if supported {
                     *handle = counter(
                         "drasi.component.inputs_processed",
@@ -304,6 +324,16 @@ impl ComponentObservations {
                 }
             }
         }
+        let storage_errors = if config.scope().and_then(TelemetryScope::semantic_kind)
+            == Some(drasi_computation_contracts::ComponentSemanticKind::Reaction)
+        {
+            counter(
+                "drasi.errors",
+                vec![("error_kind".into(), "storage".into())],
+            )?
+        } else {
+            Counter::noop()
+        };
         up.set(0.0);
         Ok(Arc::new(Self {
             generation,
@@ -312,6 +342,10 @@ impl ComponentObservations {
             inputs,
             outputs,
             dispatched,
+            storage_errors,
+            worker_owned: std::sync::atomic::AtomicBool::new(false),
+            query: std::sync::OnceLock::new(),
+            subscriptions: Mutex::new(BTreeMap::new()),
             state: Mutex::new(BindingState { active: true, up }),
         }))
     }
@@ -332,15 +366,195 @@ impl ComponentObservations {
         })
     }
 
+    pub(crate) fn bind_query_metrics(&self) -> Result<(), TelemetryError> {
+        if !self.config.policy().metrics_enabled()
+            || self.query.get().is_some()
+            || self.config.scope().and_then(TelemetryScope::semantic_kind)
+                != Some(drasi_computation_contracts::ComponentSemanticKind::Query)
+        {
+            return Ok(());
+        }
+        let state = self.state.lock().map_err(|_| TelemetryError::Poisoned)?;
+        if state.active && self.query.get().is_none() {
+            self.query
+                .set(QueryMetrics::new(&self.config)?)
+                .expect("query metric binding is serialized");
+        }
+        Ok(())
+    }
+
     pub(crate) fn query_observer(
         self: &Arc<Self>,
     ) -> Option<Arc<dyn drasi_core::computation::QueryObserver>> {
-        (self.config.policy().allows_span("query.evaluate")
-            || self.config.policy().allows_span("query.commit"))
+        self.query_observer_for(QueryPhase::Steady, true)
+    }
+
+    pub(crate) fn query_observer_for(
+        self: &Arc<Self>,
+        phase: QueryPhase,
+        detail: bool,
+    ) -> Option<Arc<dyn drasi_core::computation::QueryObserver>> {
+        ((detail
+            && (self.config.policy().allows_span("query.evaluate")
+                || self.config.policy().allows_span("query.commit")))
+            || self
+                .config
+                .policy()
+                .allows_metric("drasi.query.engine.duration")
+            || self
+                .config
+                .policy()
+                .allows_metric("drasi.query.commit.duration"))
         .then(|| {
-            Arc::new(QueryOperationObserver(self.clone()))
-                as Arc<dyn drasi_core::computation::QueryObserver>
+            Arc::new(QueryOperationObserver {
+                owner: self.clone(),
+                phase,
+                detail,
+            }) as Arc<dyn drasi_core::computation::QueryObserver>
         })
+    }
+
+    pub(crate) fn query_input(&self, phase: QueryPhase) {
+        if self.query.get().is_none() {
+            return;
+        }
+        self.update(|| {
+            if let Some(query) = self.query.get() {
+                query.inputs[phase as usize].increment(1);
+            }
+        });
+    }
+
+    pub(crate) fn query_results(&self, output: &crate::computation::v1::ChangeEnvelope) {
+        if self.query.get().is_none() {
+            return;
+        }
+        self.update(|| {
+            if let Some(query) = self.query.get() {
+                let mut counts = [0; 3];
+                for change in output.changes().operations() {
+                    use crate::computation::v1::ChangeOperation;
+                    let index = match change {
+                        ChangeOperation::Added { .. } => 0,
+                        ChangeOperation::Updated { .. } => 1,
+                        ChangeOperation::Deleted { .. } => 2,
+                    };
+                    counts[index] += 1;
+                }
+                for (counter, count) in query.results.iter().zip(counts) {
+                    if count > 0 {
+                        counter.increment(count);
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn query_state(&self, outbox: usize, live: usize) {
+        if self.query.get().is_none() {
+            return;
+        }
+        self.update(|| {
+            if let Some(query) = self.query.get() {
+                if let Err(error) = query.state(&self.config, outbox, live) {
+                    log::warn!("Cannot observe query output metrics: {error}");
+                }
+            }
+        });
+    }
+
+    pub(crate) fn bind_reaction_queries(
+        self: &Arc<Self>,
+        queries: &[String],
+    ) -> Result<(), TelemetryError> {
+        if !self.config.policy().metrics_enabled()
+            || self
+                .config
+                .scope()
+                .and_then(TelemetryScope::component_id)
+                .is_none()
+        {
+            return Ok(());
+        }
+        let mut subscriptions = self
+            .subscriptions
+            .lock()
+            .map_err(|_| TelemetryError::Poisoned)?;
+        for query in queries {
+            if !subscriptions.contains_key(query) {
+                subscriptions.insert(
+                    query.clone(),
+                    ReactionSubscriptionMetrics::new(self, &self.config, query)?,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reaction_subscription(
+        &self,
+        query: &str,
+    ) -> Option<Arc<ReactionSubscriptionMetrics>> {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!("Reading poisoned reaction metric bindings: {error}");
+                error.into_inner()
+            })
+            .get(query)
+            .cloned()
+    }
+
+    pub(super) fn configured(&self) -> bool {
+        self.config.policy().metrics_enabled()
+            && self
+                .config
+                .scope()
+                .and_then(TelemetryScope::component_id)
+                .is_some()
+    }
+
+    pub(super) fn handled_inputs(&self, inputs: usize) {
+        self.inputs[2].increment(inputs as u64);
+    }
+
+    pub(super) fn start_work(&self, operation: ObservedOperation) -> Option<Instant> {
+        self.worker_owned
+            .store(true, std::sync::atomic::Ordering::Release);
+        let metrics = self.metrics.get(&operation)?;
+        self.update(|| metrics.calls.increment(1));
+        self.config
+            .policy()
+            .allows_metric("drasi.component.operation.duration")
+            .then(Instant::now)
+    }
+
+    pub(super) fn finish_work(
+        &self,
+        operation: ObservedOperation,
+        started: Option<Instant>,
+        outcome: usize,
+    ) {
+        self.update(|| {
+            if let Some(metrics) = self.metrics.get(&operation) {
+                if let Some(started) = started {
+                    metrics.durations[outcome].record(started.elapsed().as_secs_f64());
+                }
+
+                if outcome == 1 {
+                    metrics.errors.increment(1);
+                }
+            }
+        });
+    }
+
+    pub(crate) fn checkpoint_failed(&self) {
+        self.update(|| self.storage_errors.increment(1));
+    }
+
+    fn owns_operation_errors(&self, operation: ObservedOperation) -> bool {
+        operation != ObservedOperation::Run
+            || !self.worker_owned.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) async fn scope<T>(self: &Arc<Self>, future: impl Future<Output = T>) -> T {
@@ -367,11 +581,17 @@ impl ComponentObservations {
             log::error!("Revoking poisoned component telemetry: {error}");
             error.into_inner()
         });
+        if !state.active {
+            return;
+        }
         state.active = false;
         state.up.set(0.0);
+        if let Some(query) = self.query.get() {
+            query.retire();
+        }
     }
 
-    fn update(&self, work: impl FnOnce()) {
+    pub(super) fn update(&self, work: impl FnOnce()) {
         let state = self.state.lock().unwrap_or_else(|error| {
             log::error!("Updating poisoned component telemetry: {error}");
             error.into_inner()
@@ -387,7 +607,11 @@ impl ComponentObservations {
 
     pub(crate) fn failed(&self, operation: ObservedOperation) {
         self.update(|| {
-            if let Some(metrics) = self.metrics.get(&operation) {
+            let record_metrics = !matches!(
+                operation,
+                ObservedOperation::Reaction | ObservedOperation::ReactionBatch
+            );
+            if let Some(metrics) = self.metrics.get(&operation).filter(|_| record_metrics) {
                 metrics.errors.increment(1);
             }
         });
@@ -485,6 +709,10 @@ impl ComponentObservations {
         truncated: bool,
         trace: bool,
     ) -> Result<OperationObservation, TelemetryError> {
+        if operation == ObservedOperation::ServiceWork {
+            self.worker_owned
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         let eligible = trace
             && !(operation == ObservedOperation::Evaluate && fields.change_count == Some(0))
             && operation
@@ -532,10 +760,15 @@ impl ComponentObservations {
                 }
             }
         }
-        if let Some(metrics) = self.metrics.get(&operation) {
+        let record_metrics = !matches!(
+            operation,
+            ObservedOperation::Reaction | ObservedOperation::ReactionBatch
+        );
+        if let Some(metrics) = self.metrics.get(&operation).filter(|_| record_metrics) {
             self.update(|| metrics.calls.increment(1));
         }
-        let timed = self.metrics.contains_key(&operation)
+        let timed = record_metrics
+            && self.metrics.contains_key(&operation)
             && self
                 .config
                 .policy()
@@ -557,6 +790,8 @@ impl ComponentObservations {
             finished: false,
             input_count: fields.input_count.unwrap_or(0),
             completion: fields.completion,
+            record_metrics,
+            query_timing: None,
         })
     }
 }
@@ -570,6 +805,8 @@ pub(crate) struct OperationObservation {
     finished: bool,
     input_count: usize,
     completion: Option<&'static str>,
+    record_metrics: bool,
+    query_timing: Option<(QueryPhase, bool, Instant)>,
 }
 
 impl OperationObservation {
@@ -582,7 +819,11 @@ impl OperationObservation {
     }
 }
 
-pub(crate) struct QueryOperationObserver(pub Arc<ComponentObservations>);
+pub(crate) struct QueryOperationObserver {
+    owner: Arc<ComponentObservations>,
+    phase: QueryPhase,
+    detail: bool,
+}
 
 impl drasi_core::computation::QueryObserver for QueryOperationObserver {
     fn start(
@@ -595,16 +836,29 @@ impl drasi_core::computation::QueryObserver for QueryOperationObserver {
             drasi_core::computation::QueryOperation::Evaluate => ObservedOperation::Evaluate,
             drasi_core::computation::QueryOperation::Commit => ObservedOperation::Commit,
         };
-        self.0
-            .begin(
-                operation,
-                &ExecutionContext::current(),
-                OperationFields {
-                    change_count,
-                    ..Default::default()
-                },
-            )
-            .map(|observation| {
+        let fields = OperationFields {
+            change_count,
+            ..Default::default()
+        };
+        let context = ExecutionContext::current();
+        let observation = if self.detail {
+            self.owner.begin(operation, &context, fields)
+        } else {
+            self.owner.begin_untraced(operation, &context, fields)
+        };
+        observation
+            .map(|mut observation| {
+                let evaluate = operation == ObservedOperation::Evaluate;
+                let name = if evaluate {
+                    "drasi.query.engine.duration"
+                } else {
+                    "drasi.query.commit.duration"
+                };
+                if self.owner.query.get().is_some()
+                    && self.owner.config.policy().allows_metric(name)
+                {
+                    observation.query_timing = Some((self.phase, evaluate, Instant::now()));
+                }
                 Box::new(observation) as Box<dyn drasi_core::computation::QueryObservation>
             })
             .map_err(drasi_core::interface::IndexError::other)
@@ -736,11 +990,26 @@ impl OperationObservation {
             self.span.record("error_kind", self.operation.error_kind());
         }
         self.owner.update(|| {
-            if let Some(metrics) = self.owner.metrics.get(&self.operation) {
+            if let Some((phase, evaluate, started)) = self.query_timing {
+                if let Some(query) = self.owner.query.get() {
+                    let histogram = if evaluate {
+                        &query.engine[phase as usize]
+                    } else {
+                        &query.commit[phase as usize][outcome]
+                    };
+                    histogram.record(started.elapsed().as_secs_f64());
+                }
+            }
+            if let Some(metrics) = self
+                .owner
+                .metrics
+                .get(&self.operation)
+                .filter(|_| self.record_metrics)
+            {
                 if let Some(started) = self.started {
                     metrics.durations[outcome].record(started.elapsed().as_secs_f64());
                 }
-                if outcome == 1 {
+                if outcome == 1 && self.owner.owns_operation_errors(self.operation) {
                     metrics.errors.increment(1);
                 }
             }

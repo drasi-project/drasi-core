@@ -671,6 +671,8 @@ impl ContinuousQueryTransformer {
                             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
                             .apply_rows(&output);
                     }
+                    crate::observability::ComponentObservations::current_or_disabled()
+                        .query_input(crate::observability::QueryPhase::Bootstrap);
                 }
                 snapshot
                     .watermarks

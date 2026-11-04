@@ -137,7 +137,9 @@ async fn process_query_result(
         query_result.query_id
     );
 
+    let mut work = drasi_lib::observability::WorkerTelemetry::capture().reaction_work();
     let mut failure = None;
+    let mut handled = 0;
     for diff in &query_result.results {
         // Noop items produce no context and no command.
         if matches!(diff, ResultDiff::Noop) {
@@ -185,6 +187,8 @@ async fn process_query_result(
 
         match executor.execute_command(&command, params).await {
             Ok(()) => {
+                handled += 1;
+                work.handled(&query_result.query_id, 1, 0);
                 debug!("[{reaction_id}] Successfully executed command");
             }
             Err(e) => {
@@ -193,6 +197,15 @@ async fn process_query_result(
             }
         }
     }
+    let input_rows = query_result
+        .results
+        .iter()
+        .filter(|diff| !matches!(diff, ResultDiff::Noop))
+        .count();
+    if handled == input_rows && handled > 0 {
+        work.handled(&query_result.query_id, 0, 1);
+    }
+    work.finish(failure.is_none());
     failure.map_or(Ok(()), Err)
 }
 

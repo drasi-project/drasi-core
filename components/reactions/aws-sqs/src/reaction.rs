@@ -429,8 +429,10 @@ impl Reaction for SqsReaction {
                 }
                 let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
                     .map_err(|e| warn!("Failed to observe SQS processing: {e}")).ok();
+                let mut work = telemetry.reaction_work();
                 let process = async {
                 let mut failure = None;
+                let mut handled = 0;
                 for result in &query_result.results {
                     let Some((spec, operation)) = Self::resolve_template_spec(query_config, result)
                     else {
@@ -511,8 +513,17 @@ impl Reaction for SqsReaction {
                             "[{reaction_id}] Failed to send SQS message for query '{query_id}' operation '{operation}': {e}"
                         );
                         failure = Some(e);
+                    } else {
+                        handled += 1;
+                        work.handled(query_id, 1, 0);
                     }
                 }
+                let input_rows = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+                if handled == input_rows {
+                    work.handled(query_id, 0, 1);
+                }
+                work.finish(failure.is_none());
                 failure.map_or(Ok(()), Err)
                 };
                 let _ = match observation {

@@ -138,7 +138,7 @@ pub const METRICS: &[MetricDefinition] = &[
     metric!("drasi.source.events_dispatched", Counter, One, Basic, true, ["source_id", "phase"], "source publication owner", "Envelope attempts accepted by all bound destinations, once before fan-out"),
     metric!("drasi.query.events_processed", Counter, One, Basic, true, ["query_id", "phase"], "query input owner", "Completed input envelopes; no increment for output-only replay or dedup skips"),
     metric!("drasi.query.results_emitted", Counter, One, Basic, true, ["query_id", "change_kind"], "query result publication owner", "New result-row changes published locally; replay is not a new computed result"),
-    metric!("drasi.reaction.results_processed", Counter, One, Basic, true, ["reaction_id", "query_id"], "ordinary reaction processor", "Results completed by the processor, not enqueue-only acceptance"),
+    metric!("drasi.reaction.results_processed", Counter, One, Basic, true, ["reaction_id", "query_id"], "ordinary reaction processor", "Successfully handled non-Noop result-row changes, not envelopes, enqueue acceptance or checkpoint advances"),
     metric!("drasi.queue.depth", Gauge, One, Basic, false, ["queue_id"], "physical queue provider", "Current pending deliveries; one series per actual queue, absent when unsupported"),
     metric!("drasi.queue.depth_max", Gauge, One, Basic, false, ["queue_id"], "physical queue provider", "Peak pending deliveries for the binding; not duplicated for shared edges or multicast"),
     metric!("drasi.queue.blocked_enqueues", Counter, One, Basic, false, ["queue_id"], "physical queue provider", "Provider-observed blocking events, not reconstructed from coalescing inspection"),
@@ -146,6 +146,12 @@ pub const METRICS: &[MetricDefinition] = &[
     metric!("drasi.reaction.checkpoint_lag_events", Gauge, One, Persistence, true, ["reaction_id", "query_id"], "ordinary reaction checkpoint owner", "Known checkpoint lag only; no fabricated zero for opaque sinks"),
     metric!("drasi.errors", Counter, One, Basic, true, ["error_kind"], "failed operation owner", "One failed operation, not each reporting or propagation of its cause"),
     metric!("drasi.query.engine.duration", Histogram, Seconds, Basic, true, ["query_id", "phase"], "query evaluator", "Actual inner evaluation duration, excluding result hooks/commit and output-only replay"),
+    metric!("drasi.query.commit.duration", Histogram, Seconds, Persistence, true, ["query_id", "phase", "outcome"], "query transaction owner", "Actual session commit attempt duration, including failure/cancellation, excluding evaluation and result hooks"),
+    metric!("drasi.query.outbox.entries", Gauge, One, Persistence, true, ["query_id"], "query output owner", "Known retained output entry count, not storage-engine or disk statistics"),
+    metric!("drasi.query.live_results", Gauge, One, Persistence, true, ["query_id"], "query output owner", "Known live result cardinality at publication/recovery boundaries"),
+    metric!("drasi.reaction.dedup_skips", Counter, One, Persistence, true, ["reaction_id", "query_id"], "reaction dedup owner", "Actual skipped result envelopes, once at the deciding adapter or worker"),
+    metric!("drasi.reaction.gaps_detected", Counter, One, Persistence, true, ["reaction_id", "query_id"], "reaction recovery owner", "Actual gap detections, not coalesced inspection reports"),
+    metric!("drasi.reaction.recovery_triggers", Counter, One, Persistence, true, ["reaction_id", "query_id", "policy"], "reaction recovery owner", "Actual recovery-policy invocations, not reset completions"),
     metric!("drasi.pipeline.end_to_end.duration", Histogram, Seconds, Deferred, true, ["query_id", "phase"], "future handled-branch timing owner", "Reserved and never emitted until validated source-to-handled-sink timing exists"),
 ];
 
@@ -174,7 +180,11 @@ pub fn valid_category(key: &str, value: &str) -> bool {
                 | "run"
                 | "confirm_outputs"
                 | "acknowledge"
+                | "reaction"
+                | "reaction_batch"
+                | "service_work"
         ),
+        "policy" => matches!(value, "strict" | "auto_reset" | "auto_skip_gap"),
         "error_kind" => matches!(
             value,
             "configuration"

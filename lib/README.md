@@ -875,8 +875,9 @@ does not change startup readiness or cancellation-safe provider cleanup.
 Ordinary reaction workers emit `reaction.process` or `reaction.process_batch`
 around actual effects, separately from enqueue acceptance. Batches choose a
 shared parent or bounded links before sampling; collection is outside handling.
-These trace-only observations do not add handling metrics, acknowledgements,
-or stronger delivery guarantees.
+The trace scope can include checkpoint/policy work. Separate worker metric
+guards account for actual handling before checkpointing; neither observation
+adds acknowledgements or stronger delivery guarantees.
 
 The common component instruments count operation attempts, successfully processed
 input envelopes, and validated output envelopes before fan-out. Source dispatch
@@ -900,10 +901,63 @@ may expose `RetainedEnvelopeStore::observations()`. Unsupported capabilities
 remain absent, not fabricated zeros. Existing pipe inspection snapshots retain
 their original semantics.
 
-Query/reaction-specific counters, evaluator histograms, native metric callbacks,
-native completed-span/log collection, exporters and handled-branch latency remain
-unimplemented: `require_native_metrics()` fails, and deferred instruments are not
-registered by graph instrumentation.
+Query and ordinary reaction metrics use the same host-owned recorder, even
+without tracing, sampling, or the optional OpenTelemetry adapter:
+
+| Instrument | Meaning |
+|---|---|
+| `drasi.query.events_processed{query_id,phase}` | Completed, nonduplicate data input envelopes, not source changes or timer notifications |
+| `drasi.query.results_emitted{query_id,change_kind}` | Newly published add/update/delete result-row changes before fan-out, not replayed envelopes |
+| `drasi.query.engine.duration{query_id,phase}` | Seconds per actual evaluation attempt, including failure/cancellation, excluding preparation, hooks, commit, and forwarding |
+| `drasi.reaction.results_processed{reaction_id,query_id}` | Successfully handled non-Noop result-row changes at the ordinary worker, not queue acceptance or checkpoint advancement |
+
+`phase` is `bootstrap` or `steady`. Bootstrap records successful snapshot inputs
+and actual evaluation, but loading the live view does not emit result-stream
+rows. It retains aggregate tracing without per-row spans. Scheduled evaluation
+records engine time and new results, but no new data input. Prepared input replay
+uses the normal nonduplicate path; output-only replay records no new query input,
+evaluation, or computed results. These are process-local observations, not
+durable exactly-once totals.
+
+The Persistence profile additionally exposes:
+
+- `drasi.query.commit.duration{query_id,phase,outcome}`: real query-owned commit
+  attempts in seconds, including actual bootstrap/replay bookkeeping commits.
+- `drasi.query.outbox.entries{query_id}` and `drasi.query.live_results{query_id}`:
+  known framework retention/cardinality, including in-memory providers, not disk
+  or storage-engine statistics. Removed bindings clear previously known gauges.
+- `drasi.reaction.checkpoint_lag_events{reaction_id,query_id}`: current query
+  result-sequence head minus a confirmed checkpoint in the same epoch. It updates
+  on both head and checkpoint changes, including while handling is blocked.
+  Staged bootstrap checkpoints and enqueue progress do not advance it.
+- `drasi.reaction.dedup_skips`, `drasi.reaction.gaps_detected`, and
+  `drasi.reaction.recovery_triggers{policy}`: actual per-reaction/query recovery
+  decisions; policy is `strict`, `auto_reset`, or `auto_skip_gap`.
+
+Unknown, unsupported, or epoch-mismatched checkpoint lag is absent, not a
+fabricated zero. A recorder may retain the last series after observations stop.
+Existing reaction snapshots retain their compatibility behavior, including the
+runtime adapter's acceptance-based progress; they are not the source of the new
+confirmed-checkpoint gauge. Existing query/lifecycle snapshots and profiling
+metadata remain available with telemetry Off.
+
+Handling success is independent of checkpoint success: completed rows remain
+counted if a later checkpoint write fails and can count again when retried.
+Partial batches count only positively completed rows; dropped/failed rows do not
+become successes under AutoSkipGap. Whole-input handled counts wait for all of
+that input's rows, including across split batches. Application-channel forwarding
+is a local boundary, not application-consumer completion.
+
+Bounded reaction/service work records common calls/durations/errors at the
+worker. Once that component uses work observations, its service `run` lifetime
+is not an additional owner of propagated processing errors. Checkpoint write
+failures are observed separately as storage errors. Idle service loops do not
+create work samples.
+
+Native metric callbacks, native completed-span/log collection, exporters, and
+handled-branch latency remain unimplemented: `require_native_metrics()` fails.
+Opaque native/legacy workers do not gain internal metrics from host wrappers.
+`drasi.pipeline.end_to_end.duration` remains reserved and absent.
 
 Use `TelemetrySettings::new(profile).with_metrics(false)` for tracing-only
 policy, or `.with_tracing(false)` for metrics-only policy. Metric exclusions are

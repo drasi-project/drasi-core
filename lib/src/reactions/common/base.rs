@@ -178,7 +178,14 @@ impl ReactionBase {
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
     /// - `resource_observer`: Optional reporting of the actual selected providers
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
-        *self.worker_telemetry.write().await = crate::observability::WorkerTelemetry::capture();
+        let telemetry = crate::observability::WorkerTelemetry::capture();
+        if let Err(error) = telemetry.bind_queries(&self.queries) {
+            log::warn!(
+                "Cannot bind reaction worker metrics for '{}': {error}",
+                self.id
+            );
+        }
+        *self.worker_telemetry.write().await = telemetry;
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
@@ -397,7 +404,17 @@ impl ReactionBase {
         let store = self.state_store.read().await;
         match store.as_ref() {
             Some(s) => {
-                crate::reactions::checkpoint::read_checkpoint(s.as_ref(), &self.id, query_id).await
+                let checkpoint =
+                    crate::reactions::checkpoint::read_checkpoint(s.as_ref(), &self.id, query_id)
+                        .await?;
+                if let Some(checkpoint) = &checkpoint {
+                    self.worker_telemetry().await.checkpoint(
+                        query_id,
+                        checkpoint.sequence,
+                        checkpoint.config_hash,
+                    );
+                }
+                Ok(checkpoint)
             }
             None => Ok(None),
         }
@@ -413,12 +430,17 @@ impl ReactionBase {
         let store = self.state_store.read().await;
         match store.as_ref() {
             Some(s) => {
-                crate::reactions::checkpoint::read_checkpoints_batch(
+                let checkpoints = crate::reactions::checkpoint::read_checkpoints_batch(
                     s.as_ref(),
                     &self.id,
                     &self.queries,
                 )
-                .await
+                .await?;
+                let telemetry = self.worker_telemetry().await;
+                for (query, checkpoint) in &checkpoints {
+                    telemetry.checkpoint(query, checkpoint.sequence, checkpoint.config_hash);
+                }
+                Ok(checkpoints)
             }
             None => Ok(std::collections::HashMap::new()),
         }
@@ -437,13 +459,23 @@ impl ReactionBase {
         let store = store.as_ref().ok_or_else(|| {
             anyhow::anyhow!("No state store configured — cannot write checkpoint")
         })?;
-        crate::reactions::checkpoint::write_checkpoint(
+        let result = crate::reactions::checkpoint::write_checkpoint(
             store.as_ref(),
             &self.id,
             query_id,
             checkpoint,
         )
-        .await
+        .await;
+        if let Err(error) = result {
+            self.worker_telemetry().await.checkpoint_failed();
+            return Err(error);
+        }
+        self.worker_telemetry().await.checkpoint(
+            query_id,
+            checkpoint.sequence,
+            checkpoint.config_hash,
+        );
+        Ok(())
     }
 
     /// Perform common cleanup operations
@@ -635,19 +667,39 @@ impl ReactionBase {
                         "[{}] Skipping already-processed event: query={}, seq={} (checkpoint={})",
                         self.id, query_id, seq, cp.sequence
                     );
+                    if let Some(subscription) = self.worker_telemetry().await.subscription(query_id)
+                    {
+                        subscription.dedup();
+                    }
                     continue;
                 }
             }
 
             // Invoke the user-provided side effect. The durable checkpoint
             // advances only after this returns success.
-            match self
-                .worker_telemetry()
-                .await
-                .reaction(&context, event.results.len())?
-                .run(handler(Arc::clone(&event)))
-                .await
-            {
+            let change_count = event
+                .results
+                .iter()
+                .filter(|diff| !matches!(diff, crate::channels::ResultDiff::Noop))
+                .count();
+            if change_count == 0 {
+                continue;
+            }
+            let telemetry = self.worker_telemetry().await;
+            let mut work = telemetry.reaction_work();
+            let observation = telemetry
+                .reaction(&context, change_count)
+                .map_err(|error| log::warn!("Cannot observe reaction handling: {error}"))
+                .ok();
+            let result = match observation {
+                Some(observation) => observation.run(handler(Arc::clone(&event))).await,
+                None => handler(Arc::clone(&event)).await,
+            };
+            if result.is_ok() {
+                work.handled(query_id, change_count, 1);
+            }
+            work.finish(result.is_ok());
+            match result {
                 Err(e) => {
                     error!(
                         "[{}] Handler error for query={}, seq={}: {:#}",

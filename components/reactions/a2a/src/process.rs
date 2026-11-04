@@ -94,6 +94,8 @@ pub(crate) async fn run_loop(
             continue;
         }
 
+        let input_rows = query_result.results.iter().filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+        let processing = telemetry.reaction_input(&query_result.query_id, input_rows);
         let mut delivery_failed = false;
         for (diff_index, diff) in query_result.results.iter().enumerate() {
             if matches!(diff, ResultDiff::Noop) {
@@ -112,6 +114,7 @@ pub(crate) async fn run_loop(
                 &mut activation_cache,
                 &telemetry,
                 &execution_context,
+                &processing,
             )
             .await;
 
@@ -204,6 +207,7 @@ async fn process_diff(
     activation_cache: &mut HashMap<String, ActivationState>,
     telemetry: &WorkerTelemetry,
     execution_context: &ExecutionContext,
+    processing: &drasi_lib::observability::ReactionInput,
 ) -> anyhow::Result<()> {
     let Some(diff_payload) = DiffPayload::from_result_diff(diff) else {
         return Ok(());
@@ -261,6 +265,7 @@ async fn process_diff(
     } else {
         None
     };
+    let mut work = needs_work.then(|| telemetry.reaction_work());
     let process = async {
         let mut effect_failed = false;
         let outcome = async {
@@ -314,6 +319,7 @@ async fn process_diff(
                         .context("SendMessage create RPC failed")?;
                     match outcome {
                         DeliveryResult::Delivered(response) => {
+                            processing.handled(1);
                             let next_state = response_to_activation(
                                 response,
                                 message_id.clone(),
@@ -352,6 +358,7 @@ async fn process_diff(
                         Ok(outcome) => {
                             match outcome {
                                 DeliveryResult::Delivered(response) => {
+                                    processing.handled(1);
                                     let next_state = match response {
                                         SendMessageResult::Message => match activation {
                                             ActivationState::Present(existing) => {
@@ -471,6 +478,7 @@ async fn process_diff(
                     {
                         Ok(outcome) => match outcome {
                             DeliveryResult::Delivered(()) => {
+                                processing.handled(1);
                                 clear_activation_state(base, activation_cache, &state_key)
                                 .await
                                 .with_context(|| {
@@ -559,6 +567,9 @@ async fn process_diff(
 
         Ok::<_, anyhow::Error>(())
         }.await;
+        if let Some(work) = &mut work {
+            work.finish(outcome.is_ok() && !effect_failed);
+        }
         match outcome {
             Err(error) => Err(Some(error)),
             Ok(()) if effect_failed => Err(None),

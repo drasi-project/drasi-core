@@ -81,7 +81,7 @@ async fn worker_tracing_preserves_batch_origins_in_fixed_and_adaptive_modes() {
                 ExecutionContext::default(),
             ];
             recording
-                .run(reaction.clone(), async {
+                .run_metrics(reaction.clone(), async {
                     for (index, origin) in origins.iter().enumerate() {
                         let mut result = support::result(index as u64 + 1);
                         if index == 1 {
@@ -100,12 +100,31 @@ async fn worker_tracing_preserves_batch_origins_in_fixed_and_adaptive_modes() {
                         recording.finished().is_empty(),
                         "remote acknowledgement is pending"
                     );
+                    assert_eq!(
+                        recording
+                            .metrics
+                            .count("drasi.reaction.results_processed", &[]),
+                        0
+                    );
                     server.recorder.release_responses(2);
                     recording.wait_for_finished(2).await;
                     assert_eq!(server.recorder.total_items().await, 4);
                 })
                 .await;
             let spans = recording.finished();
+            assert_eq!(
+                recording
+                    .metrics
+                    .count("drasi.reaction.results_processed", &[("query_id", "q1")]),
+                4
+            );
+            assert_eq!(
+                recording.metrics.count(
+                    "drasi.component.inputs_processed",
+                    &[("completion", "handled")]
+                ),
+                4
+            );
             assert_eq!(spans.len(), 2);
             assert!(spans
                 .iter()
@@ -162,7 +181,7 @@ async fn worker_tracing_counts_inputs_not_diffs_when_a_result_splits_across_batc
         );
         let recording = worker_telemetry::Recording::default();
         recording
-            .run(reaction.clone(), async {
+            .run_metrics(reaction.clone(), async {
                 let mut result = support::result(7);
                 result.results = (1..=3)
                     .map(|row_signature| drasi_lib::channels::ResultDiff::Add {
@@ -187,6 +206,19 @@ async fn worker_tracing_counts_inputs_not_diffs_when_a_result_splits_across_batc
             })
             .await;
         let spans = recording.finished();
+        assert_eq!(
+            recording
+                .metrics
+                .count("drasi.reaction.results_processed", &[]),
+            3
+        );
+        assert_eq!(
+            recording.metrics.count(
+                "drasi.component.inputs_processed",
+                &[("completion", "handled")]
+            ),
+            1
+        );
         assert_eq!(spans.len(), 2);
         assert!(spans
             .iter()

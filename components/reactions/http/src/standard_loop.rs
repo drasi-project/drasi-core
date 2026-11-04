@@ -75,6 +75,8 @@ pub(crate) async fn run_standard_loop(
             telemetry.reaction(&query_result_arc.execution_context, change_count)
                 .map_err(|e| warn!("Failed to observe HTTP processing: {e}")).ok()
         };
+        let input = telemetry.reaction_input(query_name, change_count);
+        let mut work = (change_count > 0).then(|| telemetry.reaction_work());
         let mut stop = false;
         let process = async {
         let mut delivery_failed = false;
@@ -115,7 +117,7 @@ pub(crate) async fn run_standard_loop(
             };
 
             match outcome {
-                Ok(DeliveryOutcome::Delivered) => {}
+                Ok(DeliveryOutcome::Delivered) => input.handled(1),
                 Ok(DeliveryOutcome::Dropped) => dropped = true,
                 Err(e) => {
                     error!("[{reaction_name}] Failed to process result: {e}");
@@ -128,6 +130,9 @@ pub(crate) async fn run_standard_loop(
             }
         }
 
+        if let Some(work) = &mut work {
+            work.finish(!delivery_failed && !dropped);
+        }
         if delivery_failed {
             match FailureAction::from_policy(policy) {
                 FailureAction::Stop => {

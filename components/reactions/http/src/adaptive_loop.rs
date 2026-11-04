@@ -48,6 +48,7 @@ pub(crate) struct BatchItem {
     pub execution_context: ExecutionContext,
     // Sequence IDs can repeat on replay; this identifies the dequeued input.
     pub input_id: u64,
+    pub processing: drasi_lib::observability::ReactionInput,
 }
 
 /// Run forwarding and batching concurrently inside the owned processor.
@@ -110,19 +111,28 @@ pub(crate) async fn run_adaptive_loop(
                 let mut payloads = Vec::with_capacity(batch_size);
                 let mut meta = Vec::with_capacity(batch_size);
                 let mut contexts = HashMap::new();
+                let mut inputs = Vec::with_capacity(batch_size);
                 for item in batch {
                     contexts.entry(item.input_id)
                         .or_insert(item.execution_context);
                     meta.push((item.query_id, item.sequence, item.is_terminal));
                     payloads.push(item.payload);
+                    inputs.push(item.processing);
                 }
                 let (completed, seen) = batch_checkpoint_candidates(meta);
 
                 let observation = telemetry.reaction_batch(contexts.values(), contexts.len(), batch_size)
                     .map_err(|e| warn!("Failed to observe HTTP batch: {e}")).ok();
+                let mut work = telemetry.reaction_batch_work();
                 let deliver = async {
                 let outcome = deliver_batch(&client, &config, &reaction_name, payloads).await;
                 let failed = !matches!(&outcome, Ok(DeliveryOutcome::Delivered));
+                if !failed {
+                    for input in inputs {
+                        input.handled(1);
+                    }
+                }
+                work.finish(!failed);
                 match outcome {
                     Ok(_) => {
                         // Advance each represented query to its max fully-acked
@@ -242,6 +252,7 @@ pub(crate) async fn run_adaptive_loop(
                 .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d))
                 .collect();
             let last_idx = notifications.len().saturating_sub(1);
+            let processing = telemetry.reaction_input(query_id, notifications.len());
 
             let mut batcher_closed = false;
             for (i, notification) in notifications.iter().enumerate() {
@@ -253,6 +264,7 @@ pub(crate) async fn run_adaptive_loop(
                     is_terminal: i == last_idx,
                     execution_context: query_result_arc.execution_context.clone(),
                     input_id,
+                    processing: processing.clone(),
                 };
                 if batch_tx.send(item).await.is_err() {
                     error!("[{reaction_name}] Failed to send to batch channel — batcher exited");

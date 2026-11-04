@@ -737,7 +737,32 @@ MUST remain outside effects spans.
 
 These `reaction.process` / `reaction.process_batch` spans observe worker work;
 they do not strengthen the legacy adapter's `sink.handle(completion=accepted)`
-boundary, add metrics, or establish durable/once-only delivery.
+boundary or establish durable/once-only delivery.
+
+Handling metrics are separate from trace scopes because existing effect spans
+can include checkpoint/policy work. The standard `ReactionBase` loop accounts
+for handling automatically. Custom loops MUST begin `telemetry.reaction_work()`
+(or `reaction_batch_work()`) immediately before actual effects, report
+positively completed rows, and call `work.finish(success)` **before**
+checkpointing. An unfinished guard records cancellation, never success.
+Do not count waiting, batch collection, enqueueing, dedup skips, or dropped rows.
+
+`work.handled(query_id, rows, completed_inputs)` records rows and whole input
+envelopes separately. For partial/split batches, create
+`telemetry.reaction_input(query_id, non_noop_rows)` once per dequeued input and
+retain clones with its existing buffered items. Call `input.handled(rows)` only
+after those rows complete. This bounded transient helper counts whole-input
+completion once, only when every required row has completed. Never rebuild it
+for each sub-batch or key it by a replayable sequence ID.
+
+These metrics use initialize-time, host-assigned component/subscription bindings
+and work without tracing. `drasi.reaction.results_processed` counts successful
+non-Noop **row changes**, not `QueryResult` containers. Local success does not
+prove external exactly-once delivery. A later checkpoint failure must not undo
+successful handling counts; AutoSkipGap checkpoint advancement must not invent
+handling success. `ReactionBase` checkpoint APIs report confirmed writes
+separately. The framework's new checkpoint-lag gauge is not derived from the
+legacy adapter's acceptance-based metrics snapshot.
 
 > 🔴 **MUST** — Use `tokio::select!` with `biased;` and the shutdown
 > receiver. Without it your reaction will not stop promptly when the
@@ -2715,6 +2740,8 @@ Walk this list before publishing your reaction.
       caught effect failures remain errors in the worker span.
 - [ ] Keeps per-input contexts through custom batches; empty/dedup items
       do not create effects spans.
+- [ ] Records successful rows and whole-input completion separately, before
+      checkpointing; split/partial batches retain bounded per-input accounting.
 
 #### Configuration
 

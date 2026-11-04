@@ -11,12 +11,13 @@ use std::{
 use async_trait::async_trait;
 use drasi_lib::{
     computation::v1::{
-        ComponentDescriptor, ComponentId, ComputationComponent, ComputationGraph,
-        ComputationService, GraphError,
+        ComponentDescriptor, ComponentId, ComponentSemanticKind, ComputationComponent,
+        ComputationGraph, ComputationService, GraphError,
     },
     observability::{
-        ExecutionContext, ExecutionScope, TelemetryOptions, TelemetryProfile, TelemetrySettings,
-        TraceContextAdapter, TraceContextGuard, TraceContextV1,
+        ExecutionContext, ExecutionScope, MetricRegistrationContext, TelemetryOptions,
+        TelemetryProfile, TelemetrySettings, TraceContextAdapter, TraceContextGuard,
+        TraceContextV1,
     },
     MemoryStateStoreProvider, Reaction,
 };
@@ -28,6 +29,9 @@ use tracing::{
     Subscriber,
 };
 use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan, Layer};
+
+#[path = "../../../lib/tests/computation_support/metrics.rs"]
+mod metric_recording;
 
 pub fn context(value: u8) -> ExecutionContext {
     ExecutionContext::new(TraceContextV1::new([value; 16], [value; 8], 1, None).unwrap())
@@ -212,6 +216,7 @@ impl ComputationService for Worker {
 pub struct Recording {
     spans: Spans,
     parents: Arc<Parents>,
+    pub metrics: metric_recording::RecordingMetrics,
 }
 
 impl Recording {
@@ -238,16 +243,40 @@ impl Recording {
     }
 
     pub async fn run(&self, reaction: Arc<dyn Reaction>, work: impl Future<Output = ()>) {
+        self.run_with_metrics(reaction, work, false).await;
+    }
+
+    pub async fn run_metrics(&self, reaction: Arc<dyn Reaction>, work: impl Future<Output = ()>) {
+        self.run_with_metrics(reaction, work, true).await;
+    }
+
+    async fn run_with_metrics(
+        &self,
+        reaction: Arc<dyn Reaction>,
+        work: impl Future<Output = ()>,
+        metrics: bool,
+    ) {
         async {
             let started = Arc::new(Notify::new());
             let mut graph = ComputationGraph::builder("worker-tests")
                 .with_telemetry(
                     TelemetryOptions::new(
-                        TelemetrySettings::new(TelemetryProfile::Debug)
-                            .with_metrics(false)
-                            .with_tracing(true),
+                        TelemetrySettings::new(if metrics {
+                            TelemetryProfile::Persistence
+                        } else {
+                            TelemetryProfile::Debug
+                        })
+                        .with_metrics(metrics)
+                        .with_tracing(true),
                     )
                     .with_instance_id("worker-tests")
+                    .with_metric_context(
+                        MetricRegistrationContext::new(
+                            Arc::new(self.metrics.clone()),
+                            Default::default(),
+                        )
+                        .unwrap(),
+                    )
                     .with_context_adapter(self.parents.clone()),
                 )
                 .service(Box::new(Worker {
@@ -255,7 +284,8 @@ impl Recording {
                         ComponentId::try_new(reaction.id()).unwrap(),
                         Vec::new(),
                     )
-                    .unwrap(),
+                    .unwrap()
+                    .with_semantic_kind(ComponentSemanticKind::Reaction),
                     reaction,
                     started: started.clone(),
                 }))

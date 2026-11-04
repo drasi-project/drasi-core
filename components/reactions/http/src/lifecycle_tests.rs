@@ -212,7 +212,7 @@ async fn worker_tracing_preserves_origins_until_actual_dispatch_in_both_modes() 
             ExecutionContext::default(),
         ];
         recording
-            .run(reaction.clone(), async {
+            .run_metrics(reaction.clone(), async {
                 for (index, origin) in origins.iter().enumerate() {
                     let mut result = support::result(index as u64 + 1);
                     if index == 1 {
@@ -227,6 +227,12 @@ async fn worker_tracing_preserves_origins_until_actual_dispatch_in_both_modes() 
                 assert!(
                     recording.finished().is_empty(),
                     "dispatch has not completed"
+                );
+                assert_eq!(
+                    recording
+                        .metrics
+                        .count("drasi.reaction.results_processed", &[]),
+                    0
                 );
                 let first = if adaptive { &first["batch"][0] } else { &first };
                 assert!(first.get("executionContext").is_none());
@@ -260,6 +266,39 @@ async fn worker_tracing_preserves_origins_until_actual_dispatch_in_both_modes() 
         server.worker.await.unwrap();
 
         let spans = recording.finished();
+        assert_eq!(
+            recording
+                .metrics
+                .count("drasi.reaction.results_processed", &[("query_id", "q1")]),
+            4
+        );
+        assert_eq!(
+            recording.metrics.count(
+                "drasi.component.inputs_processed",
+                &[("completion", "handled")]
+            ),
+            4
+        );
+        assert_eq!(
+            recording
+                .metrics
+                .histogram(
+                    "drasi.component.operation.duration",
+                    &[
+                        (
+                            "operation",
+                            if adaptive {
+                                "reaction_batch"
+                            } else {
+                                "reaction"
+                            }
+                        ),
+                        ("outcome", "success")
+                    ]
+                )
+                .len(),
+            request_count
+        );
         assert_eq!(spans.len(), request_count);
         for span in &spans {
             assert_eq!(

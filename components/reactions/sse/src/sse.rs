@@ -296,6 +296,8 @@ impl Reaction for SseReaction {
                 }
                 let observation = telemetry.reaction(&query_result_context, change_count)
                     .map_err(|e| log::warn!("Failed to observe SSE broadcast: {e}")).ok();
+                let processing = telemetry.reaction_input(&query_result.query_id, change_count);
+                let mut work = telemetry.reaction_work();
                 let broadcast = async {
                 let mut render_failed = false;
                 let timestamp = chrono::Utc::now().timestamp_millis();
@@ -316,16 +318,19 @@ impl Reaction for SseReaction {
                         }
                     };
                     match broadcaster.send(event.payload) {
-                        Ok(count) => debug!(
+                        Ok(count) => {
+                            processing.handled(1);
+                            debug!(
                             "[{reaction_id}] Broadcast to {count} SSE listeners on path {}",
                             event.path
-                        ),
+                        )},
                         Err(error) => debug!(
                             "[{reaction_id}] no SSE listeners on path {}: {error}",
                             event.path
                         ),
                     }
                 }
+                work.finish(!render_failed);
                 if render_failed {
                     anyhow::bail!("SSE template rendering failed; fallback output was used");
                 }

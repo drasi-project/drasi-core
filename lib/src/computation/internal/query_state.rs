@@ -195,6 +195,7 @@ impl QueryOutputState {
 pub struct QueryResults {
     pub(crate) state: Arc<RwLock<QueryOutputState>>,
     pub(crate) notify: Arc<tokio::sync::Notify>,
+    pub(crate) telemetry: Arc<crate::observability::QueryProgressObservations>,
 }
 
 impl QueryResults {

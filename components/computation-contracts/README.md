@@ -27,6 +27,15 @@ optional `metrics-facade` feature adds the shared facade adapter used by the
 library and static SDK, avoiding two implementations of recorder registration.
 It installs no recorder or exporter and does not add a runtime dependency.
 
+The catalogue distinguishes input envelopes, newly published result-row changes,
+and handling attempts. Query engine time excludes result hooks and commit;
+bootstrap, scheduled evaluation, and replay retain distinct count semantics.
+Persistence entries describe supported framework observations, not engine
+statistics. Checkpoint lag requires known, compatible query/checkpoint progress;
+unsupported values are absent rather than zero. Ordinary worker implementation
+and generation fencing remain host-local; these definitions do not provide
+native metric transport.
+
 The host owns one `MetricRegistrationContext` per recorder and shares its clones
 across instances. Incompatible same-name definitions fail atomically before
 recorder calls; identity values are not part of schema identity. Definitions and

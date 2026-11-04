@@ -541,6 +541,8 @@ impl Reaction for McpReaction {
                     telemetry.reaction(&query_result_context, change_count)
                         .map_err(|e| warn!("Failed to observe MCP processing: {e}")).ok()
                 };
+                let processing = telemetry.reaction_input(&query_id, change_count);
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
                 let process = async {
                 let mut failed = false;
                 for diff in &query_result.results {
@@ -564,7 +566,12 @@ impl Reaction for McpReaction {
 
                     let template = match template {
                         Some(t) => t,
-                        None => continue,
+                        None => {
+                            if !matches!(diff, ResultDiff::Noop) {
+                                processing.handled(1);
+                            }
+                            continue;
+                        },
                     };
 
                     let mut context = Map::new();
@@ -651,6 +658,7 @@ impl Reaction for McpReaction {
                         debug!(
                             "[{reaction_id}] No subscribers for {uri}, skipping {operation} notification"
                         );
+                        processing.handled(1);
                         continue;
                     }
 
@@ -680,9 +688,16 @@ impl Reaction for McpReaction {
                         }
                     }
 
+                    let delivered = to_cleanup.is_empty();
                     for session_id in to_cleanup {
                         processing_state.cleanup_session(&session_id).await;
                     }
+                    if delivered {
+                        processing.handled(1);
+                    }
+                }
+                if let Some(work) = &mut work {
+                    work.finish(!failed);
                 }
                 if failed {
                     anyhow::bail!("One or more MCP notifications failed");

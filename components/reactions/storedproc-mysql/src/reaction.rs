@@ -192,8 +192,10 @@ impl MySqlStoredProcReaction {
                 }
                 let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
                     .map_err(|e| warn!("Failed to observe MySQL processing: {e}")).ok();
+                let mut work = telemetry.reaction_work();
                 let process = async {
                 let mut failure = None;
+                let mut handled = 0;
                 // Process each result item in the batch (empty batch = no-op).
                 for result_item in &query_result.results {
                     // Map the diff variant to (operation, context fields).
@@ -291,6 +293,8 @@ impl MySqlStoredProcReaction {
                         .await
                     {
                         Ok(()) => {
+                            handled += 1;
+                            work.handled(&query_result.query_id, 1, 0);
                             debug!(
                                 "[{reaction_id}] Successfully executed command for {result_type} operation"
                             );
@@ -301,6 +305,10 @@ impl MySqlStoredProcReaction {
                         }
                     }
                 }
+                if handled == change_count {
+                    work.handled(&query_result.query_id, 0, 1);
+                }
+                work.finish(failure.is_none());
                 failure.map_or(Ok(()), Err)
                 };
                 let _ = match observation {

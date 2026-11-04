@@ -182,8 +182,10 @@ impl PostgresStoredProcReaction {
             }
             let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
                 .map_err(|e| log::warn!("Failed to observe PostgreSQL processing: {e}")).ok();
+            let mut work = telemetry.reaction_work();
             let process = async {
             let mut failure = None;
+            let mut handled = 0;
             for result_item in &query_result.results {
                 // Noop variants carry no change; skip them.
                 let render_input = match render::build_render_input(query_result, result_item) {
@@ -244,8 +246,15 @@ impl PostgresStoredProcReaction {
                 if let Err(e) = executor.execute_command(&command, params).await {
                     error!("[{reaction_id}] Failed to execute command: {e}");
                     failure = Some(e);
+                } else {
+                    handled += 1;
+                    work.handled(&query_result.query_id, 1, 0);
                 }
             }
+            if handled == change_count {
+                work.handled(&query_result.query_id, 0, 1);
+            }
+            work.finish(failure.is_none());
             failure.map_or(Ok(()), Err)
             };
             let _ = match observation {

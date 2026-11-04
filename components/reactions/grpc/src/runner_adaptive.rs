@@ -48,6 +48,7 @@ struct BatcherItem {
     execution_context: ExecutionContext,
     // Sequence IDs can repeat on replay; this identifies the dequeued input.
     input_id: u64,
+    processing: drasi_lib::observability::ReactionInput,
 }
 
 pub(crate) struct AdaptiveRunnerParams {
@@ -134,18 +135,21 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             // See `batch_checkpoint_candidates` for the `completed` / `seen`
             // at-least-once rationale.
             let mut meta = Vec::with_capacity(batch.len());
-            let mut batches_by_key: HashMap<BatchKey, Vec<ProtoQueryResultItem>> = HashMap::new();
+            let mut batches_by_key: HashMap<BatchKey, (Vec<ProtoQueryResultItem>, Vec<drasi_lib::observability::ReactionInput>)> = HashMap::new();
             let change_count = batch.len();
             let mut contexts = HashMap::new();
-            for BatcherItem { key, item, is_terminal, execution_context, input_id } in batch {
+            for BatcherItem { key, item, is_terminal, execution_context, input_id, processing } in batch {
                 contexts.entry(input_id).or_insert(execution_context);
                 meta.push((key.query_id.clone(), item.sequence, is_terminal));
-                batches_by_key.entry(key).or_default().push(item);
+                let (items, inputs) = batches_by_key.entry(key).or_default();
+                items.push(item);
+                inputs.push(processing);
             }
             let (completed, seen) = batch_checkpoint_candidates(meta);
 
             let observation = batcher_telemetry.reaction_batch(contexts.values(), contexts.len(), change_count)
                 .map_err(|e| warn!("Failed to observe adaptive gRPC batch: {e}")).ok();
+            let mut work = batcher_telemetry.reaction_batch_work();
             let deliver = async {
             if client.is_none() {
                 match create_client_with_retry(
@@ -159,7 +163,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                         info!("Successfully created gRPC client for endpoint: {batcher_endpoint}");
                         client = Some(c);
                     }
-                    Err(e) => match FailureAction::from_policy(policy) {
+                    Err(e) => {
+                    work.finish(false);
+                    match FailureAction::from_policy(policy) {
                         FailureAction::Stop => {
                             fail_stop(
                                 &batcher_base,
@@ -184,6 +190,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                             }
                             return Err(false);
                         }
+                    }
                     },
                 }
             }
@@ -193,7 +200,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             let mut failed_queries: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
 
-            for (key, items) in batches_by_key.into_iter() {
+            for (key, (items, inputs)) in batches_by_key.into_iter() {
                 let delivered = deliver_sub_batch(
                     &mut client,
                     &items,
@@ -206,6 +213,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 .await;
 
                 if delivered {
+                    for input in inputs {
+                        input.handled(1);
+                    }
                     successful_sends += 1;
                     if successful_sends.is_multiple_of(100) {
                         info!(
@@ -216,6 +226,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                     failed_sends += 1;
                     match FailureAction::from_policy(policy) {
                         FailureAction::Stop => {
+                            work.finish(false);
                             fail_stop(
                                 &batcher_base,
                                 &batcher_errored,
@@ -241,6 +252,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 }
             }
 
+            work.finish(failed_queries.is_empty());
             // Advance checkpoints after acks. Fully-acked queries advance to
             // their terminal max. Queries with a dropped sub-batch (AutoSkipGap
             // only) advance to their `seen` max, accepting the loss — this can
@@ -350,10 +362,14 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             }
 
             let last_idx = built_items.len().saturating_sub(1);
+            let input_rows = query_result.results.iter()
+                .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+            let processing = telemetry.reaction_input(&query_id, input_rows);
             for (i, (key, item)) in built_items.into_iter().enumerate() {
                 let is_terminal = i == last_idx;
                 if batch_tx.send(BatcherItem {
                     key, item, is_terminal, execution_context: execution_context.clone(), input_id,
+                    processing: processing.clone(),
                 }).await.is_err() {
                     let msg = "failed to send item to adaptive batcher".to_string();
                     error!("[{reaction_name}] {msg}");
