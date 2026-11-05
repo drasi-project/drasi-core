@@ -39,11 +39,11 @@ use super::{
 };
 use crate::computation::v1::{
     ActivationCoupling, BindingState, ComponentFailure, ComponentGeneration, ComponentHealth,
-    ComponentId, ComponentLifecycle, ComponentRole, CreationOutcome, DataAvailability,
-    DeploymentReport, FailureDisposition, FailurePhase, GraphRevision, GraphSelection,
-    HealthObservation, LifecyclePolicy, ObservedComponent, ObservedGraph, ObservedRelationship,
-    ObservedResource, OperationEpoch, OperationSummary, PortId, RealizationState,
-    ResourceRealization, StartOutcome, StartReport, StopOutcome, StopReport,
+    ComponentId, ComponentLifecycle, CreationOutcome, DataAvailability, DeploymentReport,
+    FailureDisposition, FailurePhase, GraphRevision, GraphSelection, HealthObservation,
+    LifecyclePolicy, ObservedComponent, ObservedGraph, ObservedRelationship, ObservedResource,
+    OperationEpoch, OperationSummary, PortId, RealizationState, ResourceRealization, StartOutcome,
+    StartReport, StopOutcome, StopReport,
 };
 
 pub(super) struct InstanceSlot {
@@ -461,6 +461,7 @@ pub(super) enum Command {
         allow_processing_failure: bool,
         reply: oneshot::Sender<GraphResult<super::RecoveryFreeze>>,
     },
+    #[cfg(test)]
     AutoStart,
     Add {
         addition: super::ComponentAddition,
@@ -697,9 +698,12 @@ impl Command {
                 let _ = reply.send(Err(error));
             }
             Self::RetiredResources(_)
-            | Self::AutoStart
             | Self::ObserveResources { .. }
             | Self::ObservePlugin { .. } => {
+                log::error!("Cannot service graph notification: {error}");
+            }
+            #[cfg(test)]
+            Self::AutoStart => {
                 log::error!("Cannot service graph notification: {error}");
             }
         }
@@ -792,6 +796,7 @@ impl CommandReceiver {
 
     // Mutations wait in their bounded channel, not an unbounded side queue.
     // Independent additions and generation-fenced stops remain serviceable.
+    #[cfg(test)]
     async fn recv_during_construction(&mut self) -> Option<Command> {
         self.construction.recv().await
     }
@@ -2075,9 +2080,7 @@ impl HandleRequest {
                     && operations
                         .reconciliation
                         .as_ref()
-                        .map_or(true, |reservation| {
-                            reservation.components.is_disjoint(&components)
-                        })
+                        .is_none_or(|reservation| reservation.components.is_disjoint(&components))
             }
             Self::Stop { .. } | Self::StopMembers { .. } => !operations.conflicts(&selected, false),
         }
@@ -2632,8 +2635,9 @@ impl ReconciliationReservation {
             | Command::Preview { .. }
             | Command::Health { .. }
             | Command::ObserveResources { .. }
-            | Command::ObservePlugin { .. }
-            | Command::AutoStart => true,
+            | Command::ObservePlugin { .. } => true,
+            #[cfg(test)]
+            Command::AutoStart => true,
             Command::ForceCancel { .. } => true,
             Command::Start { selection, .. } | Command::Quiesce { selection, .. } => {
                 disjoint(selection)
@@ -3205,13 +3209,6 @@ impl Operations {
                 }
             }
         }
-    }
-
-    fn retire_control(&mut self, graph: &ComputationGraph, index: usize) -> GraphResult<()> {
-        let slot = &graph.components[index];
-        graph.peers.remove(&slot.id, slot.generation)?;
-        self.forget_control(index);
-        Ok(())
     }
 
     fn forget_control(&mut self, index: usize) {
@@ -5444,6 +5441,7 @@ async fn begin_handle_requests(
     Ok(began)
 }
 
+#[cfg(test)]
 async fn quiesce_before_stop(
     graph: &ComputationGraph,
     operations: &mut Operations,
@@ -5460,7 +5458,7 @@ async fn quiesce_before_stop(
             operations
                 .active
                 .get(index)
-                .map_or(true, |active| active.operation == Operation::Process)
+                .is_none_or(|active| active.operation == Operation::Process)
         })
         .collect();
     // Keep the group's pending members so a drain cannot finish its start report early.
@@ -5760,11 +5758,11 @@ pub(super) async fn run(
 
 fn handle_command<'a>(
     graph: &'a mut ComputationGraph,
-    mut operations: &'a mut Operations,
-    mut controls: &'a mut PipeGuard,
+    operations: &'a mut Operations,
+    controls: &'a mut PipeGuard,
     cancel: &'a mut watch::Receiver<bool>,
     command: Command,
-    mut commands: &'a mut CommandReceiver,
+    commands: &'a mut CommandReceiver,
 ) -> BoxFuture<'a, GraphResult<()>> {
     async move {
         if operations.reconciliation.is_some() {
@@ -5863,6 +5861,7 @@ fn handle_command<'a>(
                     })();
                     let _ = reply.send(result);
                 }
+                #[cfg(test)]
                 Some(Command::AutoStart) => {
                     for &index in graph.ids.values() {
                         if operations.reconciliation.as_ref().is_some_and(|reservation| {
@@ -5965,7 +5964,7 @@ fn handle_command<'a>(
                         if !crate::management::equivalent(&current, &target).map_err(|error| topology(error.to_string()))?
                             || !bindings.resource_constructors.is_empty()
                             || bindings.factories.factories.iter().any(|(id, factory)| {
-                                graph.factories.get(id).map_or(true, |current| !Arc::ptr_eq(current, factory))
+                                graph.factories.get(id).is_none_or(|current| !Arc::ptr_eq(current, factory))
                             })
                         {
                             changes.push(reconcile::DesiredMutation::SetTopology(target));

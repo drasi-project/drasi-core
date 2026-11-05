@@ -42,8 +42,11 @@ In this document, a **transformer** is a processing step with inputs and outputs
 a **sink** consumes data, and a **port** is a named connection point on a
 component. A **pipe** carries data between ports. A **native component** uses
 ComputationGraph's direct interfaces. Older Source and Reaction interfaces still
-work through graph-owned adapters. Both query-authoring paths use
-`ContinuousQueryTransformer` and the same evaluator.
+work through graph-owned adapters. Ordinary queries select an explicitly
+registered native query factory, and explicitly composed graphs can use that
+same loadable query plugin. Both use the existing Core evaluator and shared
+query implementation. `ContinuousQueryTransformer` remains an explicit linked
+reference constructor, not the ordinary path or an automatic fallback.
 
 The runtime graph describes the processing application. It is distinct from the
 graph of rooms, products or other business entities that a query evaluates.
@@ -112,9 +115,18 @@ such as **source → normalizer → capture sink** needs no query at all.
 
 This does not make every mapper a maintained view. The `map` and `jq` rules
 operate on individual events. Ignoring an update that no longer matches does
-not automatically delete a previously emitted row. Use a continuous query for
-that maintained-result behavior. A dedicated stateful view-transform component
-is still [remaining work][view-transform].
+not automatically delete a previously emitted row. Use a continuous query or
+the dedicated [stateful view transformer][view-transform] when the output must
+describe the current dataset.
+
+The `drasi.standard/view` factory reconstructs complete input images, runs the
+configured map/relabel pipeline, and records the outputs actually emitted.
+For example, removing a product from a filtered projection retracts its old
+output; removing a child from an expansion deletes that child's output; changing
+a key removes the old identity. Historical mapping is not rerun to guess what
+was emitted. Its current profile is memory-backed with coherent snapshots and
+volatile producer progress. It does not advertise durable recovery, replay,
+transaction participation or snapshot-input initialization.
 
 ### Connection rules are explicit instead of implied by component type
 
@@ -159,6 +171,21 @@ old component cannot silently act on a replacement with the same name.
 and continuous queries that maintain obstructions and affected journeys.
 Moving the wall out of the way retracts the impact. Geometry processing is a
 real graph step, not a query-shaped wrapper around unrelated application code.
+
+### Non-query work can be scheduled with its state
+
+A native transformer can request, replace or cancel delayed work through its
+borrowed processing context. Requests commit with its state and retained output;
+only committed deadlines can wake the graph. Completion is explicit, and stale
+tokens cannot complete a replacement request.
+
+**Example:** retain a delayed notification in a non-query component, restart the
+process before it is due, and later emit it without another source event.
+The standalone profile is qualified with atomic persistent RocksDB on both
+Tokio runtimes. It reuses the query timer's shared wakeup policy, not another
+scheduler runtime. Memory/non-atomic bundles reject this stronger capability.
+This does not make external delivery exactly once; the mixed query/non-query
+application proof remains [CW-82](computation-graph-remaining-work.md#cw-82).
 
 ## Saving work and recovering it
 
@@ -334,6 +361,18 @@ configuration and its native graph definitions enter the same runtime. Query
 inputs can name other producers, and secrets can remain references. An empty
 Server does not invent an implicit instance.
 
+Native `add_source_from_factory` and `add_reaction_from_factory` declarations
+retain failed construction for inspection and retry. Existing legacy
+object-based APIs remain supported; the new recipes do not construct legacy
+objects. `reconstructible_topology()` exports explicit component/resource/pipe
+recipes and their secret references, not settings guessed from live objects.
+
+The standard source-time merger has a versioned factory and a shared Host/Server
+`sourceTimeMergeStorage` recipe. A clean instance can reconstruct the same
+connections and resource ownership; persistent atomic storage also preserves
+the merger's processing frontier. Configuration restoration does not rewind
+processing data or migrate an older direct-constructor storage namespace.
+
 ### Plugins and process hosts can reuse the same processing contracts
 
 Native plugins can provide sources, transformers, sinks, services and
@@ -459,15 +498,16 @@ provides the repeatable diagnostics.
 - **Recovery is opt-in and capability-specific.** A common data format does not
   require a state store, snapshot provider or durable journal. Persistent
   inputs, long disconnections, bootstrap and crash combinations must be qualified
-  for the actual providers. The broader ledger remains 20 covered, 23 partial
-  and five unqualified requirements.
+  for the actual providers. The [qualification ledger][qualification] records
+  the evidence and gaps for each requirement; implemented support is not
+  exhaustive environment or failure qualification.
 - **There is no graph-wide transaction or universal completion counter.**
   Separate queries and remote effects do not commit together. Runtime processing
   layouts remain acyclic; scheduling controls are not permission to create
   arbitrary feedback loops.
 - **Native conversion is not universal.** Supported ordinary adapters remain
-  graph-owned. Native queries are still built in rather than independently
-  loadable query plugins, and some advanced assembly needs Rust-level setup.
+  graph-owned. The query transformer is independently loadable and requires
+  explicit factory registration; some advanced assembly still needs Rust-level setup.
   SQL Server live qualification is deferred; recorded permission, large-batch
   and orphan-marker gaps remain open.
 - **Database modes are not interchangeable.** MySQL positional/older-server
@@ -477,8 +517,12 @@ provides the repeatable diagnostics.
   effect exactly once.
 - **Some query and transformer capabilities remain unfinished.** Variable-length
   relationship execution is not established merely because syntax parses.
-  Stateless event mappers do not maintain filtered datasets; the dedicated
-  view-transform work is still open.
+  Stateless event mappers do not maintain filtered datasets. The separate view
+  transform does, but its memory-backed profile needs full initial images and
+  ordered lossless input; it is not a durable or input-deduplicating materializer.
+  Native query reads page large collections, but each individual encoded record
+  or envelope still has a 16-MiB limit, separate from the 64-MiB processing limit.
+  Garnet is not a qualified native-query storage profile.
 - **Lifecycle, security and scale still have boundaries.** Finite lifecycle
   budgets and incremental status publication are implemented. Cleanup may still
   fail, configuration acceptance must retain uncertain commits, and complete

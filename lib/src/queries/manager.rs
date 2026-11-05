@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_trait::async_trait;
 
 use crate::{
     channels::{ComponentEvent, ComponentStatus, ComponentType},
@@ -146,13 +145,6 @@ impl QueryManager {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         Ok(self.runtime.subscribe_events(id, "query").await?)
-    }
-}
-
-#[async_trait]
-impl crate::reactions::QueryProvider for QueryManager {
-    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>> {
-        Ok(self.runtime.query_instance(id).await?)
     }
 }
 

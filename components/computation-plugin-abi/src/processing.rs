@@ -42,6 +42,25 @@ pub struct ProcessingV1 {
     >,
 }
 
+/// Negotiated scheduled-processing extension. The base table is unchanged;
+/// only factories declaring `scheduled_processing` receive this exact header.
+/// Observation is read-only and never opens a transaction or consumes work.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ScheduledProcessingV1 {
+    pub processing: ProcessingV1,
+    pub version: u32,
+    pub reserved: u32,
+    pub observe: Option<unsafe extern "C" fn(*mut c_void, u32, *mut OperationHandle) -> Status>,
+}
+
+pub const SCHEDULING_VERSION: u32 = 1;
+
+pub mod schedule_observation {
+    pub const WAIT: u32 = 1;
+    pub const NEXT_DEADLINE: u32 = 2;
+}
+
 /// One plugin-owned operation. The host calls `begin` once while its actual
 /// transaction is active and revokes the supplied state table when it ends.
 #[repr(C)]
@@ -129,6 +148,14 @@ pub mod request {
     /// Restore an output baseline inside the operation that performed an owned
     /// bootstrap reset. This is not delivery acknowledgement.
     pub const RESET_OUTPUT_BASELINE: u32 = 54;
+    /// Component-local scheduled work. These requests require the explicitly
+    /// negotiated ScheduledProcessingV1 service and its atomic storage profile.
+    pub const SCHEDULE_REQUEST: u32 = 55;
+    pub const SCHEDULE_REPLACE: u32 = 56;
+    pub const SCHEDULE_CANCEL: u32 = 57;
+    pub const SCHEDULE_GET: u32 = 58;
+    pub const SCHEDULE_CLAIM_DUE: u32 = 59;
+    pub const SCHEDULE_COMPLETE: u32 = 60;
 }
 
 /// Processing-specific failure codes. Messages for errors carrying a string
@@ -152,6 +179,7 @@ mod tests {
         let pointer = size_of::<usize>();
         assert_eq!(size_of::<PluginProcessingV1>(), 24 + pointer);
         assert_eq!(size_of::<ProcessingV1>(), 16 + 4 * pointer);
+        assert_eq!(size_of::<ScheduledProcessingV1>(), 24 + 5 * pointer);
         assert_eq!(size_of::<ProcessingWorkV1>(), 16 + 4 * pointer);
         assert_eq!(size_of::<OutputProcessingWorkV1>(), 24 + 4 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);

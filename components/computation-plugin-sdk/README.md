@@ -808,6 +808,96 @@ factory adapter binds the existing query clock and catalogue transport counter.
 Its explicit non-atomic profile uses the same Core evaluator and the existing
 shared publication/reset protocol.
 
+## Transaction-owned scheduled work
+
+A non-query transformer can declare `scheduled_processing`, alongside
+`indexed_processing`, `committed_input_progress` and `wakeups`. Its
+`create_with_processing` receives the same `NativeProcessing` owner as other
+indexed transformers. `processing.scheduling()` returns the negotiated
+`NativeScheduling` observer; return its `wakeup_source()` from the transformer's
+normal wakeup hook. No plugin scheduler task, private graph or second
+transaction/session is needed.
+
+The initial storage profile requires an actual complete atomic result bundle,
+persistent checkpoints and declared process-restart durability. The current
+no-op memory provider and explicitly non-atomic publication are rejected rather
+than given a rollback guarantee. Existing query scheduling, including its
+memory and non-atomic profiles, is unchanged.
+
+All mutations belong to a `NativeProcessing::run` or `run_output` operation:
+
+| Context operation | Contract |
+|---|---|
+| `request_scheduled_work(ScheduledRequest)` | Create an absent component-local key with a physical deadline and opaque payload. An occupied key is an error. |
+| `scheduled_work(key)` | Read the current transaction's request, including changes made earlier in that operation. |
+| `replace_scheduled_work(token, request)` | Replace the exact pending incarnation, keeping its business key and assigning a fresh token. |
+| `cancel_scheduled_work(token)` | Cancel the exact pending incarnation; stale, absent or currently claimed work is an error. |
+| `claim_due_scheduled_work()` | Claim one request eligible under the Host physical clock. The queue pop remains inside the current transaction. |
+| `complete_scheduled_work(token)` | Complete that operation's exact claim together with its business-state and retained-output writes. |
+
+An operation cannot succeed with an outstanding claim. Failed or cancelled
+work never commits the claim; confirmed rollback restores requests, component
+state and output together. Cancellation or an uncertain commit fences the
+existing owner and requires its normal awaited cleanup/reconstruction. Request
+tokens are not proof of commit: publish them to application callers only after
+the enclosing processing call succeeds. Replacement uses a new random
+incarnation so a token returned by rolled-back work cannot match a later
+request with the same key.
+
+Keys contain 1-256 UTF-8 bytes without NUL. Each payload is at most 64 KiB;
+there are at most 4,096 outstanding requests and at most 1 MiB of encoded
+scheduling metadata per component. Exceeding any bound fails the operation.
+The Host persists metadata in its reserved scheduling checkpoint and requests
+in the existing Core future queue, in the same actual transaction as component
+state. Generic checkpoint writes, raw future-queue mutations and generic state
+reset cannot bypass these typed operations.
+
+`NativeScheduling::next_deadline()` observes only the last committed deadline.
+It performs no storage transaction and never consumes work. Deadline
+publication follows successful commit under the existing processing
+serialization; shared transactions use the existing committed-mutation hook.
+Startup reconstructs the observation from persisted requests, and stop revokes
+pending observations before releasing storage. The common `CommittedSchedule`
+and `FutureWakeup` policy is also used by the linked and native query paths.
+Clock changes affect physical eligibility, not input timestamps or provenance.
+
+For Host construction, bind a `NativeProcessingResource::new(provider)` as the
+factory's `processing` dependency. Direct construction can use
+`NativeFactory::create_component_with_processing_resource(id, config, scope,
+&resource)`. An explicit `PhysicalClock` can be supplied with
+`resource.with_scheduling_clock(clock)` for controlled-clock operation. Only
+scheduled-processing factories accept that clock; query test controls keep
+their existing binding.
+
+For due output, use `run_output`: claim, change business state, append the
+retained output, stage its sequence and complete the claim in that one
+operation. Declare `durable_output`, continuations and startup continuation
+when using the existing output-retention service. Reconstruct and replay
+unconfirmed output before new work, then use `delivery_completed` to advance
+delivery progress. One committed completion is not exactly-once external
+delivery; a failed delivery can replay the same logical output identity.
+
+**Native ABI negotiation:** the strict manifest capability selects the
+version-1 `ScheduledProcessingV1` extension of the existing processing creation
+service. It has its own exact header, version, reserved fields and read-only
+observation callback. The SDK rejects a base table for a scheduling factory,
+an unexpected scheduling table for an ordinary factory, and malformed or
+unsupported extension versions. Transaction requests still use the same
+revocable mailbox, with no plugin commit method. Base ABI 1.0.0 layouts,
+envelope wire version 1 and the independent legacy plugin ABI are unchanged.
+
+The stateful delayed-emission transformer in
+[`host-sdk/tests/fixtures/native_scheduling.rs`](../host-sdk/tests/fixtures/native_scheduling.rs)
+exercises this contract without a query evaluator. The standalone
+[`native_scheduling`](../host-sdk/tests/native_scheduling.rs) tests use actual
+RocksDB storage, both Tokio flavors, static native tables and a separately built
+library. They cover due output without new input, rollback,
+replacement/cancellation and real process exits before/after request and
+completion commits. The focused Host service tests additionally hold an
+overdue request before commit and check that it cannot wake the graph.
+This is not qualification of other storage providers, shared-storage application
+combinations or the mixed SQLite/query/non-query CW-82 application.
+
 ## Optional host-owned consumer completion
 
 The independently negotiated `drasi_computation_plugin_consumer_v1` extension

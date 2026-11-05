@@ -3,12 +3,13 @@
 
 use super::*;
 use crate::computation::v1::{
-    ChangeSet, ComponentDescriptor, ComputationComponent, ComputationGraph, EdgeDefinition,
-    Endpoint, EnvelopeSink, EnvelopeSource, FailurePhase, GraphChangeCodec, GraphError,
-    GraphProducerIdentity, GraphProducerProgress, GraphState, LegacyIndexProviderAdapter,
-    OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, QosChannel,
-    QosChannelDefinition, QueryChangeCodec, ResourceCleanup, ResourceId, ResourceOwnership,
-    ResourceRole, ResourceSpecification, RetentionPolicy, SinkCompletion, SubscriptionStart,
+    ChangeEnvelope, ChangeOperation, ChangeSet, ComponentDescriptor, ComponentId,
+    ComputationComponent, ComputationGraph, EdgeDefinition, Endpoint, EnvelopeSink, EnvelopeSource,
+    FailurePhase, GraphChangeCodec, GraphError, GraphProducerIdentity, GraphProducerProgress,
+    GraphState, LegacyIndexProviderAdapter, OutputEnvelope, PipeRequirements, PortDescriptor,
+    PortDirection, QosChannel, QosChannelDefinition, ResourceCleanup, ResourceId,
+    ResourceOwnership, ResourceRole, ResourceSpecification, RetentionPolicy, SinkCompletion,
+    SubscriptionStart,
 };
 use drasi_core::{
     computation::{ComputationIndexProvider, ComputationResource, TransactionDomain},

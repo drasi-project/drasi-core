@@ -473,7 +473,7 @@ impl SinkOutputs {
                     && selector
                         .port
                         .as_ref()
-                        .map_or(true, |port| &endpoint.port == port)
+                        .is_none_or(|port| &endpoint.port == port)
             });
             let endpoint = match (matching.next(), matching.next()) {
                 (Some(endpoint), None) => endpoint,

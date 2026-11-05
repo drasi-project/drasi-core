@@ -491,7 +491,7 @@ impl Runtime {
                 .get(&spec.implementation)
                 .cloned()
                 .or_else(|| publication.factory(&spec.implementation));
-            if !factory.is_some_and(|factory| factory.query_authoring().is_some()) {
+            if factory.is_none_or(|factory| factory.query_authoring().is_none()) {
                 continue;
             }
             let config = match spec.configuration.get("query_config") {
@@ -1180,21 +1180,8 @@ impl Runtime {
     async fn start_record(&self, record: &Record) -> anyhow::Result<()> {
         let (control, revision, observed) = self.control_for(record)?;
         if observed.realization == RealizationState::CreationFailed {
-            let preview = control
-                .preview(
-                    revision,
-                    vec![DesiredMutation::Retry(GraphSelection::Exact(vec![record.node.clone()]))],
-                )
+            self.retry_creation(&control, revision, &record.node)
                 .await?;
-            let report = control
-                .reconcile(preview, TopologyBindings::default())
-                .await?;
-            if !report.committed || report.summary != OperationSummary::Completed {
-                return Err(
-                    anyhow::Error::new(LifecycleReportError::Reconciliation(report))
-                        .context("native creation retry failed"),
-                );
-            }
         } else if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
             self.stop_record(record).await?;
         }
@@ -1219,6 +1206,31 @@ impl Runtime {
         }
         Ok(())
     }
+
+    async fn retry_creation(
+        &self,
+        control: &GraphControl,
+        revision: GraphRevision,
+        node: &ComponentId,
+    ) -> anyhow::Result<()> {
+        let preview = control
+            .preview(
+                revision,
+                vec![DesiredMutation::Retry(GraphSelection::Exact(vec![node.clone()]))],
+            )
+            .await?;
+        let report = control
+            .reconcile(preview, TopologyBindings::default())
+            .await?;
+        if !report.committed || report.summary != OperationSummary::Completed {
+            return Err(
+                anyhow::Error::new(LifecycleReportError::Reconciliation(report))
+                    .context("native creation retry failed"),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn start_component(
         self: &Arc<Self>,
         id: &str,
@@ -1265,11 +1277,24 @@ impl Runtime {
                 "Component '{id}' cannot start while it is {:?}",
                 observed.lifecycle
             );
-            let handle = control.component_handle(&ComponentId::try_new(id)?)?;
+            let component = ComponentId::try_new(id)?;
+            let handle = control.component_handle(&component)?;
             anyhow::ensure!(
                 handle.generation() == observed.generation,
                 GraphError::StaleGeneration
             );
+            if observed.realization == RealizationState::CreationFailed {
+                self.retry_creation(&control, publication.desired.revision, &component)
+                    .await?;
+                return control
+                    .component_handle(&component)?
+                    .start()
+                    .await
+                    .map_err(Into::into);
+            }
+            if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
+                handle.stop().await?;
+            }
             return handle.start().await.map_err(Into::into);
         }
         let record = self.record(id, kind).await?;
@@ -1452,7 +1477,7 @@ impl Runtime {
     ) -> anyhow::Result<Record> {
         let subscription_inputs = value.subscription_inputs()?;
         let component = value.instance();
-        let id = component.id().to_owned();
+        let _id = component.id().to_owned();
         let (_, _, observed) = self.control_for(&old)?;
         if needs_stop(&observed) {
             self.stop_record(&old).await?;
@@ -1869,7 +1894,7 @@ impl Runtime {
             let mut changes = control.subscribe_observed();
             let settled = tokio::select! {
                 result = changes.wait_for(|state| {
-                    state.components.get(&id).map_or(true, |node| {
+                    state.components.get(&id).is_none_or(|node| {
                         node.generation != handle.generation()
                             || !matches!(
                                 node.realization,

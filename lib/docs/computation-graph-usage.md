@@ -231,8 +231,9 @@ The [application reaction guide](../../components/reactions/application/README.m
 shows the exact result shape and the receive APIs. Take its receiver only once;
 create separate reactions if you need separate consumers.
 
-Queries assembled with `computation_pipeline()` or the built-in continuous-query
-factory are listed by `list_queries()` and expose configuration, status, results,
+Queries assembled with `computation_pipeline()` and an explicitly registered
+query factory, or with a supported query-authoring factory recipe, are listed by
+`list_queries()` and expose configuration, status, results,
 retained output, metrics, logs and events through the ordinary query APIs. These
 readers use the graph-owned query's existing state; reading does not construct a
 second evaluator. A stopped query remains discoverable, but result reads report

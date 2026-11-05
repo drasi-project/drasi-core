@@ -18,13 +18,15 @@
 
 mod adapters;
 mod canonical;
-pub(crate) mod value_codec;
 
 pub(crate) use adapters::{
     query_evaluation_to_envelope, query_result_from_envelope, query_variables_to_json,
-    source_change_from_envelope, source_change_from_envelope_owned, source_event_from_envelope,
-    source_event_parts_to_envelope, source_event_to_envelope, ChangeAdapterError,
+    source_change_from_envelope_owned, source_event_parts_to_envelope, source_event_to_envelope,
     QueryEnvelopeMetadata,
+};
+#[cfg(test)]
+pub(crate) use adapters::{
+    source_change_from_envelope, source_event_from_envelope, ChangeAdapterError,
 };
 #[cfg(test)]
 pub(crate) use canonical::{encode_query_variables, encode_source_change};
@@ -81,6 +83,7 @@ impl SchemaVersion {
         Self(value)
     }
 
+    #[cfg(test)]
     pub(crate) const fn value(self) -> u32 {
         self.0
     }
@@ -108,6 +111,7 @@ impl ChangeSchema {
         self.id
     }
 
+    #[cfg(test)]
     pub(crate) const fn version(&self) -> SchemaVersion {
         self.version
     }
@@ -173,7 +177,9 @@ macro_rules! identity_type {
 }
 
 identity_type!(ChangeSetId);
+#[cfg(test)]
 identity_type!(EnvelopeId);
+#[cfg(test)]
 identity_type!(ContextRootId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -553,10 +559,6 @@ impl ChangeSet {
     pub(crate) fn deleted(&self) -> &[DeletedRecord] {
         &self.deleted
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.updated.is_empty() && self.deleted.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -566,6 +568,7 @@ pub(crate) struct TraceMetadata {
 }
 
 impl TraceMetadata {
+    #[cfg(test)]
     pub(crate) fn new(trace_id: impl Into<Arc<str>>, span_id: Option<Arc<str>>) -> Self {
         Self {
             trace_id: trace_id.into(),
@@ -573,10 +576,12 @@ impl TraceMetadata {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn trace_id(&self) -> &str {
         &self.trace_id
     }
 
+    #[cfg(test)]
     pub(crate) fn span_id(&self) -> Option<&str> {
         self.span_id.as_deref()
     }
@@ -590,16 +595,19 @@ pub(crate) struct SystemMetadataExtensions {
 }
 
 impl SystemMetadataExtensions {
+    #[cfg(test)]
     pub(crate) fn with_trace(mut self, trace: TraceMetadata) -> Self {
         self.trace = Some(trace);
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_graph_epoch(mut self, graph_epoch: u64) -> Self {
         self.graph_epoch = Some(graph_epoch);
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_config_epoch(mut self, config_epoch: u64) -> Self {
         self.config_epoch = Some(config_epoch);
         self
@@ -651,12 +659,9 @@ impl SystemMetadata {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn source_id(&self) -> Option<&str> {
         self.source_id.as_deref()
-    }
-
-    pub(crate) fn source_id_arc(&self) -> Option<&Arc<str>> {
-        self.source_id.as_ref()
     }
 
     pub(crate) fn query_id(&self) -> Option<&str> {
@@ -667,6 +672,7 @@ impl SystemMetadata {
         self.sequence
     }
 
+    #[cfg(test)]
     pub(crate) fn source_position(&self) -> Option<&Bytes> {
         self.source_position.as_ref()
     }
@@ -679,19 +685,23 @@ impl SystemMetadata {
         self.profiling.as_deref()
     }
 
+    #[cfg(test)]
     pub(crate) fn trace(&self) -> Option<&TraceMetadata> {
         self.trace.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) const fn graph_epoch(&self) -> Option<u64> {
         self.graph_epoch
     }
 
+    #[cfg(test)]
     pub(crate) const fn config_epoch(&self) -> Option<u64> {
         self.config_epoch
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ContextContributorKind {
     Runtime,
@@ -700,12 +710,14 @@ pub(crate) enum ContextContributorKind {
     Reaction,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContextContributor {
     kind: ContextContributorKind,
     component_id: Arc<str>,
 }
 
+#[cfg(test)]
 impl ContextContributor {
     pub(crate) fn new(kind: ContextContributorKind, component_id: impl Into<Arc<str>>) -> Self {
         Self {
@@ -723,6 +735,7 @@ impl ContextContributor {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ContextValue {
     Bool(bool),
@@ -732,6 +745,7 @@ pub(crate) enum ContextValue {
     Bytes(Arc<[u8]>),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContextContribution {
     contributor: ContextContributor,
@@ -739,6 +753,7 @@ pub(crate) struct ContextContribution {
     value: ContextValue,
 }
 
+#[cfg(test)]
 impl ContextContribution {
     pub(crate) fn new(
         contributor: ContextContributor,
@@ -765,23 +780,27 @@ impl ContextContribution {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct ProcessingContextRoot {
     id: ContextRootId,
 }
 
+#[cfg(test)]
 impl ProcessingContextRoot {
     pub(crate) const fn id(&self) -> ContextRootId {
         self.id
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct ProcessingContextNode {
     parent: Option<Arc<ProcessingContextNode>>,
     contribution: ContextContribution,
 }
 
+#[cfg(test)]
 impl ProcessingContextNode {
     pub(crate) fn parent(&self) -> Option<&Arc<ProcessingContextNode>> {
         self.parent.as_ref()
@@ -792,6 +811,7 @@ impl ProcessingContextNode {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct ProcessingContext {
     root: Arc<ProcessingContextRoot>,
@@ -799,6 +819,7 @@ pub(crate) struct ProcessingContext {
     len: usize,
 }
 
+#[cfg(test)]
 impl ProcessingContext {
     fn new(root_id: ContextRootId) -> Self {
         Self {
@@ -838,8 +859,10 @@ impl ProcessingContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChangeEnvelope {
+    #[cfg(test)]
     id: EnvelopeId,
     change_set: ChangeSetRef,
+    #[cfg(test)]
     context: ProcessingContext,
     system: Arc<SystemMetadata>,
     metadata: Arc<HashMap<String, serde_json::Value>>,
@@ -851,18 +874,24 @@ impl ChangeEnvelope {
         system: SystemMetadata,
         metadata: HashMap<String, serde_json::Value>,
     ) -> Self {
+        #[cfg(test)]
         let context_root_id = context_root_id(change_set.id(), &system);
+        #[cfg(test)]
         let context = ProcessingContext::new(context_root_id);
+        #[cfg(test)]
         let id = envelope_id(change_set.id(), &system, &metadata, context_root_id);
         Self {
+            #[cfg(test)]
             id,
             change_set,
+            #[cfg(test)]
             context,
             system: Arc::new(system),
             metadata: Arc::new(metadata),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn append_context(&self, contribution: ContextContribution) -> Self {
         let context = self.context.append(contribution.clone());
         let mut identity = StableIdBuilder::new("drasi.internal.change-envelope.context/v1");
@@ -878,6 +907,7 @@ impl ChangeEnvelope {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn id(&self) -> EnvelopeId {
         self.id
     }
@@ -890,6 +920,7 @@ impl ChangeEnvelope {
         self.change_set
     }
 
+    #[cfg(test)]
     pub(crate) fn context(&self) -> &ProcessingContext {
         &self.context
     }
@@ -944,6 +975,7 @@ impl StableIdBuilder {
         self.bytes(label, value.as_bytes());
     }
 
+    #[cfg(test)]
     pub(super) fn optional_string(&mut self, label: &str, value: Option<&str>) {
         self.optional_bytes(label, value.map(str::as_bytes));
     }
@@ -962,6 +994,7 @@ impl StableIdBuilder {
         }
     }
 
+    #[cfg(test)]
     fn i64(&mut self, label: &str, value: i64) {
         self.bytes(label, &value.to_le_bytes());
     }
@@ -970,6 +1003,7 @@ impl StableIdBuilder {
         self.bytes(label, &[u8::from(value)]);
     }
 
+    #[cfg(test)]
     fn system(&mut self, system: &SystemMetadata) {
         self.optional_string("source-id", system.source_id());
         self.optional_string("query-id", system.query_id());
@@ -1014,6 +1048,7 @@ impl StableIdBuilder {
         }
     }
 
+    #[cfg(test)]
     fn json(&mut self, value: &serde_json::Value) {
         match value {
             serde_json::Value::Null => self.bytes("json-kind", b"null"),
@@ -1049,6 +1084,7 @@ impl StableIdBuilder {
         }
     }
 
+    #[cfg(test)]
     fn metadata(&mut self, metadata: &HashMap<String, serde_json::Value>) {
         let mut entries: Vec<_> = metadata.iter().collect();
         entries.sort_unstable_by_key(|(key, _)| *key);
@@ -1059,6 +1095,7 @@ impl StableIdBuilder {
         }
     }
 
+    #[cfg(test)]
     fn context_contribution(&mut self, contribution: &ContextContribution) {
         let kind = match contribution.contributor().kind() {
             ContextContributorKind::Runtime => "runtime",
@@ -1101,6 +1138,7 @@ impl StableIdBuilder {
     }
 }
 
+#[cfg(test)]
 fn context_root_id(change_set_id: ChangeSetId, system: &SystemMetadata) -> ContextRootId {
     let mut identity = StableIdBuilder::new("drasi.internal.processing-context/v1");
     identity.u64("change-set", change_set_id.value());
@@ -1108,6 +1146,7 @@ fn context_root_id(change_set_id: ChangeSetId, system: &SystemMetadata) -> Conte
     ContextRootId::new(identity.finish())
 }
 
+#[cfg(test)]
 fn envelope_id(
     change_set_id: ChangeSetId,
     system: &SystemMetadata,

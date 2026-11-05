@@ -33,29 +33,17 @@
 //! when added to DrasiLib. The `ReactionRuntimeContext` provides:
 //! - `event_tx`: Channel for component lifecycle events
 //! - `state_store`: Optional persistent state storage
-//! - `query_provider`: Access to query instances for subscription
+//! - `snapshot_fetcher`: Scoped access to graph-owned query results
 //!
 //! This replaces the previous `inject_*` methods with a cleaner single-call pattern.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
 
 use crate::channels::{ComponentStatus, QueryResult};
 use crate::context::ReactionRuntimeContext;
-use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
 use crate::recovery::ReactionRecoveryPolicy;
-
-/// Trait for providing access to queries without requiring full DrasiLib dependency.
-///
-/// This trait provides a way for reactions to access query instances for subscription
-/// without needing a direct dependency on the server core.
-#[async_trait]
-pub trait QueryProvider: Send + Sync {
-    /// Get a query instance by ID
-    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
-}
 
 /// Trait defining the interface for all reaction implementations.
 ///

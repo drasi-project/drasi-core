@@ -17,7 +17,7 @@
 
 use super::*;
 use crate::{
-    channels::ComponentStatusHandle,
+    channels::{ComponentStatusHandle, QueryResult},
     metrics::{LifecycleMetrics, ReactionMetrics},
     state_store::{MemoryStateStoreProvider, StateStoreProvider},
 };

@@ -267,7 +267,7 @@ impl ReplayProvider for InventoryReplay {
             let oldest = state.log.front().map(|entry| entry.0);
             if after.sequence() > head.sequence()
                 || (after.sequence() < head.sequence()
-                    && oldest.map_or(true, |oldest| after.sequence() + 1 < oldest))
+                    && oldest.is_none_or(|oldest| after.sequence() + 1 < oldest))
             {
                 return Err(OutputReadError::Gap {
                     requested: after.sequence(),

@@ -39,6 +39,54 @@ pub struct GraphConfigurationSnapshot {
     pub configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
 }
 
+impl GraphConfigurationSnapshot {
+    /// Export desired factory configuration rather than observed object settings.
+    /// References remain references; literals already present in the desired
+    /// configuration are not redacted and still require privileged handling.
+    ///
+    /// Every component must have an explicit factory specification, every
+    /// resource a declared recipe, and every pipe a reconstructible definition.
+    /// Available factories, compatible versions and secret values are checked
+    /// later by the owning graph, so unavailable implementations can still be
+    /// restored as retryable declarations. Hosts must supply the recipe resolver.
+    /// This does not capture or rewind processing state.
+    pub fn reconstructible_topology(&self) -> GraphResult<DesiredTopology> {
+        self.topology.validate_structure()?;
+        for component in &self.topology.components {
+            if !matches!(component.construction, ComponentConstruction::Factory(_)) {
+                return Err(topology(format!(
+                    "external component {} is inspectable but has no reconstruction factory",
+                    component.descriptor.id()
+                )));
+            }
+        }
+        for resource in &self.topology.resources {
+            if !self
+                .topology
+                .resource_configurations
+                .contains_key(&resource.id)
+            {
+                return Err(topology(format!(
+                    "resource {} has no reconstruction recipe; external bindings cannot be persisted or cloned",
+                    resource.id
+                )));
+            }
+        }
+        if !self.topology.boundary_relationships.is_empty()
+            || self
+                .topology
+                .relationships
+                .iter()
+                .any(|relationship| matches!(relationship.pipe, DesiredPipe::External { .. }))
+        {
+            return Err(topology(
+                "external pipe or boundary bindings cannot be reconstructed; complete pipe definitions are required",
+            ));
+        }
+        Ok(self.topology.clone())
+    }
+}
+
 impl Component {
     pub(super) fn capture_configuration(&self) -> anyhow::Result<CapturedComponentConfiguration> {
         let result = match self {

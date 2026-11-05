@@ -49,10 +49,13 @@ deletes only the names in `removed_properties`; omitted properties stay unchange
   property deletes the children it selected, and a child item that loses fields
   removes them. A replacement or a changed label also cleans the previous children.
 
-A stateful **view transform** would be a separate component that maintains a
-derived dataset, including retractions for filtered or removed outputs. It is
-[future work](../lib/docs/computation-graph-remaining-work.md#cw-68), not a mode
-or replacement for the stateless event mappers.
+The separate [stateful view transformer](../components/computation-plugins/transformers/view/README.md)
+maintains a derived dataset, including retractions for filtered/removed outputs
+and changed keys. It reconstructs complete input images and reuses map/relabel
+processors while retaining actual output associations. Its initial profile is
+memory-backed with coherent snapshots and volatile progress, not durable,
+transactional or replay-capable. It is not a mode or replacement for the
+stateless event mappers.
 
 ### JQ Middleware Options
 

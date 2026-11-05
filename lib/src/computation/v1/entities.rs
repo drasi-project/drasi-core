@@ -18,11 +18,11 @@ use std::{
 };
 
 use super::{
-    BindingState, ComponentDescriptor, ComponentFailure, ComponentGeneration, ComponentId,
-    ComponentRole, ConfigurationValue, DataAvailability, DesiredPipe, DesiredRelationship,
-    EdgeDefinition, GraphRevision, GraphSnapshot, ImplementationIdentity, NodeSnapshot,
-    ObservedComponent, ObservedGraph, ObservedRelationship, ObservedResource, PipeCapabilities,
-    PipeProvider, PluginIdentity, PortId, ResourceId, ResourceRole, ResourceSpecification,
+    BindingState, ComponentFailure, ComponentGeneration, ComponentId, ConfigurationValue,
+    DataAvailability, DesiredPipe, DesiredRelationship, EdgeDefinition, GraphRevision,
+    GraphSnapshot, ImplementationIdentity, NodeSnapshot, ObservedComponent, ObservedGraph,
+    ObservedRelationship, ObservedResource, PipeCapabilities, PipeProvider, PluginIdentity, PortId,
+    ResourceId, ResourceRole, ResourceSpecification,
 };
 
 /// An entity identity scoped to one computation graph. Native pipes use full

@@ -210,7 +210,7 @@ impl Runtime {
                     ComponentType::Source | ComponentType::Query | ComponentType::Reaction
                 ) && kind
                     .as_ref()
-                    .map_or(true, |kind| kind == &event.component_type)
+                    .is_none_or(|kind| kind == &event.component_type)
             })
             .collect()
     }

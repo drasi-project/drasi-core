@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::computation::v1::{
+    ComponentDescriptor, ConstructedComponent, Endpoint, PipeRequirements,
+};
 use async_trait::async_trait;
 
 struct Source(ComponentDescriptor);

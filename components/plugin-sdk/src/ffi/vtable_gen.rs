@@ -27,11 +27,9 @@ use std::ffi::c_void;
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use drasi_core::models::{ElementMetadata, SourceChange};
+use drasi_core::models::SourceChange;
 use drasi_lib::bootstrap::BootstrapProvider;
-use drasi_lib::channels::events::{
-    BootstrapEvent, BootstrapEventSender, SourceEvent, SourceEventWrapper,
-};
+use drasi_lib::channels::events::BootstrapEvent;
 use drasi_lib::channels::ChangeReceiver;
 use drasi_lib::channels::ComponentUpdateReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
@@ -809,7 +807,6 @@ pub fn build_source_vtable<T: Source + 'static>(
             let ctx = w
                 .instance_lifecycle_ctx
                 .load(std::sync::atomic::Ordering::Acquire);
-            let instance_id = w.instance_id.read().map(|s| s.clone()).unwrap_or_default();
             let event = FfiLifecycleEvent {
                 component_id: FfiStr::from_str(&w.cached_id),
                 component_type: FfiStr::from_str("source"),

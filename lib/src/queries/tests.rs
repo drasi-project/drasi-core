@@ -14,16 +14,13 @@
 
 #[cfg(test)]
 mod manager_tests {
-    use super::super::*;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
-    use crate::queries::output_state::FetchError;
+
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::test_helpers::managers::{QueryManager, SourceManager};
     use crate::test_helpers::wait_for_component_status;
-    use drasi_core::models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
-    };
+
     use std::sync::Arc;
 
     /// Creates a test query configuration
@@ -149,7 +146,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         let result = add_query(&manager, &graph, config.clone()).await;
@@ -164,7 +161,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
 
@@ -196,7 +193,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
         add_query(&manager, &graph, config).await.unwrap();
@@ -381,7 +378,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_gql_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
         let result = add_query(&manager, &graph, config.clone()).await;
@@ -438,7 +435,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_mixed_language_queries() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a Cypher query
         let cypher_config = create_test_query_config("cypher-query", vec!["source1".to_string()]);
@@ -459,7 +456,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_query_config() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         add_query(&manager, &graph, config.clone()).await.unwrap();
@@ -475,7 +472,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let mut config = create_test_query_config("test-query", vec![]);
         add_query(&manager, &graph, config.clone()).await.unwrap();
@@ -565,7 +562,7 @@ mod manager_tests {
     /// Test that query with auto_start=false can be added and remains stopped
     #[tokio::test]
     async fn test_query_auto_start_false_not_started_on_add() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false (no sources needed since we won't start it)
         let config = create_test_query_config_with_auto_start("no-auto-start-query", vec![], false);
@@ -641,7 +638,7 @@ mod manager_tests {
     /// Test that get_query_config preserves auto_start value
     #[tokio::test]
     async fn test_query_config_preserves_auto_start() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false
         let config = create_test_query_config_with_auto_start("test-query", vec![], false);
@@ -672,7 +669,7 @@ mod manager_tests {
     /// Test that deleting a query cleans up its event history
     #[tokio::test]
     async fn test_delete_query_cleans_up_event_history() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a query
         let config = create_test_query_config("cleanup-events-query", vec![]);
@@ -777,7 +774,7 @@ mod manager_tests {
     /// Test that deleting a query cleans up its log history
     #[tokio::test]
     async fn test_delete_query_cleans_up_log_history() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a query
         let config = create_test_query_config("cleanup-logs-query", vec![]);
@@ -867,7 +864,6 @@ mod query_core_tests {
 // =========================================================================
 #[cfg(test)]
 mod output_state_integration_tests {
-    use super::super::*;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::queries::output_state::FetchError;

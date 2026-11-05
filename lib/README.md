@@ -35,6 +35,8 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 drasi-lib = { path = "../drasi-core/lib" }
+drasi-host-sdk = { path = "../drasi-core/components/host-sdk" }
+drasi-computation-transformer-query = { path = "../drasi-core/components/computation-plugins/transformers/query" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -43,6 +45,9 @@ The APIs in this branch are not necessarily available in published crate version
 The [development setup](docs/developer-guide/README.md#1-run-your-first-application)
 includes a complete native application, its dependencies, and the required
 toolchain. Non-jq examples do not need jq build tools.
+The Host/query dependencies supply the explicitly selected native query
+implementation; a source-only application or an explicitly composed linked
+reference example does not need them.
 
 ## ComputationGraph runtime
 
@@ -86,6 +91,9 @@ Start with the guide for your task:
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
+| [Stateful view transformer](../components/computation-plugins/transformers/view/README.md) | Maintain memory-backed projected datasets, exact retractions and coherent output snapshots |
+| [Source-time merging](docs/computation-graph-time-merge.md) | Explicit ordering policies and versioned volatile/persistent reconstruction recipes |
+| [Native SDK services](../components/computation-plugin-sdk/README.md) | Borrowed transactional processing and optional persistent non-query scheduling |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
@@ -226,9 +234,13 @@ async fn main() -> anyhow::Result<()> {
     // Sources and reactions are plugins — create instances from plugin crates
     let source = my_source::MySource::new("sensors", config)?;
     let reaction = my_reaction::MyReaction::new("alerts", vec!["high-temp".into()]);
+    let query_plugin = drasi_host_sdk::computation::NativePlugin::from_definition(
+        drasi_computation_transformer_query::plugin()?,
+    )?;
 
     let core = DrasiLib::builder()
         .with_id("my-app")
+        .with_query_factory(query_plugin.query_factory()?)
         .with_source(source)
         .with_reaction(reaction)
         .with_query(
@@ -285,7 +297,8 @@ Create a DrasiLib instance with `DrasiLib::builder()`:
 
 ```rust
 let core = DrasiLib::builder()
-    .with_id("my-app")                          // Instance name (default: UUID)
+    .with_id("my-app")                           // Builder default: "drasi-lib"
+    .with_query_factory(query_plugin.query_factory()?) // Explicit native query selection
     .with_source(source1)                        // Add a source plugin
     .with_source(source2)                        // Add another source
     .with_reaction(reaction)                     // Add a reaction plugin
@@ -305,7 +318,8 @@ Sources and reactions are **owned by DrasiLib** after calling `with_source()` / 
 
 | Method | Type | Default |
 |--------|------|---------|
-| `with_id(impl Into<String>)` | Instance name for logging | Auto-generated UUID |
+| `with_id(impl Into<String>)` | Stable instance identity | `"drasi-lib"` (the config struct separately defaults to a UUID) |
+| `with_query_factory(Arc<dyn ComponentFactory>)` | Explicit ordinary-query implementation | None; no linked fallback |
 | `with_source(impl Source + 'static)` | Source plugin (chainable) | — |
 | `with_reaction(impl Reaction + 'static)` | Reaction plugin (chainable) | — |
 | `with_query(QueryConfig)` | Query config from `Query` builder | — |
@@ -682,6 +696,7 @@ let provider = RocksDbIndexProvider::new("/data/drasi-indexes", false, false)
 
 let core = DrasiLib::builder()
     .with_id("my-app")
+    .with_query_factory(query_plugin.query_factory()?) // Same explicit selection as above
     // 1. Register the provider under a name
     .with_index_provider("rocks", Arc::new(provider))
     .with_source(source)
@@ -1137,7 +1152,8 @@ queries:
 
 ### Loading YAML
 
-Inside an async function, with the source/reaction objects already constructed:
+Inside an async function, with the source/reaction objects and selected native
+`query_plugin` already constructed:
 
 ```rust,ignore
 use drasi_lib::{DrasiLib, DrasiLibConfig};
@@ -1146,7 +1162,9 @@ let yaml = std::fs::read_to_string("config.yaml")?;
 let config: DrasiLibConfig = serde_yaml::from_str(&yaml)?;
 config.validate()?;
 
-let mut builder = DrasiLib::builder().with_id(&config.id);
+let mut builder = DrasiLib::builder()
+    .with_id(&config.id)
+    .with_query_factory(query_plugin.query_factory()?);
 if let Some(capacity) = config.priority_queue_capacity {
     builder = builder.with_priority_queue_capacity(capacity);
 }
@@ -1168,8 +1186,8 @@ let core = builder
 This excerpt uses in-memory indexes. Register actual named storage providers
 when using storage references; parsing `storage_backends` does not construct
 external providers. The three source objects must use the IDs referenced in
-the YAML above. Engine selection is also separate from `DrasiLibConfig`;
-see the [ComputationGraph configuration reference](docs/computation-graph-configuration.md).
+the YAML above. The query factory is supplied explicitly; there is no engine
+selector. See the [ComputationGraph configuration reference](docs/computation-graph-configuration.md).
 
 ### `DrasiLibConfig` Fields
 

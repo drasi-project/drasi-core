@@ -132,7 +132,9 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
         .expect("extra graph");
     core.add_components(extra.auto_start(false))
         .await
-        .expect("extra component creation");
+        .expect("extra component creation")
+        .ensure_committed()
+        .expect("desired topology committed");
 
     let before = reads.load(Ordering::SeqCst);
     let snapshot = tokio::time::timeout(
@@ -335,7 +337,9 @@ async fn in_place_configuration_changes_publish_with_the_new_revision_not_old_sn
         control
             .reconcile(preview, TopologyBindings::default())
             .await
-            .unwrap();
+            .unwrap()
+            .ensure_committed()
+            .expect("desired topology committed");
         let after = control.configuration_snapshot().unwrap();
         assert!(after.topology.revision > before.topology.revision);
         assert_eq!(values(&after, "configured"), json!({"setting":"after"}));
@@ -498,7 +502,9 @@ async fn resource_recipes_survive_component_updates_but_never_follow_a_rebound_p
         control
             .reconcile(preview, TopologyBindings::default())
             .await
-            .unwrap();
+            .unwrap()
+            .ensure_committed()
+            .expect("desired topology committed");
         let updated = control.configuration_snapshot().unwrap();
         assert_eq!(updated.topology.resource_configurations[&resource], recipe);
         let preview = control
@@ -517,7 +523,12 @@ async fn resource_recipes_survive_component_updates_but_never_follow_a_rebound_p
             resource.clone(),
             ResourceHandle::new(ResourceRole::StateStore, Arc::new(2usize)),
         );
-        control.reconcile(preview, bindings).await.unwrap();
+        control
+            .reconcile(preview, bindings)
+            .await
+            .unwrap()
+            .ensure_committed()
+            .expect("desired topology committed");
         assert!(!control
             .configuration_snapshot()
             .unwrap()

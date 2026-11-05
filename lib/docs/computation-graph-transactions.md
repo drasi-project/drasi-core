@@ -16,15 +16,16 @@ The output event from one step is passed directly to the next.
 
 ## Query body
 
-`ContinuousQueryFactory` constructs `ContinuousQueryTransformer` directly,
-including output-delivery tracking for ordinary DrasiLib queries.
-Direct assembly uses the same query component. It uses the reusable
+Ordinary DrasiLib queries require an explicitly registered query factory. The
+normal Host/Server selection is the native query plugin; it and the retained
+linked reference constructors use `drasi-query-common` and the reusable
 `QueryEvaluator`, which contains
 the existing matching, change detection, projection, aggregation and middleware
 algorithms. The standalone `ContinuousQuery` API also uses that same evaluator;
 the graph does not construct a nested standalone runtime or copy query semantics.
 
-For direct graph construction:
+For explicitly selected linked-reference construction (not the ordinary native
+factory path):
 
 ```rust,ignore
 let query = ContinuousQueryTransformer::new_configured(
@@ -41,9 +42,11 @@ A query body owns the full index bundle, materialized rows, source checkpoints,
 result journal and scheduling state. It is not squeezed through the linear
 steps' limited key/value interface. Existing per-query middleware remains in
 that same query transaction. Memory-only query execution remains supported;
-persistent recovery requires complete atomic storage.
+persistent atomic recovery requires a complete atomic storage bundle.
+The native query also supports an explicitly selected persistent non-atomic
+publication protocol, which must not be described as one atomic commit.
 
-The query's state, input position, result sequence, live rows and output commit
+For the atomic profile, query state, input position, result sequence, live rows and output commit
 together. Forwarding confirmation is separate. A crash after commit but before
 confirmation replays saved output without running the query again. Replay uses
 a fresh transport sequence while preserving logical query-result identity.
@@ -57,10 +60,18 @@ due work through a read-only view and emits typed notifications. Schedule change
 commit with the query state; removing due work, reevaluating it and storing the
 result commit together. Notifications never destructively remove scheduled work.
 
-Direct query construction opts into pending-output tracking and replay with
+Direct linked-reference construction opts into pending-output tracking and replay with
 `with_delivery_tracking()`. The registered query factory enables this
 automatically. A query is not an ordinary linear step and cannot be nested
 into a transaction container.
+
+Native non-query transformers may negotiate `scheduled_processing` through
+their existing indexed-processing resource. Request/replace/cancel and explicit
+claim/completion enlist in that actual transaction; deadline observations
+publish only after commit. Its qualified RocksDB profile requires persistent
+checkpoints and process-restart durability, rejects no-op/non-atomic storage,
+and does not create another transaction owner or scheduler task. See the
+[native SDK](../../components/computation-plugin-sdk/README.md).
 
 ## Transaction behaviour
 

@@ -1,6 +1,5 @@
 # Preserve the library lint policy for the query implementation moved here.
 avoid-breaking-exported-api = true
-msrv = "1.70.0"
 cognitive-complexity-threshold = 25
 type-complexity-threshold = 100
 missing-docs-in-crate-items = true

@@ -107,7 +107,7 @@ impl OutputBootstrapProvider {
         }
         let resuming = progress.bootstrap_complete;
         if resuming
-            && saved.as_ref().map_or(true, |saved| {
+            && saved.as_ref().is_none_or(|saved| {
                 saved.outputs.len() != self.outputs.len()
                     || saved
                         .outputs

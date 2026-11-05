@@ -40,13 +40,14 @@ declaration-first policy.
 
 ## Library settings
 
-Set these on `DrasiLib::builder()`. Sources and reactions are plugin objects
-supplied by the application, not plugin kinds that the library discovers from
-Server YAML.
+Set these on `DrasiLib::builder()`. The application supplies source/reaction
+objects or native factory declarations; the library does not discover Server
+YAML plugin kinds itself.
 
 | Builder method | Default | Meaning |
 |---|---|---|
 | `with_id(id)` | `"drasi-lib"` | Instance identity; keep it stable when resuming instance-scoped storage |
+| `with_query_factory(factory)` | None | Explicitly select query construction before adding ordinary queries; no linked fallback |
 | `with_priority_queue_capacity(n)` | 10,000 when no override is set | Default query input-queue capacity |
 | `with_dispatch_buffer_capacity(n)` | 1,000 when no override is set | Default runtime dispatch-buffer capacity |
 | `with_default_recovery_policy(policy)` | `RecoveryPolicy::Strict` | Query recovery default when the query has no override |
@@ -68,6 +69,19 @@ Plugins can also allocate their own queues; these settings are not a total
 process-memory limit. In particular, check the reaction plugin's own queue
 settings rather than assuming an already-created plugin inherits every builder
 default.
+
+For native plugin-backed queries, select `plugin.query_factory()?`; Server
+resolves the unique eligible loaded implementation. Loading/registering
+component recipes is separate from selecting an ordinary-query default.
+An empty/source-only instance needs no query factory. See the
+[query plugin guide](../../components/computation-plugins/transformers/query/README.md).
+
+`add_source_from_factory` and `add_reaction_from_factory` accept native
+`ComponentAddition` declarations and return handles even when construction must
+wait. `ComponentAddition::declaration` can precede factory registration.
+Explicit recipes preserve versions, resource dependencies and secret references
+for `GraphConfigurationSnapshot::reconstructible_topology()`. Existing legacy
+object-based APIs remain supported; the new recipe constructors are native-only.
 
 `DrasiLibConfig` has a different ID default: constructing/deserializing it without
 an ID generates a UUID. The Rust builder defaults to `"drasi-lib"`. For persistent
@@ -179,13 +193,15 @@ recoveryPolicy: strict
 
 Deserializing configuration does not register source/reaction plugins.
 When loading a `DrasiLibConfig`, explicitly apply its instance
-settings and queries to your builder and supply the plugin objects/providers.
+settings and queries to your builder and supply the query factory, plugin
+objects/providers or native factory declarations.
 
 ## Ordering and buffers
 
 The source list is significant. `primary` ranks before `secondary` in the example.
-For queued events, comparison uses source-reported event timestamp, then this
-query-local rank, then the raw source sequence number.
+Each producer's admitted order is preserved. Among the available producer heads,
+comparison uses source-reported event timestamp, then this query-local rank,
+then the raw source sequence number.
 
 - Use the source event wrapper's timestamp, not an element's `effective_from`
   value or a profiling timestamp.

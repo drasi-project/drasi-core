@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-host-sdk"
 version.workspace = true
 edition = "2021"
@@ -100,6 +101,12 @@ axum = "0.7"
 prost-types = "0.14"
 tonic = "0.14"
 drasi-computation-transformer-query = { path = "../computation-plugins/transformers/query" }
+
+[[example]]
+name = "native_scheduling"
+path = "tests/fixtures/native_scheduling.rs"
+crate-type = ["cdylib"]
+test = false
 
 [[example]]
 name = "native_custom_query"

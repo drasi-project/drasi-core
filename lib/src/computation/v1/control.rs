@@ -470,10 +470,10 @@ impl ControlPlane {
         generation: ComponentGeneration,
     ) -> Result<Option<PeerMessage>, ControlError> {
         let mut state = self.lock_open()?;
-        if !state
+        if state
             .components
             .get(id)
-            .is_some_and(|endpoint| endpoint.generation == generation)
+            .is_none_or(|endpoint| endpoint.generation != generation)
         {
             return Err(ControlError::StaleComponent {
                 id: id.clone(),
@@ -497,10 +497,10 @@ impl ControlPlane {
         Self::validate_connections(&pairs)?;
         let state = self.lock_open()?;
         for (id, generation) in removed {
-            if !state
+            if state
                 .components
                 .get(id)
-                .is_some_and(|endpoint| endpoint.generation == *generation)
+                .is_none_or(|endpoint| endpoint.generation != *generation)
             {
                 return Err(ControlError::StaleComponent {
                     id: id.clone(),
@@ -658,6 +658,7 @@ impl ControlPlane {
     /// component to invalidate its handles too. Unattached peers are permitted for
     /// declared subscriptions but cannot receive or satisfy downstream readiness.
     /// Use `sync_connections` to preserve bindings during incremental topology updates.
+    #[cfg(test)]
     pub(crate) fn set_connections(
         &self,
         pairs: impl IntoIterator<Item = (ComponentId, ComponentId)>,
@@ -905,8 +906,7 @@ impl PayloadBudget {
 
 impl Write for PayloadBudget {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.consume(bytes.len())
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        self.consume(bytes.len()).map_err(io::Error::other)?;
         Ok(bytes.len())
     }
 

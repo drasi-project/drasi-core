@@ -3,7 +3,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use async_trait::async_trait;

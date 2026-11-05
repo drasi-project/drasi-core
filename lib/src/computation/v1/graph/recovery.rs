@@ -204,7 +204,7 @@ pub(super) fn assess(
             let unknown = ComponentRecovery::default();
             let contract = contracts.get(id).unwrap_or(&unknown);
             let predecessors = incoming.get(id);
-            if predecessors.map_or(true, BTreeSet::is_empty) {
+            if predecessors.is_none_or(BTreeSet::is_empty) {
                 let admitted = match contract.admission {
                     Some(durability) => {
                         survival(&mut report, participant.clone(), *guarantee, durability)

@@ -28,7 +28,7 @@ mod tests {
     use crate::channels::{ComponentEvent, ComponentStatus, ComponentType};
     use crate::lib_core::DrasiLib;
     use crate::reactions::tests::manager_tests::{create_test_mock_reaction, TestMockReaction};
-    use crate::sources::tests::{create_test_mock_source, TestMockSource};
+    use crate::sources::tests::TestMockSource;
 
     /// Default timeout for waiting on events.
     const EVENT_TIMEOUT: Duration = Duration::from_secs(5);

@@ -43,7 +43,6 @@ pub(super) trait RuntimeComponent: Send + Sync {
     }
     async fn shutdown(&self) -> anyhow::Result<()>;
     async fn deprovision(&self) -> anyhow::Result<()>;
-    async fn status(&self) -> crate::ComponentStatus;
 }
 
 pub(super) struct RuntimeInstance {

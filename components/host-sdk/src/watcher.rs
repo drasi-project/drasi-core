@@ -67,7 +67,7 @@ pub struct PluginWatcher {
 }
 
 impl PluginWatcher {
-    /// Create a new watcher. Call [`start`] or [`start_polling`] to begin monitoring.
+    /// Create a new watcher. Call [`Self::start`] or [`Self::start_polling`] to begin monitoring.
     pub fn new(config: PluginWatcherConfig) -> Self {
         let (event_tx, _) = broadcast::channel(64);
         Self {

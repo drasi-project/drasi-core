@@ -300,7 +300,7 @@ result sequence.
 | `BroadcastPipeConfig` | Bounded history with an explicit lag policy; no backpressure guarantee |
 | `RetainedPipeConfig` + `MemoryEnvelopeStore` | Retained history inside the process |
 | `RetainedPipeConfig` + `IndexedEnvelopeStore` | Durable acceptance/replay using a complete persistent index bundle |
-| `RankedInputPipeConfig` | Branches of a shared query queue ordered by event time, source rank and source sequence; not producer FIFO |
+| `RankedInputPipeConfig` | Preserves each producer's admitted order; selects among available heads by event time, source rank and sequence |
 
 `EnvelopeCodec` requires registered schema validators on decode and preserves
 event metadata and annotations. Internal canonical identity bytes are not a
@@ -636,7 +636,7 @@ either gives permission to use that behaviour, not a capability the source lacks
 
 Descriptor factories validate kind/configuration version and available schema.
 The host must first safely load and version-check dynamic plugins. The existing
-Source/Reaction ABI remains at 0.15; the earlier recovery update distinguished
+Source/Reaction ABI is 0.17 with supported 0.16 fast-mode compatibility; recovery distinguishes
 an absent resume sequence from an explicit sequence zero. Native graph plugins
 use a different ABI family. Task-scoped secret resolution
 for in-process creation does not replace a dynamic plugin's injected resolver.

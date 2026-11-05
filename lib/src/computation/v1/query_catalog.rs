@@ -27,7 +27,8 @@ pub(super) struct LocalQueryOutput {
     pub reader: Arc<super::query_output::QueryOutputProvider>,
     pub progress: Option<Arc<QuerySourceProgress>>,
     pub incarnation: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
-    pub checkpoint: Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
+    pub _checkpoint:
+        Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
     pub output_persistence: Arc<std::sync::RwLock<Option<bool>>>,
 }
 
@@ -37,12 +38,14 @@ pub(super) struct CatalogQuery {
     pub output: Arc<super::query_api::QueryApiOutput>,
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct QueryOutputGenerationReader {
     query: ComponentId,
     results: QueryResults,
 }
 
+#[cfg(test)]
 impl QueryOutputGenerationReader {
     pub(crate) fn generation(&self) -> u64 {
         self.results.observed_generation(self.query.as_str())
@@ -349,6 +352,7 @@ impl QueryResultsCatalog {
 
     /// Capture while the query is registered. The reader retains only output
     /// state, not index handles, and remains usable after permanent shutdown.
+    #[cfg(test)]
     pub(crate) fn output_generation_reader(
         &self,
         id: &str,
@@ -416,6 +420,7 @@ impl QueryResultsCatalog {
             .get(id)
             .map(|config| config.metrics.clone()))
     }
+    #[cfg(test)]
     pub(crate) fn checkpoint_store(
         &self,
         id: &str,
@@ -427,7 +432,7 @@ impl QueryResultsCatalog {
             anyhow::bail!("native query checkpoints belong to its processing service");
         };
         let checkpoint = output
-            .checkpoint
+            ._checkpoint
             .read()
             .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))?
             .clone();
@@ -599,7 +604,7 @@ impl QueryResultsCatalog {
                 reader,
                 progress,
                 incarnation,
-                checkpoint,
+                _checkpoint: checkpoint,
                 output_persistence,
             })),
         )
@@ -654,6 +659,7 @@ impl QueryResultsCatalog {
             },
         })
     }
+    #[cfg(test)]
     pub(crate) async fn legacy_snapshot(
         &self,
         id: &str,
@@ -665,6 +671,7 @@ impl QueryResultsCatalog {
         }
         super::plugin_reaction::snapshot_response_parts(id, &snapshot, hash)
     }
+    #[cfg(test)]
     pub(crate) async fn legacy_outbox(
         &self,
         id: &str,
@@ -727,6 +734,7 @@ impl QueryResultsCatalog {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) async fn query_view(
         &self,
         id: &str,

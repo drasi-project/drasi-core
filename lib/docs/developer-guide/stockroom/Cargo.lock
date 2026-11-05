@@ -580,10 +580,12 @@ dependencies = [
 name = "drasi-core-types"
 version = "0.11.3"
 dependencies = [
+ "async-trait",
  "bytes",
  "chrono",
  "chrono-tz",
  "drasi-query-ast",
+ "futures-core",
  "itoa",
  "lazy_static",
  "log",
@@ -628,10 +630,13 @@ dependencies = [
  "drasi-ffi-primitives",
  "drasi-lib",
  "drasi-plugin-sdk",
+ "drasi-query-common",
  "futures-util",
+ "imbl",
  "indexmap 2.14.2",
  "libloading",
  "log",
+ "ordered-float",
  "semver",
  "serde",
  "serde_json",
@@ -682,20 +687,17 @@ dependencies = [
  "drasi-computation-contracts",
  "drasi-core",
  "drasi-core-types",
- "drasi-functions-cypher",
- "drasi-functions-gql",
  "drasi-middleware",
  "drasi-query-ast",
+ "drasi-query-common",
  "drasi-query-cypher",
  "drasi-query-gql",
  "drasi-reaction-common",
  "equivalent",
- "fnv",
  "futures",
  "imbl",
  "log",
  "ordered-float",
- "rand 0.8.8",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -717,7 +719,6 @@ version = "0.5.11"
 dependencies = [
  "async-trait",
  "base64",
- "drasi-core",
  "drasi-core-types",
  "hex",
  "jsonpath-rust",
@@ -762,6 +763,31 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "drasi-query-common"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "drasi-computation-contracts",
+ "drasi-core",
+ "drasi-functions-cypher",
+ "drasi-functions-gql",
+ "drasi-query-ast",
+ "drasi-query-cypher",
+ "drasi-query-gql",
+ "fnv",
+ "imbl",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -81,8 +81,7 @@ pub fn validate_bootstrap_watermark(
         );
     }
     anyhow::ensure!(
-        position.map_or(true, |position| position.len()
-            <= crate::MAX_SOURCE_POSITION_BYTES),
+        position.is_none_or(|position| position.len() <= crate::MAX_SOURCE_POSITION_BYTES),
         "bootstrap source position exceeds the supported checkpoint limit"
     );
     Ok(())

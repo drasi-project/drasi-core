@@ -156,7 +156,7 @@ async fn persisted_model() {
             let key = format!("{source}/{id}");
             let time = 1 + cycle * 40 + ((random >> 16) % 80);
             let value = ((random >> 24) % 100) as i64;
-            let delete = (random >> 32) % 5 == 0;
+            let delete = (random >> 32).is_multiple_of(5);
             let change = if delete {
                 SourceChange::Delete {
                     metadata: metadata(source, &id, time),
@@ -171,7 +171,7 @@ async fn persisted_model() {
                     element: node(source, &id, time, value),
                 }
             };
-            if model.get(&key).map_or(true, |(latest, _)| time >= *latest) {
+            if model.get(&key).is_none_or(|(latest, _)| time >= *latest) {
                 model.insert(key, (time, (!delete).then_some(value)));
             }
             sequence += 1;

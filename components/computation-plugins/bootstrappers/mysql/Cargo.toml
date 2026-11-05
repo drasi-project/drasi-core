@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-bootstrap-mysql"
 description = "Native MySQL snapshots and consumer-owned binlog handover"
 readme = "README.md"

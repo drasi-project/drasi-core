@@ -403,7 +403,7 @@ impl QosChannel {
         match owner {
             Some(owner)
                 if owner.cancelled.load(Ordering::Acquire)
-                    || !current.is_some_and(|current| current.generation == owner.generation) =>
+                    || current.is_none_or(|current| current.generation != owner.generation) =>
             {
                 return Err(PipeError::Closed);
             }

@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(missing_docs, clippy::unwrap_used, clippy::expect_used)]
+
+//! Host-owned lifecycle and processing contracts for graph components.
+
 use async_trait::async_trait;
 
-use super::{ChangeEnvelope, ComponentDescriptor, PortId};
+use super::{ComponentDescriptor, PortId};
 
 pub use drasi_computation_contracts::{
     InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, SnapshotConsumer,
@@ -34,6 +38,7 @@ pub use drasi_computation_contracts::{
 /// No default success methods conceal missing implementation.
 #[async_trait]
 pub trait ComputationComponent: Send + Sync {
+    /// Immutable identity, semantic role and declared ports for this instance.
     fn descriptor(&self) -> &ComponentDescriptor;
     /// Captured at construction, activation and reconfiguration, never per envelope.
     /// Unknown is not a recovery guarantee. Implementations must identify their
@@ -113,7 +118,9 @@ pub trait ComputationComponent: Send + Sync {
     fn requires_readiness_confirmation(&self) -> bool {
         false
     }
+    /// Activate owned resources before processing can begin.
     async fn start(&mut self) -> anyhow::Result<()>;
+    /// Stop and join owned work; an interrupted wait is not completed cleanup.
     async fn stop(&mut self) -> anyhow::Result<()>;
     /// Erase owned state for explicit permanent removal, after stopping work.
     /// Ordinary stop, replacement and instance shutdown do not call this hook.
@@ -131,6 +138,7 @@ pub trait ComputationComponent: Send + Sync {
 /// Its work runs in an independently scheduled, graph-owned Tokio task.
 #[async_trait]
 pub trait ComputationService: ComputationComponent {
+    /// Drive service work until completion or graph-owned cancellation.
     async fn run(&mut self) -> anyhow::Result<()>;
 
     /// Called after `run()` is dropped for quiescence. Services with separately
@@ -201,13 +209,16 @@ pub trait Transformer: ComputationComponent {
     fn has_pending_emissions(&self) -> bool {
         false
     }
+    /// Produce the next bounded emission batch for the current input.
     async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
         anyhow::bail!("this transformer has no continuation")
     }
 
+    /// Observe scheduling notifications without requiring another input envelope.
     fn wakeup_source(&self) -> Option<std::sync::Arc<dyn WakeupSource>> {
         None
     }
+    /// Process due work and return its ordered output emissions.
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
         anyhow::bail!("this transformer does not implement scheduled processing")
     }
@@ -229,6 +240,7 @@ pub trait EnvelopeSink: ComputationComponent {
     fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {
         Ok(None)
     }
+    /// Handle a host-collected batch at the declared completion boundary.
     async fn handle_batch(&mut self, _inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
         anyhow::bail!("this sink does not implement host-owned batching")
     }

@@ -169,12 +169,11 @@ impl ComputationGraph {
                 observed
                     .components
                     .get(id)
-                    .map_or(true, |component| component.generation != *old)
+                    .is_none_or(|component| component.generation != *old)
             })
             && retirement.resources.iter().all(|(id, old)| {
-                self.resource_handles.get(id).map_or(true, |current| {
-                    old.upgrade()
-                        .map_or(true, |old| !current.same_instance(&old))
+                self.resource_handles.get(id).is_none_or(|current| {
+                    old.upgrade().is_none_or(|old| !current.same_instance(&old))
                 })
             })
         {

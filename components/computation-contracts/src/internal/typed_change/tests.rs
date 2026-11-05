@@ -514,8 +514,15 @@ fn envelopes_share_immutable_changes_and_append_context_persistently() {
         second.context().head().unwrap().parent().unwrap()
     ));
     assert_eq!(envelope.context().len(), 0);
+    assert!(envelope.context().is_empty());
     assert_eq!(first.context().len(), 1);
+    assert!(!first.context().is_empty());
     assert_eq!(second.context().len(), 2);
+    assert_eq!(envelope.context().root().id(), second.context().root().id());
+    assert_eq!(
+        first.context().head().unwrap().contribution().value(),
+        &ContextValue::Unsigned(3)
+    );
     assert_ne!(envelope.id(), first.id());
     assert_ne!(first.id(), second.id());
     assert_eq!(envelope.system().graph_epoch(), Some(5));
@@ -524,6 +531,39 @@ fn envelopes_share_immutable_changes_and_append_context_persistently() {
         envelope.system().trace().unwrap(),
         &TraceMetadata::new("trace-1", Some(Arc::from("span-1")))
     );
+}
+
+#[test]
+fn context_reference_preserves_every_contributor_and_value_kind() {
+    let input = wrapper(SourceChange::Insert {
+        element: element(ElementPropertyMap::from(json!({ "name": "Alice" })), 1_000),
+    });
+    let envelope = source_event_to_envelope(&input, SystemMetadataExtensions::default()).unwrap();
+    for kind in [
+        ContextContributorKind::Runtime,
+        ContextContributorKind::Source,
+        ContextContributorKind::Query,
+        ContextContributorKind::Reaction,
+    ] {
+        for value in [
+            ContextValue::Bool(true),
+            ContextValue::Signed(-3),
+            ContextValue::Unsigned(3),
+            ContextValue::String(Arc::from("value")),
+            ContextValue::Bytes(Arc::from([1_u8, 2, 3].as_slice())),
+        ] {
+            let contribution =
+                ContextContribution::new(ContextContributor::new(kind, "owner"), "key", value);
+            let appended = envelope.append_context(contribution.clone());
+            assert_eq!(
+                appended.context().head().unwrap().contribution(),
+                &contribution
+            );
+            assert_eq!(appended.id(), envelope.append_context(contribution).id());
+            assert_ne!(appended.id(), envelope.id());
+            assert!(Arc::ptr_eq(appended.change_set(), envelope.change_set()));
+        }
+    }
 }
 
 #[test]

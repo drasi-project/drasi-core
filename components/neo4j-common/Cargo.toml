@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-neo4j-common"
 version = "0.1.6"
 edition = "2021"

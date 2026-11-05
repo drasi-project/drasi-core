@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use std::{
     collections::{BTreeSet, HashSet},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -586,7 +586,7 @@ impl LegacySourceSubscription {
                         "durable middleware source recovery requires a replay-capable owned or explicitly recoverable borrowed source"
                     );
                     anyhow::ensure!(
-                        saved.as_ref().map_or(true, |saved| saved.source_position.is_some()),
+                        saved.as_ref().is_none_or(|saved| saved.source_position.is_some()),
                         "durable middleware source checkpoint has no replay cursor"
                     );
                 }
@@ -743,7 +743,7 @@ impl LegacySourceSubscription {
                     match current {
                         SubscriptionPhase::Ready
                             if generation
-                                .map_or(true, |generation| binding_generation == generation) =>
+                                .is_none_or(|generation| binding_generation == generation) =>
                         {
                             return Ok(BootstrapPreparation::Ready)
                         }

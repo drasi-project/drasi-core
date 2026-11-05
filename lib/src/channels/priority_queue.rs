@@ -379,7 +379,7 @@ where
                 .fetch_add(1, AtomicOrdering::Relaxed);
             let total_drops = previous + 1;
 
-            if total_drops == 1 || total_drops % 100 == 0 {
+            if total_drops == 1 || total_drops.is_multiple_of(100) {
                 debug!(
                     "Priority queue at capacity ({}); {} events dropped so far",
                     self.max_capacity, total_drops
@@ -488,7 +488,7 @@ where
                 + 1;
 
             // Log blocking event periodically (every 100th block or first time)
-            if blocked_count == 1 || blocked_count % 100 == 0 {
+            if blocked_count == 1 || blocked_count.is_multiple_of(100) {
                 debug!(
                     "Priority queue enqueue blocked (capacity {}); blocked {} times so far",
                     self.max_capacity, blocked_count

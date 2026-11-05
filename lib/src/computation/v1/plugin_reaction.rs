@@ -14,7 +14,7 @@
 
 use super::{plugin_services::PluginObservations, query_catalog::CatalogQuery, *};
 use crate::{
-    channels::{ComponentStatus, QueryResult, ResultDiff},
+    channels::{ComponentStatus, ResultDiff},
     context::ReactionRuntimeContext,
     queries::output_state::{
         FetchError, OutboxGap, OutboxResponse, OutboxStream, SnapshotResponse, SnapshotStream,
@@ -376,7 +376,7 @@ impl ReactionPluginHost {
             && services
                 .state_store
                 .as_ref()
-                .map_or(true, |store| !store.is_durable())
+                .is_none_or(|store| !store.is_durable())
         {
             anyhow::bail!("durable reaction requires a durable state store");
         }
@@ -562,7 +562,7 @@ impl ReactionPluginHost {
                 .services
                 .state_store
                 .as_ref()
-                .map_or(true, |store| !store.is_durable())
+                .is_none_or(|store| !store.is_durable())
         {
             let reason = if self.services.state_store.is_some() {
                 self.reject_startup(crate::metrics::StartupRejectionReason::DurableOnVolatile);
@@ -740,7 +740,7 @@ impl ReactionPluginHost {
             heads.insert(query_id.clone(), head);
         }
         anyhow::ensure!(
-            supplied_heads.as_ref().map_or(true, BTreeMap::is_empty),
+            supplied_heads.as_ref().is_none_or(BTreeMap::is_empty),
             "reaction received subscription heads for unrelated queries"
         );
         life.needs_stop = true;

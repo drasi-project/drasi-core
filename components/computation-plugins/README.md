@@ -31,8 +31,9 @@ checks every native library independently, including its build dependencies.
 | Source | [drasi-computation-source-sqlite](sources/sqlite) | `drasi.sqlite/changes`, `drasi.sqlite/transactions`, `drasi.sqlite/replay-transactions`, `drasi.sqlite/shared-transactions` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-bridge](sources/bridge) | `drasi.bridge/source` | Static Rust factory |
 | Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
+| Transformer | [drasi-computation-transformer-view](transformers/view) | `drasi.standard/view` | Dynamic or Rust SDK; memory-backed maintained view and snapshots |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
-| Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.experimental/volatile-query`, `drasi.experimental/indexed-query`, `drasi.experimental/provider-query` | Experimental; not a production query replacement |
+| Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.experimental/volatile-query`, `drasi.experimental/indexed-query`, `drasi.experimental/provider-query` | Dynamic or Rust SDK; explicit ordinary-query adapter through Host |
 | Sink | [drasi-computation-sink-capture](sinks/capture) | `drasi.standard/capture` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |
@@ -49,6 +50,14 @@ under the user-approved database-test deferral. See the
 and each family guide for the tested scope and operating restrictions.
 SQLite has no legacy reaction to migrate; no new SQLite sink is implied by this
 inventory.
+
+The query plugin is the normal explicitly selected Host/Server query
+implementation; the historical `drasi.experimental` names remain stable
+identities. The separate view component maintains map/relabel projections and
+exact retractions, but does not advertise durability, replay/follow or
+transaction participation. Native `scheduled_processing` is an optional
+borrowed service, not another plugin or graph: its standalone profile requires
+atomic persistent RocksDB. See each component/SDK guide for its actual limits.
 
 ## Build just one plugin
 

@@ -237,7 +237,7 @@ impl QueryApi {
         drasi_computation_contracts::validate_identifier("query graph", &description.graph_id)?;
         description.execution.validate(None)?;
         anyhow::ensure!(
-            progress.as_ref().map_or(true, |progress| {
+            progress.as_ref().is_none_or(|progress| {
                 progress.graph_id() == description.graph_id && progress.component_id() == &id
             }),
             "query read progress belongs to another graph or component"

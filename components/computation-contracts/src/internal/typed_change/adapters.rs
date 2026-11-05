@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -53,6 +50,7 @@ pub(crate) enum ChangeAdapterError {
     InvalidGraphEnvelope,
     #[error(transparent)]
     InvalidSourceChange(#[from] SourceChangeError),
+    #[cfg(test)]
     #[error("graph envelope is missing its source sequence")]
     MissingSourceSequence,
     #[error("query envelope is missing its query identity")]
@@ -99,6 +97,7 @@ impl QueryEnvelopeMetadata {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_extensions(mut self, extensions: SystemMetadataExtensions) -> Self {
         self.extensions = extensions;
         self
@@ -253,6 +252,7 @@ pub(crate) fn source_change_to_envelope(
     Ok(ChangeEnvelope::new(change_set, system, HashMap::new()))
 }
 
+#[cfg(test)]
 pub(crate) fn source_event_from_envelope(
     envelope: &ChangeEnvelope,
 ) -> Result<SourceEventWrapper, ChangeAdapterError> {
@@ -274,6 +274,7 @@ pub(crate) fn source_event_from_envelope(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn source_change_from_envelope(
     envelope: &ChangeEnvelope,
 ) -> Result<SourceChange, ChangeAdapterError> {

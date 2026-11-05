@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-bootstrap-mssql"
 description = "Native SQL Server consistent CDC-barrier bootstrap"
 readme = "README.md"

@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![deny(unused)]
+
 //! Native component messages and contracts shared by the runtime and plugins.
 //! This crate contains no graph executor, query evaluator, parser or storage backend.
 
@@ -47,6 +49,7 @@ mod query_identity;
 mod query_joins;
 mod query_read;
 mod query_recovery;
+mod scheduling;
 mod snapshot;
 mod snapshot_consumer;
 mod source_schema;
@@ -93,6 +96,7 @@ pub use query_identity::*;
 pub use query_joins::*;
 pub use query_read::*;
 pub use query_recovery::*;
+pub use scheduling::*;
 
 pub use bootstrap::*;
 pub use delivery::{

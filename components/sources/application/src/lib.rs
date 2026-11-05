@@ -150,11 +150,11 @@ pub use property_builder::PropertyMapBuilder;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentStatus, *};

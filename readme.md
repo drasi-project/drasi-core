@@ -204,7 +204,7 @@ For example, `drasi-source-postgres`, `drasi-reaction-log`, `drasi-bootstrap-mss
 
 ### Prerequisites
 
-- Rust toolchain (see `rust-toolchain.toml`)
+- Rust 1.95.0 or newer; `rust-toolchain.toml` pins the supported baseline.
 - System dependencies: `jq`, `libjq-dev`, `protobuf-compiler` (Linux) or `jq`, `protobuf` (macOS)
 - For cross-compilation: [`cross`](https://github.com/cross-rs/cross) (Linux host with Docker)
 
@@ -406,4 +406,4 @@ The drasi-core library is one component of an early release of Drasi which enabl
 
 ## Contributing
 
-Please see the [Contribution guide](CONTRIBUTING.md)
+Please see the [Contribution guide](docs/contributing/how-to.md).

@@ -254,7 +254,7 @@ impl Drop for RejectedAddition {
     }
 }
 
-/// A declaration and its already supplied instances. Accepting this value adds
+/// A declaration and its optional construction bindings. Accepting this value adds
 /// the node; validation, construction and activation are observable node outcomes.
 pub struct ComponentAddition {
     pub definition: DesiredComponent,
@@ -290,6 +290,20 @@ impl ComponentAddition {
         specification: ComponentSpecification,
         factory: Arc<dyn ComponentFactory>,
     ) -> Self {
+        let mut addition = Self::declaration(specification);
+        addition
+            .bindings
+            .factories
+            .register(factory)
+            .expect("a new registry has no duplicate factory");
+        addition
+    }
+
+    /// Declare a factory-built component without requiring its implementation
+    /// to be registered yet. The graph retains missing factories as dependency
+    /// waits; register one later through [`GraphControl::register_factory`] or
+    /// [`crate::DrasiLib::register_component_factory`].
+    pub fn declaration(specification: ComponentSpecification) -> Self {
         let definition = DesiredComponent {
             descriptor: specification.descriptor.clone(),
             role: specification.role,
@@ -299,15 +313,10 @@ impl ComponentAddition {
             input_merge: InputMergePolicy::default(),
             construction: ComponentConstruction::Factory(specification),
         };
-        let mut bindings = TopologyBindings::default();
-        bindings
-            .factories
-            .register(factory)
-            .expect("a new registry has no duplicate factory");
         Self {
             definition,
             resources: Vec::new(),
-            bindings,
+            bindings: TopologyBindings::default(),
         }
     }
 
@@ -713,13 +722,6 @@ impl GraphControl {
             bindings.pipes.insert(binding, provider);
         }
         self.reconcile(preview, bindings).await
-    }
-
-    pub(crate) async fn request_auto_start(&self) -> GraphResult<()> {
-        self.commands
-            .send(controller::Command::AutoStart)
-            .await
-            .map_err(|_| GraphError::ControllerClosed)
     }
 
     /// Add a node and return without waiting for its realization or activation.

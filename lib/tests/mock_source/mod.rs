@@ -14,6 +14,11 @@
 
 //! Mock source for integration tests.
 
+#![allow(
+    dead_code,
+    reason = "Independent integration binaries use different mock-source capabilities"
+)]
+
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{
@@ -78,7 +83,7 @@ impl MockSourceHandle {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             counts.wait_for(|counts| {
-                counts.created == created && active.map_or(true, |active| counts.active == active)
+                counts.created == created && active.is_none_or(|active| counts.active == active)
             }),
         )
         .await??;

@@ -21,8 +21,6 @@
 
 use std::ffi::c_void;
 
-use super::types::{FfiResult, FfiStr};
-
 /// FFI-safe credential type tag.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

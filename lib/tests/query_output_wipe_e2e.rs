@@ -19,7 +19,7 @@ mod mock_source;
 use anyhow::Result;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::queries::{FetchError, Query as QueryInstance};
+use drasi_lib::queries::FetchError;
 use drasi_lib::{DrasiLib, IndexBackendPlugin, Query, StorageBackendRef};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::sync::Arc;

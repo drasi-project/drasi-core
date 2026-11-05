@@ -78,9 +78,71 @@ or a native component batch. Connect each declared producer output to the
 merger's `in` port. Bind `out` to `definition.output_stream` and connect it to the
 next component's input. With routing enabled, bind and connect `late` too.
 All declared ports must connect. This API supplies a constructed native
-component; it does not install a standard factory or a Server/plugin
-configuration recipe. `configuration()` exposes its immutable definition for
-inspection, not automatic reconstruction.
+component. Its `configuration()` result is inspectable, but does not turn the
+object into a reconstruction recipe.
+
+### Factory-owned construction
+
+`FactoryRegistry::standard()` includes `drasi/source-time-merge`, implementation
+version `"1"` and configuration version `1`. It supports the graph-change
+schema, including `FailAndRetain`, `Route` and `Discard`. Custom executable
+schemas still use the object-based constructors.
+
+`definition.specification(None)` describes a volatile merger.
+`definition.specification(Some(storage_id))` describes a durable merger using
+an actual `SourceTimeMergeStorage` resource. Both retain the complete definition;
+the graph and component IDs must match their real owners. For a `DrasiLib`
+instance, use `core.computation_info().await?.id` as the definition's graph ID.
+No component or storage is opened while describing the specification.
+
+```rust,ignore
+let specification = definition.specification(None)?;
+let factories = FactoryRegistry::standard();
+let factory = factories.get(&specification.implementation).unwrap().clone();
+let mut addition = ComponentAddition::from_specification(specification, factory)
+    .bind_stream(PortId::try_new("out")?, definition.output_stream.clone());
+if let Some(stream) = &definition.late_output_stream {
+    addition = addition.bind_stream(PortId::try_new("late")?, stream.clone());
+}
+let handle = core.add_computation_component(addition).await?;
+```
+
+Connect the declared producer streams to `in` and the outputs to their consumers.
+The factory checks the actual incoming bindings, rather than deriving source
+membership from component names. `wait_created()` reports construction failures;
+missing connections and resources remain visible dependency waits.
+
+Host and Server use the same `sourceTimeMergeStorage` resource recipe:
+
+```yaml
+kind: sourceTimeMergeStorage
+implementation:
+  name: drasi/source-time-merge-storage
+  version: "1"
+configurationVersion: 1
+component: merge
+indexes: indexes
+```
+
+Declare `indexes` as this graph-owned resource's sole `IndexBackend` dependency,
+and bind the storage resource to the merger's `storage` slot. Server supplies
+the provider with `rocksdbIndexes`; an embedded Host supplies its registered
+`indexes` recipe. The merger requires persistent atomic checkpoints and
+asynchronous cleanup; volatile providers and shared transaction groups are
+rejected. Durable outputs still require their own lossless durable pipes, such
+as separate `qos` journals with replay receipts.
+Server's readable `graph` connections currently create bounded pipes; use the
+canonical `computation.definition` form for durable QoS connections. Volatile
+mergers can use the readable graph form.
+
+The storage resource owns acquired transactions before constructor validation,
+and retains an in-flight acquisition across cancelled construction or cleanup
+waits. One actual component lease prevents aliasing the owner even when callers
+supply matching instance, graph and component names.
+Factory storage uses the actual instance, graph and component identities;
+it does not adopt a direct constructor's older storage namespace. Reopening the
+same recipe and scope resumes the existing processing state. Restoring a saved
+configuration does not rewind the frontier, held inputs or pending output.
 
 | Setting | Meaning |
 |---|---|
@@ -216,9 +278,13 @@ From the Core repository root:
 cargo test --locked -p drasi-lib --test computation_time_merge
 cargo test --locked -p drasi-lib --no-default-features \
   --features computation-rocksdb-tests --test computation_time_merge
+cargo test --locked -p drasi-host-sdk --test reconstruction_recipes
 ```
 
 These cover source-time ordering, equal-time ties, exact wait/idle boundaries,
 buffer quotas, late policies, query provenance, both Tokio flavors, quiet and
 finite producers, backpressure cancellation, RocksDB reconstruction, uncertain
 commit/cancellation fencing, output replay and damaged snapshots.
+The Host cases additionally restore factory definitions on a clean instance,
+preserve secret references and resource dependencies, and verify that failed or
+cancelled restoration leaves declarations visible and storage cleanup owned.

@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-query-ast"
 version = "0.3.5"
 edition.workspace = true

@@ -1126,7 +1126,7 @@ impl QosChannel {
                 }
                 let after = cursor.position;
                 if !endpoint.binding.pending.load(Ordering::Acquire)
-                    && state.oldest.map_or(true, |oldest| after >= oldest - 1)
+                    && state.oldest.is_none_or(|oldest| after >= oldest - 1)
                 {
                     self.cache_after(&mut state, after)
                         .await
@@ -1523,10 +1523,10 @@ impl Endpoint {
             .lock()
             .map_err(|_| backend("QoS bindings poisoned"))?;
         if self.binding.cancelled.load(Ordering::Acquire)
-            || !bindings
+            || bindings
                 .consumers
                 .get(&self.subscriber)
-                .is_some_and(|current| current.generation == self.binding.generation)
+                .is_none_or(|current| current.generation != self.binding.generation)
         {
             return Err(PipeError::Closed);
         }

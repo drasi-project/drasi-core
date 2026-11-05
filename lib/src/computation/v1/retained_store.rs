@@ -726,7 +726,7 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
                 && state
                     .entries
                     .last_key_value()
-                    .map_or(true, |(last, _)| last.checked_add(1) == Some(position))
+                    .is_none_or(|(last, _)| last.checked_add(1) == Some(position))
         }) {
             state.entries.insert(position, bytes);
         }

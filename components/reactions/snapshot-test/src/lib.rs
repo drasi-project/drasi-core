@@ -31,7 +31,6 @@ use drasi_lib::identity::{CredentialContext, IdentityProvider};
 use drasi_lib::reactions::bootstrap_context::BootstrapContext;
 use drasi_lib::reactions::{Reaction, SnapshotFetcher};
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
-use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;

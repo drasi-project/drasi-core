@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-identity-aws"
 version = "0.2.8"
 edition = "2021"

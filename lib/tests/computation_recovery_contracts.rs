@@ -1,7 +1,6 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-#[allow(dead_code)]
 mod computation_support;
 
 use std::{
@@ -805,7 +804,9 @@ async fn instance_batches() {
             drasi
                 .add_components(batch)
                 .await
-                .expect("ordinary addition");
+                .expect("ordinary addition")
+                .ensure_committed()
+                .expect("desired topology committed");
         }
         drasi.start().await.expect("start");
         let control = drasi.computation_control().expect("single controller");

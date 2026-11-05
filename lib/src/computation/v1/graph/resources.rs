@@ -252,11 +252,11 @@ impl GraphControl {
         component: &ComponentId,
         generation: ComponentGeneration,
     ) -> GraphResult<()> {
-        if !self
+        if self
             .observed()
             .components
             .get(component)
-            .is_some_and(|node| node.generation == generation)
+            .is_none_or(|node| node.generation != generation)
         {
             return Err(GraphError::StaleGeneration);
         }
@@ -299,11 +299,11 @@ pub(super) fn observe(
         .ids
         .get(&component)
         .ok_or(GraphError::StaleGeneration)?;
-    if !graph
+    if graph
         .observed()
         .components
         .get(&component)
-        .is_some_and(|node| node.generation == generation)
+        .is_none_or(|node| node.generation != generation)
     {
         return Err(GraphError::StaleGeneration);
     }
@@ -433,10 +433,10 @@ pub(super) fn observe_plugin(
     plugin: super::PluginIdentity,
 ) -> GraphResult<()> {
     let state = graph.observed();
-    if !state
+    if state
         .components
         .get(component)
-        .is_some_and(|node| node.generation == generation)
+        .is_none_or(|node| node.generation != generation)
     {
         return Err(GraphError::StaleGeneration);
     }

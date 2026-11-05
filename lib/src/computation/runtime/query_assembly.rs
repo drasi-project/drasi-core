@@ -686,7 +686,7 @@ impl Runtime {
                     continue;
                 }
                 anyhow::ensure!(
-                    source.port.as_deref().map_or(true, |port| port == "out"),
+                    source.port.as_deref().is_none_or(|port| port == "out"),
                     "source '{}' has no output port '{}'",
                     source.component,
                     source.port.as_deref().unwrap_or_default()

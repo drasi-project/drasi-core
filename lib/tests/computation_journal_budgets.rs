@@ -1,7 +1,6 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-#[allow(dead_code)]
 mod computation_support;
 
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
@@ -136,7 +135,7 @@ async fn qos_pressure(channel: &Arc<QosChannel>) -> Result<()> {
     handle(slow_receiver.as_mut(), 2).await?;
     tokio::time::timeout(Duration::from_secs(5), publishers.join_next())
         .await?
-        .context("oversized publication task")??;
+        .context("oversized publication task")???;
     let next = root("source", 4, &[4]);
     let producer = channel.clone();
     publishers.spawn(async move { producer.publish(&next).await });
@@ -154,7 +153,7 @@ async fn qos_pressure(channel: &Arc<QosChannel>) -> Result<()> {
     handle(resumed_receiver.as_mut(), 3).await?;
     tokio::time::timeout(Duration::from_secs(5), publishers.join_next())
         .await?
-        .context("subsequent publication task")??;
+        .context("subsequent publication task")???;
     assert_eq!(channel.progress().await?.accepted, 4);
     handle(fast_receiver.as_mut(), 4).await?;
     handle(resumed_receiver.as_mut(), 4).await?;

@@ -46,6 +46,8 @@ mod progress;
 pub(super) use progress::Call as ProcessingCall;
 #[path = "processing_reset.rs"]
 mod reset;
+#[path = "processing_scheduling.rs"]
+mod scheduling;
 
 const MAX_OPERATIONS: usize = 16;
 type Opening = Pin<Box<dyn Future<Output = Result<ComputationIndexes, IndexError>> + Send>>;
@@ -70,6 +72,7 @@ impl Drop for CleanupAttempt {
 pub struct NativeProcessingResource {
     provider: Arc<dyn ComputationIndexProvider>,
     publication: drasi_lib::computation::v1::QueryPublicationMode,
+    scheduling_clock: Option<Arc<dyn drasi_computation_contracts::PhysicalClock>>,
 }
 
 impl NativeProcessingResource {
@@ -77,6 +80,7 @@ impl NativeProcessingResource {
         Self {
             provider,
             publication: drasi_lib::computation::v1::QueryPublicationMode::Atomic,
+            scheduling_clock: None,
         }
     }
 
@@ -95,6 +99,22 @@ impl NativeProcessingResource {
     pub fn publication(&self) -> drasi_lib::computation::v1::QueryPublicationMode {
         self.publication
     }
+
+    /// Supply the physical clock for negotiated non-query scheduled processing.
+    /// It does not change logical input timestamps or the query test-clock binding.
+    pub fn with_scheduling_clock(
+        mut self,
+        clock: Arc<dyn drasi_computation_contracts::PhysicalClock>,
+    ) -> Self {
+        self.scheduling_clock = Some(clock);
+        self
+    }
+
+    pub(super) fn scheduling_clock(
+        &self,
+    ) -> Option<Arc<dyn drasi_computation_contracts::PhysicalClock>> {
+        self.scheduling_clock.clone()
+    }
 }
 
 struct Live {
@@ -110,6 +130,7 @@ struct State {
     component: String,
     progress: Option<Arc<progress::Progress>>,
     output: Option<Arc<output::Output>>,
+    scheduling: Option<Arc<scheduling::Scheduling>>,
     live: Mutex<Live>,
     settled: Notify,
 }
@@ -164,6 +185,7 @@ impl ProcessingBinding {
                 component: component.clone(),
                 progress: None,
                 output: None,
+                scheduling: None,
                 live: Mutex::new(Live {
                     owner: None,
                     active: false,
@@ -188,6 +210,30 @@ impl ProcessingBinding {
     pub(super) fn with_volatile_processing(mut self, supported: bool) -> Self {
         self.volatile_processing = supported && self.provider.is_volatile();
         self
+    }
+
+    pub(super) fn with_scheduling(
+        mut self,
+        enabled: bool,
+        clock: Option<Arc<dyn drasi_computation_contracts::PhysicalClock>>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            enabled || clock.is_none(),
+            "a scheduling clock requires negotiated scheduled processing"
+        );
+        if enabled {
+            anyhow::ensure!(
+                !self.provider.is_volatile()
+                    && !self.volatile_processing
+                    && !self.non_atomic_publication
+                    && self.state.progress.is_some(),
+                "scheduled processing requires persistent atomic input progress"
+            );
+            Arc::get_mut(&mut self.state)
+                .context("scheduling must bind before export")?
+                .scheduling = Some(Arc::new(scheduling::Scheduling::new(clock)));
+        }
+        Ok(self)
     }
 
     pub(super) fn with_publication(
@@ -406,6 +452,7 @@ impl ProcessingBinding {
                         draft.bind(owner.resources(), &self.component, bindings).await.map_err(operation_error)?;
                         Ok(((), vec![Box::new(Publication {
                             owner: Arc::downgrade(&owner), progress: None, output: Some(draft.clone()),
+                            scheduling: None,
                         }) as Box<dyn drasi_core::computation::TransactionGroupMutation>]))
                     }).await
                 } else {
@@ -457,6 +504,9 @@ impl ProcessingBinding {
     }
 
     pub(super) fn suspend_progress(&self) -> anyhow::Result<()> {
+        if let Some(scheduling) = &self.state.scheduling {
+            scheduling.suspend()?;
+        }
         if let Some(progress) = &self.state.progress {
             progress.suspend()?;
         }
@@ -473,8 +523,43 @@ impl ProcessingBinding {
         }
     }
 
+    pub(super) fn with_table<T>(&self, use_table: impl FnOnce(&ProcessingV1) -> T) -> T {
+        if self.state.scheduling.is_some() {
+            let table = ScheduledProcessingV1 {
+                processing: ProcessingV1 {
+                    header: abi::Header::new::<ScheduledProcessingV1>(),
+                    ..self.table()
+                },
+                version: SCHEDULING_VERSION,
+                reserved: 0,
+                observe: Some(scheduling::observe),
+            };
+            use_table(&table.processing)
+        } else {
+            use_table(&self.table())
+        }
+    }
+
     pub(super) async fn open(&mut self) -> anyhow::Result<()> {
-        self.acquire(true).await
+        self.acquire(true).await?;
+        if let Some(scheduling) = &self.state.scheduling {
+            let progress = self
+                .state
+                .progress
+                .as_ref()
+                .context("missing scheduling progress")?;
+            let _serial = progress.serial.lock().await;
+            let owner = self
+                .state
+                .live
+                .lock()
+                .map_err(|_| anyhow::anyhow!("native processing state poisoned"))?
+                .owner
+                .clone()
+                .context("missing scheduling transaction owner")?;
+            scheduling.recover(&owner).await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn prepare(&mut self) -> anyhow::Result<()> {
@@ -541,6 +626,9 @@ impl ProcessingBinding {
         live.cancel = CancellationToken::new();
         live.runtime = self.runtime.clone();
         live.owner = Some(owner.clone());
+        if let Some(scheduling) = &self.state.scheduling {
+            scheduling.validate(&owner)?;
+        }
         if let Some(progress) = &self.state.progress {
             progress.bind_owner(&owner)?;
         }
@@ -878,7 +966,7 @@ unsafe extern "C" fn run(
             let result = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => Err(Failure::cancelled()),
-                result = drive(&owner, &work, &_guard.0.component, _guard.0.progress.as_ref(), _guard.0.output.as_ref()) => result.map_err(processing_failure),
+                result = drive(&owner, &work, &_guard.0.component, _guard.0.progress.as_ref(), _guard.0.output.as_ref(), _guard.0.scheduling.as_ref()) => result.map_err(processing_failure),
             };
             if result.is_ok() {
                 if let Some(call) = progress_call { call.complete(); }
@@ -900,6 +988,7 @@ struct Publication {
     owner: std::sync::Weak<ComputationTransaction>,
     progress: Option<Arc<progress::Draft>>,
     output: Option<Arc<output::Draft>>,
+    scheduling: Option<Arc<scheduling::Draft>>,
 }
 
 #[async_trait::async_trait]
@@ -927,6 +1016,11 @@ impl drasi_core::computation::TransactionGroupMutation for Publication {
                 .publish()
                 .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
         }
+        if let Some(scheduling) = &self.scheduling {
+            scheduling
+                .publish()
+                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+        }
         Ok(())
     }
 }
@@ -937,6 +1031,7 @@ async fn drive(
     component: &str,
     progress: Option<&Arc<progress::Progress>>,
     output: Option<&Arc<output::Output>>,
+    scheduling: Option<&Arc<scheduling::Scheduling>>,
 ) -> drasi_core::computation::Result<Vec<u8>> {
     if let Some(progress) = progress {
         return Box::pin(async {
@@ -965,10 +1060,13 @@ async fn drive(
                 .map(|output| output::Draft::new(output, work.1 == WorkKind::Output).map(Arc::new))
                 .transpose()
                 .map_err(operation_error)?;
+            let scheduling =
+                scheduling.map(|scheduling| Arc::new(scheduling::Draft::new(scheduling.clone())));
             let publication = owner.is_transaction_group_member().then(|| Publication {
                 owner: Arc::downgrade(owner),
                 progress: Some(draft.clone()),
                 output: output.clone(),
+                scheduling: scheduling.clone(),
             });
             let result = drive_inner(
                 owner,
@@ -976,6 +1074,7 @@ async fn drive(
                 component,
                 Some(&draft),
                 output.as_deref(),
+                scheduling.as_deref(),
                 reservations,
                 publication,
             )
@@ -989,26 +1088,34 @@ async fn drive(
                 if let Some(output) = output {
                     output.publish().map_err(operation_error)?;
                 }
+                if let Some(scheduling) = scheduling {
+                    if let Err(error) = scheduling.publish() {
+                        owner.fence();
+                        return Err(operation_error(error));
+                    }
+                }
             }
             Ok(result)
         })
         .await;
     }
-    drive_inner(owner, work, component, None, None, None, None).await
+    drive_inner(owner, work, component, None, None, None, None, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_inner(
     owner: &ComputationTransaction,
     work: &Work,
     component: &str,
     progress: Option<&progress::Draft>,
     output: Option<&output::Draft>,
+    scheduling: Option<&scheduling::Draft>,
     reservations: Option<drasi_lib::computation::v1::OutputReservations>,
     publication: Option<Publication>,
 ) -> drasi_core::computation::Result<Vec<u8>> {
     let operation = async {
         let mut scope = RequestScope::new(
-            request::GET_ELEMENT..=request::RESET_OUTPUT_BASELINE,
+            request::GET_ELEMENT..=request::SCHEDULE_COMPLETE,
             abi::MAX_MESSAGE_BYTES,
         );
         let operation = {
@@ -1031,6 +1138,7 @@ async fn drive_inner(
             streams: tokio::sync::Mutex::new(SlotStreams::default()),
             progress,
             output,
+            scheduling,
         };
         tokio::pin!(operation);
         let result = tokio::select! {
@@ -1044,13 +1152,21 @@ async fn drive_inner(
             },
         };
         scope.revoke();
-        let result = result.and_then(|bytes| {
+        let result = async {
+            let bytes = result?;
             scope.finish().map_err(operation_error)?;
             if let Some(progress) = progress {
                 progress.validate_completion().map_err(operation_error)?;
             }
+            if let Some(scheduling) = scheduling {
+                scheduling
+                    .stage(owner.resources())
+                    .await
+                    .map_err(operation_error)?;
+            }
             Ok(bytes)
-        });
+        }
+        .await;
         if result.is_err() && handler.configured_joins.load(Ordering::Acquire) {
             owner.fence();
         }
@@ -1110,6 +1226,7 @@ struct IndexRequests<'a> {
     streams: tokio::sync::Mutex<SlotStreams>,
     progress: Option<&'a progress::Draft>,
     output: Option<&'a output::Draft>,
+    scheduling: Option<&'a scheduling::Draft>,
 }
 
 #[derive(Default)]
@@ -1143,6 +1260,21 @@ impl IndexRequests<'_> {
 #[async_trait::async_trait]
 impl RequestHandler for IndexRequests<'_> {
     async fn apply(&self, code: u32, input: &[u8]) -> anyhow::Result<Vec<u8>> {
+        if (request::SCHEDULE_REQUEST..=request::SCHEDULE_COMPLETE).contains(&code) {
+            return self
+                .scheduling
+                .ok_or_else(|| index_error_to_failure(&IndexError::NotSupported))?
+                .apply(self.resources, code, input)
+                .await;
+        }
+        anyhow::ensure!(
+            self.scheduling.is_none() || !matches!(code,
+                request::FUTURE_PUSH..=request::FUTURE_POP
+                | request::FUTURE_CLEAR
+                | request::ATOMIC_STATE_RESET
+            ),
+            "scheduled processing owns its queue and checkpoint; use the typed scheduling operations"
+        );
         let volatile = self.progress.is_some_and(progress::Draft::is_volatile);
         let non_atomic = self.progress.is_some_and(progress::Draft::is_non_atomic);
         let volatile_operation = matches!(code,
@@ -1273,9 +1405,10 @@ impl RequestHandler for IndexRequests<'_> {
             }
             request::PHYSICAL_TIME => {
                 wire::decode::<()>(input)?;
-                let now = match self.progress {
-                    Some(progress) => progress.physical_time()?,
-                    None => u64::try_from(chrono::Utc::now().timestamp_millis())?,
+                let now = match (self.scheduling, self.progress) {
+                    (Some(scheduling), _) => scheduling.physical_time()?,
+                    (None, Some(progress)) => progress.physical_time()?,
+                    (None, None) => u64::try_from(chrono::Utc::now().timestamp_millis())?,
                 };
                 wire::encode(&now)
             }
@@ -1516,7 +1649,9 @@ impl RequestHandler for IndexRequests<'_> {
                 let (key, sequence, position): (String, u64, Option<Vec<u8>>) =
                     wire::decode(input)?;
                 anyhow::ensure!(
-                    !progress::reserved(&key) && !output::reserved(&key),
+                    !progress::reserved(&key)
+                        && !output::reserved(&key)
+                        && !scheduling::reserved(&key),
                     "owned checkpoints require the typed progress operation"
                 );
                 let position = position.map(bytes::Bytes::from);

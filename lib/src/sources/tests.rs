@@ -307,20 +307,6 @@ impl LoggingTestSource {
             fail_start: false,
         })
     }
-
-    /// Log a message at info level (for testing)
-    /// Note: With tracing refactor, logs should be emitted via tracing::info!()
-    /// within a span that has component_id and component_type attributes
-    pub async fn emit_log(&self, _message: &str) {
-        // Logging is now done via tracing spans, not ComponentLogger
-        // This method is kept for API compatibility but does nothing
-    }
-
-    /// Log messages at various levels (for testing)
-    pub async fn emit_all_log_levels(&self) {
-        // Logging is now done via tracing spans, not ComponentLogger
-        // This method is kept for API compatibility but does nothing
-    }
 }
 
 #[async_trait]
@@ -1143,7 +1129,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_source_log_subscription_nonexistent() {
-        let (manager, graph) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Try to subscribe to a non-existent source
         let result = manager.subscribe_logs("nonexistent-source").await;
@@ -1759,7 +1745,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_nonexistent_source() {
-        let (manager, graph) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let new_source = DeprovisionTestSource::new_simple("nonexistent");
         let result = manager

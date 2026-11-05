@@ -14,7 +14,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 use computation_support::*;
 use drasi_lib::{computation::v1::*, DrasiLib};
@@ -92,7 +91,12 @@ async fn inspection_history_is_coherent_for_instance_components() {
         .build()
         .await
         .expect("instance");
-    drasi.add_components(components()).await.expect("register");
+    drasi
+        .add_components(components())
+        .await
+        .expect("register")
+        .ensure_committed()
+        .expect("desired topology committed");
     let inspector = drasi.inspect_computation_graph().expect("inspection");
     let before = inspector.snapshot().sequence;
     let control = drasi.computation_control().unwrap();
@@ -189,7 +193,9 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
     drasi
         .add_components(components().auto_start(false))
         .await
-        .expect("register");
+        .expect("register")
+        .ensure_committed()
+        .expect("desired topology committed");
     let control = drasi.computation_control().unwrap();
     let preview = control
         .preview(
@@ -204,7 +210,9 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
     control
         .reconcile(preview, TopologyBindings::default())
         .await
-        .expect("unbind");
+        .expect("unbind")
+        .ensure_committed()
+        .expect("desired topology committed");
     let inspector = control.inspector();
     let mut source = ComputationTopologySource::new(
         component("topology"),

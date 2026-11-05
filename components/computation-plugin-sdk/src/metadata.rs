@@ -189,6 +189,10 @@ pub struct Capabilities {
     /// The transformer requires the host-owned indexed processing service.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub indexed_processing: bool,
+    /// Transaction-owned requests and committed deadline observations through
+    /// ScheduledProcessingV1. Requires atomic persistent processing resources.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scheduled_processing: bool,
     /// Also implements an explicitly volatile provider profile. The host must
     /// not grant atomic output or durable bootstrap guarantees to that profile.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -367,6 +371,15 @@ impl FactoryMetadata {
             !c.volatile_processing
                 || (c.indexed_processing && c.committed_input_progress.is_some()),
             "volatile indexed processing requires its own input-progress publication"
+        );
+        anyhow::ensure!(
+            !c.scheduled_processing
+                || (c.indexed_processing
+                    && c.committed_input_progress.is_some()
+                    && c.wakeups
+                    && !c.volatile_processing
+                    && !c.non_atomic_publication),
+            "scheduled processing requires atomic indexed progress and wakeups"
         );
         if let Some(input) = &c.committed_input_progress {
             anyhow::ensure!(
@@ -602,6 +615,23 @@ mod tests {
         metadata.capabilities.indexed_processing = true;
         metadata.validate(&plugin, &[schema.descriptor().clone()])?;
         metadata.capabilities.committed_input_progress = Some(PortId::try_new("missing")?);
+        assert!(metadata
+            .validate(&plugin, &[schema.descriptor().clone()])
+            .is_err());
+        metadata.capabilities.committed_input_progress = Some(PortId::try_new("in")?);
+        metadata.capabilities.scheduled_processing = true;
+        assert!(metadata
+            .validate(&plugin, &[schema.descriptor().clone()])
+            .is_err());
+        metadata.capabilities.wakeups = true;
+        metadata.validate(&plugin, &[schema.descriptor().clone()])?;
+        metadata.capabilities.volatile_processing = true;
+        assert!(metadata
+            .validate(&plugin, &[schema.descriptor().clone()])
+            .is_err());
+        metadata.capabilities.volatile_processing = false;
+        metadata.capabilities.non_atomic_publication = true;
+        metadata.capabilities.durable_output = true;
         assert!(metadata
             .validate(&plugin, &[schema.descriptor().clone()])
             .is_err());

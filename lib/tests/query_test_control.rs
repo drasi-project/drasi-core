@@ -607,8 +607,7 @@ datetime.realtime().epochMillis AS logicalTime";
         async fn commit(&self) -> std::result::Result<(), IndexError> {
             let fault = self.fault.mode.swap(0, Ordering::AcqRel);
             if fault == FAIL_COMMIT {
-                return Err(IndexError::other(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(IndexError::other(std::io::Error::other(
                     "injected output commit failure",
                 )));
             }
@@ -657,8 +656,7 @@ datetime.realtime().epochMillis AS logicalTime";
                 .compare_exchange(FAIL_QUEUE, 0, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return Err(IndexError::other(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(IndexError::other(std::io::Error::other(
                     "injected scheduling read failure",
                 )));
             }

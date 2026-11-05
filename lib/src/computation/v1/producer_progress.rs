@@ -19,8 +19,7 @@ use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ChangeEnvelope, ComponentId, ContextEntry, ContextValue, GraphChangeCodec, SourceProgressKey,
-    StreamId, SystemMetadata,
+    ChangeEnvelope, ComponentId, GraphChangeCodec, SourceProgressKey, StreamId, SystemMetadata,
 };
 
 pub(super) const INPUT_OWNER_PREFIX: &str = "computation:input-owner:";
@@ -431,7 +430,7 @@ impl GraphInputProgress {
                 || self
                     .producer
                     .as_ref()
-                    .map_or(true, GraphProducerIdentity::persistent),
+                    .is_none_or(GraphProducerIdentity::persistent),
             "persistent graph processing cannot recover through a volatile output"
         );
         Ok(())
@@ -479,7 +478,7 @@ impl GraphInputProgress {
                 }
                 // Volatile streams need epoch fencing too, but do not acquire
                 // durable replay's consecutive-history guarantee.
-                if identity.persistent() && saved.map_or(true, |saved| self.sequence > saved) {
+                if identity.persistent() && saved.is_none_or(|saved| self.sequence > saved) {
                     anyhow::ensure!(
                         saved.map_or(Some(1), |saved| saved.checked_add(1)) == Some(self.sequence),
                         "graph input logical progress has a gap"
@@ -513,10 +512,7 @@ impl GraphInputProgress {
                 transport_identity(&key, saved)
                     .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
             }
-            if saved
-                .as_ref()
-                .map_or(true, |saved| saved.sequence < sequence)
-            {
+            if saved.as_ref().is_none_or(|saved| saved.sequence < sequence) {
                 store.stage_checkpoint(&key, sequence, None).await?;
             }
         }
@@ -542,9 +538,7 @@ impl GraphInputProgress {
                 transport_identity(&key, saved)
                     .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
             }
-            changed |= saved
-                .as_ref()
-                .map_or(true, |saved| saved.sequence < sequence);
+            changed |= saved.as_ref().is_none_or(|saved| saved.sequence < sequence);
         }
         Ok(changed)
     }

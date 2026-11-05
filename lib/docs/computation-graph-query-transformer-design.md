@@ -50,7 +50,8 @@ native-test, full-suite, performance and reference-retirement work is tracked
 separately in the [canonical backlog](computation-graph-remaining-work.md#cw-76).
 The linked reference constructors still exist; removing implicit selection does
 not mean they have been deleted. General non-query scheduling is a separate
-optional capability, not missing query temporal-function support.
+implemented capability with its own atomic-persistent profile, not missing query
+temporal-function support.
 
 For runnable registration and profile details, see the
 [query plugin guide](../../components/computation-plugins/transformers/query/README.md).
@@ -168,10 +169,13 @@ due time and production timestamps. The existing physical-clock/test-control
 frontier waits through actual due-work and delivery confirmation, not merely
 queue admission or a wall-clock sleep.
 
-The broader reusable non-query scheduled-work component/plugin remains a
-separate capability in [CW-81](computation-graph-remaining-work.md#cw-81).
-Its request/cancel/completion must enlist in the requesting owner's actual
+Reusable non-query scheduled work is implemented in
+[CW-81](computation-graph-remaining-work.md#cw-81). Request/replace/cancel,
+claim and explicit completion enlist in the requesting owner's actual
 transaction, never a competing session on the same database path.
+It shares `CommittedSchedule`/`FutureWakeup` in computation-contracts and preserves
+query-common re-exports. Its standalone RocksDB process-restart cases qualify
+that contract; no-op memory and non-atomic bundles reject the capability.
 [CW-82](computation-graph-remaining-work.md#cw-82) owns the mixed query/non-query
 proof; query scheduling alone does not establish that broader contract.
 
@@ -239,8 +243,8 @@ acceptance without an actual native execution path.
 
 The mixed source/bootstrap, non-query transformer, query and capture-consumer
 proof is [CW-82](computation-graph-remaining-work.md#cw-82). It depends on the
-reusable non-query scheduling contract in
-[CW-81](computation-graph-remaining-work.md#cw-81). Its ownership, rollback,
+implemented reusable non-query scheduling contract in
+[CW-81](computation-graph-remaining-work.md#cw-81). The remaining mixed ownership, rollback,
 clock and real-process failure checks qualify that new combined profile; they
 do not keep the implemented query plugin open or imply that query timers are
 unavailable.

@@ -139,7 +139,7 @@ async fn request_query_start(
         .get(id)
         .ok_or(GraphError::StaleGeneration)?;
     anyhow::ensure!(
-        expected.map_or(true, |expected| expected == state.generation),
+        expected.is_none_or(|expected| expected == state.generation),
         GraphError::StaleGeneration
     );
     anyhow::ensure!(
@@ -236,7 +236,7 @@ pub(super) async fn stop_query(
         .get(id)
         .ok_or(GraphError::StaleGeneration)?;
     anyhow::ensure!(
-        expected.map_or(true, |expected| expected == state.generation),
+        expected.is_none_or(|expected| expected == state.generation),
         GraphError::StaleGeneration
     );
     let members = query_members(&publication, id);
@@ -891,7 +891,7 @@ impl Runtime {
                 .desired
                 .specifications
                 .get(member)
-                .map_or(true, |spec| spec.implementation != outlet)
+                .is_none_or(|spec| spec.implementation != outlet)
         });
         let selected: BTreeSet<_> = members.keys().cloned().collect();
         let mut target = publication.desired.select(GraphSelection::All)?;
@@ -1038,10 +1038,12 @@ pub(crate) struct NativeQuery {
 }
 
 impl NativeQuery {
+    #[cfg(test)]
     pub(crate) fn inspector(&self) -> ComputationInspector {
         self.control.inspector()
     }
 
+    #[cfg(test)]
     pub(crate) fn checkpoint_store(
         &self,
     ) -> anyhow::Result<Option<Arc<dyn drasi_core::interface::CheckpointStore>>> {
@@ -1371,11 +1373,11 @@ impl Query for NativeQuery {
     }
     async fn subscription_count(&self) -> usize {
         let publication = self.control.registry_snapshot();
-        if !publication
+        if publication
             .observed
             .components
             .get(self.handle.id())
-            .is_some_and(|state| state.generation == self.handle.generation())
+            .is_none_or(|state| state.generation != self.handle.generation())
         {
             return 0;
         }

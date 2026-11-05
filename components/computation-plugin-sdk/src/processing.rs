@@ -26,7 +26,10 @@ use crate::{
     wire,
 };
 
-struct RetainedProcessing(ProcessingV1);
+type ScheduleObserver =
+    unsafe extern "C" fn(*mut c_void, u32, *mut abi::OperationHandle) -> abi::Status;
+
+struct RetainedProcessing(ProcessingV1, Option<ScheduleObserver>);
 // Only the producer callbacks dereference the context; retain/release are thread-safe.
 unsafe impl Send for RetainedProcessing {}
 unsafe impl Sync for RetainedProcessing {}
@@ -84,7 +87,25 @@ impl NativeProcessing {
     /// # Safety
     /// The table must obey the processing ABI and remain callable until released.
     pub unsafe fn from_borrowed(raw: *const ProcessingV1) -> Result<Self, Failure> {
-        let raw = *unsafe { checked_table(raw)? };
+        if raw.is_null() || !raw.is_aligned() {
+            return Err(Failure::protocol(
+                "null or unaligned native processing service",
+            ));
+        }
+        let header = unsafe { std::ptr::read(raw.cast::<abi::Header>()) };
+        let (raw, scheduling) =
+            if header.size == std::mem::size_of::<ScheduledProcessingV1>() as u32 {
+                let extended = *unsafe { checked_table(raw.cast::<ScheduledProcessingV1>())? };
+                if extended.version != SCHEDULING_VERSION
+                    || extended.reserved != 0
+                    || extended.observe.is_none()
+                {
+                    return Err(Failure::protocol("invalid scheduled processing extension"));
+                }
+                (extended.processing, extended.observe)
+            } else {
+                (*unsafe { checked_table(raw)? }, None)
+            };
         if raw.context.is_null()
             || raw.retain.is_none()
             || raw.release.is_none()
@@ -93,7 +114,31 @@ impl NativeProcessing {
             return Err(Failure::protocol("incomplete native processing capability"));
         }
         unsafe { raw.retain.expect("validated")(raw.context) };
-        Ok(Self(Arc::new(RetainedProcessing(raw))))
+        Ok(Self(Arc::new(RetainedProcessing(raw, scheduling))))
+    }
+
+    /// Read-only scheduled-work observation, only when this factory negotiated
+    /// the versioned scheduling extension. Mutations use the processing context.
+    pub fn scheduling(&self) -> Option<crate::NativeScheduling> {
+        self.0 .1.map(|_| crate::NativeScheduling(self.clone()))
+    }
+
+    pub(crate) async fn observe_schedule<T: DeserializeOwned>(
+        &self,
+        code: u32,
+    ) -> anyhow::Result<T> {
+        let observe = self
+            .0
+             .1
+            .ok_or_else(|| Failure::protocol("scheduled processing was not negotiated"))?;
+        let operation = {
+            let mut raw = abi::OperationHandle::null();
+            unsafe {
+                take_status(observe(self.0 .0.context, code, &mut raw))?;
+                OperationFuture::new(raw)?
+            }
+        };
+        wire::decode(&operation.await?)
     }
 
     /// Run one operation inside the host's session. The host applies the
@@ -225,7 +270,7 @@ impl NativeProcessingContext {
         self.call(request::PHYSICAL_TIME, &()).await
     }
 
-    async fn call<I: Serialize, O: DeserializeOwned>(
+    pub(crate) async fn call<I: Serialize, O: DeserializeOwned>(
         &self,
         code: u32,
         input: &I,
@@ -743,6 +788,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduling_extension_requires_an_exact_versioned_table() -> anyhow::Result<()> {
+        unsafe extern "C" fn retain(_: *mut c_void) {}
+        unsafe extern "C" fn release(_: *mut c_void) {}
+        unsafe extern "C" fn run(
+            _: *mut c_void,
+            _: *const ProcessingWorkV1,
+            _: *mut abi::OperationHandle,
+        ) -> abi::Status {
+            abi::Status::ok()
+        }
+        unsafe extern "C" fn observe(
+            _: *mut c_void,
+            _: u32,
+            _: *mut abi::OperationHandle,
+        ) -> abi::Status {
+            abi::Status::ok()
+        }
+        let mut context = 0u8;
+        let base = ProcessingV1 {
+            header: abi::Header::new::<ProcessingV1>(),
+            context: (&mut context as *mut u8).cast(),
+            retain: Some(retain),
+            release: Some(release),
+            run: Some(run),
+        };
+        let plain = unsafe { NativeProcessing::from_borrowed(&base)? };
+        assert!(plain.scheduling().is_none());
+        let mut extended = ScheduledProcessingV1 {
+            processing: ProcessingV1 {
+                header: abi::Header::new::<ScheduledProcessingV1>(),
+                ..base
+            },
+            version: SCHEDULING_VERSION,
+            reserved: 0,
+            observe: Some(observe),
+        };
+        assert!(
+            extended
+                .processing
+                .header
+                .validate::<ProcessingV1>()
+                .is_err(),
+            "an older host/SDK cannot reinterpret the extended table as base processing"
+        );
+        let scheduled = unsafe { NativeProcessing::from_borrowed(&extended.processing)? };
+        assert!(scheduled.scheduling().is_some());
+        extended.version += 1;
+        assert!(unsafe { NativeProcessing::from_borrowed(&extended.processing) }.is_err());
+        extended.version = SCHEDULING_VERSION;
+        extended.reserved = 1;
+        assert!(unsafe { NativeProcessing::from_borrowed(&extended.processing) }.is_err());
+        extended.reserved = 0;
+        extended.observe = None;
+        assert!(unsafe { NativeProcessing::from_borrowed(&extended.processing) }.is_err());
+        Ok(())
+    }
 
     #[test]
     fn index_failure_round_trips_error_categories() {

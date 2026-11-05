@@ -74,6 +74,32 @@ impl DrasiLib {
             .await
     }
 
+    /// Declare a native factory-built reaction in the instance's computation graph.
+    ///
+    /// The factory specification must explicitly declare semantic kind
+    /// [`crate::computation::v1::ComponentSemanticKind::Reaction`]. Use
+    /// [`crate::computation::v1::ComponentAddition::from_specification`] with a
+    /// factory, or `ComponentAddition::declaration` to register the factory
+    /// later. Input connections use the ordinary computation connection APIs;
+    /// subscriptions and storage are never inferred from configuration names.
+    ///
+    /// Success acknowledges declaration, not readiness. Missing dependencies
+    /// and failed configuration, secret resolution or construction remain
+    /// visible and retryable through [`Self::start_reaction`]. Await the returned
+    /// handle for creation/activation outcomes. The object-based
+    /// [`Self::add_reaction`] remains supported; native recipes do not construct
+    /// legacy [`Reaction`] objects.
+    pub async fn add_reaction_from_factory(
+        &self,
+        addition: crate::computation::v1::ComponentAddition,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.add_factory_component(
+            addition,
+            crate::computation::v1::ComponentSemanticKind::Reaction,
+        )
+        .await
+    }
+
     async fn add_reaction_with_metadata_and_handle(
         &self,
         reaction: impl Reaction + 'static,
@@ -170,7 +196,7 @@ impl DrasiLib {
     /// Start a stopped reaction
     ///
     /// This will create the necessary subscriptions to query result streams.
-    /// The QueryProvider was already injected when the reaction was added via `add_reaction()`.
+    /// Scoped query readers are supplied through the reaction's runtime context.
     ///
     /// # Example
     /// ```no_run
@@ -398,16 +424,6 @@ mod tests {
     }
 
     impl TestMockReaction {
-        fn new(id: String, queries: Vec<String>) -> Self {
-            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
-            Self {
-                id,
-                queries,
-                auto_start: true,
-                status_handle,
-            }
-        }
-
         fn with_auto_start(id: String, queries: Vec<String>, auto_start: bool) -> Self {
             let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
             Self {

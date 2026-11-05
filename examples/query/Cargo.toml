@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "examples"
 version = "0.0.0"
 publish = false

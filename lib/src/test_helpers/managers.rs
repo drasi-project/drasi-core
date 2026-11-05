@@ -139,9 +139,6 @@ impl ReactionManager {
     pub(crate) async fn start_reaction(&self, id: String) -> anyhow::Result<()> {
         Ok(self.0.start_reaction(&id).await?)
     }
-    pub(crate) async fn stop_reaction(&self, id: String) -> anyhow::Result<()> {
-        Ok(self.0.stop_reaction(&id).await?)
-    }
     pub(crate) async fn update_reaction(
         &self,
         id: String,
@@ -161,12 +158,6 @@ impl QueryManager {
         let query = self.0.computation_runtime.query(id).await?;
         assert_query_implementation(&self.0, query.as_ref());
         Ok(query)
-    }
-    pub(crate) async fn provision_query(
-        &self,
-        config: crate::config::QueryConfig,
-    ) -> anyhow::Result<()> {
-        self.0.computation_runtime.declare_query(config).await
     }
     pub(crate) async fn teardown_query(&self, id: String) -> anyhow::Result<()> {
         Ok(self.0.remove_query(&id).await?)

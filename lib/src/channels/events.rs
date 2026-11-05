@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::profiling::ProfilingMetadata;
-use bytes::Bytes;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -400,6 +397,8 @@ impl EventChannels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profiling::ProfilingMetadata;
+    use bytes::Bytes;
     use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 
     fn create_test_source_change() -> SourceChange {

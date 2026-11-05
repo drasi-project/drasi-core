@@ -146,7 +146,7 @@ impl FactoryRegistry {
     ) -> GraphResult<&Arc<dyn ComponentFactory>> {
         let mut matches = self.factories.iter().filter(|(identity, _)| {
             identity.name.as_ref() == name
-                && version.map_or(true, |version| identity.version.as_ref() == version)
+                && version.is_none_or(|version| identity.version.as_ref() == version)
         });
         let (_, factory) = matches.next().ok_or_else(|| {
             topology(format!(

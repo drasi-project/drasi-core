@@ -261,7 +261,7 @@ impl ComponentStatusHandle {
         let mut current = self.update_tx.write().await;
         if current
             .as_ref()
-            .map_or(true, ComponentUpdateSender::is_closed)
+            .is_none_or(ComponentUpdateSender::is_closed)
         {
             *current = Some(update_tx.into());
         }

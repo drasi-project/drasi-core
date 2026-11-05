@@ -67,6 +67,13 @@ The ordinary wrapper has the distinct implementation name
 `drasi.experimental/indexed-query/ordinary`, because its authoring schema differs
 from the raw plugin factory's schema.
 
+`NativePlugin::register_factories` and
+`PluginRegistry::computation_factory_registry` include that supported authoring
+identity as well as the raw native factories. Saved specifications can therefore
+be reconstructed and inspected through the same registry. Registration alone
+does not select an ordinary-query default; the explicit instance/pipeline
+selection above is still required.
+
 `PluginRegistry::query_factory()` resolves one eligible loaded factory and rejects
 ambiguity. Server uses it before adding configured queries and for API-created
 queries on instances without a selected factory. No new YAML query-factory field

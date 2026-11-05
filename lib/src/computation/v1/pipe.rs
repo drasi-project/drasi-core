@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{ChangeEnvelope, ContractError, EnvelopeId, PipeCapabilities, PipeMetricsSnapshot};
+use super::{ChangeEnvelope, EnvelopeId, PipeCapabilities, PipeMetricsSnapshot};
 
 /// Enqueue acceptance ONLY. Not downstream handling, acknowledgement, checkpoint
 /// advancement, or durability (unless DurableAcceptance was explicitly negotiated).

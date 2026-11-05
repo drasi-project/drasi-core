@@ -269,7 +269,4 @@ impl RuntimeComponent for ReactionInstance {
     async fn deprovision(&self) -> anyhow::Result<()> {
         self.deprovision().await
     }
-    async fn status(&self) -> ComponentStatus {
-        self.reaction.status().await
-    }
 }

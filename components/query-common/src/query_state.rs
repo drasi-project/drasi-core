@@ -168,7 +168,7 @@ impl QueryOutputState {
             .map(|envelope| envelope.system().sequence());
         if after > self.sequence
             || (after < self.sequence
-                && oldest.map_or(true, |oldest| after < oldest.saturating_sub(1)))
+                && oldest.is_none_or(|oldest| after < oldest.saturating_sub(1)))
         {
             return Err(QueryHistoryError::Unavailable {
                 requested: after,

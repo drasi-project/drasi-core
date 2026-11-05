@@ -14,7 +14,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use async_trait::async_trait;
@@ -2926,7 +2925,9 @@ async fn binding_factory_waits_for_its_input_declaration() {
                 RelationshipPolicy::default(),
             )
             .await
-            .expect("declare the input");
+            .expect("declare the input")
+            .ensure_committed()
+            .expect("desired topology committed");
         let report = control
             .start_components(control.desired_snapshot().revision, GraphSelection::All)
             .await

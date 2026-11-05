@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-sink-storedproc-mysql"
 description = "Native MySQL stored-procedure delivery"
 readme = "README.md"

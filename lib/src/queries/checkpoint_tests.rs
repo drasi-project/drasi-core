@@ -38,7 +38,6 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
     use crate::channels::*;
     use crate::computation::v1::{
         query_reset_key, ComponentBatch, ComponentId, ComputationQueryLanguage,
@@ -2228,10 +2227,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 return Err(drasi_core::interface::IndexError::other(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "injected result sequence write failure",
-                    ),
+                    std::io::Error::other("injected result sequence write failure"),
                 ));
             }
             Ok(())
@@ -2289,10 +2285,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 return Err(drasi_core::interface::IndexError::other(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "injected clear_checkpoints failure",
-                    ),
+                    std::io::Error::other("injected clear_checkpoints failure"),
                 ));
             }
             self.inner.clear_checkpoints().await
@@ -2441,10 +2434,7 @@ mod tests {
         async fn clear(&self) -> Result<(), drasi_core::interface::IndexError> {
             if self.fail_clear.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(drasi_core::interface::IndexError::other(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "injected element index clear failure",
-                    ),
+                    std::io::Error::other("injected element index clear failure"),
                 ));
             }
             ElementIndex::clear(&*self.inner).await
@@ -2484,10 +2474,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 return Err(drasi_core::interface::IndexError::other(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "injected archive index clear failure",
-                    ),
+                    std::io::Error::other("injected archive index clear failure"),
                 ));
             }
             ElementArchiveIndex::clear(&*self.inner).await
@@ -3248,10 +3235,9 @@ mod tests {
 
 #[cfg(test)]
 mod orchestration_tests {
-    use bytes::Bytes;
+
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     use super::tests::MockPersistentPlugin;
     use crate::channels::*;
@@ -3352,11 +3338,6 @@ mod orchestration_tests {
             })
         }
 
-        /// Get a clone of the remaining failures counter.
-        fn remaining_failures_handle(&self) -> Arc<std::sync::atomic::AtomicU32> {
-            self.remaining_failures.clone()
-        }
-
         /// Get a clone of the subscribe counter for checking from outside after the source is moved.
         fn subscribe_count_handle(&self) -> Arc<std::sync::atomic::AtomicU32> {
             self.subscribe_count.clone()
@@ -3367,11 +3348,6 @@ mod orchestration_tests {
         fn set_fail_count(&self, count: u32) {
             self.remaining_failures
                 .store(count, std::sync::atomic::Ordering::Release);
-        }
-
-        fn subscribe_count(&self) -> u32 {
-            self.subscribe_count
-                .load(std::sync::atomic::Ordering::Acquire)
         }
     }
 

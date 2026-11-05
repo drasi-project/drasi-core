@@ -14,7 +14,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use async_trait::async_trait;
@@ -535,7 +534,9 @@ async fn component_batches_share_identity_and_preserve_existing_instance_members
     drasi
         .add_components(batch.auto_start(false))
         .await
-        .expect("register");
+        .expect("register")
+        .ensure_committed()
+        .expect("desired topology committed");
     drasi.start().await.expect("instance");
     assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
     let (duplicate, _, _) = components(Arc::new(Calls::default()));
@@ -573,7 +574,9 @@ async fn component_batches_share_identity_and_preserve_existing_instance_members
     control
         .reconcile(preview, TopologyBindings::default())
         .await
-        .unwrap();
+        .unwrap()
+        .ensure_committed()
+        .expect("desired topology committed");
     assert!(drasi.is_running().await);
     assert!(drasi.computation_component("native-source").is_err());
     assert_eq!(
@@ -612,7 +615,9 @@ async fn cancelled_shutdown_retains_the_driver_and_actual_async_cleanup_owner() 
     drasi
         .add_components(batch.auto_start(false))
         .await
-        .expect("register");
+        .expect("register")
+        .ensure_committed()
+        .expect("desired topology committed");
     let handle = drasi.computation_control().unwrap();
     handle
         .start_requested(
@@ -790,7 +795,12 @@ async fn rejected_registration_keeps_failed_cleanup_separate_from_the_live_graph
     let rejected = Arc::new(Calls::default());
     rejected.fail_dispose.store(true, Ordering::Release);
     let (original, _, _) = components(live.clone());
-    drasi.add_components(original).await.expect("original");
+    drasi
+        .add_components(original)
+        .await
+        .expect("original")
+        .ensure_committed()
+        .expect("desired topology committed");
     let (duplicate, _, _) = components(rejected.clone());
     let error = match drasi.add_components(duplicate).await {
         Ok(_) => panic!("duplicate registration succeeded"),

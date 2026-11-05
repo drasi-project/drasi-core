@@ -83,8 +83,8 @@ for profile in core-types shared-contracts default no-default-features extra-cap
             package=drasi-host-sdk
             inventory=/dev/null
             mappings=/dev/null
-            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
-            targets=(--lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
+            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs components/host-sdk/tests/native_scheduling.rs components/host-sdk/tests/native_view.rs components/host-sdk/tests/reconstruction_recipes.rs)
+            targets=(--lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission --test native_scheduling --test native_view --test reconstruction_recipes)
             test_arguments+=(--test-threads=1)
             ;;
         native-query)

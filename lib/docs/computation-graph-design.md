@@ -101,8 +101,10 @@ Exact API state names and transitions are in the
 
 ## Queries run independently
 
-A query added through DrasiLib is a `ContinuousQueryTransformer` in the
-instance's ComputationGraph. Its source readers, scheduled-work source and
+A query added through DrasiLib uses the explicitly registered query factory in
+the instance's ComputationGraph. The normal Host/Server implementation is the
+loadable native query plugin, using shared query logic and the existing Core
+evaluator. Its source readers, scheduled-work source and
 result outlet are components in that same graph, not a private query graph.
 
 The graph owns independently scheduled component tasks. Independent queries
@@ -190,9 +192,11 @@ Queries keep current result rows, source progress, output sequence numbers and
 recent output history. The recent history lets consumers recover missed results
 without always rebuilding from a full snapshot.
 
-Query factories construct `ContinuousQueryTransformer` directly. It invokes the
-same `QueryEvaluator` as the standalone query API; solving, change detection and
-aggregation are not reimplemented. With a storage provider that supports atomic query output, index changes,
+The selected query component invokes the same `QueryEvaluator` as the standalone
+query API; solving, change detection and aggregation are not reimplemented.
+The native plugin and explicit linked reference constructors share
+`drasi-query-common`; ordinary APIs never silently select the linked reference.
+With a storage provider that supports atomic query output, index changes,
 source checkpoints, output sequence, retained outputs and current rows commit
 together. Only committed results become visible. Unconfirmed output is replayed
 after restart without reevaluating the input. Query-result positions remain
@@ -204,11 +208,25 @@ work. The query transaction removes actual due work, reevaluates it using the
 existing logic and stages output atomically. Lost/duplicate hints cannot lose
 the stored work.
 
+Non-query native transformers can use the negotiated `scheduled_processing`
+service to request, replace, cancel, claim and complete delayed work in their
+existing transaction. Its committed deadline observations share the query
+wakeup policy. The standalone qualified profile requires actual atomic
+persistent RocksDB storage; it does not turn a memory/non-atomic component into
+a recoverable scheduler or establish exactly-once external delivery.
+
 The middleware transformer also has a durable mode. It saves previous elements,
 input progress and pending transformed output together, then uses durable output
 connections. After a restart it resends unconfirmed output instead of running
 stateful middleware twice. A persistent query rejects known memory-only
 middleware output; query storage cannot repair lost transformer state.
+
+The separate `drasi.standard/view` transformer maintains projected datasets
+from complete reconstructed inputs, retaining exact output associations for
+filter, child and key retractions. Its current profile is memory-backed with
+coherent output snapshots and volatile progress, not the durable middleware
+profile. Reconstruction starts empty; full initial input and lossless ordered
+delivery are required.
 
 Persistent indexes alone do not make query output durable. A reaction that saves
 progress needs both persistent reaction state and persistent output from its

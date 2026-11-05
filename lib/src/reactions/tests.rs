@@ -14,7 +14,6 @@
 
 #[cfg(test)]
 pub(crate) mod manager_tests {
-    use super::super::*;
     use crate::channels::*;
     use crate::test_helpers::managers::ReactionManager;
     use crate::test_helpers::wait_for_component_status;
@@ -23,20 +22,6 @@ pub(crate) mod manager_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::RwLock;
-
-    struct MockQueryProvider;
-
-    #[async_trait]
-    impl QueryProvider for MockQueryProvider {
-        async fn get_query_instance(
-            &self,
-            id: &str,
-        ) -> anyhow::Result<Arc<dyn crate::queries::Query>> {
-            Err(anyhow::anyhow!("No query '{id}' in test"))
-        }
-    }
-
     /// A simple test mock reaction for unit testing the ReactionManager.
     pub struct TestMockReaction {
         id: String,
@@ -309,7 +294,7 @@ pub(crate) mod manager_tests {
 
     #[tokio::test]
     async fn test_get_nonexistent_reaction_status() {
-        let (manager, graph) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let status = manager.get_reaction_status("nonexistent".to_string()).await;
         assert!(status.is_err());
@@ -832,7 +817,7 @@ pub(crate) mod manager_tests {
 
     #[tokio::test]
     async fn test_update_nonexistent_reaction() {
-        let (manager, graph) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let new_reaction = DeprovisionTestReaction::new_simple("nonexistent");
         let result = manager

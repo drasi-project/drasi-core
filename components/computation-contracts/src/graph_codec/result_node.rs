@@ -130,7 +130,7 @@ impl ResultNodeProjector {
 
     pub fn row_identity(&self, reference: &ElementReference) -> Result<Bytes, ResultNodeError> {
         let key = reference.element_id.as_bytes();
-        if reference.source_id != self.dataset || key.is_empty() || key.len() % 2 != 0 {
+        if reference.source_id != self.dataset || key.is_empty() || !key.len().is_multiple_of(2) {
             return Err(ResultNodeError::Identity);
         }
         let nibble = |byte| match byte {

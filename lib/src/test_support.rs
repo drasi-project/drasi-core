@@ -277,11 +277,11 @@ impl PublicationObserver for FailureObserver {
             return;
         };
         let (query, generation) = &self.component;
-        if !current
+        if current
             .observed
             .components
             .get(query)
-            .is_some_and(|node| node.generation == *generation)
+            .is_none_or(|node| node.generation != *generation)
         {
             return;
         }

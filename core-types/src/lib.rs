@@ -4,8 +4,6 @@
 //! Shared graph elements, result values and failure-survival descriptions.
 //! There is no query evaluator, language parser, storage backend or runtime here.
 
-extern crate alloc;
-
 pub mod data_value;
 pub mod evaluation;
 pub mod interface;

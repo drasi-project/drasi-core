@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-source-sqlite"
 description = "Native SQLite source with bounded SQL and source-owned transaction replay"
 readme = "README.md"

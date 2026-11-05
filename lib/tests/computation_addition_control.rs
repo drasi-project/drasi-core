@@ -1080,7 +1080,9 @@ async fn connecting_deferred_components_does_not_start_them_before_explicit_acti
                 RelationshipPolicy::default(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .ensure_committed()
+            .expect("desired topology committed");
         assert!(!source.observed().unwrap().started);
         assert!(!sink.observed().unwrap().started);
         assert_eq!(

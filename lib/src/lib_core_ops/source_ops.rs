@@ -29,6 +29,7 @@ use crate::schema::{GraphSchema, SourceSchema};
 use crate::sources::Source;
 
 impl DrasiLib {
+    #[cfg(test)]
     pub(crate) async fn source_instance(
         &self,
         id: &str,
@@ -79,6 +80,32 @@ impl DrasiLib {
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.add_source_with_metadata_and_handle(source, HashMap::new())
             .await
+    }
+
+    /// Declare a native factory-built source in the instance's computation graph.
+    ///
+    /// Use [`crate::computation::v1::ComponentAddition::from_specification`] to
+    /// supply a factory, or `ComponentAddition::declaration` when it will be
+    /// registered later. The addition carries its output streams, dependencies
+    /// and auto-start policy. Its semantic kind must be `Source` (the default
+    /// for the native source role).
+    ///
+    /// Construction happens only after the graph owns the declaration. Missing
+    /// factories/resources remain dependency waits; configuration, secret
+    /// resolution and constructor failures remain inspectable on the node.
+    /// Success acknowledges declaration, not readiness. Use the returned handle
+    /// to await creation, and [`Self::start_source`] to retry failed creation.
+    /// This does not construct legacy [`Source`] objects from native recipes;
+    /// the existing object-based [`Self::add_source`] is unchanged.
+    pub async fn add_source_from_factory(
+        &self,
+        addition: crate::computation::v1::ComponentAddition,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.add_factory_component(
+            addition,
+            crate::computation::v1::ComponentSemanticKind::Source,
+        )
+        .await
     }
 
     async fn add_source_with_metadata_and_handle(

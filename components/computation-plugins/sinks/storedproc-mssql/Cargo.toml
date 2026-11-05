@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-sink-storedproc-mssql"
 description = "Native awaited SQL Server stored-procedure sink"
 readme = "README.md"

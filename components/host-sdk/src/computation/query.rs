@@ -176,6 +176,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registered_plugins_restore_native_query_authoring_recipes() -> anyhow::Result<()> {
+        let plugin = NativePlugin::from_definition(drasi_computation_transformer_query::plugin()?)?;
+        let authoring = plugin.query_factory()?;
+        let specification = authoring.specification_from_config(
+            ComponentId::try_new("restored-query")?,
+            serde_json::json!({
+                "query": "MATCH (n:Item) RETURN n.value AS value",
+                "execution": {"inputs": ["inventory"]}
+            }),
+        )?;
+        let mut plugins = crate::PluginRegistry::new();
+        plugins.register_computation_plugin(plugin.clone())?;
+        let registry = plugins.computation_factory_registry()?;
+        let registered = registry
+            .get(&specification.implementation)
+            .ok_or_else(|| anyhow::anyhow!("native query recipe factory is not registered"))?;
+        assert!(Arc::ptr_eq(registered, &authoring));
+        drop(authoring);
+        drop(plugins);
+        drop(plugin);
+
+        let restored: ComponentSpecification =
+            serde_json::from_value(serde_json::to_value(specification)?)?;
+        let configuration = registered
+            .query_authoring()
+            .ok_or_else(|| {
+                anyhow::anyhow!("registered query recipe lost its authoring capability")
+            })?
+            .query_configuration(&restored, "restored-graph")?;
+        assert_eq!(configuration.id, "restored-query");
+        assert_eq!(
+            configuration.query,
+            "MATCH (n:Item) RETURN n.value AS value"
+        );
+        assert_eq!(configuration.inputs[0].component, "inventory");
+        Ok(())
+    }
+
+    #[test]
     fn query_selection_is_explicit_unambiguous_and_reuses_the_registered_factory(
     ) -> anyhow::Result<()> {
         let plugin = NativePlugin::from_definition(drasi_computation_transformer_query::plugin()?)?;

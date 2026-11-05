@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::computation::v1::{
-    BootstrapWatermark, ChangeEnvelope, ComponentRole, ComputationBootstrapSnapshot,
-    InputPositionComparator, InputPositionPolicy, QueryOutputMetadata,
+    BootstrapWatermark, ChangeEnvelope, ComputationBootstrapSnapshot, InputPositionComparator,
+    InputPositionPolicy, QueryOutputMetadata,
 };
 use drasi_computation_contracts::exchange::{SourceEvent, SourceEventWrapper};
 use drasi_core::{

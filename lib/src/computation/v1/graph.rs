@@ -53,11 +53,11 @@ pub use topology::*;
 use super::{
     data::{validate_identifier, validate_schema},
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentGeneration,
-    ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender,
-    EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy,
-    ObservedGraph, OutputEnvelope, OutputProgress, PipeCapabilities, PipeCapability, PipeControl,
-    PipeError, PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    RelationshipPolicy, ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
+    ComponentId, ContractError, Delivery, EnvelopeReceiver, EnvelopeSender, EnvelopeSink,
+    EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy, ObservedGraph,
+    OutputEnvelope, OutputProgress, PipeCapabilities, PipeCapability, PipeControl, PipeError,
+    PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy,
+    ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
 };
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;

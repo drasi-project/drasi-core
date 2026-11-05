@@ -54,7 +54,7 @@ async fn native_query_stop_preserves_an_unrelated_inflight_stop() -> anyhow::Res
             .source(core.borrow_computation_source("input").await?, SourceSubscriptionOptions::default())?
             .query(Query::cypher("query").query("MATCH (n) RETURN n")
                 .from_input("input").enable_bootstrap(false).build()).build()?;
-        core.add_components(batch).await?;
+        core.add_components(batch).await?.ensure_committed().expect("desired topology committed");
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let other = core.add_computation_component(ComponentAddition::new(ConstructedComponent::service(Box::new(BlockingStop {
@@ -211,7 +211,10 @@ async fn native_query_stop_cancels_its_pending_start() -> anyhow::Result<()> {
                 Box::new(BoundedPipeConfig { capacity: 2 }),
             )
             .build()?;
-        core.add_components(batch).await?;
+        core.add_components(batch)
+            .await?
+            .ensure_committed()
+            .expect("desired topology committed");
         core.start().await?;
         let mut starting = Box::pin(core.start_query("pending"));
         tokio::select! {
@@ -359,7 +362,10 @@ async fn preconstructed_native_query_exposes_its_existing_results_without_a_cata
                 Box::new(BoundedPipeConfig { capacity: 2 }),
             )
             .build()?;
-        core.add_components(batch).await?;
+        core.add_components(batch)
+            .await?
+            .ensure_committed()
+            .expect("desired topology committed");
         assert_eq!(
             core.list_queries().await?,
             vec![("direct".into(), ComponentStatus::Added)]
@@ -637,7 +643,10 @@ async fn manual_native_query_lifecycle_controls_its_helpers_without_stopping_sib
                 )?
                 .query(query)
                 .build()?;
-            core.add_components(batch).await?;
+            core.add_components(batch)
+                .await?
+                .ensure_committed()
+                .expect("desired topology committed");
         }
         core.start().await?;
         assert_eq!(
@@ -751,7 +760,10 @@ async fn native_query_handles_and_subscriptions_cannot_observe_replacement_insta
             )?
             .query(config)
             .build()?;
-        core.add_components(batch).await?;
+        core.add_components(batch)
+            .await?
+            .ensure_committed()
+            .expect("desired topology committed");
         core.start().await?;
         let old = core
             .query_manager()
@@ -786,7 +798,9 @@ async fn native_query_handles_and_subscriptions_cannot_observe_replacement_insta
             .await?;
         control
             .reconcile(preview, TopologyBindings::default())
-            .await?;
+            .await?
+            .ensure_committed()
+            .expect("desired topology committed");
         let new = core
             .query_manager()
             .get_query_instance("items")

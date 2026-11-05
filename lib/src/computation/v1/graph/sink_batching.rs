@@ -221,7 +221,7 @@ impl SinkBatchState {
             let is_new = |index: usize| {
                 prepared
                     .as_ref()
-                    .map_or(true, |inputs| !inputs[index].duplicate)
+                    .is_none_or(|inputs| !inputs[index].duplicate)
             };
             if use_batch {
                 let batch: Vec<_> = self
@@ -335,7 +335,7 @@ pub(super) async fn run(
     retained: &mut Option<Box<SinkBatchState>>,
     input_progress: &mut Option<Box<input_progress::InputProgress>>,
 ) -> GraphResult<()> {
-    if inputs.is_empty() && retained.as_ref().map_or(true, |state| state.is_empty()) {
+    if inputs.is_empty() && retained.as_ref().is_none_or(|state| state.is_empty()) {
         cancelled(quiesce).await;
         return Ok(());
     }

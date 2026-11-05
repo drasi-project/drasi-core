@@ -61,7 +61,6 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -487,6 +486,7 @@ impl ComponentLogRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     fn make_key(instance: &str, component_type: ComponentType, component: &str) -> ComponentLogKey {
         ComponentLogKey::new(instance, component_type, component)
     }

@@ -341,6 +341,32 @@ not load library paths from stored definitions.
 `management::HostManagementResources` provides standard resource recipes for
 memory indexes, query-result catalogs, source progress, middleware, transactional
 factories and configuration references.
+It also resolves `sourceTimeMergeStorage`: a version-pinned, graph-owned
+`SourceTimeMergeStorage` for one merger with exactly one declared `IndexBackend`
+dependency. Bind that resource to the `drasi/source-time-merge` factory's
+`storage` slot. The owner derives its scope from the constructing instance and
+graph, retains acquired transactions through failed/cancelled construction, and
+awaits cleanup before releasing them. It requires an independent persistent
+atomic provider, not a volatile provider or another producer's shared
+transaction. See [source-time recipes](../../lib/docs/computation-graph-time-merge.md#factory-owned-construction).
+
+Hosts can register a provider with
+`with_versioned_index_provider(name, implementation, configuration_version, provider)`.
+An `indexes` recipe then pins the same `implementation` and
+`configurationVersion` alongside `provider`. The identity comes from the
+embedding application's actual registration; it is never inferred from a Rust
+type, database path or provider name. Both identity fields are required together,
+and mismatches remain resource-construction failures. The older
+`with_index_provider` and unversioned recipes remain supported, but cannot satisfy
+a version-pinned recipe.
+
+Use `GraphConfigurationSnapshot::reconstructible_topology()` to extract a
+factory-only definition with explicit resource recipes. Captured object
+properties are inspection data, not an automatic reconstruction contract, and
+resolved secret values are never substituted into exported references. Restoring
+configuration selects the same declared resource scope; it does not restore an
+earlier processing position.
+
 The `{"kind":"sourceProgress","component":"query"}` recipe creates a checkpoint
 resource for the named consumer in the current graph. Bind that same resource ID
 to the consumer and its replayable source using `source_progress`. The consumer
@@ -361,6 +387,24 @@ across multiple instance IDs, and register the required factories on each
 restart. Missing factories remain visible as failed declarations, not silently
 removed components. See [managed configuration](../../lib/docs/managed-configuration.md)
 for acceptance, reconstruction, snapshots and mutation-boundary contracts.
+
+The ordinary `DrasiLib` facade also accepts native factory additions through
+`add_source_from_factory(addition)` and `add_reaction_from_factory(addition)`.
+Use `ComponentAddition::from_specification(specification, factory)` to supply
+the implementation, or `ComponentAddition::declaration(specification)` followed
+by `register_component_factory(factory)` when the implementation arrives later.
+Declare output streams and connections explicitly. Sources use the native
+`Source` role or an explicitly source-labelled service; reactions must declare
+`ComponentSemanticKind::Reaction` on a sink or service descriptor.
+
+The returned handle acknowledges declaration, not readiness. A failed source
+constructor can leave its reaction waiting for the input connection; retry the
+source before awaiting that reaction's creation. Ordinary `start_source` and
+`start_reaction` retry failed unmanaged construction through the same graph.
+For managed definitions, use `reconcile_desired_state`. Imperative additions
+are not automatically adopted by a configuration store. Existing `add_source`
+and `add_reaction` continue to accept legacy trait objects; native recipes do
+not introduce legacy-producing factory constructors.
 
 ## Native fast-path measurement
 
@@ -473,7 +517,7 @@ Host unit tests also load a separately built, test-only SQLite replay plugin.
 Set `DRASI_NATIVE_RECOVERY_PLUGIN` to select an explicit fixture path.
 
 The independent `computation` module loads native graph factories without changing
-the legacy ABI 0.15:
+the independent legacy ABI (0.17, with supported 0.16 compatibility):
 
 ```rust,ignore
 use drasi_host_sdk::computation;
@@ -497,6 +541,14 @@ capabilities. Do not fall back to legacy registration after such an error.
 `load` requires this native family. Native libraries are pinned for process
 lifetime, including identified candidates whose initialization fails; hot
 unloading is unsupported.
+
+Registration also includes supported native query-authoring recipe identities,
+so exported query specifications reconstruct through the same factory registry.
+It does not choose an ordinary-query default. For ordinary builder/API queries,
+explicitly pass `plugin.query_factory()?` to `with_query_factory`, or register
+that selection with `register_query_factory`. Missing or ambiguous selection is
+an error, never a linked-reference fallback. See the
+[query plugin guide](../computation-plugins/transformers/query/README.md).
 
 Native ABI 1.0 uses wire version 1: bounded MessagePack and bulk binary envelope
 buffers. Build native libraries and the host from matching sources; unknown

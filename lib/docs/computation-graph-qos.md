@@ -669,8 +669,10 @@ or an ingestion API that returns the pipe's actual durable acceptance.
 
 ## Query and timer handoff
 
-Query factories construct `ContinuousQueryTransformer` components using the
-shared core evaluator and transaction owner. Persistent output records are
+The explicitly registered query factory constructs a graph-owned query
+component. The native plugin and linked reference reuse the existing Core
+evaluator and shared query implementation; actual storage resources retain
+transaction ownership. Persistent output records are
 retained until forwarding is confirmed, then remain available within the query's
 ordinary replay window.
 The query retains its result snapshot and logical result sequence; a replay gets
@@ -690,6 +692,12 @@ schedule observations to it. A due notification never removes work; the query
 transaction atomically pops the due item, uses the existing reevaluation logic
 and records its output. Schedule insertion, replacement and cancellation use
 the same transaction as the query state that caused them.
+
+The native non-query `scheduled_processing` service uses the same committed
+wakeup policy and actual processing transaction for requests and completion.
+Its standalone RocksDB profile is qualified independently of the mixed
+query/non-query application. Neither scheduled completion nor retained output
+is proof of exactly-once external effects.
 
 The query processing identity includes the current execution-format version.
 Earlier ComputationGraph processing formats are not migrated. Use a fresh

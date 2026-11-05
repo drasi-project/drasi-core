@@ -24,7 +24,6 @@ use drasi_core::{
     interface::{CreatedIndexes, IndexBackendPlugin, IndexError},
     middleware::MiddlewareTypeRegistry,
 };
-use drasi_query_common::QueryExecutionSettingsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,

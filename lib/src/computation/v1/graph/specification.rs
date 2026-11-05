@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use super::{Component, ComponentRole, EdgeDefinition, Endpoint, GraphError, GraphResult};
 use crate::computation::v1::{
     data::validate_identifier, ComponentDescriptor, ComponentGeneration, ComponentId, EnvelopeSink,
-    EnvelopeSource, FailureDisposition, OutputEndpoint, PortId, ResourceId, SinkCompletion,
-    StreamId, Transformer,
+    EnvelopeSource, FailureDisposition, OutputEndpoint, ResourceId, SinkCompletion, StreamId,
+    Transformer,
 };
 
 pub use drasi_computation_contracts::{

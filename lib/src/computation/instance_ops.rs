@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::v1::{ComponentBatch, ComputationInfo, GraphSelection, ReconciliationReport};
+use super::v1::{ComponentBatch, ComputationInfo, ReconciliationReport};
 use crate::{DrasiError, DrasiLib, Result};
 
-/// Complete user configuration, excluding generated ordinary-query infrastructure.
+/// Descriptive user configuration, excluding generated ordinary-query infrastructure.
 /// The existing source/query/reaction representation is retained under `instance`.
+/// Captured object properties do not imply reconstructibility. Native factory
+/// definitions and resource recipes can be checked and exported separately with
+/// [`super::v1::GraphConfigurationSnapshot::reconstructible_topology`].
 /// Configurations may contain secrets and must be stored as privileged data.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,13 +203,14 @@ impl DrasiLib {
             })
     }
 
-    /// Add a preconstructed native component using the same node-first
+    /// Add an owned component or factory declaration using the same node-first
     /// controller used by ordinary source, query and reaction additions.
     pub async fn add_computation_component(
         &self,
         mut addition: super::v1::ComponentAddition,
     ) -> Result<super::v1::ComponentHandle> {
         let control = self.computation_control()?;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         let id = addition.definition.descriptor.id().clone();
         if !self.is_running().await {
             addition.bindings.defer_activation = true;
@@ -220,6 +224,50 @@ impl DrasiLib {
             .await
             .map_err(DrasiError::from)?;
         Ok(handle)
+    }
+
+    pub(crate) async fn add_factory_component(
+        &self,
+        addition: super::v1::ComponentAddition,
+        kind: super::v1::ComponentSemanticKind,
+    ) -> Result<super::v1::ComponentHandle> {
+        use super::v1::{ComponentConstruction, ComponentRole, ComponentSemanticKind};
+
+        let definition = &addition.definition;
+        let actual = definition
+            .descriptor
+            .semantic_kind()
+            .unwrap_or_else(|| definition.role.into());
+        let role_matches = matches!(
+            (kind, definition.role),
+            (
+                ComponentSemanticKind::Source,
+                ComponentRole::Source | ComponentRole::Service
+            ) | (
+                ComponentSemanticKind::Reaction,
+                ComponentRole::Sink | ComponentRole::Service
+            )
+        );
+        if actual != kind
+            || !role_matches
+            || !matches!(definition.construction, ComponentConstruction::Factory(_))
+        {
+            let error = DrasiError::invalid_config(format!(
+                "expected a {kind:?} factory declaration with a compatible execution role"
+            ));
+            let mut definition = crate::management::DesiredInstance::default().topology;
+            definition.components.push(addition.definition);
+            definition.resources = addition.resources;
+            let pending = self.instance_graph.retain(
+                ComponentBatch {
+                    definition,
+                    bindings: addition.bindings,
+                },
+                self.computation_control().ok(),
+            );
+            return Err(super::instance::reject_components(pending, error).await);
+        }
+        self.add_computation_component(addition).await
     }
 
     pub async fn add_transformer_with_handle(
@@ -301,7 +349,9 @@ impl DrasiLib {
     }
 
     pub fn query_factory_implementation(&self) -> Option<super::v1::ImplementationIdentity> {
-        self.computation_runtime.query_factory().map(|factory| factory.descriptor().implementation.clone())
+        self.computation_runtime
+            .query_factory()
+            .map(|factory| factory.descriptor().implementation.clone())
     }
 
     pub fn computation_pipeline(&self) -> Result<super::v1::ComputationPipelineBuilder> {

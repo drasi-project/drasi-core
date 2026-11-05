@@ -1,6 +1,6 @@
-# Counter, middleware, capture and arithmetic components
+# Counter, middleware, view, capture and arithmetic components
 
-These four [independent component crates](README.md) supply real graph components through native ABI
+These five [independent component crates](README.md) supply real graph components through native ABI
 **1.0.0**, independently of the Source/Reaction/Bootstrap ABI **0.17.0**
 (with 0.16 fast-mode compatibility).
 The package uses the workspace version; that version is not its ABI version.
@@ -11,6 +11,7 @@ are `"1"` and configuration versions are `1`.
 |---|---|---|
 | `drasi.standard/volatile-counter` | `EnvelopeSource` | `stream` required; `count=10`, `start=0`, `step=1`, `interval_ms=0`, `paused=false` |
 | `drasi.standard/middleware` | `Transformer` | Required `stream`, `middleware`, `pipeline`; supports existing `map` and `relabel` middleware |
+| `drasi.standard/view` | `Transformer` | Required `stream`, `middleware`, `pipeline`; maintains complete map/relabel projections and recorded output associations |
 | `drasi.standard/capture` | `EnvelopeSink` | `path` required; `append=false` |
 | `drasi.standard/arithmetic` | `Transformer`, optional transaction participant | `stream` required; `field="value"`, `add=0`, `multiply=1`, `counter_property="batch_count"` |
 
@@ -63,6 +64,13 @@ Reaction wrapper. For example:
 The selected middleware implementations are stateless. The surrounding transformer
 owns volatile sequencing/element bookkeeping and marks its producer identity as
 nonpersistent. No jq feature or bundled jq build is required.
+
+Choose the separate [view transformer](transformers/view/README.md) when the
+output must remain a projection of the current input dataset. It reconstructs
+patches, retracts filtered/removed children and replaces changed output keys.
+Its coherent snapshots and producer epoch are volatile; stop/start of the same
+object retains them, while reconstruction starts empty. It is not a durable,
+transactional, replay-capable or input-deduplicating middleware mode.
 
 The capture sink writes one complete `EnvelopeCodec` JSON frame per line to its
 configured file. `append=false` truncates on start; `append=true` preserves prior

@@ -13,18 +13,16 @@
 // limitations under the License.
 
 use super::super::{
-    recovery, resolve, validate_unbound_relationship, ComponentConstruction,
-    ComponentSpecification, ConstructedComponent, DesiredComponent, DesiredPipe,
-    DesiredRelationship, DesiredTopology, EdgeDefinition, EdgeSnapshot, Endpoint, FlowProgress,
+    recovery, resolve, validate_unbound_relationship, ComponentConstruction, DesiredComponent,
+    DesiredPipe, DesiredRelationship, DesiredTopology, EdgeDefinition, EdgeSnapshot,
     ImplementationIdentity, ResourceHandle, ResourceSpecification, TopologyBindings,
 };
 use super::*;
 use crate::computation::v1::{
-    validate_connection, validate_sink_completion, ComponentDescriptor, ComponentFactory,
-    ComponentRole, ConfigurationValue, PipeCapabilities, PipeCapability, PipeProvider,
-    PipeRequirements, PortDirection, RemovalPolicy, ResourceConstructor, ResourceId, ResourceRole,
+    ComponentFactory, ComponentRole, PipeProvider, PortDirection, RemovalPolicy,
+    ResourceConstructor, ResourceId, ResourceRole,
 };
-use std::{future::Future, num::NonZeroUsize};
+use std::future::Future;
 
 #[cfg(test)]
 #[path = "reconcile_commit_tests.rs"]
@@ -941,7 +939,7 @@ pub(super) fn preview(
     for (edge, description) in &new_edges {
         let rebound = old_edges
             .get(edge)
-            .map_or(true, |old| old.pipe != description.pipe);
+            .is_none_or(|old| old.pipe != description.pipe);
         let resource_changed = graph
             .snapshot
             .edges
@@ -2173,6 +2171,7 @@ async fn pause_reconciliation(
     result
 }
 
+#[cfg(test)]
 pub(super) async fn quiesce(
     graph: &ComputationGraph,
     operations: &mut Operations,
@@ -2244,6 +2243,7 @@ pub(super) async fn quiesce(
     Ok(ids.into_iter().collect())
 }
 
+#[cfg(test)]
 async fn pause(
     graph: &ComputationGraph,
     operations: &mut Operations,

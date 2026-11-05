@@ -1,6 +1,11 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![allow(
+    dead_code,
+    reason = "Shared semantic cases are selected by independent test binaries"
+)]
+
 use anyhow::{Context, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,

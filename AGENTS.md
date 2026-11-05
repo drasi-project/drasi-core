@@ -33,6 +33,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 - In .github/workflows, *.lock.yml files are COMPILED OUTPUT of the sibling .md gh-aw workflow sources - never edit a .lock.yml; edit the .md and run `gh aw compile` (procedure: .github/workflows/readme.md)
 
 ## Build prerequisites
+- Rust 1.95.0 is the supported compiler floor and the pinned development toolchain. Workspace members inherit `rust-version.workspace = true`; Clippy uses that manifest policy rather than a separate MSRV.
 - Plain `cargo build`/`cargo test` need no libjq (the jq middleware feature is opt-in), but `make clippy` enables it - install system libjq with `JQ_LIB_DIR` set (setup: docs/contributing/); some plugin builds need protobuf-compiler and cmake; optional fmt pre-commit hook: `git config core.hooksPath .githooks`
 
 ## Query stack (crates at repo root, no directory of their own)

@@ -16,7 +16,7 @@ use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
     stream::FuturesUnordered,
     task::AtomicWaker,
-    FutureExt, StreamExt,
+    StreamExt,
 };
 
 use super::{

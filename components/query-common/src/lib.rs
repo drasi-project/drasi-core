@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![deny(unused)]
+
 //! Existing query-component behavior shared by linked and native hosting adapters.
 
 mod configuration;

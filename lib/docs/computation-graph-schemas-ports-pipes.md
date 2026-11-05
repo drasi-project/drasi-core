@@ -5,8 +5,8 @@
 [QoS and durable handoffs](computation-graph-qos.md) |
 [Transactions](computation-graph-transactions.md)
 
-This describes the current branch implementation, reviewed against `e46f6130`
-on 2026-10-09. Suggested improvements below are **not implemented features**.
+This describes the current implementation. Suggested improvements are labeled
+separately and are **not implemented features**.
 
 Read sections 1-2 for the overview, 3-4 for data and connection rules,
 [5 for pipe choices](#5-the-five-pipe-families), and 6-8 for execution and limits.

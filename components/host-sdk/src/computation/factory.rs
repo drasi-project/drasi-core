@@ -603,14 +603,38 @@ impl NativeFactory {
         owner: Option<Arc<QuerySourceProgress>>,
         publication: drasi_lib::computation::v1::QueryPublicationMode,
     ) -> anyhow::Result<NativeComponentProxy> {
+        let resource = super::NativeProcessingResource::new(provider).with_publication(publication);
+        self.create_processing_component(id, configuration, scope, &resource, owner)
+    }
+
+    /// Construct with the same processing resource used by graph factory wiring,
+    /// including an explicitly supplied scheduled-processing physical clock.
+    pub fn create_component_with_processing_resource(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        resource: &super::NativeProcessingResource,
+    ) -> anyhow::Result<NativeComponentProxy> {
+        self.create_processing_component(id, configuration, scope, resource, None)
+    }
+
+    fn create_processing_component(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+        scope: Scope,
+        resource: &super::NativeProcessingResource,
+        owner: Option<Arc<QuerySourceProgress>>,
+    ) -> anyhow::Result<NativeComponentProxy> {
         let processing = super::processing::ProcessingBinding::new(
-            provider,
+            resource.provider().clone(),
             scope.graph_id.clone(),
             id.to_string(),
         )
         .with_volatile_processing(self.metadata.capabilities.volatile_processing)
         .with_publication(
-            publication,
+            resource.publication(),
             self.metadata.capabilities.non_atomic_publication,
         )?
         .with_committed_input_progress_owner(
@@ -620,6 +644,10 @@ impl NativeFactory {
         .with_durable_output(
             self.metadata.capabilities.durable_output,
             self.codec.clone(),
+        )?
+        .with_scheduling(
+            self.metadata.capabilities.scheduled_processing,
+            resource.scheduling_clock(),
         )?;
         self.construct_bound_with_identity(
             CreateRequest {
@@ -1025,16 +1053,17 @@ impl NativeFactory {
                         && !consumer,
                     "native indexed processing cannot use conflicting services"
                 );
-                take_status(self
-                    .processing
-                    .expect("validated")
-                    .create
-                    .expect("validated")(
-                    self.raw.state,
-                    abi::BorrowedBytes::new(&bytes),
-                    &processing.table(),
-                    &mut component,
-                ))?;
+                take_status(processing.with_table(|table| {
+                    self.processing
+                        .expect("validated")
+                        .create
+                        .expect("validated")(
+                        self.raw.state,
+                        abi::BorrowedBytes::new(&bytes),
+                        table,
+                        &mut component,
+                    )
+                }))?;
             } else if let Some(coordinator) = &source_bootstrap {
                 anyhow::ensure!(
                     admission.is_none() && !consumer && output_snapshots.is_none(),
@@ -1513,6 +1542,12 @@ impl ComponentFactory for NativeFactory {
                     processing.with_durable_output(
                         self.metadata.capabilities.durable_output,
                         self.codec.clone(),
+                    )
+                })
+                .and_then(|processing| {
+                    processing.with_scheduling(
+                        self.metadata.capabilities.scheduled_processing,
+                        resource.scheduling_clock(),
                     )
                 })
                 .map_err(ComponentCreationError::terminal)?,

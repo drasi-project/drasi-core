@@ -203,15 +203,6 @@ impl DrasiLib {
     // Construction and Initialization
     // ============================================================================
 
-    /// Create an Arc-wrapped reference to self
-    ///
-    /// Since DrasiLib contains all Arc-wrapped fields, cloning is cheap
-    /// (just increments ref counts), but this helper makes the intent clearer
-    /// and provides a single place to document this pattern.
-    pub(crate) fn to_arc(&self) -> Arc<Self> {
-        Arc::new(self.clone())
-    }
-
     /// Subscribe to all component events (status changes, additions, removals).
     ///
     /// Returns a broadcast receiver that gets a copy of every `ComponentEvent` across
@@ -223,6 +214,7 @@ impl DrasiLib {
 
     /// Internal constructor - creates uninitialized server
     /// Use `builder()` instead
+    #[cfg(test)]
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
         Self::new_with_wal(config, None)
     }
@@ -237,6 +229,10 @@ impl DrasiLib {
     /// Standard middleware factories enabled by this build, for host-owned
     /// reconstructible resource recipes as well as ordinary instance components.
     pub fn default_middleware_registry() -> Arc<MiddlewareTypeRegistry> {
+        #[allow(
+            unused_mut,
+            reason = "Optional middleware features populate this registry"
+        )]
         let mut middleware_registry = MiddlewareTypeRegistry::new();
 
         #[cfg(any(
@@ -272,6 +268,7 @@ impl DrasiLib {
         Arc::new(middleware_registry)
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_middleware(
         config: Arc<RuntimeConfig>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
@@ -1045,54 +1042,27 @@ mod tests {
 
         let registry = core.middleware_registry();
 
-        // Verify that middleware factories are registered when their features are enabled
-        #[cfg(feature = "middleware-jq")]
-        assert!(
-            registry.get("jq").is_some(),
-            "JQ factory should be registered"
-        );
-        #[cfg(feature = "middleware-map")]
-        assert!(
-            registry.get("map").is_some(),
-            "Map factory should be registered"
-        );
-        #[cfg(feature = "middleware-unwind")]
-        assert!(
-            registry.get("unwind").is_some(),
-            "Unwind factory should be registered"
-        );
-        #[cfg(feature = "middleware-relabel")]
-        assert!(
-            registry.get("relabel").is_some(),
-            "Relabel factory should be registered"
-        );
-        #[cfg(feature = "middleware-decoder")]
-        assert!(
-            registry.get("decoder").is_some(),
-            "Decoder factory should be registered"
-        );
-        #[cfg(feature = "middleware-parse-json")]
-        assert!(
-            registry.get("parse_json").is_some(),
-            "ParseJson factory should be registered"
-        );
-        #[cfg(feature = "middleware-promote")]
-        assert!(
-            registry.get("promote").is_some(),
-            "Promote factory should be registered"
-        );
-        #[cfg(feature = "middleware-all")]
-        for kind in ["jq", "map", "unwind", "relabel", "decoder", "parse_json", "promote"] {
-            assert!(
+        for (kind, enabled) in [
+            (
+                "jq",
+                cfg!(any(
+                    feature = "middleware-jq",
+                    feature = "middleware-bundled-jq"
+                )),
+            ),
+            ("map", cfg!(feature = "middleware-map")),
+            ("unwind", cfg!(feature = "middleware-unwind")),
+            ("relabel", cfg!(feature = "middleware-relabel")),
+            ("decoder", cfg!(feature = "middleware-decoder")),
+            ("parse_json", cfg!(feature = "middleware-parse-json")),
+            ("promote", cfg!(feature = "middleware-promote")),
+        ] {
+            assert_eq!(
                 registry.get(kind).is_some(),
-                "middleware-all omitted {kind}"
+                enabled || cfg!(feature = "middleware-all"),
+                "middleware availability for {kind}"
             );
         }
-        #[cfg(feature = "middleware-bundled-jq")]
-        assert!(
-            registry.get("jq").is_some(),
-            "bundled JQ factory should be registered"
-        );
     }
 
     #[tokio::test]
@@ -1102,28 +1072,7 @@ mod tests {
         let registry1 = core.middleware_registry();
         let registry2 = core.middleware_registry();
 
-        // Both Arc instances should point to the same underlying registry
-        // We can't directly test Arc equality, but we can verify both work
-        // Test with any available middleware feature
-        #[cfg(feature = "middleware-jq")]
-        {
-            assert!(registry1.get("jq").is_some());
-            assert!(registry2.get("jq").is_some());
-        }
-        #[cfg(all(feature = "middleware-map", not(feature = "middleware-jq")))]
-        {
-            assert!(registry1.get("map").is_some());
-            assert!(registry2.get("map").is_some());
-        }
-        #[cfg(all(
-            feature = "middleware-decoder",
-            not(feature = "middleware-jq"),
-            not(feature = "middleware-map")
-        ))]
-        {
-            assert!(registry1.get("decoder").is_some());
-            assert!(registry2.get("decoder").is_some());
-        }
+        assert!(Arc::ptr_eq(&registry1, &registry2));
     }
 
     #[tokio::test]
@@ -1344,10 +1293,10 @@ mod tests {
     mod snapshot_tests {
         use super::*;
         use crate::builder::Query;
-        use crate::component_graph::ComponentKind;
+
         use crate::config::snapshot::ConfigurationSnapshot;
         use crate::reactions::Reaction;
-        use crate::sources::tests::{create_test_mock_source, TestMockSource};
+        use crate::sources::tests::TestMockSource;
         use async_trait::async_trait;
         use std::collections::HashMap;
 

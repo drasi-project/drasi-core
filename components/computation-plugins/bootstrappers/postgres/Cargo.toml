@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-bootstrap-postgres"
 description = "Native coordinated PostgreSQL snapshot and WAL handover provider"
 readme = "README.md"

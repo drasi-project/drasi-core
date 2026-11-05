@@ -1212,7 +1212,7 @@ async fn component_handle(core: &DrasiLib, id: &str, kind: &'static str) -> Comp
         .unwrap()
 }
 
-async fn assert_creation_failed(core: &DrasiLib, handle: &ComponentHandle, message: &str) {
+async fn assert_creation_failed(_core: &DrasiLib, handle: &ComponentHandle, message: &str) {
     tokio::time::timeout(Duration::from_secs(3), handle.wait_created())
         .await
         .expect("creation must complete with a failure")
@@ -4072,7 +4072,7 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
             status: ComponentStatus::Error
         })
     ));
-    let runtime = core.computation_runtime.as_ref();
+    let _runtime = core.computation_runtime.as_ref();
     let handle = core.computation_component("query").unwrap();
     let first = handle.observed().unwrap();
     assert!(format!("{:#}", first.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));

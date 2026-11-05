@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-sqlite-common"
 description = "Shared SQLite schema and native graph identity mapping"
 version.workspace = true

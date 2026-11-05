@@ -713,7 +713,7 @@ impl Driver {
                         != desired.resource_configurations.get(&resource.id)
                     || old.resource_dependencies.get(&resource.id)
                         != desired.resource_dependencies.get(&resource.id)
-                    || current_resource.map_or(true, |state| {
+                    || current_resource.is_none_or(|state| {
                         state.realization != ResourceRealization::Created || state.failure.is_some()
                     });
                 if needs_resource {
@@ -1373,7 +1373,6 @@ pub(crate) fn compose_definition(
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
-    use crate::computation::v1::*;
 
     struct Service(ComponentDescriptor);
 

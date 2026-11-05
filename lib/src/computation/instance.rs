@@ -14,7 +14,6 @@
 
 use futures::FutureExt;
 use std::{
-    collections::BTreeMap,
     ops::{Deref, DerefMut},
     pin::Pin,
     sync::{
@@ -27,8 +26,7 @@ use tokio::{sync::watch, task::JoinHandle};
 use super::v1::{
     ComponentBatch, ComputationGraph, DeploymentReport, DesiredMutation, GraphControl, GraphError,
     GraphRevision, GraphRun, GraphSelection, GraphState, ObservedGraph, OperationSummary,
-    RejectedResources, ResourceHandle, ResourceId, ResourceOwnership, StartReport,
-    TopologyBindings,
+    RejectedResources, ResourceOwnership, StartReport, TopologyBindings,
 };
 use crate::error::{DrasiError, Result};
 
@@ -904,6 +902,7 @@ impl Drop for PendingComponents {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computation::v1::ResourceId;
     use crate::computation::v1::{
         ComponentDescriptor, ComponentId, ComputationComponent, ComputationService, LifecyclePolicy,
     };

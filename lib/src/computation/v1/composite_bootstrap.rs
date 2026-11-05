@@ -234,7 +234,7 @@ impl CompositeBootstrapProvider {
                 anyhow::ensure!(
                     reader
                         .as_ref()
-                        .map_or(true, |reader| reader.same_owner(actual)),
+                        .is_none_or(|reader| reader.same_owner(actual)),
                     "composite bootstrap children have different actual progress owners"
                 );
                 reader = Some(actual.clone());
@@ -515,7 +515,7 @@ fn append_watermarks(
             watermark
                 .position
                 .as_ref()
-                .map_or(true, |position| position.len()
+                .is_none_or(|position| position.len()
                     <= crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES),
             "composite bootstrap source position exceeds the checkpoint bound"
         );

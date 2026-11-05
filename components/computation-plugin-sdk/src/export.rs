@@ -1440,6 +1440,10 @@ unsafe fn create_component_with_services(
                     "indexed processing cannot use a conflicting construction service"
                 );
                 let processing = unsafe { crate::NativeProcessing::from_borrowed(processing)? };
+                anyhow::ensure!(
+                    metadata.capabilities.scheduled_processing == processing.scheduling().is_some(),
+                    "native scheduling requires its explicitly negotiated processing extension"
+                );
                 (
                     factory.create_with_processing(&request, control.clone(), processing)?,
                     None,

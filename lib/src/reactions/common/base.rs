@@ -33,7 +33,6 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
 use crate::channels::ComponentStatusHandle;
@@ -708,7 +707,6 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
-    use tokio::sync::mpsc;
 
     struct FailNWritesStore {
         inner: MemoryStateStoreProvider,

@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![deny(missing_docs, clippy::unwrap_used, clippy::expect_used)]
+
+//! External configuration-store ownership, acceptance and snapshot contracts.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,47 +16,72 @@ use super::DesiredInstance;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommittedConfiguration {
+    /// Revision of the durably accepted desired configuration.
     pub revision: u64,
+    /// Desired definitions, not the state of running components.
     pub desired: DesiredInstance,
 }
 
+/// Idempotent acceptance of one desired-configuration request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptanceReceipt {
+    /// Request identity used to resolve retries.
     pub request_id: String,
+    /// Accepted desired-configuration revision.
     pub revision: u64,
+    /// Whether acceptance has the store's promised durability.
     pub durable: bool,
 }
 
+/// Name and immutable revision of a saved configuration snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationSnapshotSummary {
+    /// Snapshot name within the instance's configuration session.
     pub name: String,
+    /// Revision captured when the snapshot was created.
     pub revision: u64,
 }
 
+/// Explicit configuration ownership, acceptance and snapshot failures.
 #[derive(Debug, thiserror::Error)]
 pub enum ManagementError {
+    /// A possibly accepted write must be reconciled before authoritative reads.
     #[error("configuration state could not be confirmed; reconcile before reading authoritative desired state")]
     ConfigurationUnconfirmed,
+    /// The caller's expected revision is no longer current.
     #[error("configuration revision conflict: expected {expected}, current {actual}")]
-    RevisionConflict { expected: u64, actual: u64 },
+    RevisionConflict {
+        /// Revision supplied by the caller.
+        expected: u64,
+        /// Revision currently owned by the store.
+        actual: u64,
+    },
+    /// A request ID was reused for a different desired definition.
     #[error("request ID was already used for a different desired configuration")]
     RequestConflict,
+    /// The retry identity expired and cannot be submitted as new work.
     #[error("configuration request has expired; inspect current configuration before creating a new request")]
     RequestExpired,
+    /// The store requires an ID generated through its current request batch.
     #[error("this store requires an ID from new_configuration_request_id or ConfigurationSession::new_request_id")]
     GeneratedRequestIdRequired,
+    /// The current request batch cannot admit another new operation.
     #[error(
         "configuration request batch is full; obtain a new request ID before submitting new work"
     )]
     RequestBatchFull,
+    /// The provider does not implement the named optional operation.
     #[error("configuration store does not support {0}")]
     UnsupportedOperation(&'static str),
+    /// Another session already owns the named instance.
     #[error("instance {0} already has a configuration owner")]
     AlreadyOwned(String),
+    /// This configuration session no longer admits operations.
     #[error("configuration store session is closed")]
     Closed,
+    /// An immutable snapshot already uses the requested name.
     #[error("configuration snapshot {0} already exists")]
     SnapshotExists(String),
 }
@@ -72,6 +101,7 @@ pub trait ConfigurationStore: Send + Sync {
 /// resolve by request ID until an explicitly configured retry window expires.
 #[async_trait]
 pub trait ConfigurationSession: Send + Sync {
+    /// Read the last confirmed committed configuration.
     async fn load(&self) -> anyhow::Result<CommittedConfiguration>;
 
     /// Generate an ID for a new operation, never for a retry. Expiring stores
@@ -98,11 +128,13 @@ pub trait ConfigurationSession: Send + Sync {
         desired: &DesiredInstance,
     ) -> anyhow::Result<AcceptanceReceipt>;
 
+    /// Resolve a request without reapplying it; expired identities remain errors.
     async fn receipt(&self, request_id: &str) -> anyhow::Result<Option<AcceptanceReceipt>>;
 
     /// Store an immutable snapshot of the current committed revision atomically
     /// with reading it. Snapshots are privileged configuration, not data backups.
     async fn snapshot(&self, name: &str) -> anyhow::Result<CommittedConfiguration>;
+    /// Read a named configuration snapshot without changing live desired state.
     async fn load_snapshot(&self, name: &str) -> anyhow::Result<Option<CommittedConfiguration>>;
 
     /// Bounded metadata listing. `after` is the last returned name, used as a

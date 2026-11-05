@@ -16,7 +16,7 @@
 
 use async_trait::async_trait;
 use drasi_core::{
-    computation::{ComputationIndexProvider, InMemoryComputationProvider},
+    computation::InMemoryComputationProvider,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
 use drasi_lib::{
@@ -1148,6 +1148,7 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
 #[cfg(feature = "computation-rocksdb-tests")]
 #[tokio::test]
 async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_without_rewriting() {
+    use drasi_core::computation::ComputationIndexProvider;
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
     };

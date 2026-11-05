@@ -15,7 +15,6 @@
 //! Public inspection and plugin status contracts retained after the mutable
 //! ComponentGraph implementation was removed.
 
-#[allow(dead_code)]
 mod mock_source;
 
 use drasi_lib::{

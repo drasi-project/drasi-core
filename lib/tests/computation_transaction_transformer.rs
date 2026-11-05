@@ -16,7 +16,7 @@
 #![cfg(feature = "computation-rocksdb-tests")]
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     num::NonZeroUsize,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},

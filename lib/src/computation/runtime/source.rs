@@ -94,9 +94,6 @@ impl SourceInstance {
             subscriptions_notified: Mutex::new(None),
         })
     }
-    pub(super) async fn deprovision(&self) -> anyhow::Result<()> {
-        self.source.deprovision().await
-    }
     pub(super) fn notify(&self) {
         self.changed
             .send_modify(|value| *value = value.wrapping_add(1));
@@ -233,8 +230,5 @@ impl RuntimeComponent for SourceInstance {
     }
     async fn deprovision(&self) -> anyhow::Result<()> {
         self.source.deprovision().await
-    }
-    async fn status(&self) -> ComponentStatus {
-        self.source.status().await
     }
 }

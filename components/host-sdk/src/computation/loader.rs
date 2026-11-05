@@ -63,11 +63,16 @@ impl NativePlugin {
         &self.bootstrap_factories
     }
 
-    /// Atomic with respect to duplicate registration: failures leave registry as-is.
+    /// Register native factories and their supported query-authoring recipe identities.
+    /// This does not select an instance's default query factory. Registration is
+    /// atomic: failures leave the registry unchanged.
     pub fn register_factories(&self, registry: &mut FactoryRegistry) -> anyhow::Result<()> {
         let mut next = registry.clone();
         for factory in &self.factories {
             next.register(factory.clone())?;
+            if factory.supports_ordinary_queries() {
+                next.register(factory.for_ordinary_queries()?)?;
+            }
         }
         *registry = next;
         Ok(())

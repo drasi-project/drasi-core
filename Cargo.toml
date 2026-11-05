@@ -143,6 +143,7 @@ members = [
   "components/computation-plugins/transformers/arithmetic",
   "components/computation-plugins/transformers/middleware",
   "components/computation-plugins/transformers/query",
+  "components/computation-plugins/transformers/view",
   "components/computation-plugins/sinks/bridge",
   "components/computation-plugins/sinks/capture",
   "components/computation-plugins/sinks/grpc",
@@ -181,6 +182,7 @@ resolver = "2"
 [workspace.package]
 version = "0.11.3"
 edition = "2021"
+rust-version = "1.95.0"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi"]
@@ -204,6 +206,7 @@ drasi-computation-plugin-abi = { version = "0.11.3", path = "components/computat
 drasi-computation-contracts = { version = "0.11.3", path = "components/computation-contracts" }
 drasi-query-common = { version = "0.11.3", path = "components/query-common" }
 drasi-computation-plugin-sdk = { version = "0.11.3", path = "components/computation-plugin-sdk" }
+drasi-computation-transformer-view = { version = "0.11.3", path = "components/computation-plugins/transformers/view" }
 drasi-computation-bootstrap-http = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/http" }
 drasi-computation-bootstrap-mysql = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/mysql" }
 drasi-computation-bootstrap-mssql = { path = "components/computation-plugins/bootstrappers/mssql" }
@@ -272,6 +275,7 @@ drasi-source-sqlite = { version = "0.1.10", path = "components/sources/sqlite" }
 
 [workspace.lints.rust]
 warnings = "deny"
+# Library and shared native/query contracts opt in to deny(unused) at their crate roots.
 unused = "allow"
 
 [workspace.lints.clippy]

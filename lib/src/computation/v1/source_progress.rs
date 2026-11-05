@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use super::{ComponentId, StreamId};
-use async_trait::async_trait;
 use drasi_core::interface::SourceCheckpoint;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -819,6 +818,7 @@ impl CommittedProgressPublication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
 
     struct External(Arc<QuerySourceProgress>);
 

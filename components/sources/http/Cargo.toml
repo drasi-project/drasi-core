@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-source-http"
 version = "0.2.13"
 edition = "2021"

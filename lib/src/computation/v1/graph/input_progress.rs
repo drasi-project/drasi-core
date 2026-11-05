@@ -139,7 +139,7 @@ impl InputProgress {
             .with_consumer_boundary(input, Some(&self.progress))?
             .with_transport(input);
         anyhow::ensure!(
-            progress.position.as_ref().map_or(true, |position| {
+            progress.position.as_ref().is_none_or(|position| {
                 position.len() <= drasi_computation_contracts::MAX_SOURCE_POSITION_BYTES
             }),
             "volatile input position exceeds the source cursor limit"

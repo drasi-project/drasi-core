@@ -25,19 +25,17 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
-use bincode::Options;
 use bytes::Bytes;
 use chrono::Utc;
 use drasi_core::{
     computation::{ComputationIndexProvider, ComputationQuery},
-    interface::{FutureQueue, IndexError, SourceCheckpoint},
+    interface::{IndexError, SourceCheckpoint},
 };
 pub use drasi_query_common::ContinuousQueryDefinition;
 use drasi_query_common::{
     parser, query_builder, query_descriptor, FutureWakeup, QueryExecutionSettingsExt,
     QueryOperation,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::profiling::{timestamp_ns, ProfilingMetadata};
 use drasi_query_common::QueryOutputOwner;
@@ -51,11 +49,10 @@ use super::{
     ComponentSpecification, ComputationBootstrapProvider, ComputationComponent, ConfigurationField,
     ConfigurationSchema, ConfigurationType, ConfigurationValue, ConstructedComponent,
     ConstructionContext, EnvelopeCodec, FactoryDescriptor, GraphChangeCodec,
-    ImplementationIdentity, InputEnvelope, OutputEnvelope, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, QueryBootstrapResource, QueryChangeCodec, QueryOptions,
-    QueryOutputMetadata, QueryPublicationMode, QueryRecoveryError, QueryRecoveryPolicy, Record,
-    RecordId, RecordImage, ResourceRequirement, ResourceRole, StreamId, SystemMetadata,
-    Transformer, WakeupSource,
+    ImplementationIdentity, InputEnvelope, OutputEnvelope, PortId, QueryBootstrapResource,
+    QueryChangeCodec, QueryOptions, QueryOutputMetadata, QueryPublicationMode, QueryRecoveryError,
+    QueryRecoveryPolicy, ResourceRequirement, ResourceRole, StreamId, SystemMetadata, Transformer,
+    WakeupSource,
 };
 use super::{QueryExecutionSettings, QueryMiddlewareResource};
 use super::{
@@ -180,7 +177,7 @@ fn validate_watermarks(
                 || watermark
                     .producer
                     .as_ref()
-                    .map_or(true, super::GraphProducerIdentity::persistent),
+                    .is_none_or(super::GraphProducerIdentity::persistent),
             "persistent query cannot bootstrap from a volatile output"
         );
         if !sources.insert(progress_key(
@@ -1278,7 +1275,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
                                 reader: self.output_reader.clone(),
                                 progress: self.source_progress.clone(),
                                 incarnation: self.publication_identity.clone(),
-                                checkpoint: self.checkpoint_view.clone(),
+                                _checkpoint: self.checkpoint_view.clone(),
                                 output_persistence: self.output_persistence_view.clone(),
                             },
                         )),
@@ -1455,7 +1452,7 @@ impl Transformer for ContinuousQueryTransformer {
             None
         };
         if futures_due
-            && progress.as_ref().map_or(true, |progress| {
+            && progress.as_ref().is_none_or(|progress| {
                 !progress.identity().persistent() && self.provider.is_volatile()
             })
         {
@@ -1581,7 +1578,7 @@ impl Transformer for ContinuousQueryTransformer {
             .future_queue()
             .peek_due_time()
             .await?
-            .map_or(true, |due| due > now)
+            .is_none_or(|due| due > now)
         {
             self.draining_futures = false;
             #[cfg(feature = "test-support")]
@@ -1976,7 +1973,7 @@ impl ComponentFactory for ContinuousQueryFactory {
         configuration
             .entry(Arc::from("stream"))
             .or_insert_with(|| serde_json::json!(format!("{id}/out")));
-        let execution: QueryExecutionSettings = configuration
+        let _execution: QueryExecutionSettings = configuration
             .get("execution")
             .map(|value| serde_json::from_value(value.clone()))
             .transpose()?
@@ -2073,7 +2070,7 @@ impl ComponentFactory for ContinuousQueryFactory {
                 && spec
                     .dependencies
                     .get("middleware")
-                    .map_or(true, Vec::is_empty)
+                    .is_none_or(Vec::is_empty)
             {
                 anyhow::bail!("query middleware requires a declared middleware resource");
             }
@@ -2090,10 +2087,7 @@ impl ComponentFactory for ContinuousQueryFactory {
             })
             .collect();
         if options(&literals)?.recovery == QueryRecoveryPolicy::AutoReset
-            && spec
-                .dependencies
-                .get("bootstrap")
-                .map_or(true, Vec::is_empty)
+            && spec.dependencies.get("bootstrap").is_none_or(Vec::is_empty)
         {
             anyhow::bail!("auto_reset requires a declared bootstrap provider");
         }

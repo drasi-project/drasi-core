@@ -23,6 +23,7 @@ pub mod output_snapshots;
 mod port_formats;
 pub mod processing;
 pub mod progress;
+pub mod scheduling;
 mod transaction;
 pub mod transport;
 pub mod wire;
@@ -51,6 +52,7 @@ pub use output_snapshots::{
 };
 pub use processing::{NativeProcessing, NativeProcessingContext};
 pub use progress::NativeSourceProgress;
+pub use scheduling::NativeScheduling;
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
 pub use wire::{CreateRequest, Scope};
 

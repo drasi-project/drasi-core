@@ -14,7 +14,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use std::{
@@ -1349,7 +1348,9 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
         control
             .reconcile(preview, TopologyBindings::default())
             .await
-            .expect("remove source");
+            .expect("remove source")
+            .ensure_committed()
+            .expect("desired topology committed");
         assert!(!inspector
             .snapshot()
             .desired
@@ -1380,7 +1381,9 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
         control
             .reconcile(preview, TopologyBindings::default())
             .await
-            .expect("replace reaction");
+            .expect("replace reaction")
+            .ensure_committed()
+            .expect("desired topology committed");
         let topology = inspector.topology();
         assert!(!topology.nodes.contains_key(&plugin_id));
         assert!(!topology.nodes.contains_key(&family_id));
@@ -2148,7 +2151,9 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
             control
                 .reconcile(preview, TopologyBindings::default())
                 .await
-                .expect("remove");
+                .expect("remove")
+                .ensure_committed()
+                .expect("desired topology committed");
             let topology = inspector.topology();
             assert_eq!(
                 inspected_plugin(&topology, &other_version).dependent_component_count(),
@@ -2205,7 +2210,9 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
         control
             .reconcile(preview, TopologyBindings::default())
             .await
-            .expect("remove last version");
+            .expect("remove last version")
+            .ensure_committed()
+            .expect("desired topology committed");
         let topology = inspector.topology();
         assert_eq!(kind_count(&topology, GraphEntityKind::Plugin), 0);
         assert_eq!(kind_count(&topology, GraphEntityKind::PluginFamily), 0);
@@ -2312,7 +2319,9 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_compone
     control
         .reconcile(preview, TopologyBindings::default())
         .await
-        .unwrap();
+        .unwrap()
+        .ensure_committed()
+        .expect("desired topology committed");
     let current = instance
         .inspect_computation_inventory()
         .await
@@ -2442,7 +2451,9 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
         control
             .reconcile(preview, TopologyBindings::default())
             .await
-            .expect("unbind");
+            .expect("unbind")
+            .ensure_committed()
+            .expect("desired topology committed");
         let topology = inspector.topology();
         let pipe = inspected_pipe(&topology, &definition);
         assert!(pipe.declared_only);
@@ -2482,7 +2493,9 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
         control
             .reconcile(preview, TopologyBindings::default())
             .await
-            .expect("remove producer");
+            .expect("remove producer")
+            .ensure_committed()
+            .expect("desired topology committed");
         let topology = inspector.topology();
         assert!(topology.nodes.contains_key(&pipe_id));
         let producer = GraphEntityId::Component(component("source"));

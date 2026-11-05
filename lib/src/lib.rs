@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unused)]
+
 //! # drasi-lib
 //!
 //! Embedded library for running Drasi continuous queries with sources, queries, and reactions.

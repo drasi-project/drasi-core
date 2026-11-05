@@ -171,13 +171,15 @@ fn init_tracing_internal(log_registry: Arc<ComponentLogRegistry>) {
 /// a span that has `component_id` and `component_type` attributes. If so,
 /// the log is routed to that component's log stream in the registry.
 pub struct ComponentLogLayer {
-    registry: Arc<ComponentLogRegistry>,
+    _registry: Arc<ComponentLogRegistry>,
 }
 
 impl ComponentLogLayer {
     /// Create a new layer with the given log registry.
     pub fn new(registry: Arc<ComponentLogRegistry>) -> Self {
-        Self { registry }
+        Self {
+            _registry: registry,
+        }
     }
 }
 

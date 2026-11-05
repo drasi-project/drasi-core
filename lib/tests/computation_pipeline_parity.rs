@@ -311,7 +311,9 @@ async fn scenario() {
     native_core
         .add_components(graph)
         .await
-        .expect("register graph");
+        .expect("register graph")
+        .ensure_committed()
+        .expect("desired topology committed");
     drasi
         .start()
         .await

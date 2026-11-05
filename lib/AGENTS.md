@@ -2,7 +2,8 @@
 
 Embedded Drasi: sources -> continuous queries -> reactions running fully in-process inside your own Rust application. This crate has its own clippy.toml (stricter than the workspace's), rustfmt.toml, and deny.toml (a separate license/advisory policy).
 
-## Architecture rules (stable conventions; only the runtime-flavor rule has an automated guard)
+## Architecture rules (stable conventions; selected automated guards are noted below)
+- This crate, computation-contracts and query-common deny unused-code warnings. Shared integration fixtures have narrow, documented dead-code exceptions; test-only reference helpers stay under `cfg(test)`. Component lifecycle, management-store and query-read contracts also enforce public rustdoc and prohibit unchecked unwrap/expect calls.
 - Error layering: public API (`DrasiLib`, the `*_ops` extensions, inspection) returns `crate::error::Result`/`DrasiError`; internal modules and plugin traits use `anyhow` with `.context()`; never construct public-API errors with `anyhow!()` - see src/error.rs
 - To make a new failure kind pattern-matchable, do NOT add a `DrasiError` variant (the enum is not non_exhaustive, so that breaks the public API); carry a typed error inside `anyhow` and `downcast_ref` at the boundary (existing examples: ComponentNotFoundError in src/error.rs, SourceError in src/sources/traits.rs)
 - Preserve existing failures with `DrasiError::with_cause`; match `classification()` for public categories and use `downcast_ref()` for typed causes. Never replace a cause or cleanup aggregate with its formatted string. `OperationFailures` retains all causes; `LifecycleReportError` retains per-member outcomes. Their source chains follow only the primary failure, so inspect the aggregate for other causes.

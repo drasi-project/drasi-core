@@ -59,6 +59,7 @@ PLUGIN_TARGET_DIR := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)
 PLUGIN_OUT_DIR := $(PLUGIN_TARGET_DIR)/debug/plugins
 NATIVE_STANDARD_PACKAGES := drasi-computation-source-counter \
                            drasi-computation-transformer-middleware \
+                           drasi-computation-transformer-view \
                            drasi-computation-sink-capture \
                            drasi-computation-transformer-arithmetic
 NATIVE_NETWORK_PACKAGES := drasi-computation-source-http \
@@ -95,7 +96,7 @@ build-test-plugins: build-native-plugins
 	cargo build --lib -p drasi-secret-store-file --features drasi-secret-store-file/dynamic-plugin
 	cargo build -p drasi-host-sdk --example native_recovery --example native_consumer_progress_metadata \
 		--example native_bootstrap_coordination_metadata --example native_bootstrap_coordination_partial \
-		--example native_activation_credentials --example native_custom_query
+		--example native_activation_credentials --example native_custom_query --example native_scheduling
 	cargo build -p drasi-instance-host --example instance_host_fixture --features drasi-instance-host/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
@@ -115,7 +116,7 @@ build-test-plugins: build-native-plugins
 # Build test plugins, then run host-sdk integration tests.
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
-	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test native_sqlite_components -- --test-threads=1
+	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test native_sqlite_components --test native_scheduling --test native_view --test reconstruction_recipes -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-mssql-plugins build-native-postgres-plugins build-native-sqlite-plugins build-native-query-plugin

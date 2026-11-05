@@ -44,6 +44,10 @@ impl Profile {
         )
     }
 
+    #[allow(
+        dead_code,
+        reason = "Not every integration binary checks acknowledgement mode"
+    )]
     pub fn acknowledgement(self) -> bool {
         matches!(
             self,

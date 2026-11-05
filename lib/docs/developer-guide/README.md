@@ -1,8 +1,9 @@
 # The drasi-lib developer guide
 
 **Development API guide.** This guide describes the current checkout, including
-native MySQL/SQLite components, shared hosting, query-progress measurements and the
-unified graph-change data contract (queries publish ordinary result nodes). Use
+native database components, the loadable query plugin, stateful views, scheduled
+non-query work, reconstructible recipes and the unified graph-change data
+contract (queries publish ordinary result nodes). Use
 matching Core/Server sources and rebuilt plugin libraries; an older published
 commit or registry binary does not contain all of these interfaces, and earlier
 native wire or query-row formats are not read.
@@ -322,6 +323,14 @@ ordinary API. Native sinks consume envelopes; an ordinary Reaction adapter
 consumes query results. Code below uses explicit native Rust composition unless
 its surrounding lesson identifies another surface.
 
+Stockroom deliberately selects the supported Rust-linked query reference in
+its source examples; it is not an implicit runtime fallback. Ordinary
+Source/Query/Reaction applications explicitly register the native query plugin
+with `with_query_factory`, `register_query_factory` or pipeline `query_factory`.
+The [query plugin guide](../../../components/computation-plugins/transformers/query/README.md)
+shows both static plugin registration and dynamic loading. Both paths reuse
+the same Core evaluator and shared query implementation.
+
 Use an existing native component when it supports your integration. The small
 file source makes the first exercise self-contained; Chapter 5 replaces it
 with a packaged HTTP source and adds an SSE notification sink without writing
@@ -335,7 +344,7 @@ memory-backed processing state and small file source are starting points:
 storage providers and source/sink plugins support persistent state and other
 external systems.
 
-The first lesson constructs one `ContinuousQueryTransformer` for the low-stock
+The first lesson explicitly constructs one linked `ContinuousQueryTransformer` for the low-stock
 query. The companion's `low_stock_query` function creates it and obtains its
 result handle:
 
@@ -1816,8 +1825,15 @@ ordinary element mutation. Such controls pass through rather than being mapped.
 Use an event mapper for
 reshaping each event. If you need a *maintained* derived dataset (retracting
 outputs that stop matching a filter, or re-keying outputs), that is a different,
-stateful component: a view transform, planned as
-[CW-68](../computation-graph-remaining-work.md#cw-68) and not available today.
+stateful component: the
+[view transformer](../../../components/computation-plugins/transformers/view/README.md).
+Its `drasi.standard/view` factory reconstructs complete images, applies a
+map/relabel pipeline and remembers the exact outputs to retract. Configure
+map insert rules that produce complete projected images, rather than event
+update/delete rules. The initial profile provides memory-backed snapshots and
+volatile progress, not durable replay, input deduplication or bootstrap input.
+Supply complete initial records and ordered lossless changes; a fresh instance
+starts empty, whereas stop/start of the same object retains its view.
 
 Unwind illustrates why apparently simple transformation can be stateful.
 When a bin disappears from a warehouse's array, the old child must be deleted.
@@ -1863,6 +1879,24 @@ For time-driven work, expose a `WakeupSource` and implement `on_wakeup`.
 finite graph account for outstanding scheduled work. Persist both schedules
 and their completion when timers must recover. A wall-clock alarm held only in
 a Rust field is volatile.
+
+For recoverable **native non-query work**, negotiate `scheduled_processing`
+alongside indexed processing, committed input progress and wakeups. Use
+`NativeProcessingContext` to request, replace or cancel work, then claim and
+explicitly complete due work. `processing.scheduling().wakeup_source()` connects
+the existing graph wakeup hook. Requests, state and retained output commit
+together; only committed deadlines become visible. Incarnation tokens reject
+stale completion after replacement or cancellation.
+
+The qualified standalone profile uses atomic persistent RocksDB and persistent
+checkpoints; memory/no-op and non-atomic bundles reject this capability.
+Keys are bounded to 256 bytes, payloads to 64 KiB, outstanding requests to 4,096,
+and encoded scheduling state to 1 MiB. A committed completion does not make
+external delivery exactly once. The
+[SDK scheduling guide](../../../components/computation-plugin-sdk/README.md)
+and [real delayed-emission fixture](../../../components/host-sdk/tests/fixtures/native_scheduling.rs)
+show the complete service contract. Query temporal functions already use the
+shared committed wakeup policy; they do not require this optional capability.
 
 A `ComputationService` can run a periodic health activity without data ports.
 Its `run` future must yield, and its quiesce/stop hooks must account for any
@@ -4261,7 +4295,10 @@ The [managed lesson](stockroom/src/managed.rs) reconstructs the same file source
 query, and alert sink from specifications. It adds two small native factories:
 `FileFactory` validates the source descriptor and path setting, and `AlertFactory`
 creates the handled in-memory result view. The query uses the standard
-`drasi/continuous-query` factory.
+`drasi/continuous-query` linked-reference factory explicitly. For the native
+plugin path, obtain its authoring factory through `plugin.query_factory()` and
+register the plugin's factories when restoring recipes; do not silently
+substitute one implementation identity for the other.
 
 Run `cargo test --locked --features management configuration_reopens` to build
 and exercise this path before changing it. The test saves a definition, closes
@@ -4274,7 +4311,7 @@ teach separate ownership choices; enabling one does not silently enable the othe
 
 #### Replace a constructor with a specification
 
-Use the standard query factory for `low-stock`:
+Use the lesson's explicitly selected linked-reference factory for `low-stock`:
 
 <!-- illustration: query-factory -->
 ```rust
@@ -4518,6 +4555,22 @@ definitions rather than a collection of opaque Rust objects.
 Processing state lets Stockroom recover its data. Saved desired configuration
 lets the host reconstruct the application that owns that data, including
 definitions that were accepted but failed to start.
+
+Native source/reaction integrations can also use `add_source_from_factory` and
+`add_reaction_from_factory` with `ComponentAddition` instead of supplying an
+already constructed object. They return declaration handles: missing factories
+remain waits, and failed construction remains inspectable and retryable.
+`ComponentAddition::declaration` can be submitted before registration. These new
+recipes are native-only; existing legacy object-based APIs remain supported.
+
+`GraphConfigurationSnapshot::reconstructible_topology()` exports explicit
+component, resource and pipe recipes with their original secret references.
+It rejects opaque external bindings instead of inventing settings. Restore on
+a clean instance with the same factory registry and resource resolver.
+The [source-time merger](../computation-graph-time-merge.md) supplies a standard
+versioned factory and Host/Server storage recipe. Pinned provider versions must
+match; its durable mode needs independent persistent atomic storage and does
+not migrate an older direct-constructor namespace or rewind its saved frontier.
 
 #### Run a saved configuration
 
@@ -5149,7 +5202,9 @@ not turn forced termination into successful drain.
 #### Export useful definitions
 
 `snapshot_configuration` and `snapshot_computation_configuration` expose
-application reconstruction information. `GraphSnapshot::select` exports a
+available configuration and reconstruction information. Use
+`GraphConfigurationSnapshot::reconstructible_topology()` when an export must be
+reconstructible, rather than merely descriptive. `GraphSnapshot::select` exports a
 whole graph or subset, retaining explicit boundary relationships and resource
 dependencies. Keep missing neighbors explicit at the subset boundary.
 
