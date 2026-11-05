@@ -10,17 +10,29 @@ mod execution;
 mod execution_scope;
 #[cfg(feature = "metrics-facade")]
 pub mod facade;
+mod lifetime;
 #[cfg(feature = "otel-context")]
 mod otel;
+#[cfg(feature = "metrics-facade")]
+mod plugin;
+mod records;
 mod registration;
+#[cfg(feature = "metrics-facade")]
+mod scoped_metrics;
 
 pub use catalogue::*;
 pub use execution::*;
 #[cfg(feature = "tracing-context")]
 pub use execution_scope::*;
+pub use lifetime::*;
 #[cfg(feature = "otel-context")]
 pub use otel::*;
+#[cfg(feature = "metrics-facade")]
+pub use plugin::*;
+pub use records::*;
 pub use registration::*;
+#[cfg(feature = "metrics-facade")]
+pub use scoped_metrics::*;
 
 use crate::{ComponentId, ComponentRole, ComponentSemanticKind};
 use std::{str::FromStr, sync::Arc};
@@ -38,6 +50,8 @@ pub enum TelemetryError {
     Capacity(&'static str),
     #[error("telemetry registration state is poisoned")]
     Poisoned,
+    #[error("telemetry binding has been retired")]
+    Retired,
 }
 
 pub type Result<T> = std::result::Result<T, TelemetryError>;
@@ -343,11 +357,32 @@ impl ResolvedTelemetry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "TelemetryScopeRecord")]
 pub struct TelemetryScope {
     instance_id: Arc<str>,
     graph_id: Arc<str>,
     component: Option<(ComponentId, ComponentRole, ComponentSemanticKind)>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TelemetryScopeRecord {
+    instance_id: Arc<str>,
+    graph_id: Arc<str>,
+    component: Option<(ComponentId, ComponentRole, ComponentSemanticKind)>,
+}
+
+impl TryFrom<TelemetryScopeRecord> for TelemetryScope {
+    type Error = TelemetryError;
+
+    fn try_from(value: TelemetryScopeRecord) -> Result<Self> {
+        let scope = Self::graph(value.instance_id, value.graph_id)?;
+        Ok(match value.component {
+            Some((id, role, kind)) => scope.component(id, role, kind),
+            None => scope,
+        })
+    }
 }
 
 impl TelemetryScope {

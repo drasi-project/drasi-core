@@ -22,6 +22,7 @@ pub struct PluginMetricDefinition<'a> {
     pub description: &'a str,
 }
 
+#[derive(Debug, Clone)]
 pub enum RegisteredMetric {
     Disabled,
     Counter(Counter),
@@ -68,8 +69,8 @@ struct Context {
 
 /// Clone this context into every graph and static SDK integration using its
 /// recorder. Constructing another context is not a way to bypass conflicts.
-/// Handles retain the supplied recorder's semantics; generation-local absolute
-/// counter accounting and stale-handle revocation belong to the later SDK slice.
+/// Raw registration retains recorder semantics. Component code uses
+/// `ScopedMetricEmitter` for generation-local accounting and revocation.
 #[derive(Clone)]
 pub struct MetricRegistrationContext(Arc<Context>);
 
@@ -133,7 +134,7 @@ impl MetricRegistrationContext {
         )?)
     }
 
-    fn register(&self, registration: MetricRegistration) -> Result<RegisteredMetric> {
+    pub(super) fn register(&self, registration: MetricRegistration) -> Result<RegisteredMetric> {
         self.0.registrations.register(&registration)?;
         let name = registration.name().to_owned();
         let key = Key::from_parts(
@@ -252,6 +253,227 @@ mod tests {
             ComponentRole::Transformer,
             ComponentSemanticKind::Query,
         )
+    }
+
+    fn scoped(
+        context: &MetricRegistrationContext,
+        generation: u64,
+        metrics: bool,
+        handles: usize,
+    ) -> (
+        Arc<super::super::LocalMetricBinding>,
+        super::super::TelemetryLifetime,
+        super::super::TelemetryDiagnostics,
+    ) {
+        use super::super::*;
+        let lifetime = TelemetryLifetime::default();
+        let diagnostics = TelemetryDiagnostics::default();
+        let binding = LocalMetricBinding::new(
+            Some(context.clone()),
+            Arc::new(PluginTelemetryConfig {
+                scope: scope("one"),
+                generation,
+                plugin_kind: "probe".into(),
+                tracing: false,
+                metrics,
+                trace_directives: "off".into(),
+                log_directives: "off".into(),
+                metric_exclusions: vec![],
+                sampling: PluginRootSampling::Never,
+                limits: TelemetryLimits {
+                    metric_handles: handles,
+                    ..Default::default()
+                },
+            }),
+            lifetime.clone(),
+            diagnostics.clone(),
+        )
+        .unwrap();
+        (binding, lifetime, diagnostics)
+    }
+
+    #[test]
+    fn scoped_absolute_counts_accumulate_across_replacement_and_share_clones() {
+        let recorder = Arc::new(Recording::default());
+        let context = MetricRegistrationContext::new(recorder.clone(), Default::default()).unwrap();
+        let (a, old, diagnostics) = scoped(&context, 1, true, 4);
+        let counter = a
+            .emitter()
+            .counter("received", MetricUnit::One, "Received")
+            .unwrap();
+        counter.absolute(100);
+        old.revoke(|| {}).unwrap();
+        let (b, _, _) = scoped(&context, 2, true, 4);
+        let replacement = b
+            .emitter()
+            .counter("received", MetricUnit::One, "Received")
+            .unwrap();
+        let registered_again = b
+            .emitter()
+            .counter("received", MetricUnit::One, "Received")
+            .unwrap();
+        replacement.absolute(10);
+        registered_again.absolute(10);
+        replacement.clone().absolute(8);
+        registered_again.increment(5);
+        replacement.absolute(15);
+        replacement.absolute(20);
+        counter.absolute(120);
+        assert_eq!(recorder.values.counter.load(Ordering::SeqCst), 120);
+        assert_eq!(recorder.registrations.load(Ordering::SeqCst), 2);
+        assert_eq!(b.handle_count().unwrap(), 1);
+        assert_eq!(diagnostics.snapshot().metric, 1);
+        for key in recorder.keys.lock().unwrap().iter() {
+            assert_eq!(key.name(), "drasi.plugin.probe.received");
+            let labels: std::collections::BTreeMap<_, _> = key
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect();
+            assert_eq!(labels["plugin_kind"], "probe");
+            assert_eq!(labels["instance_id"], "one");
+            assert!(!labels.contains_key("generation"));
+        }
+    }
+
+    #[test]
+    fn scoped_concurrent_absolute_updates_and_revocation_are_linearized() {
+        let recorder = Arc::new(Recording::default());
+        let context = MetricRegistrationContext::new(recorder.clone(), Default::default()).unwrap();
+        let (binding, lifetime, diagnostics) = scoped(&context, 1, true, 4);
+        let counter = binding
+            .emitter()
+            .counter("received", MetricUnit::One, "Received")
+            .unwrap();
+        std::thread::scope(|threads| {
+            for worker in 0..4 {
+                let counter = counter.clone();
+                threads.spawn(move || {
+                    for value in (1..=100).rev() {
+                        counter.absolute(value + worker * 100);
+                    }
+                });
+            }
+        });
+        assert_eq!(recorder.values.counter.load(Ordering::SeqCst), 400);
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        std::thread::scope(|threads| {
+            for _ in 0..4 {
+                let counter = counter.clone();
+                let barrier = barrier.clone();
+                threads.spawn(move || {
+                    for _ in 0..100 {
+                        counter.increment(1);
+                    }
+                    barrier.wait();
+                    barrier.wait();
+                    for _ in 0..100 {
+                        counter.increment(1);
+                    }
+                });
+            }
+            barrier.wait();
+            lifetime.revoke(|| {}).unwrap();
+            barrier.wait();
+        });
+        assert_eq!(recorder.values.counter.load(Ordering::SeqCst), 800);
+        assert_eq!(diagnostics.snapshot().metric, 400);
+    }
+
+    #[test]
+    fn scoped_gauges_reset_once_and_histograms_reject_invalid_values() {
+        let recorder = Arc::new(Recording::default());
+        let context = MetricRegistrationContext::new(recorder.clone(), Default::default()).unwrap();
+        let (binding, lifetime, diagnostics) = scoped(&context, 1, true, 4);
+        let emitter = binding.emitter();
+        let gauge = emitter.gauge("queued", MetricUnit::One, "Queued").unwrap();
+        gauge.set(7.0);
+        let again = emitter.gauge("queued", MetricUnit::One, "Queued").unwrap();
+        assert_eq!(*recorder.values.gauges.lock().unwrap(), vec![0.0, 7.0]);
+        let histogram = emitter
+            .histogram("decode.duration", MetricUnit::Seconds, "Decode")
+            .unwrap();
+        histogram.record(0.5);
+        histogram.record(-0.5);
+        histogram.record(f64::NAN);
+        drop(emitter);
+        drop(binding);
+        lifetime.revoke(|| {}).unwrap();
+        assert!(!lifetime.revoke(|| panic!("retired twice")).unwrap());
+        again.set(2.0);
+        gauge.increment(1.0);
+        histogram.record(1.0);
+        assert_eq!(*recorder.values.gauges.lock().unwrap(), vec![0.0, 7.0, 0.0]);
+        assert_eq!(*recorder.values.histograms.lock().unwrap(), vec![0.5]);
+        assert_eq!(diagnostics.snapshot().metric, 5);
+        let (next, _, _) = scoped(&context, 2, true, 4);
+        next.emitter()
+            .gauge("queued", MetricUnit::One, "Queued")
+            .unwrap()
+            .set(3.0);
+        gauge.set(100.0);
+        assert_eq!(recorder.values.gauges.lock().unwrap().last(), Some(&3.0));
+    }
+
+    #[test]
+    fn scoped_handle_limits_conflicts_disablements_and_foreign_updates_are_explicit() {
+        use super::super::*;
+        let recorder = Arc::new(Recording::default());
+        let context = MetricRegistrationContext::new(recorder.clone(), Default::default()).unwrap();
+        let (binding, lifetime, _) = scoped(&context, 1, true, 1);
+        let request = PluginMetricRegistration {
+            leaf: "received".into(),
+            kind: MetricKind::Counter,
+            unit: MetricUnit::One,
+            description: "Received".into(),
+            labels: vec![],
+        };
+        let handle = binding.register_handle(&request).unwrap().unwrap();
+        assert_eq!(binding.register_handle(&request).unwrap(), Some(handle));
+        assert!(matches!(
+            binding
+                .emitter()
+                .gauge("received", MetricUnit::One, "Wrong type"),
+            Err(TelemetryError::Conflict(_))
+        ));
+        assert!(matches!(
+            binding
+                .emitter()
+                .counter("another", MetricUnit::One, "Other"),
+            Err(TelemetryError::Capacity(_))
+        ));
+        assert_eq!(recorder.registrations.load(Ordering::SeqCst), 1);
+        let (other, _, _) = scoped(&context, 2, true, 1);
+        let foreign = other.register_handle(&request).unwrap().unwrap();
+        assert_ne!(handle, foreign);
+        assert!(other
+            .update(PluginMetricUpdate::CounterIncrement { handle, value: 1 })
+            .is_err());
+        assert!(binding
+            .update(PluginMetricUpdate::GaugeSet { handle, value: 1.0 })
+            .is_err());
+        binding
+            .update(PluginMetricUpdate::CounterAbsolute {
+                handle,
+                value: u64::MAX,
+            })
+            .unwrap();
+        assert!(binding
+            .update(PluginMetricUpdate::CounterIncrement { handle, value: 1 })
+            .is_err());
+        assert_eq!(recorder.values.counter.load(Ordering::SeqCst), u64::MAX);
+        lifetime.revoke(|| {}).unwrap();
+        assert!(matches!(
+            binding.register_handle(&request),
+            Err(TelemetryError::Retired)
+        ));
+        let (disabled, _, _) = scoped(&context, 3, false, 1);
+        disabled
+            .emitter()
+            .counter("INVALID", MetricUnit::One, "Unused")
+            .unwrap()
+            .increment(9);
+        assert_eq!(disabled.handle_count().unwrap(), 0);
+        assert_eq!(recorder.registrations.load(Ordering::SeqCst), 2);
     }
 
     #[test]

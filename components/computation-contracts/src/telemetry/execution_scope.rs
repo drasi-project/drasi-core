@@ -58,6 +58,8 @@ pub struct ExecutionScope {
     adapter: Option<Arc<dyn TraceContextAdapter>>,
     dispatch: tracing::Dispatch,
     transport_required: bool,
+    #[cfg(feature = "metrics-facade")]
+    plugin_telemetry: Option<super::PluginTelemetry>,
 }
 
 thread_local! {
@@ -72,6 +74,8 @@ impl ExecutionScope {
             adapter: None,
             dispatch: tracing::dispatcher::get_default(Clone::clone),
             transport_required: false,
+            #[cfg(feature = "metrics-facade")]
+            plugin_telemetry: None,
         }
     }
 
@@ -81,6 +85,34 @@ impl ExecutionScope {
             generation,
         }));
         self
+    }
+
+    #[cfg(feature = "metrics-facade")]
+    pub fn with_plugin_telemetry(mut self, binding: Option<super::PluginTelemetry>) -> Self {
+        self.plugin_telemetry = binding;
+        self
+    }
+
+    #[cfg(feature = "metrics-facade")]
+    pub fn current_plugin_telemetry() -> Option<super::PluginTelemetry> {
+        CURRENT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .and_then(|scope| scope.plugin_telemetry.clone())
+        })
+    }
+
+    /// The supplied carrier, without consulting an adapter or recursing through
+    /// the current native subscriber.
+    pub fn supplied_context() -> ExecutionContext {
+        CURRENT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|scope| scope.context.clone())
+                .unwrap_or_default()
+        })
     }
 
     pub fn with_adapter(mut self, adapter: Option<Arc<dyn TraceContextAdapter>>) -> Self {

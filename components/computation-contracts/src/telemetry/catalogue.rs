@@ -11,14 +11,14 @@ pub enum ObservationDetail {
     Deferred,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MetricKind {
     Counter,
     Gauge,
     Histogram,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MetricUnit {
     /// Dimensionless counts, including occupancy and boolean readiness gauges.
     One,
