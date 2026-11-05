@@ -19,6 +19,14 @@ use serde_json::{json, Value};
 struct Service {
     descriptor: ComponentDescriptor,
     config: Value,
+    start_gate: Option<Arc<StartGate>>,
+}
+
+#[derive(Default)]
+struct StartGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    starts: AtomicUsize,
 }
 
 #[async_trait]
@@ -30,6 +38,11 @@ impl ComputationComponent for Service {
         Ok(self.config.clone())
     }
     async fn start(&mut self) -> Result<()> {
+        if let Some(gate) = &self.start_gate {
+            gate.starts.fetch_add(1, Ordering::SeqCst);
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         Ok(())
     }
     async fn stop(&mut self) -> Result<()> {
@@ -47,6 +60,7 @@ struct Factory {
     descriptor: FactoryDescriptor,
     created: Arc<AtomicUsize>,
     create_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    start_gate: Option<Arc<StartGate>>,
 }
 
 impl Factory {
@@ -54,6 +68,7 @@ impl Factory {
         Self {
             created,
             create_gate: None,
+            start_gate: None,
             descriptor: FactoryDescriptor {
                 implementation: ImplementationIdentity::try_new("test/managed-service", "1")
                     .expect("implementation"),
@@ -97,6 +112,7 @@ impl ComponentFactory for Factory {
         Ok(ConstructedComponent::service(Box::new(Service {
             descriptor: context.specification.descriptor.clone(),
             config: serde_json::to_value(context.configuration()).expect("factory configuration"),
+            start_gate: self.start_gate.clone(),
         })))
     }
 }
@@ -286,6 +302,7 @@ async fn persistence_is_optional_and_object_injection_remains_lightweight() -> R
         Box::new(Service {
             descriptor,
             config: json!({}),
+            start_gate: None,
         }),
     )))
     .await?
@@ -753,6 +770,67 @@ async fn instance_stop_interrupts_managed_construction_multi_thread() -> Result<
         instance_stop_retains_pending_managed_construction(reconcile).await?;
     }
     Ok(())
+}
+
+async fn instance_start_joins_managed_activation() -> Result<()> {
+    let gate = Arc::new(StartGate::default());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factory = Factory::new(created.clone());
+    factory.start_gate = Some(gate.clone());
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(factory))?;
+    let core = lib_integration_tests::query_builder()
+        .with_component_factories(factories)
+        .with_startup_timeout_secs(3)
+        .build()
+        .await?;
+    core.apply_desired_state(0, "create", desired(&[("held", false)]))
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    let control = core.computation_control()?;
+    let revision = control.desired_snapshot().revision;
+    let activation = tokio::spawn(async move {
+        control
+            .start_components(
+                revision,
+                GraphSelection::Exact(vec![ComponentId::try_new("held")?]),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), gate.entered.notified()).await?;
+    let mut startup = Box::pin(core.start());
+    let early = tokio::time::timeout(Duration::from_millis(50), &mut startup).await;
+    let waited = early.is_err();
+    gate.release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), activation)
+            .await???
+            .summary,
+        OperationSummary::Completed
+    );
+    let result = match early {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(3), startup).await?,
+    };
+    core.shutdown().await?;
+    result?;
+    assert!(
+        waited,
+        "instance startup must wait for the existing activation"
+    );
+    assert_eq!(gate.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(created.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn instance_start_joins_managed_activation_current_thread() -> Result<()> {
+    instance_start_joins_managed_activation().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instance_start_joins_managed_activation_multi_thread() -> Result<()> {
+    instance_start_joins_managed_activation().await
 }
 
 #[tokio::test]
@@ -1720,6 +1798,7 @@ async fn desired_changes_preserve_direct_components_and_reject_implicit_adoption
         .service(Box::new(Service {
             descriptor: ComponentDescriptor::try_new(ComponentId::try_new("new")?, Vec::new())?,
             config: json!({"direct":true}),
+            start_gate: None,
         }))
         .build()?;
     let core = lib_integration_tests::query_builder()
@@ -1796,6 +1875,7 @@ async fn pending_managed_construction_allows_unrelated_admission_and_component_s
                     Vec::new(),
                 )?,
                 config: json!({"unrelated":true}),
+                start_gate: None,
             }),
         ))),
     )

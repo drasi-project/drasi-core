@@ -44,11 +44,13 @@ The implemented query profiles cover:
 - Paged native snapshot/history and snapshot/live attachment, including results
   larger than the former whole-response row/envelope/byte limits.
 
-The profiles above are implemented. Native transport still bounds individual
-records/envelopes; fragmenting larger items, the broader non-query scheduler
-proof and complete performance/CI qualification remain open. The linked reference
-constructors still exist; removing implicit selection does not mean they have
-been deleted.
+The profiles above are implemented and
+[CW-43](computation-graph-remaining-work.md#cw-43) is closed. Remaining payload,
+native-test, full-suite, performance and reference-retirement work is tracked
+separately in the [canonical backlog](computation-graph-remaining-work.md#cw-76).
+The linked reference constructors still exist; removing implicit selection does
+not mean they have been deleted. General non-query scheduling is a separate
+optional capability, not missing query temporal-function support.
 
 For runnable registration and profile details, see the
 [query plugin guide](../../components/computation-plugins/transformers/query/README.md).
@@ -167,10 +169,11 @@ frontier waits through actual due-work and delivery confirmation, not merely
 queue admission or a wall-clock sleep.
 
 The broader reusable non-query scheduled-work component/plugin remains a
-separate outstanding design/qualification item. Its request/cancel/completion
-must enlist in the requesting owner's actual transaction, never a competing
-session on the same database path. The combined F0 proof below must demonstrate
-that common contract rather than assuming query scheduling alone proves it.
+separate capability in [CW-81](computation-graph-remaining-work.md#cw-81).
+Its request/cancel/completion must enlist in the requesting owner's actual
+transaction, never a competing session on the same database path.
+[CW-82](computation-graph-remaining-work.md#cw-82) owns the mixed query/non-query
+proof; query scheduling alone does not establish that broader contract.
 
 ### Results, subscriptions and diagnostics
 
@@ -205,43 +208,42 @@ Contiguous live delivery uses metadata-only heads, not full row transfers.
 Notification-driven waits survive clean stop/start; old transfers and removed
 owners remain fenced.
 
-## Work packages and completion gates
+<a id="work-packages-and-completion-gates"></a>
 
-| Gate | Implemented | Remaining |
-|---|---|---|
-| W0: construction-independent fixtures | Explicit reference registration; ordinary native integration fixtures; actual loaded-library runner; native standalone examples | Preserve exact construction-mode evidence through final qualification |
-| W1: evaluator/configuration | Retained Core evaluator, scoped adapters, shared settings, joins, middleware, source/input binding | Preserve structured errors and lifetime invariants through remaining profiles |
-| W2: durable processing | Atomic state, canonical rows, input progress, pending delivery, separate/shared journals, explicit non-atomic publication and real crash recovery | Complete combined backend/profile qualification without upgrading independent writers |
-| W3: bootstrap/lifecycle | Existing providers, coordinated SQLite, composites, chains, partial/crashed initialization, reset and deletion | Finish combined profile qualification and numeric-generation assertions |
-| W4: evaluation/scheduling | Archives, configured middleware, source transactions, Core future work and deterministic clocks | Generic non-query scheduling proof and combined request/state crash boundaries |
-| W5: readers/facades | Shared readers, ordinary subscriptions/reactions, paged reads/follow, coherent progress/output metrics and retained recovery readers | Individual oversized-item handling and combined qualification |
-| W6: factory cutover | Explicit ordinary factory selection, native construction, missing-factory errors, direct Server registration and native standalone examples | Retire linked reference construction when its native preservation coverage is complete |
-| W7: final qualification | Focused loaded, library, Host and Server gates | Combined preservation/performance evidence, required backend profiles and regenerated architecture |
+## Implementation status and follow-ups
 
-The reference implementation remains preservation evidence, not an implicit
-production compatibility mode. Do not weaken existing assertions, introduce
-skips, or call a reference-only result native acceptance.
+[CW-43](computation-graph-remaining-work.md#cw-43) records completed native query
+integration and the exact scope of its qualification evidence. Evaluator reuse,
+ordinary factory selection, supported storage/publication profiles, bootstrap,
+scheduling, readers, metrics and retained recovery are implemented. Architecture
+artifacts have been regenerated and checked; rerunning their generator after a
+future source change is maintenance, not an outstanding query implementation step.
+
+This guide describes contracts, not a second work checklist. Open items and
+completion criteria live only in the remaining-work document:
+
+| Follow-up | Canonical item |
+|---|---|
+| Fragment individually oversized native records/envelopes | [CW-76](computation-graph-remaining-work.md#cw-76) |
+| Fill missing native behavioral-parity coverage | [CW-77](computation-graph-remaining-work.md#cw-77) |
+| Execute the complete existing current-code test matrix | [CW-78](computation-graph-remaining-work.md#cw-78) |
+| Measure native-query overhead against the linked baseline | [CW-79](computation-graph-remaining-work.md#cw-79) |
+| Retire remaining linked query runtime entry points | [CW-80](computation-graph-remaining-work.md#cw-80) |
+
+The explicit reference remains preservation evidence, not an automatic
+production fallback. Some successful preservation tests still use it. Their
+assertions must be retained, and their results must not be labeled native
+acceptance without an actual native execution path.
 
 ### F0: combined proof
 
-Combine the working native source/bootstrap provider, a small non-query stateful
-transformer, the loaded query and a capture consumer with real persistent
-storage. Bind the common scheduled-work contract to query and non-query owners.
-
-1. Bootstrap the chain while live input continues; verify observable
-   transformation, exact final rows and gap-free/duplicate-free handover.
-2. Read recovered progress before readiness, cancel initialization and prove
-   retained ownership, awaited cleanup and safe retry.
-3. Schedule, replace and cancel work in the same transaction as component state.
-   Inject rollback and verify neither state nor timer requests leak.
-4. Advance the physical clock without new source input. Both owners receive due
-   work without losing provenance or producing duplicate output.
-5. Kill a child around bootstrap completion, request commit and due-work/output
-   commit. Reopen and verify checkpoints, pending work, rows, sequence and output.
-
-Use both Tokio flavors and real subprocess drivers, not sleeps or merely dropping
-components. Reuse the actual SQLite integration rather than inventing a connector.
-Failures of ownership, handover or due-work atomicity block completion.
+The mixed source/bootstrap, non-query transformer, query and capture-consumer
+proof is [CW-82](computation-graph-remaining-work.md#cw-82). It depends on the
+reusable non-query scheduling contract in
+[CW-81](computation-graph-remaining-work.md#cw-81). Its ownership, rollback,
+clock and real-process failure checks qualify that new combined profile; they
+do not keep the implemented query plugin open or imply that query timers are
+unavailable.
 
 ### Preservation matrix
 
@@ -266,24 +268,30 @@ affected preservation targets; do not rerun every connector after each edit.
 `bash lib/tests/run-query-plugin.sh smoke` rebuilds the actual query, SQLite and
 middleware libraries and includes ordinary APIs, large reads and test clocks.
 `ordinary` isolates required registration and ordinary native construction.
+`retained-recovery` covers native recovery consumers, corrupt-state rebuilding
+and reset-baseline guards alongside their shared/reference preservation cases.
 Other groups cover subscriptions, evaluator lifetime, scheduling, archives,
-middleware, joins, bootstrap, progress and recovery. The script does not install
-dependencies, start containers or run Server.
+middleware, joins, bootstrap, progress and recovery. The `semantics`, `recovery`
+and `timers` groups and the library portion of `api` still explicitly use the
+linked reference. The script does not install dependencies, start containers,
+run Server or execute every workspace suite.
 
-Final qualification must include default/no-default and relevant middleware,
-test-support and backend profiles, both runtimes, linked native definitions and
-actual cdylibs. Preserve process-exit drivers and the supported Garnet/RocksDB,
-atomic/non-atomic, shared-journal and cleanup matrices. Unavailable external
-backends are blocked gates, not passes or new ignored tests.
+Use [CW-77](computation-graph-remaining-work.md#cw-77) for missing native cases
+and [CW-78](computation-graph-remaining-work.md#cw-78) for full-suite execution.
+Record default/no-default and relevant middleware, test-support and backend
+profiles, both runtimes, linked native definitions and actual cdylibs. Preserve
+process-exit drivers and the supported Garnet/RocksDB, atomic/non-atomic,
+shared-journal and cleanup contracts. Unavailable external backends are blocked
+gates, not passes or new ignored tests.
 
-Measure graph-driven projection, joins/aggregates, large reads, backpressure and
-timers against the retained baseline. Check evaluator setup count, codec/RPC
-cost, latency/throughput and bounded ownership. Do not invent a performance
-budget or optimize around a correctness failure.
+Performance comparisons and their operating bounds belong to
+[CW-79](computation-graph-remaining-work.md#cw-79). Do not invent a performance
+budget, compare different storage guarantees or optimize around a correctness
+failure.
 
-Direct Server registration is included because ordinary creation now requires
+Direct Server registration is implemented because ordinary creation requires
 it. Broader Server composition, deployment and unrelated connector migrations
-remain separate work. The native dependency policy, builds, current usage
-documentation and generated architecture must agree before the
-[CW-43 backlog](computation-graph-remaining-work.md#cw-43-optional-native-query-plugin)
-can be closed.
+remain separate work in the canonical backlog. Published package availability
+and migration documentation remain
+[CW-73](computation-graph-remaining-work.md#cw-73); a successful matched local
+build is not evidence that the plugin is already distributed in a release.

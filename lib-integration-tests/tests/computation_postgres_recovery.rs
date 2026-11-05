@@ -22,14 +22,14 @@ use testcontainers_modules::postgres::Postgres;
 const SOURCE: &str = "postgres";
 const QUERY: &str = "items";
 const SLOT: &str = "computation_recovery";
-// Persisted input identity "source:postgres", not a framework sequence alone.
-const SOURCE_CHECKPOINT: &str = "computation:input:736f757263653a706f737467726573";
+#[allow(dead_code)]
+mod index_observation;
 const DEADLINE: Duration = Duration::from_secs(30);
 const IMAGE: &str =
     "16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea";
 
 struct ObservedIndexes {
-    inner: RocksDbIndexProvider,
+    inner: index_observation::ObservedIndexProvider,
     checkpoints: Mutex<Option<Weak<dyn CheckpointStore>>>,
 }
 
@@ -49,7 +49,10 @@ impl IndexBackendPlugin for ObservedIndexes {
         Ok(indexes)
     }
     fn is_volatile(&self) -> bool {
-        false
+        self.inner.is_volatile()
+    }
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.inner.durability()
     }
     fn supports_atomic_query_output(&self) -> bool {
         self.inner.supports_atomic_query_output()
@@ -65,11 +68,23 @@ impl ObservedIndexes {
             .as_ref()
             .and_then(Weak::upgrade)
             .context("query checkpoint store is unavailable")?;
-        store
-            .read_checkpoint(SOURCE_CHECKPOINT)
+        index_observation::native_source_checkpoints(store.as_ref())
             .await?
+            .remove(SOURCE)
             .context("source checkpoint is absent")
     }
+}
+
+async fn stopped_checkpoint(root: &Path) -> Result<SourceCheckpoint> {
+    let indexes = index_observation::open_query_indexes(&root.join("indexes"), QUERY).await?;
+    let store = indexes
+        .checkpoint_store
+        .as_ref()
+        .context("stopped query checkpoint store")?;
+    index_observation::native_source_checkpoints(store.as_ref())
+        .await?
+        .remove(SOURCE)
+        .context("stopped query source checkpoint is absent")
 }
 
 struct Admin {
@@ -123,7 +138,15 @@ impl Admin {
 
 async fn open(root: &Path, host: &str, port: u16) -> Result<(DrasiLib, Arc<ObservedIndexes>)> {
     let indexes = Arc::new(ObservedIndexes {
-        inner: RocksDbIndexProvider::new(root.join("indexes"), false, false),
+        inner: index_observation::ObservedIndexProvider::new(
+            Arc::new(RocksDbIndexProvider::new(
+                root.join("indexes"),
+                false,
+                false,
+            )),
+            &root.join("indexes"),
+            QUERY,
+        ),
         checkpoints: Mutex::new(None),
     });
     let source = PostgresReplicationSource::builder(SOURCE)
@@ -331,7 +354,7 @@ async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_ro
             .await
             .context("wait for actual acknowledgement of the committed prefix")?;
         core.stop_query(QUERY).await?;
-        let saved = indexes.checkpoint().await?;
+        let saved = stopped_checkpoint(root.path()).await?;
         admin
             .client
             .batch_execute(
@@ -344,7 +367,7 @@ async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_ro
             .await
             .context("source must report newer WAL read without acknowledging paused query work")?;
         assert_eq!(
-            indexes.checkpoint().await?,
+            stopped_checkpoint(root.path()).await?,
             saved,
             "stopped query must not acknowledge unseen data"
         );
@@ -393,7 +416,7 @@ async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_ro
                 (4, "delta".into())
             ])
         );
-        assert_eq!(indexes.checkpoint().await?, saved);
+        assert_eq!(stopped_checkpoint(root.path()).await?, saved);
         core.start_query(QUERY)
             .await
             .context("resume query after database restart")?;

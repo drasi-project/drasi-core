@@ -72,8 +72,10 @@ inactive reads or recreating an evaluator.
 Server registers the unique eligible loaded query factory before ordinary
 query creation. Non-atomic publication reuses the existing pending-output/reset
 protocol and never claims atomicity for independent writers. Remaining
-diagnostic and qualification gaps are tracked in
-[CW-43](../lib/docs/computation-graph-remaining-work.md#cw-43-optional-native-query-plugin).
+payload, native-coverage, full-suite, performance and reference-retirement work
+is tracked in [CW-76 through CW-80](../lib/docs/computation-graph-remaining-work.md#cw-76).
+[CW-43](../lib/docs/computation-graph-remaining-work.md#cw-43) records the completed
+query integration rather than an open implementation checklist.
 
 ## Architecture Diagram
 

@@ -728,6 +728,12 @@ async fn tracked_graph(
     } else {
         &["left"][..]
     };
+    let mut sink_settings = database.sink_settings();
+    sink_settings["outputs"] = names
+        .iter()
+        .map(|name| ((*name).to_owned(), json!({"component":name,"port":"out"})))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
     let owners = names
         .iter()
         .map(|name| {
@@ -762,7 +768,7 @@ async fn tracked_graph(
                 ResourceRole::SecretStore,
                 Arc::new(ConfigurationResolverResource(Arc::new(Settings {
                     source: settings.clone(),
-                    sink: database.sink_settings(),
+                    sink: sink_settings,
                 }))),
             ),
         ),
@@ -929,7 +935,15 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
     let mut committed = Vec::new();
     let mut transports = Vec::new();
     let proof = async {
-        tokio::time::timeout(Duration::from_secs(30), graph.core.start()).await??;
+        let inspector = graph.core.inspect_computation_graph()?;
+        tokio::time::timeout(Duration::from_secs(30), graph.core.start())
+            .await
+            .with_context(|| {
+                format!(
+                    "MySQL graph startup did not settle: {:?}",
+                    inspector.snapshot().observed
+                )
+            })??;
         for query in &graph.results {
             let mut actual = rows(query)?;
             actual.sort_by_key(Value::to_string);

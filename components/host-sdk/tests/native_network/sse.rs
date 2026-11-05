@@ -188,7 +188,11 @@ async fn native_sse_dynamic_routes_are_bounded_and_recreated_only_after_cleanup(
             Ok::<_, anyhow::Error>(())
         })
         .await??;
+        drop(events);
+        drop(client);
         sink.start().await?;
+        // Route reconstruction must use a connection to the new listener.
+        let client = reqwest::Client::new();
         assert_eq!(
             client.get(&path).send().await?.status(),
             StatusCode::NOT_FOUND

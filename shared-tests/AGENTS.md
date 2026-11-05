@@ -7,3 +7,4 @@ Reusable behavioral scenarios and test harnesses consumed as a library by other 
 - Changing expected results breaks downstream crates: also run the tests of components/indexes/* and the reaction recovery e2e tests (components/reactions/*/tests/recovery_e2e.rs)
 - redis_helpers starts Redis via testcontainers (Docker required); its 5-attempt container retry works around a Docker Desktop port-mapping bug - do not simplify it away
 - recovery_test_helpers and mock_source support drasi-lib reaction-recovery tests; use_cases and temporal_retrieval target drasi-core query/index conformance
+- Reaction-recovery helpers explicitly register the statically linked native query plugin through the Host SDK. Do not restore implicit linked-query selection; engine/index use-case scenarios remain separate Core evaluator evidence.

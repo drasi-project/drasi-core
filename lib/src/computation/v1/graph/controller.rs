@@ -2018,12 +2018,16 @@ pub(super) struct DrainCompletion {
     result: GraphResult<()>,
 }
 
-/// A single-component start or stop waiting behind a conflicting lifecycle
-/// operation. Requests for the same component begin in arrival order.
+/// Generation-fenced lifecycle requests waiting behind conflicting work.
+/// Requests for the same component begin in arrival order.
 enum HandleRequest {
     Start {
         component: ComponentId,
         generation: ComponentGeneration,
+        reply: oneshot::Sender<GraphResult<StartReport>>,
+    },
+    StartMembers {
+        members: BTreeMap<ComponentId, ComponentGeneration>,
         reply: oneshot::Sender<GraphResult<StartReport>>,
     },
     Stop {
@@ -2043,36 +2047,47 @@ impl HandleRequest {
             Self::Start { component, .. } | Self::Stop { component, .. } => {
                 BTreeSet::from([component.clone()])
             }
-            Self::StopMembers { members, .. } => members.keys().cloned().collect(),
+            Self::StartMembers { members, .. } | Self::StopMembers { members, .. } => {
+                members.keys().cloned().collect()
+            }
         }
     }
 
     fn abandoned(&self) -> bool {
         match self {
-            Self::Start { reply, .. } => reply.is_closed(),
+            Self::Start { reply, .. } | Self::StartMembers { reply, .. } => reply.is_closed(),
             Self::Stop { reply, .. } | Self::StopMembers { reply, .. } => reply.is_closed(),
         }
     }
 
-    /// A stop may interrupt an in-flight start; a start needs the controller
-    /// free of both.
+    /// Member starts can join activation, but must wait for cleanup and
+    /// reconciliation. A stop may interrupt an in-flight start.
     fn ready(&self, graph: &ComputationGraph, operations: &Operations) -> bool {
-        let selected = self
-            .components()
+        let components = self.components();
+        let selected = components
             .iter()
             .filter_map(|id| graph.ids.get(id).copied())
             .collect();
         match self {
             Self::Start { .. } => !operations.conflicts(&selected, true),
+            Self::StartMembers { .. } => {
+                !operations.conflicts(&selected, false)
+                    && operations
+                        .reconciliation
+                        .as_ref()
+                        .map_or(true, |reservation| {
+                            reservation.components.is_disjoint(&components)
+                        })
+            }
             Self::Stop { .. } | Self::StopMembers { .. } => !operations.conflicts(&selected, false),
         }
     }
 
     fn validate(&self, graph: &ComputationGraph) -> GraphResult<BTreeSet<usize>> {
-        if let Self::StopMembers { members, .. } = self {
-            return member_indices(graph, members);
-        }
-        let (component, generation) = match self {
+        let selected = match self {
+            Self::StartMembers { members, .. } | Self::StopMembers { members, .. } => {
+                member_indices(graph, members)?
+            }
             Self::Start {
                 component,
                 generation,
@@ -2082,24 +2097,27 @@ impl HandleRequest {
                 component,
                 generation,
                 ..
-            } => (component, *generation),
-            Self::StopMembers { .. } => unreachable!("members validated above"),
+            } => {
+                let index = graph
+                    .ids
+                    .get(component)
+                    .filter(|index| graph.components[**index].generation == *generation)
+                    .copied()
+                    .ok_or(GraphError::StaleGeneration)?;
+                BTreeSet::from([index])
+            }
         };
-        let index = graph
-            .ids
-            .get(component)
-            .filter(|index| graph.components[**index].generation == generation)
-            .copied()
-            .ok_or(GraphError::StaleGeneration)?;
-        if matches!(self, Self::Start { .. }) && graph.retirement_active() {
+        if matches!(self, Self::Start { .. } | Self::StartMembers { .. })
+            && graph.retirement_active()
+        {
             return Err(GraphError::OperationInProgress);
         }
-        Ok(BTreeSet::from([index]))
+        Ok(selected)
     }
 
     fn reject(self, error: GraphError) {
         match self {
-            Self::Start { reply, .. } => {
+            Self::Start { reply, .. } | Self::StartMembers { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::Stop { reply, .. } | Self::StopMembers { reply, .. } => {
@@ -2127,6 +2145,13 @@ impl HandleRequest {
                 component, reply, ..
             } => {
                 graph.deferred_activation.remove(&component);
+                operations.begin_start(graph, selected, Some(reply), true);
+                Ok(())
+            }
+            Self::StartMembers { members, reply } => {
+                for id in members.keys() {
+                    graph.deferred_activation.remove(id);
+                }
                 operations.begin_start(graph, selected, Some(reply), true);
                 Ok(())
             }
@@ -4340,7 +4365,11 @@ impl Operations {
     /// Rejects queued handle starts for `component`, which a later stop
     /// supersedes; otherwise they would restart the component afterwards.
     fn supersede_queued_starts(&mut self, component: &ComponentId) {
-        let is_superseded = |queued: &HandleRequest| matches!(queued, HandleRequest::Start { component: id, .. } if id == component);
+        let is_superseded = |queued: &HandleRequest| match queued {
+            HandleRequest::Start { component: id, .. } => id == component,
+            HandleRequest::StartMembers { members, .. } => members.contains_key(component),
+            _ => false,
+        };
         if !self.handle_requests.iter().any(is_superseded) {
             return;
         }
@@ -5352,14 +5381,21 @@ async fn submit_handle_request(
     cancel: &mut watch::Receiver<bool>,
     request: HandleRequest,
 ) -> GraphResult<()> {
-    if matches!(&request, HandleRequest::Start { .. }) && request.abandoned() {
+    if matches!(
+        &request,
+        HandleRequest::Start { .. } | HandleRequest::StartMembers { .. }
+    ) && request.abandoned()
+    {
         return Ok(());
     }
     if let Err(error) = request.validate(graph) {
         request.reject(error);
         return Ok(());
     }
-    if !matches!(&request, HandleRequest::Start { .. }) {
+    if !matches!(
+        &request,
+        HandleRequest::Start { .. } | HandleRequest::StartMembers { .. }
+    ) {
         for component in request.components() {
             operations.supersede_queued_starts(&component);
         }
@@ -5755,7 +5791,9 @@ fn handle_command<'a>(
             .as_ref()
             .is_some_and(|reservation| !reservation.permits(graph, &command))
         {
-            if let Command::Add { addition, reply, .. } = command {
+            if let Command::StartMembers { members, reply } = command {
+                submit_handle_request(graph, operations, controls, cancel, HandleRequest::StartMembers { members, reply }).await?;
+            } else if let Command::Add { addition, reply, .. } = command {
                 let rejected = super::addition::RejectedAddition::new(addition);
                 graph.rejected_additions.lock().unwrap_or_else(|error| error.into_inner())
                     .push(rejected.clone());
@@ -6128,18 +6166,7 @@ fn handle_command<'a>(
                     submit_handle_request(graph, operations, controls, cancel, HandleRequest::Start { component, generation, reply }).await?;
                 }
                 Some(Command::StartMembers { members, reply }) => {
-                    if reply.is_closed() { return Ok(()); }
-                    let selected = member_indices(graph, &members).and_then(|selected| {
-                        if graph.retirement_active() || operations.conflicts(&selected, true) { Err(GraphError::OperationInProgress) }
-                        else { Ok(selected) }
-                    });
-                    match selected {
-                        Ok(selected) => {
-                            for id in members.keys() { graph.deferred_activation.remove(id); }
-                            operations.begin_start(graph, selected, Some(reply), true);
-                        }
-                        Err(error) => { let _ = reply.send(Err(error)); }
-                    }
+                    submit_handle_request(graph, operations, controls, cancel, HandleRequest::StartMembers { members, reply }).await?;
                 }
                 Some(Command::RequestMemberActivation { members, reply }) => {
                     if reply.is_closed() { return Ok(()); }

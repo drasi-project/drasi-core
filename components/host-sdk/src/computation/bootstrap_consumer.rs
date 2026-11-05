@@ -114,10 +114,14 @@ impl BootstrapBinding {
             if preparation != BootstrapPreparation::Ready
                 || status.complete && provider.has_pending_snapshot()?
             {
-                anyhow::ensure!(
-                    status.reset_allowed,
-                    "bootstrap provider requires an explicit reset under Strict recovery"
-                );
+                if !status.reset_allowed {
+                    return Err(anyhow::Error::new(
+                        drasi_computation_contracts::QueryRecoveryError::SourceResetRequired,
+                    )
+                    .context(
+                        "bootstrap provider requires an explicit reset under Strict recovery",
+                    ));
+                }
                 self.stop().await?;
                 component.unit(operation::BOOTSTRAP_RESET, &[]).await?;
                 self.cleanup_required = true;

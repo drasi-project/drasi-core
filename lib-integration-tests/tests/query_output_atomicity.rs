@@ -32,7 +32,7 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::BootstrapEventSender;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::computation::v1::{
-    EnvelopeCodec, GraphChangeCodec, QueryChangeCodec, Record, RecordImage, ResultNodeProjector,
+    GraphChangeCodec, QueryChangeCodec, Record, RecordImage, ResultNodeProjector,
 };
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
@@ -205,6 +205,10 @@ impl IndexBackendPlugin for FaultInjectingIndexProvider {
         false
     }
 
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.inner.durability()
+    }
+
     fn supports_atomic_query_output(&self) -> bool {
         self.inner.supports_atomic_query_output()
     }
@@ -274,6 +278,10 @@ impl CheckpointStore for FailingCheckpointStore {
         self.inner.clear_checkpoints().await
     }
 
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        self.inner.stage_clear_checkpoints().await
+    }
+
     async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
         self.inner.write_config_hash(hash).await
     }
@@ -334,6 +342,15 @@ impl OutboxWriter for FailingOutboxWriter {
         self.inner.read_from(query_id, after_sequence).await
     }
 
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_sequence: u64,
+        limits: drasi_core::interface::OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        self.inner.read_page(query_id, after_sequence, limits).await
+    }
+
     async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         self.inner.read_latest_sequence(query_id).await
     }
@@ -374,6 +391,17 @@ impl LiveResultsWriter for FailingLiveResultsWriter {
 
     async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_snapshot(query_id).await
+    }
+
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_signature: Option<u64>,
+        limits: drasi_core::interface::OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        self.inner
+            .read_page(query_id, after_signature, limits)
+            .await
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
@@ -804,11 +832,9 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         .checkpoint_store
         .as_ref()
         .context("checkpoint store")?;
-    let source_progress: Vec<_> = store
-        .read_all_checkpoints()
+    let source_progress: Vec<_> = index_observation::native_source_checkpoints(store.as_ref())
         .await?
         .into_iter()
-        .filter(|(key, _)| !key.starts_with('\0'))
         .collect();
     anyhow::ensure!(
         source_progress.len() <= 1,
@@ -827,8 +853,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let outbox_sequences: Vec<u64> = raw_outbox.iter().map(|(seq, _)| *seq).collect();
     let mut outbox_names = Vec::new();
     let mut outbox_source_ids = Vec::new();
-    let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("storage limit"));
-    codec.register_schema(QueryChangeCodec::schema())?;
+    let codec = drasi_computation_plugin_sdk::wire::codec(&[QueryChangeCodec::schema()])?;
     let mut output_scope: Option<ResultNodeProjector> = None;
     for (_seq, data) in &raw_outbox {
         let envelope = codec

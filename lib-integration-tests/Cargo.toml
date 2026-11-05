@@ -16,6 +16,7 @@ computation-middleware-tests = ["drasi-lib/middleware-unwind"]
 # Test dependencies and explicit native query-factory registration.
 drasi-lib = { workspace = true, features = ["test-support"] }
 drasi-host-sdk.workspace = true
+drasi-computation-plugin-sdk.workspace = true
 drasi-computation-transformer-query = { path = "../components/computation-plugins/transformers/query" }
 drasi-core.workspace = true
 drasi-source-postgres.workspace = true

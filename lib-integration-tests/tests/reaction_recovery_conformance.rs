@@ -54,6 +54,8 @@ use std::sync::{
 use std::time::Duration;
 
 const PHASE_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_PHASE";
+#[allow(dead_code)]
+mod index_observation;
 const EXECUTION_ENV: &str = "DRASI_TEST_EXECUTION";
 const RUNTIME_NAME: &str = "computation";
 const ROCKS_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_ROCKS_PATH";
@@ -194,6 +196,10 @@ impl IndexBackendPlugin for ObservedRocksDb {
 
     fn is_volatile(&self) -> bool {
         self.inner.is_volatile()
+    }
+
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.inner.durability()
     }
 
     fn supports_atomic_query_output(&self) -> bool {
@@ -2662,11 +2668,9 @@ async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
             let store = indexes
                 .checkpoint_store
                 .context("missing checkpoint store")?;
-            let checkpoints = store.read_all_checkpoints().await?;
-            // Internal query markers use the reserved NUL namespace; this
-            // fixture must not persist any per-source cursor before restart.
+            let checkpoints = index_observation::native_source_checkpoints(store.as_ref()).await?;
             assert!(
-                checkpoints.keys().all(|key| key.starts_with('\0')),
+                checkpoints.is_empty(),
                 "seed process unexpectedly persisted source progress: {checkpoints:?}"
             );
             assert_eq!(store.read_result_sequence(QUERY_ID).await?.unwrap_or(0), 0);
@@ -2677,11 +2681,8 @@ async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
             let store = indexes
                 .checkpoint_store
                 .context("missing checkpoint store")?;
-            let checkpoints = store.read_all_checkpoints().await?;
-            let source_progress: Vec<_> = checkpoints
-                .iter()
-                .filter(|(key, _)| !key.starts_with('\0'))
-                .collect();
+            let checkpoints = index_observation::native_source_checkpoints(store.as_ref()).await?;
+            let source_progress: Vec<_> = checkpoints.iter().collect();
             assert_eq!(source_progress.len(), 1);
             assert_eq!(source_progress[0].1.sequence, 3);
             assert_eq!(

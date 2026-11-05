@@ -1,6 +1,7 @@
 # id	priority	state	scope	profile	package	binary	case	remaining
 # covered means the named contract is tested, not that its entire subsystem is production-qualified.
 # partial/blocked/unqualified requirements cannot satisfy the replacement qualification gate.
+# N01..N12 bind native query evidence separately; older native-graph/reference case names do not prove execution through the query plugin.
 M01	P1	covered	managed	integration	lib-integration-tests	computation_management	commit_failure_prevents_construction_and_lost_response_is_resolved_by_request_id	-
 M02	P1	covered	managed	integration	lib-integration-tests	computation_management	regressed_changed_and_invalid_store_reads_cannot_replace_confirmed_state	-
 M03	P1	covered	managed	integration	lib-integration-tests	computation_managed_resources	live_full_queues_preserve_exact_work_across_sink_and_journal_replacement	-
@@ -49,3 +50,15 @@ H02	P1	unqualified	server-managed	-	-	-	-	Server desired-state, receipts, reconc
 H03	P1	partial	server-query-api	default	drasi-lib	component_api_parity	native_query_apis_match_ordinary_creation_and_runtime_behavior	Native query reads/lifecycle/SSE plus pipeline query update/removal, source and reaction upserts are covered; custom input/foreign-query capabilities and generic native Source/Reaction API parity remain.
 H04	P1	unqualified	test-infra-qos	-	-	-	-	Session-local golden-hash evidence exists; versioned test-infra QoS/query-host selection and provenance assertions are still required.
 H05	P2	unqualified	server-observers	-	-	-	-	Prolonged SSE/reconnect gaps need explicit resynchronization and stale-observer assertions.
+N01	P1	covered	native-query-static-and-loaded	native-query	drasi-host-sdk	native_query_plugin	semantics::native_query_semantics_match_shared_reference_cases_current_thread	-
+N02	P1	covered	native-query-static-and-loaded	native-query	drasi-host-sdk	native_query_plugin	semantics::native_query_semantics_match_shared_reference_cases_multi_thread	-
+N03	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::ordinary::ordinary_queries_use_selected_native_factory_current_thread	-
+N04	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::ordinary::ordinary_queries_use_native_memory_factory_multi_thread	-
+N05	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::bootstrap::evaluator::retained_evaluator_bootstrap_live_and_restart_current_thread	-
+N06	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::non_atomic::non_atomic_independent_output_failure_and_auto_reset_current_thread	-
+N07	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::corrupt_recovery::native_auto_reset_corrupt_state_preserves_ownership_and_consumer_progress_current_thread	-
+N08	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::retained_recovery::native_retained_recovery_and_consumer_policies_multi_thread	-
+N09	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::scheduling::shared_query_scheduling_persistent_restart_current_thread	-
+N10	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::ordinary::ordinary_native_queries_transfer_large_results_and_retained_history	-
+N11	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::bootstrap::coordinated::subscriptions::native_query_subscriptions_snapshot_handoff_current_thread	-
+N12	P1	covered	native-query-loaded	native-query	drasi-host-sdk	native_query_plugin	durable::input_middleware::shared_query_middleware_custom_factory_lifetime_multi_thread	-

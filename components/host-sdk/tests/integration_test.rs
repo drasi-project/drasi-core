@@ -53,37 +53,9 @@ use drasi_plugin_sdk::descriptor::{
 };
 use serial_test::serial;
 
-/// Locate the fixtures belonging to the selected Cargo build output.
-fn plugin_dir() -> PathBuf {
-    // Walk up from this crate's manifest dir to the workspace root
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // host-sdk is at components/host-sdk, workspace root is ../../
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
-    selected_plugin_dir(
-        workspace_root,
-        std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
-        std::env::var_os("DRASI_HOST_TEST_PLUGINS_DIR").map(PathBuf::from),
-    )
-}
-
-fn selected_plugin_dir(
-    workspace_root: &Path,
-    target: Option<PathBuf>,
-    fixtures: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(directory) = fixtures {
-        return directory;
-    }
-    let target = match target {
-        Some(path) if path.is_absolute() => path,
-        Some(path) => workspace_root.join(path),
-        None => workspace_root.join("target"),
-    };
-    target.join("debug").join("plugins")
-}
+#[path = "fixtures/plugin_directory.rs"]
+mod plugin_directory;
+use plugin_directory::{plugin_dir, selected_plugin_dir};
 
 #[test]
 fn plugin_directory_honors_cargo_target_and_fixture_override() {

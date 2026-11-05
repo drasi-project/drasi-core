@@ -7,6 +7,8 @@
 mod bootstrap;
 #[path = "native_query_plugin/durable.rs"]
 mod durable;
+#[path = "native_query_plugin/semantics.rs"]
+mod semantics;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;

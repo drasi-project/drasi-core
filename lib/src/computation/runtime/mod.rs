@@ -1909,19 +1909,15 @@ impl Runtime {
             }
         }
         if !ready.is_empty() {
-            let revision = control.desired_snapshot().revision;
             for handle in &ready {
                 handle.observed()?;
             }
             let report = control
-                .start_requested(
-                    revision,
-                    GraphSelection::Exact(
-                        ready
-                            .into_iter()
-                            .map(|handle| handle.id().clone())
-                            .collect(),
-                    ),
+                .start_members(
+                    ready
+                        .into_iter()
+                        .map(|handle| (handle.id().clone(), handle.generation()))
+                        .collect(),
                 )
                 .await?;
             if let Err(error) = accept_waiting_start(report, &control.observed()) {

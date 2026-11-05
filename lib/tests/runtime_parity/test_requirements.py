@@ -27,6 +27,16 @@ class RequirementGuards(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing requirement evidence"):
             check_discovery(self.rows, "integration", "lib-integration-tests", {("unrelated", "passes"): "discovered"})
 
+    def test_native_query_coverage_is_not_satisfied_by_reference_query_cases(self):
+        with self.assertRaisesRegex(ValueError, "N01"):
+            check_discovery(self.rows, "native-query", "drasi-host-sdk",
+                            {("computation_queries", "real_cypher_query_runs_inside_computation_graph_with_typed_add_update_delete"): "discovered"})
+        native = [row for row in self.rows if row["id"].startswith("N")]
+        self.assertEqual(len(native), 12)
+        self.assertTrue(all(row["profile"] == "native-query"
+                            and row["binary"] == "native_query_plugin"
+                            and row["scope"].startswith("native-query-") for row in native))
+
     def test_partial_contract_is_not_qualified_by_a_passing_test(self):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)

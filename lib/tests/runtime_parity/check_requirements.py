@@ -13,7 +13,7 @@ from pathlib import Path
 FIELDS = ("id", "priority", "state", "scope", "profile", "package", "binary", "case", "remaining")
 EXPECTED_IDS = {
     f"{prefix}{number:02}"
-    for prefix, count in (("M", 7), ("G", 6), ("Q", 8), ("T", 7), ("S", 5), ("R", 5), ("A", 5), ("H", 5))
+    for prefix, count in (("M", 7), ("G", 6), ("Q", 8), ("T", 7), ("S", 5), ("R", 5), ("A", 5), ("H", 5), ("N", 12))
     for number in range(1, count + 1)
 }
 
@@ -35,7 +35,7 @@ def load_ledger(path):
             rows.append(row)
     ids = [row["id"] for row in rows]
     if set(ids) != EXPECTED_IDS or len(ids) != len(EXPECTED_IDS):
-        raise ValueError("ledger must contain every approved scenario exactly once (M01..H05)")
+        raise ValueError("ledger must contain every approved scenario exactly once (M01..H05 and N01..N12)")
     return rows
 
 

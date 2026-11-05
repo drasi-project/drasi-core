@@ -25,20 +25,27 @@ ownership, rollback and lineage repairs are implemented; their broader
 qualification boundaries remain below. Intentional child-worker test ignores
 are exercised by their parent tests, not counted as disabled functional failures.
 
-Native conversion of every plugin, old-adapter retirement and dynamically
-loadable queries are **not universal merge prerequisites**. Supported ordinary
-adapters already run inside ComputationGraph. The replacement is an unreleased,
-breaking v1 design; no compatibility-shim or automatic old-state migration
-programme is implied.
+Native query integration is implemented; [CW-43](#cw-43) is closed. Its remaining
+transport limit, broader native parity coverage, environment-dependent test
+qualification, performance and reference-cleanup work have separate entries [CW-76](#cw-76) through
+[CW-80](#cw-80). Query scheduling already works; reusable non-query scheduling
+and its combined proof are separate optional work in [CW-81](#cw-81) and
+[CW-82](#cw-82).
+
+Native conversion of every plugin and old-adapter retirement are **not universal
+merge prerequisites**. Supported ordinary adapters already run inside
+ComputationGraph. The replacement is an unreleased, breaking v1 design; no
+compatibility-shim or automatic old-state migration programme is implied.
 
 | Work area | Main entries |
 |---|---|
 | Correctness, lifecycle and diagnostics | [Deadlines](#cw-06), [query matching](#cw-13), [errors](#cw-22), [status](#cw-10), [ownership investigations](#cw-35) |
 | Recovery and qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46) |
+| Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
 | Integration and applications | [Connectors](#cw-44), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
 | Scaling and maintainability | [Publication](#cw-31), [storage](#cw-28), [hot paths](#cw-32), [decomposition](#cw-34), [benchmarks](#cw-40), [parallel tests](#cw-37) |
 | Public API and release | [API curation](#cw-69), [formats](#cw-18), [lints/MSRV](#cw-61), [release documentation](#cw-73) |
-| Optional capabilities | [Loadable queries](#cw-43), [view transforms](#cw-68), [housekeeping](#cw-71), [pipe policies](#cw-74), [hosting profiles](#cw-75) |
+| Optional capabilities | [Non-query scheduling](#cw-81), [combined scheduling proof](#cw-82), [view transforms](#cw-68), [housekeeping](#cw-71), [pipe policies](#cw-74), [hosting profiles](#cw-75) |
 
 Keep CW IDs and anchors stable. Review H/M identifiers and historical CG IDs
 below identify the remaining portion of a finding, not acceptance of every
@@ -70,6 +77,10 @@ gate before construction/startup waits and retains its pending graph result.
 Acknowledged interrupted construction can be retried through reconciliation or
 instance restart. Server captures native plugin bindings before releasing its
 registry guard and awaiting resource preparation.
+Native instance startup now queues generation-fenced member requests behind
+reconciliation and cleanup, and joins existing activation instead of returning
+a transient conflict. The existing lifecycle queue retains cancellation,
+replacement fencing, retirement exclusion and stop supersession.
 
 The [configuration guide](computation-graph-configuration.md#library-settings)
 describes defaults and retry behavior. Focused coverage includes total budgets
@@ -192,6 +203,9 @@ process-restart boundary; no production recovery defect was reproduced.
 **Remaining work:** Extend this evidence to the remaining connector/provider and
 initial-loading combinations. It is not power-loss qualification, a guarantee for
 memory-only queries, or proof that an external effect happens exactly once.
+The recorded 28-case run predates the query-plugin cutover. Its hosted-query
+construction must be identified and rerun under [CW-77](#cw-77) and
+[CW-78](#cw-78) before citing it as current loaded-query evidence.
 
 **Implemented repair:** Ordinary HTTP/gRPC WAL cleanup waits for the actual
 startup subscription batch, protects replay registration against pruning, and
@@ -231,6 +245,8 @@ gRPC source/reaction adapters and a 100,000-entry outbox per query. It does not
 qualify native gRPC factories, every transport or every lost-reply window.
 The manual workflow recipe is present; a successful Linux CI execution is not
 claimed. The older scheduled multi-transport snapshot gate remains distinct.
+This run also predates the native query-factory cutover; it is not an acceptance
+run of the current query plugin.
 
 **Finish when:** Incomplete captures cannot pass, and each required behavior has
 an exact expected result and a matching recorded run.
@@ -251,10 +267,18 @@ slow observers and reconnect after a result-history gap. A client must obtain
 an authoritative replacement snapshot or explicit failure, not retain stale rows.
 Record the actual Server and plugin versions used.
 
-The latest review repairs have targeted Core/Server and integration coverage,
-not a fresh full live transport/tutorial matrix. Rebuild the relevant artifacts
-and qualify their actual public workflows; do not relabel an earlier bundle's
-evidence as a run of the new code.
+**Implemented query integration:** Configured and API-created ordinary queries
+use explicit native factory registration, and missing query support is reported
+without a linked fallback. All 400 Server unit cases, including the query-progress
+OTLP cases on both runtimes, passed against the final query integration. The
+matching Server binary was built.
+
+The current local execution baseline now includes 1,013 passing Server unit,
+binary and integration cases, including plugin-dependent E2E and crash parents;
+[CW-78](#cw-78) records the environment exclusions and exact scope. This is not
+completion of the additional workflow/failure combinations above or every live
+tutorial. Rebuild the relevant plugins and do not relabel an earlier bundle's
+evidence as a run of new code.
 
 **Finish when:** The selected current-version workflows have trustworthy
 end-to-end results, including failure and restart, rather than only matching
@@ -290,103 +314,59 @@ not reproduce.
 <a id="cw-43"></a>
 <a id="cw-43-optional-native-query-plugin"></a>
 
-## 8. Finish loadable query support and application definitions (CW-43)
+## 8. Loadable query support and ordinary application integration (CW-43)
 
-**Kind:** Native ordinary-query integration implemented; remaining parity and qualification.
+**Status:** Implemented; umbrella closed and retained as a completion anchor.
 **Area:** Core, native SDK/Host, Server.
-**Priority:** High for the selected standard-transformer migration. **Effort:** Large.
 **Origin:** CG-11.
 
 **Design:** [Continuous queries as standard plugin transformers](computation-graph-query-transformer-design.md)
-contains the shared implementation boundaries and preservation requirements.
+describes the shared implementation and its contracts.
 The [plugin guide](../../components/computation-plugins/transformers/query/README.md)
 describes current registration and supported profiles.
 
-**Work:** Make query processing an ordinary `Transformer` plugin using the
-existing evaluator, not a privileged dynamic `Query` role or a proxy back to the
-built-in engine. Preserve storage/transaction ownership, every supported bootstrap
-and recovery mode, scheduling, readers, subscriptions and existing query APIs.
-All query, bootstrap and recovery tests remain required; no new skips, weaker
-assertions or volatile fallbacks are allowed. Measure the real native service
-boundary rather than treating an earlier narrow performance proof as the current
-production baseline. Built-in native queries and query chaining already work;
-extract that implementation rather than duplicate it. Remaining Server
-composition workflows belong to
-[CW-45](#cw-45); general reconstructible definitions, including merger/provider
-recipes, are tracked in [CW-70](#cw-70).
+**Completed implementation:**
 
-**Implemented:** Ordinary builders, runtime additions and computation pipelines
-require an explicitly registered query factory. The Host SDK supplies an
-ordinary-query adapter for the loaded indexed factory, using the actual selected
-storage, progress, bootstrap, catalogue and scheduling resources. Empty instances
-work without query support; unregistered query creation fails explicitly. There
-is no automatic linked fallback. Server resolves the unique eligible loaded
-factory before config/API query creation; programmatic hosts can register one.
+| Concern | Implemented behavior |
+|---|---|
+| Execution and reuse | A normal native Transformer runs the existing Core evaluator. Shared configuration, builder setup, canonical results, publication, recovery and delivery helpers live in `drasi-query-common`; there is no Host evaluator RPC or result-row mirror. |
+| Factory and ordinary APIs | Builders, runtime additions and pipelines require explicit factory registration. Empty/source-only instances need none. Server selects the unique eligible loaded factory for configured/API queries; absence is an error, never an implicit linked fallback. |
+| Evaluation and lifetime | Cypher/GQL, relationships, joins, aggregates, archives, input-local middleware, atomic source transactions and Core future evaluation use retained evaluator/index adapters. Live input and bootstrap do not rebuild the evaluator per event. |
+| Storage and recovery | Memory, persistent atomic and explicitly non-atomic profiles work through actual resource owners. Non-atomic publication preserves its three phases and deferred input visibility. SQLite bootstrap, query chains, shared/separate journals, restart, replacement and deletion are integrated. |
+| Reset safety | Identified corrupt rows/output use shared AutoReset eligibility and ownership checks. Reset baselines retain logical and transport high-water marks separately. Foreign ownership, unknown storage failures, pending delivery and bound destinations cannot be bypassed to force reset. |
+| Results and diagnostics | Ordinary snapshots/history, subscriptions, reactions and paged native reads use canonical state. Output gauges, logical advance counters, operation timing and committed progress are wired; replay/no-op input does not invent new output. |
+| Cleanup and recovery readers | Retained recovery views require completed plugin and Host cleanup. Ordinary stopped reads remain fenced. Consumer recovery reuses existing policies and checkpointed sinks; abandoned transfers release provider work without requiring a follow lease. |
+| Callers and architecture | All 19 standalone ordinary-query examples were migrated to explicit native registration and compile-checked. Matching native libraries and Server were built; dependency isolation, scoped lint/format checks and generated architecture checks passed. |
 
-The plugin reuses Core evaluation and `drasi-query-common` configuration,
-builder setup, result ownership, recovery and delivery helpers. It supports
-Cypher/GQL, relationships and synthetic joins, aggregates, archives, input-local
-middleware, complete source transactions on atomic storage, Core future work and
-the existing deterministic test clocks. Plugin-owned middleware factories stay
-inside their library; host Rust registry entries are not transferred through FFI.
+**Recorded qualification:** The final implementation runs preceding Core
+[`09c43c2d`](https://github.com/drasi-project/drasi-core/commit/09c43c2d8c5f5236589700006b0fedc281fc388f)
+and Server
+[`ef3d7b45`](https://github.com/drasi-project/drasi-server/commit/ef3d7b45d1dc31d66414549887c705964de261a8)
+included 174 loaded-query cases, 1,235 `drasi-lib` unit cases with
+`--no-default-features`, all 400 Server unit cases, four shared-query unit cases
+and 40 linked-reference query fault/recovery/source-transaction cases. The
+library retained five existing ignores; native/recovery child-process fixture
+entries are invoked explicitly by their parent tests. Earlier default-feature,
+connector and backend runs are not a fresh final-code matrix.
 
-Ordinary memory providers retain the actual evaluator and indexes across healthy
-stop/start, without an atomicity or process-restart claim. Persistent atomic
-providers retain indexes, committed input, canonical rows, output and delivery
-obligations. Actual SQLite file/coordinated bootstrap, composites, query chains,
-partial-bootstrap recovery, Strict/AutoReset, separate/shared journal fanout,
-replacement and deletion use the real owners. Pending output and provider
-retirement requirements cannot be bypassed to force reset.
+**Follow-up ownership:** [CW-76](#cw-76) covers oversized individual items;
+[CW-77](#cw-77) covers missing native parity cases; [CW-78](#cw-78) covers the
+complete current-code test run; [CW-79](#cw-79) covers performance comparison;
+[CW-80](#cw-80) covers remaining linked-reference entry points. These are
+bounded follow-ups, not an unfinished evaluator/factory implementation.
+Architecture regeneration is complete, not an open work item.
 
-Explicit persistent non-atomic publication reuses the linked implementation's
-evaluating/prepared/completed markers and reset-generation rules. Input progress
-is not exposed between evaluation commit and completed output publication.
-Independent persistent writers, partial publication, Strict refusal, existing
-SQLite AutoReset, process exits during publication/reset, timers and ordinary
-APIs are covered. Shared transaction-group destinations remain atomic-only.
-RocksDB and Garnet expose actual staged checkpoint clearing.
-
-Ordinary snapshots, outbox, generation, channel/broadcast subscriptions and
-reactions read the plugin's canonical state through the existing catalogue and
-outlet. Native snapshot/history and snapshot/live attachment transfer one frozen
-observation in bounded pages, without whole-result row/envelope/byte caps or a
-host result mirror. Individual records/envelopes remain bounded. Input/output
-progress metrics use a coherent metadata-only observation, including no-op input.
-Canonical row/outbox gauges initialize from bootstrap/recovered state and travel
-with output replies. Replay does not increment logical result advances. Retained
-recovery readers wait for both native STOP and Host cleanup, keep ordinary stopped
-reads fenced, and reuse the existing consumer recovery policies and checkpointed
-sinks. Contiguous delivery reads only heads, not full snapshots.
-
-**Remaining:**
-
-- Complete final combined preservation/Server/performance qualification and the
-  broader non-query scheduling proof. Keep linked reference tests distinguished
-  from native execution, qualify individual oversized-item handling, and update
-  generated architecture artifacts.
-
-[`run-query-plugin.sh`](../tests/run-query-plugin.sh) selects focused gates.
-`smoke` rebuilds the actual native libraries and includes ordinary APIs, large
-reads and test clocks; `ordinary` isolates factory registration and ordinary
-native queries; `non-atomic` isolates the weaker publication/reset protocol and
-its real interruption boundaries; `retained-recovery` covers output observations,
-stopped recovery readers and consumer policy/cleanup fencing. All standalone ordinary-query examples
-explicitly register the native plugin. Other groups cover subscriptions, evaluator lifetime, scheduling,
-archives, middleware, joins, bootstrap, progress and recovery. The library's
-linked-reference gates remain preservation baselines, not native evidence.
-
-**Finish when:** The graph executes queries through the standard Transformer
-contract, applications work with query support present or absent, missing support
-is explicit, and static/loaded query implementations preserve every supported
-result, transaction, bootstrap, reading, restart and cleanup contract. The
-implemented profiles are not evidence that every final qualification gate has
-completed.
+The general non-query scheduler and former combined F0 proof are
+[CW-81](#cw-81) and [CW-82](#cw-82), not missing query timers. Server composition
+remains [CW-45](#cw-45), reconstructible recipes [CW-70](#cw-70), and release
+packaging/documentation [CW-73](#cw-73). This closure is not a claim of exhaustive
+test coverage, unlimited payloads or performance parity.
 
 <a id="cw-47"></a>
 
 ## 9. Finish required examples and normal builds (CW-47)
 
-**Kind:** Issue/integration and qualification. **Area:** Server, Learning, test-infra.
+**Kind:** Issue/integration and qualification. **Area:** Core, Server, Learning, test-infra.
 **Priority:** High for required examples. **Effort:** Large overall.
 **Origins:** CG-17/28; cleanup stages 6/9.
 
@@ -399,6 +379,16 @@ not the implemented embedded lab. Reuse its shared domain/plugin/UI code.
 passes `tsc && vite build` after removing its unused `createdReaction` flag.
 Compiler checks and cleanup behavior are unchanged. The runnable tutorial
 continues to use the sibling Server application, not that older copy.
+
+**Completed query caller migration:** All 19 standalone Core ordinary-query
+examples register the native query factory and pass current-code offline compile
+checks. Their generated, gitignored lockfiles were refreshed without changing
+package versions. Nine checked-in PostgreSQL, MySQL and Trading configurations
+were regenerated from the actual native query factory; matching build and
+startup plugin lists include the query library. [CW-78](#cw-78) records the
+execution evidence. Library-owned low-level reference examples remain explicit
+baselines until [CW-80](#cw-80). Neither example compilation nor passing Server
+units substitutes for the remaining live application acceptance runs.
 
 Retain the seven migrated tutorials' existing scenario checks and automate
 uncovered walkthrough/CI profiles with exact expected rows, effects and visible
@@ -503,6 +493,16 @@ failure before/after reset markers, partial state deletion, cancelled submitted
 I/O, reopen and repeated deprovisioning. Use real reopen for every provider
 advertising persistence; a memory provider is not crash-durable evidence.
 
+**Completed query slice:** Native atomic and independent-writer non-atomic
+profiles have actual publication/reset process-exit coverage. Identified
+missing/corrupt rows and output, Strict refusal, AutoReset, foreign ownership,
+nonzero reset baselines and handled consumer progress have loaded-query cases.
+The Host grants baseline initialization once, only inside an authorized
+bootstrap reset. RocksDB and Garnet staged checkpoint clearing is implemented;
+the executed Garnet clear/reopen case is not a full native-query crash matrix.
+Remaining native query/provider combinations are recorded in [CW-77](#cw-77);
+this item retains broader provider reset/removal qualification.
+
 **Finish when:** Partly cleared state cannot reopen as healthy, and explicit
 recovery restores correct rows, progress and output identity.
 
@@ -526,6 +526,10 @@ Typed source-subscription failures, reconciliation aggregates and the named
 manager/inspection panic paths have already been repaired. Preserve
 `DrasiError::classification()` and typed causes instead of replacing that working
 mechanism with string errors or assuming classification was lost.
+Query AutoReset now reuses shared typed eligibility and ownership checks
+internally. Audit query-facing errors after the native boundary separately:
+correct reset refusal is not proof that every plugin-owned Rust cause is
+downcastable through the public API or explained clearly in Server/UI output.
 
 **Finish when:** A user can diagnose and recover from the selected failures
 without guessing from a generic error or mistaking rejection for successful work.
@@ -568,6 +572,12 @@ views follows the existing library running flag instead of a constant. It is
 Stopped before startup and after stop, and Running while a partial startup still
 owns active work. This is not an aggregate component-readiness or cleanup-success
 claim; individual failures remain visible separately.
+
+Native query output generation now remains observable after stop without
+reopening ordinary reads. Canonical metrics, coherent paged reads, retained
+recovery, replacement fencing and no-op/replay progress have focused coverage.
+Do not reopen those implementations; extend native parity under
+[CW-77](#cw-77) and keep broader public inspection outcomes in this item.
 
 **Finish when:** Supported library and Server operations report the same truthful
 state and results through replacement, restart and failure.
@@ -630,6 +640,12 @@ and the reported result accurately distinguishes applied changes from failures.
 storage and plugin combinations. Verify that failed or cancelled cleanup retains
 the resources and errors needed for a later retry.
 
+**Completed query slice:** Retained recovery reads wait for actual Host cleanup
+even after plugin STOP succeeds. Cancelled cleanup blocks restart, uncertain
+query state stays unreadable, and deletion retires old readers. Stop also releases
+an abandoned read transfer when no follow lease exists. These repairs and their
+focused cases are complete; other provider/component combinations remain open.
+
 **Finish when:** Each selected combination releases its actual resources or
 reports unfinished ownership truthfully, including after repeated cleanup attempts.
 
@@ -665,6 +681,8 @@ Include concurrent live changes during bootstrap, independently failing/slow
 multi-source snapshots, unavailable source positions, repeated timer bursts and
 reconstruction after each transaction participant boundary. Compare rows,
 progress, scheduled work and external effects with an independent oracle.
+The specific query/non-query scheduled-work chain formerly called F0 is tracked
+in [CW-82](#cw-82), rather than duplicated as another query-plugin completion gate.
 
 **Finish when:** Each selected combination has exact expected data, progress,
 effects and cleanup outcomes rather than an inference from single-failure tests.
@@ -680,6 +698,11 @@ effects and cleanup outcomes rather than an inference from single-failure tests.
 and replacement tests using independently built libraries. Measure per-instance
 resource release through repeated use; distinguish it from libraries intentionally
 kept loaded for the process lifetime.
+
+The query round added real-library processing, paged-read, retained-recovery,
+malformed-observation and reset-baseline cases. These are scoped evidence, not
+completion of the unsafe-code audit or fuzzing below. Query-specific missing
+behavior coverage belongs to [CW-77](#cw-77).
 
 Complete the separately requested
 [PR #988 native FFI safety review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780):
@@ -723,6 +746,9 @@ small/large payloads, fast/slow fan-out, disabled/enabled recovery and both runt
 flavors. Existing branch-only measurements and old percentages are not this
 comparison. Preserve the [CPU-scaling reference](computation-graph-maintainers-guide.md#measure-the-path-actually-changed)
 as a separate, bounded acceptance workload rather than a universal speedup claim.
+The narrower native-query versus linked-reference comparison is
+[CW-79](#cw-79). It feeds this larger application benchmark effort without
+repeating the same measurement work or implying a universal speedup.
 
 **Finish when:** The selected deployment profiles have repeatable measurements,
 exact result checks and explicit operating limits.
@@ -781,6 +807,9 @@ encoded-envelope admission quotas, payload-cache bounds, receipt/progress
 metadata, backend buffers and current-result state; none alone bounds total
 process memory. Existing optional FIFO/retained/non-shared QoS byte budgets and
 paged payload caches are not missing implementations.
+Query snapshot/history paging removes whole-response transport caps, not total
+result-memory limits. Fragmenting one oversized native item is [CW-76](#cw-76);
+do not treat that transport change as completion of this capacity work.
 
 **Finish when:** The selected limits hold through slow consumers, cancellation
 and restart without accepting work that cannot be retained safely.
@@ -830,6 +859,10 @@ branch-specific annotations as well as an immutable event payload. Profile
 actual outbox reads and commit topology rather than assuming every read clones
 all history or every output needs a separate transaction. Preserve required
 ordering, contiguous completion and independent subscriber obligations.
+The query evaluator is retained across input operations, and canonical output
+observations avoid a per-input metrics RPC or snapshot transfer. Further query
+boundary optimizations should follow [CW-79](#cw-79)'s measurements, not reopen
+those completed lifetime/read changes.
 
 **Finish when:** Measured processing cost falls while exact output, identity,
 replay and failure behavior remain unchanged.
@@ -901,6 +934,11 @@ The recorded Rust 1.95 `make lint-check` failure starts in unchanged
 multiple-of checks. Passing the receiver's 139 unit tests does not close these
 lint failures.
 
+The query cutover removed 21 unused root workspace dependency aliases without
+removing their component crates. Its scoped lint and native dependency checks
+passed. That closes this cleanup slice, not the broader unused-code, test-infra
+or actual minimum-Rust-version work above.
+
 **Finish when:** Selected packages pass their normal checks with useful warnings
 enabled across supported configurations.
 
@@ -948,6 +986,9 @@ ordinary hosts/proxies/factories, duplicated legacy index/provider adapters,
 static registrations and old ABI field gates before removal. Port useful
 behavior assertions to current interfaces; remove compatibility-only fixtures,
 dependency edges and build paths only after their last required user moves.
+The remaining linked query constructors have their own bounded retirement item,
+[CW-80](#cw-80). Ordinary Source/Reaction ABI retirement stays here and is not a
+prerequisite for using the native query plugin.
 
 **Finish when:** The selected current interfaces are sufficient, unsupported
 libraries/data fail clearly, and required functionality no longer depends on the
@@ -973,9 +1014,16 @@ logic through small changes alongside the work that needs them. Concrete work:
 - Separate operation groups, reservations, connection/control state and shutdown
   into explicit ownership/state models. Clarify slot/status coherence and share
   relationship-policy predicates instead of adding independent registries.
-- Extract query ledgers/commit preparation and repeated recovery work from the
-  large query/controller/reconciler/management modules. Share receiver,
+- Factor remaining duplicated commit/recovery work from the large
+  Host-processing/controller/reconciler/management modules. Share receiver,
   acknowledgement and retention-window logic where the contracts actually match.
+
+**Completed query extraction:** Definition/configuration, evaluator setup,
+canonical result state/readers, publication markers, recovery validation/reset
+eligibility and delivery helpers are shared in `drasi-query-common`. Query
+consumers use a common recovery-reader contract rather than a second policy
+implementation. Do not schedule that extraction again or move the evaluator
+into the Host; this item concerns only remaining duplication and unclear owners.
 
 The specific validation holes and controller failure paths reported by the
 review are fixed. These remaining extractions reduce future drift; they are not
@@ -1029,7 +1077,7 @@ Include retained/QoS pressure, earliest-subscriber lag and blocked admission so
 intentional lossless backpressure is visible rather than mistaken for a stalled
 runtime.
 
-**Implemented first slice:** Query committed-input and produced-output positions
+**Implemented query slice:** Query committed-input and produced-output positions
 can be read from their actual owners, with lifecycle/output identity and
 persistence information. Server has optional OTLP export of those measurements.
 `drasi.query.progress.sequence` distinguishes `input.committed` from
@@ -1038,6 +1086,14 @@ The standard-gRPC recovery evidence combines these observations with actual
 recorded batches and final snapshots. Remaining work is all-component
 instrumentation and qualification of the other profiles, not implementation of
 this first exporter or another Server progress endpoint.
+
+Native queries also expose canonical live-row/outbox gauges, retained bounds,
+logical output advances, operation durations and snapshot-fetch counts through
+the existing library metrics. Initialization includes bootstrap/recovered state;
+replay and no-op input do not inflate advances, and unsupported providers do not
+report meaningful-looking zeros. The Server OTLP exporter currently exports
+query progress positions, not all of these output gauges. Broader metric export,
+queue/lag/error instrumentation and consistent all-component coverage remain here.
 
 **Finish when:** Enabled measurements report exact expected counts and timing
 boundaries across normal work, retries, batching and failure.
@@ -1243,6 +1299,10 @@ trait name or a successful no-op default.
 Select further native services by concrete need, including resource injection
 and in-place plugin reconfiguration where currently unsupported. Reuse scoped
 services rather than pass arbitrary Rust objects or storage pointers across FFI.
+The query plugin's indexed processing, bootstrap-state, scheduling bindings and
+output observation/recovery services are implemented and explicitly negotiated.
+Generic non-query scheduled work is [CW-81](#cw-81); do not reopen query service
+bindings as a blanket missing capability.
 
 `CheckpointedSink` now forwards compatible hooks and checkpoints batched input.
 The remaining capability is safe scoped progress deletion and combined
@@ -1267,6 +1327,13 @@ instance-scoped Server configuration/routes, query inputs/results, supported
 Server/plugin pairing and explicit backup/reset/rebootstrap procedures for old
 state. This is a breaking replacement: do not restore deprecated aliases or
 promise automatic conversion of incompatible stored data.
+
+Current query-plugin source-build and explicit registration instructions are in
+place. The release guide must carry that required registration, supported storage
+profiles, per-item transport limits, retained recovery rules and reset-baseline
+behavior into the published package/Server instructions. Verify distribution
+metadata and matching native library availability rather than assume the local
+build is already a published installable plugin.
 
 When the matching packages are published, update development-branch navigation
 and installation snippets to the supported release. Until then, keep truthful
@@ -1329,3 +1396,247 @@ resources across the whole process tree. A partition reports unknown remote
 state, not a stopped peer or permission to launch an unfenced duplicate.
 This adds no remote component-method executor, distributed transaction promise
 or automatic remote provisioning.
+
+<a id="cw-76"></a>
+
+## 50. Transfer oversized native query records and envelopes (CW-76)
+
+**Kind:** Transport capability gap. **Area:** Native contracts, ABI, SDK/Host.
+**Priority:** High before claiming parity for large individual payloads.
+**Effort:** Medium. **Origin:** CW-43 follow-up.
+
+**Current boundary:** Snapshots, history and snapshot/live attachment are already
+paged without a whole-result count or byte cap. However, each record/envelope
+must fit the [16 MiB read-page limit](../../components/computation-plugin-abi/src/output_reads.rs);
+the separate [64 MiB processing-message limit](../../components/computation-plugin-abi/src/lib.rs)
+does not make such an item readable.
+
+**Work:** Add negotiated bounded fragmentation/reassembly for individual items,
+reusing the existing codecs and owned transfers. Cover snapshot, replay, recovery
+view and follow paths consistently. Preserve schema/identity checks, coherent
+snapshot/history heads, page order, cancellation and activation retirement.
+Do not just raise all limits or allocate an unbounded second projection.
+
+**Finish when:** An item valid for processing but larger than the old read-page
+bound can be read and replayed intact. Boundary-size and malformed-fragment
+cases reject explicitly without partial results, lost acknowledgements or leaked
+provider retention. State the remaining end-to-end maximum and allocation bounds.
+Aggregate queue/result-memory quotas remain [CW-29](#cw-29).
+
+<a id="cw-77"></a>
+
+## 51. Complete query behavior coverage through the loaded plugin (CW-77)
+
+**Kind:** Behavioral-parity qualification. **Area:** Core, Host SDK, test fixtures.
+**Priority:** High before claiming complete native behavioral parity.
+**Effort:** Medium to large, split by behavior. **Origin:** CW-43 follow-up.
+
+**Status:** Native correctness baseline established; exhaustive behavioral
+parity remains a qualification item.
+
+**Completed coverage:** The existing
+[requirement ledger](../tests/runtime_parity/requirements.tsv) now distinguishes
+construction modes through N01-N12 native-query requirements and
+an independent `native-query` test batch. The current plugin suite passes 176
+cases; six additional entries are subprocess fixtures exercised by their
+required parents, not ordinary standalone tests.
+
+Eight semantic scenarios now share exact assertions between the retained
+reference tests and static/loaded native query construction on memory/RocksDB
+and both Tokio flavors. These are 64 native scenario executions inside two
+Rust test cases, not 64 additional independently discovered tests. They cover
+optional/disconnected contexts, lists/maps, numeric comparisons, optional joins,
+canonical replacement and ordered mutations.
+
+Named native cases also cover ordinary creation/read/subscription APIs, retained
+evaluation, bootstrap and reset, independent non-atomic writers, durable delivery
+and shared journals, scheduling, archives, middleware and large paged reads.
+Native/composite bootstrap ownership now accepts the actual native query
+factory while preserving role, owner, slot and progress checks. Strict bootstrap
+refusal retains its typed cause, and managed startup joins the actual lifecycle
+owner without duplicate activation.
+
+The `semantics`, `recovery` and `timers` groups and the library portion of `api`
+in [the query runner](../tests/run-query-plugin.sh) still use the explicit linked
+reference. Connector tests that register that factory are also reference
+evidence. Keep useful low-level Core unit tests; migrate the hosted behavior,
+not every evaluator unit test into an FFI test.
+
+**Remaining:** Identify and fill additional supported-behavior gaps rather than
+inferring completeness from test counts. The independent test-quality review
+assesses assertion value, duplication and missing coverage separately from
+execution success. Native Garnet is not positively qualified: its current
+provider lacks an explicit restart-durability guarantee and the bounded reads
+required by the native query. A real native refusal/no-write test passes;
+linked Garnet reconstruction does not substitute for native functionality.
+
+**Finish when:** Each supported behavior has a passing, identified native case
+for its applicable middleware/storage/runtime combinations.
+Include actual Garnet/RocksDB capabilities, non-atomic independent writers and
+shared-journal restrictions; unsupported or unavailable profiles stay explicit.
+Fix reproduced discrepancies without weaker assertions or new skips. Merely
+rerunning existing suites belongs to [CW-78](#cw-78).
+
+<a id="cw-78"></a>
+
+## 52. Run the complete existing suites on the current query integration (CW-78)
+
+**Kind:** Execution/CI qualification gap. **Area:** Core, Server, CI.
+**Priority:** High before declaring the current code fully tested.
+**Effort:** Medium plus any reproduced failures. **Origin:** CW-43 follow-up.
+
+**Status:** Locally available execution baseline completed. Environment-bound
+checks below remain open; this is not an unconditional all-platform pass.
+
+The existing workspace command, [runtime runner](../tests/run-runtime-parity.sh),
+complete Host SDK targets and Server suites were executed against frozen
+production source and freshly rebuilt matching libraries. Exact commands,
+per-target outcomes and source/lock hashes are retained in the
+`correctness-baseline-final` session evidence set. Its inputs identify Core
+`09c43c2d` and Server `ef3d7b45` plus the uncommitted correctness repairs.
+
+| Executed scope | Result |
+|---|---|
+| Workspace outside separately covered library, Host SDK and integration packages | 4,982 passed; 233 existing ignored entries |
+| Runtime runner: all 36 test batches | 9,098 passing executions; 50 explicitly permitted ignored entries |
+| Complete Host SDK with registry/fetcher/watcher/test-support | 812 passing cases after the isolated network-fixture follow-up |
+| Library and Host SDK documentation tests | 135 passed |
+| Server unit, binary and integration targets, including available ignored/E2E cases | 1,013 passed; two crash workers and two unavailable SQL Server cases excluded from direct execution |
+| Server documentation and tooling | Four doctests passed, one ignored documentation example; 70 Python tests passed |
+| Standalone Core query examples | All 19 compiled offline against current source |
+
+These scopes overlap: repeated feature/runtime executions are not unique tests
+and must not be summed into a unique-test total. Parent-driven workers remain
+required through their drivers. The Host run initially reported one SSE
+fixture failure caused by reusing a client keep-alive pool after listener
+restart. The test now creates a new client for the new listener, retaining its
+route-limit and cleanup assertions; the exact case and its complete 34-case
+network target pass. Original failed logs remain preserved. No production code
+changed after the frozen run.
+
+The repairs also corrected missing explicit factory registration, transparent
+storage-capability forwarding, native checkpoint/binary-codec inspection, an
+unpolled QoS publisher and a phantom MySQL output binding. The runner rejects
+missing native coverage and does not count captured child failure diagnostics
+as independent test executions. Changed Core/Host/Server code passes its lint
+checks; changed Rust files pass formatting checks.
+
+**Remaining environment gates:** Eight Host and two Server real SQL Server
+cases require the user-approved supported environment; two FFI layout-seed
+cases require their actual nightly/Linux allocator setup; the cross-OS
+instance-host case requires `DRASI_NETWORK_CONTAINER`. None is counted as a
+pass. Pre-existing format drift in unchanged files remains separate
+[lint/release work](#cw-61). The broader requirement ledger remains
+`replacement_qualified=false` (32 of 60 requirements satisfied); successful
+execution does not close its other partial/unqualified requirements or prove
+that every test is useful.
+
+**Finish when:** Existing required suites pass with traceable current-revision
+results. Until then, failures and unavailable environments remain named blockers,
+not exemptions from a full-pass claim. Preserve parent-driven subprocess fixtures and real backend
+cleanup. Add new native assertions under [CW-77](#cw-77), new Server failure
+scenarios under [CW-46](#cw-46), and live example acceptance under
+[CW-47](#cw-47); do not turn this run into a replacement test framework.
+
+<a id="cw-79"></a>
+
+## 53. Measure native query overhead against the linked implementation (CW-79)
+
+**Kind:** Performance qualification and measured fixes. **Area:** Core, Host SDK.
+**Priority:** High before claiming performance parity. **Effort:** Medium.
+**Origin:** CW-43 follow-up.
+
+**Work:** Compare graph-driven projection, joins/aggregates, scheduled output,
+large reads and slow-consumer/backpressure workloads with equivalent inputs,
+providers, persistence guarantees and expected results. Pin source revisions,
+toolchain and features. Use the retained pre-plugin revision where needed and
+keep an explicit linked reference available for matched comparisons; a different
+recovery or storage profile is not a fair baseline.
+
+Measure throughput, end-to-end/control tail latency, CPU, allocations, memory,
+evaluator setup count and codec/service-boundary cost on both runtimes. Separate
+static native-ABI overhead from dynamic loading. Establish workload-specific
+acceptable bounds before signoff and fix material regressions using Core/shared
+helpers, not another evaluator, cached row mirror or weakened recovery.
+
+**Finish when:** Reproducible matched runs meet the agreed bounds with exact
+results and bounded ownership. Unacceptable overhead remains named, reproduced
+work; a measurement report alone is not performance parity. Earlier
+root-only/diagnostic measurements do not close this item. Larger deployment
+and long-duration comparisons against main remain [CW-40](#cw-40).
+
+<a id="cw-80"></a>
+
+## 54. Retire the remaining linked query runtime entry points (CW-80)
+
+**Kind:** Breaking-release cleanup. **Area:** Core library, tests and examples.
+**Priority:** Medium; after parity evidence. **Effort:** Medium.
+**Origin:** CW-43 follow-up. **Depends on:** CW-77 and CW-79.
+
+**Current boundary:** Ordinary query selection is already explicit and has no
+automatic linked fallback. `ContinuousQueryFactory` and
+`ContinuousQueryTransformer` still exist as explicitly selected reference
+constructors, including in low-level examples and preservation tests.
+
+**Work:** Inventory those remaining callers and registrations. Move supported
+hosted-query behavior to the selected native factory, then remove the obsolete
+library entry points and dependency/build paths whose last user has moved.
+Retain the useful Core evaluator, shared implementation and behavior assertions.
+Preserve a reproducible pinned comparison baseline before removing executable
+reference fixtures; do not delete tests merely to reduce the change size.
+
+**Finish when:** Supported application and test paths no longer need the linked
+query runtime, missing native registration still fails explicitly, and current
+native behavior coverage remains intact. This does not require deleting the
+ordinary Source/Reaction compatibility stack tracked in [CW-63](#cw-63).
+
+<a id="cw-81"></a>
+
+## 55. Expose transaction-owned scheduling to non-query native transformers (CW-81)
+
+**Kind:** Optional reusable capability. **Area:** Core, native contracts, SDK/Host.
+**Priority:** Future capability; not a query-plugin completion blocker.
+**Effort:** Medium to large. **Origin:** General scheduling work separated from CW-43.
+
+**Current boundary:** Query temporal functions already use Core's future queue,
+committed deadline observations, graph wakeups and deterministic test controls.
+This item concerns stateful transformers that do not run a query evaluator.
+
+**Work:** Define and expose the missing reusable request/replace/cancel/completion
+contract through the existing transaction and scheduling owners. Persist requests
+with the requesting component's state; observe committed deadlines without a
+second competing transaction/session. Bind an actual non-query native transformer
+to the service. Reuse Core/graph machinery rather than copy query timer logic or
+create another scheduler task hierarchy.
+
+**Finish when:** Controlled-clock cases prove no wakeup before commit, no leaked
+requests after rollback, correct replace/cancel, and one committed completion
+through failure/restart on each advertised profile. Capability negotiation and
+cleanup ownership are explicit. The combined application proof is
+[CW-82](#cw-82); working query timers alone do not establish this contract.
+
+<a id="cw-82"></a>
+
+## 56. Prove a mixed query and non-query scheduled pipeline (CW-82)
+
+**Kind:** Optional cross-component qualification. **Area:** Core, native fixtures.
+**Priority:** Required before advertising CW-81's combined profile.
+**Effort:** Medium. **Origin:** Former query-design F0 proof. **Depends on:** CW-81.
+
+**Work:** Compose the existing native SQLite source/bootstrap provider, one
+stateful non-query transformer, the loaded query and a handled capture consumer.
+Use real persistent storage and the common scheduling contract, with no new
+connector, evaluator or graph owner.
+
+Bootstrap while live input continues and compare exact transformed rows and
+gap-free handover. Cancel initialization and verify retained ownership and
+awaited cleanup. Schedule, replace and cancel work with component-state changes;
+rollback must leak neither state nor timers. Advance the physical clock without
+new source input and verify both owners' due output and provenance.
+
+**Finish when:** Both runtimes pass real subprocess exits around bootstrap
+completion, scheduling-request commit and due-work/output commit. Fresh processes
+recover the exact checkpoints, pending work, rows and output identities without
+duplicate committed completion or abandoned cleanup. This qualifies the new
+combined scheduling profile, not the already completed query implementation.
+Other multi-failure scenarios remain [CW-39](#cw-39).

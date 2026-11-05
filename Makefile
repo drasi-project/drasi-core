@@ -21,6 +21,7 @@ help:
 	@echo "  build-native-plugins      - Build selected native plugin libraries"
 	@echo "  build-native-standard-plugins - Build native counter, middleware, capture and arithmetic libraries"
 	@echo "  build-native-network-plugins - Build native HTTP/gRPC/SSE and HTTP bootstrap libraries"
+	@echo "  build-native-query-plugin - Build the loadable query transformer"
 	@echo "  build-native-mysql-plugins - Build native MySQL source, bootstrap and stored-procedure libraries"
 	@echo "  build-native-postgres-plugins - Build native PostgreSQL source, bootstrap and stored-procedure libraries"
 	@echo "  build-native-sqlite-plugins - Build native SQLite source and bootstrap libraries"
@@ -76,18 +77,22 @@ NATIVE_POSTGRES_PACKAGES := drasi-computation-source-postgres \
                            drasi-computation-bootstrap-postgres \
                            drasi-computation-sink-storedproc-postgres
 NATIVE_SQLITE_PACKAGES := drasi-computation-bootstrap-sqlite drasi-computation-source-sqlite
-TEST_PLUGIN_NAMES := drasi_source_mock drasi_reaction_log drasi_reaction_sse \
-                     drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile \
+TEST_PLUGIN_NAMES := drasi_source_mock drasi_source_http drasi_reaction_http drasi_reaction_log drasi_reaction_sse \
+                     drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_secret_store_file \
+                     drasi_computation_transformer_query \
                      $(subst -,_,$(NATIVE_STANDARD_PACKAGES) $(NATIVE_NETWORK_PACKAGES) $(NATIVE_MYSQL_PACKAGES) $(NATIVE_MSSQL_PACKAGES) $(NATIVE_POSTGRES_PACKAGES) $(NATIVE_SQLITE_PACKAGES))
 
 build-test-plugins: build-native-plugins
 	@echo "=== Building cdylib test plugins ==="
 	cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
+	cargo build --lib -p drasi-source-http --features drasi-source-http/dynamic-plugin
+	cargo build --lib -p drasi-reaction-http --features drasi-reaction-http/dynamic-plugin
 	cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
 	cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+	cargo build --lib -p drasi-secret-store-file --features drasi-secret-store-file/dynamic-plugin
 	cargo build -p drasi-host-sdk --example native_recovery --example native_consumer_progress_metadata \
 		--example native_bootstrap_coordination_metadata --example native_bootstrap_coordination_partial \
 		--example native_activation_credentials --example native_custom_query
@@ -113,7 +118,11 @@ test-host-sdk: build-test-plugins
 	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test native_sqlite_components -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
-build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-mssql-plugins build-native-postgres-plugins build-native-sqlite-plugins
+build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-mssql-plugins build-native-postgres-plugins build-native-sqlite-plugins build-native-query-plugin
+
+.PHONY: build-native-query-plugin
+build-native-query-plugin:
+	cargo build --lib -p drasi-computation-transformer-query --features dynamic-plugin
 
 check-native-dependencies:
 	python3 ci/check_native_dependencies.py
