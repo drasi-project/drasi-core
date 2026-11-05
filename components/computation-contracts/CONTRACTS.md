@@ -3,8 +3,9 @@
 This document is a reference for every contract that ComputationGraph
 components use to talk to each other and to the host. It covers the data
 envelopes, port negotiation, the standard graph and query codecs, output reads
-(snapshot, replay and snapshot-follow), bootstrapping, source schema discovery,
-progress and recovery, admission, delivery and source transactions.
+(snapshot, replay, snapshot-follow and query views), bootstrapping, source
+schema discovery, progress and recovery, admission, delivery, source
+transactions and scheduled work.
 
 The Rust source in `src/` is authoritative. Each section names the files that
 define the contract so you can read the exact rules.
@@ -27,20 +28,23 @@ define the contract so you can read the exact rules.
 14. [Delivery to external destinations](#14-delivery-to-external-destinations)
 15. [Encodings and limits](#15-encodings-and-limits)
 16. [Context and annotation keys](#16-context-and-annotation-keys)
+17. [Query configuration and views](#17-query-configuration-and-views)
+18. [Scheduled work](#18-scheduled-work)
 
 ---
 
 ## 1. Component model
 
 A computation graph is a DAG of components connected by pipes between ports.
-Data flows source → (transformers) → query → sinks.
+Data flows from sources through transformers to sinks. A query is a transformer
+with query semantics.
 
 ```mermaid
 flowchart LR
   S[Source] -- OutputEnvelope --> P1((pipe))
   P1 -- InputEnvelope --> T[Transformer]
   T -- OutputEnvelope --> P2((pipe))
-  P2 -- InputEnvelope --> Q[Query]
+  P2 -- InputEnvelope --> Q[Query transformer]
   Q -- OutputEnvelope --> P3((pipe))
   P3 -- InputEnvelope --> K[Sink]
   B[Bootstrap provider] -. snapshot stream + watermarks .-> Q
@@ -54,16 +58,22 @@ flowchart LR
 |---|---|---|
 | `Source` | outputs only | `NativeSource::next() -> Option<OutputEnvelope>`; `None` means permanently exhausted |
 | `Transformer` | inputs and outputs | `NativeTransformer::transform(InputEnvelope) -> Vec<OutputEnvelope>` |
-| `Query` | inputs and one output, `out` | Hosted by the runtime and has no plugin trait |
 | `Sink` | inputs only | `NativeSink::handle` / `handle_batch` |
 | `Service` | none | `NativeService::run` / `quiesce` |
 
-`ComponentSemanticKind` adds `Reaction` to the five roles. It is a descriptive
-label (`ComponentDescriptor::with_semantic_kind`) and does not change ports,
-execution or lifecycle. A reaction executes as a sink.
+`ComponentSemanticKind` describes what a component does without changing its
+port or lifecycle role. A query uses `ComponentRole::Transformer` with
+`ComponentSemanticKind::Query`; a reaction uses `ComponentRole::Sink` with
+`ComponentSemanticKind::Reaction`. The semantic kind does not select a
+scheduler, storage path or evaluator.
 
-Bootstrap is **not** a role. It is a query-scoped provider family
-(see [§9](#9-bootstrap)).
+The host can also construct its built-in continuous query as a transformer.
+Native query plugins use the same transformer role and declare query semantics
+in factory metadata. Query plugins are registered explicitly; the host does not
+select an implicit query factory.
+
+Bootstrap is **not** a role. Providers can initialize host-managed queries or
+native transformers ([§9](#9-bootstrap)).
 
 ### Common component surface (`components/computation-plugin-sdk/src/component.rs`)
 
@@ -73,7 +83,9 @@ All native components implement `NativeComponent`:
 |---|---|
 | `descriptor()` | Immutable `ComponentDescriptor` ([§2](#2-ports-schemas-and-pipe-capabilities)) |
 | `configuration()` | Resolved configuration as JSON |
-| `output_readers()` | Optional snapshot/replay/follow providers per output port ([§7](#7-output-reads-snapshot-replay-and-snapshot-follow)). Fixed at construction, performs no I/O, served only while started. |
+| `supports_deprovision()` / `deprovision()` | Whether the component supports explicit deletion of its owned state |
+| `supports_input_binding_updates()` / `bind_inputs()` | Whether the graph can update the component's resolved incoming bindings |
+| `output_readers()` | Optional snapshot, replay, follow and query readers per output port ([§7](#7-output-reads-snapshot-replay-and-snapshot-follow), [§17](#17-query-configuration-and-views)). Registration is fixed at construction and performs no I/O. Each reader follows its own lifecycle contract. |
 | `consumer_progress_reader()` | Optional `ConsumerProgressView` ([§11](#11-progress-recovery-and-input-positions)) |
 | `input_position_policy()` | Optional source-defined position comparator ([§11](#11-progress-recovery-and-input-positions)) |
 | `start()` / `start_with_credentials()` / `stop()` | Lifecycle |
@@ -85,7 +97,11 @@ Role-specific additions:
 - `NativeTransformer`: `transform()`, plus `has_pending_emissions()` /
   `continue_transform()` for continuation, `wakeup_source()` / `on_wakeup()` for
   timer-driven output (`WakeupSource` in `src/component_data.rs`), and
-  `delivery_completed()`.
+  `delivery_completed()`. A transformer can also declare a bootstrap input,
+  report bootstrap status, reset bootstrap, process bootstrap envelopes, and
+  confirm bootstrap completion. A transformer with durable output can resume
+  delivery after reconstruction. These methods are optional and their
+  supported mode is declared in factory metadata ([§9](#9-bootstrap)).
 - `NativeSink`: `completion()`, `handle()`, optional `batching()` /
   `handle_batch()`, and `snapshot_consumer(port)` ([§8](#8-sinks-completion-batching-and-snapshot-replacement)).
 - `NativeService`: `run()`, `quiesce()`.
@@ -477,15 +493,19 @@ Defined in `src/output_read.rs` and `src/output_follow.rs`. The host side is in
 `lib/src/computation/v1/output_catalogue.rs` and `query_output.rs`.
 
 Any component can expose readers for its declared output ports through
-`NativeComponent::output_readers()`. Each capability is optional. A port's
-capabilities are exactly the providers it registers. There are no separate
-capability flags.
+`NativeComponent::output_readers()`. Snapshot, replay, snapshot-follow and
+query-view capabilities are optional. Each registered reader is a separate
+capability.
 
 ```text
-OutputReaders: PortId → OutputPortReaders { snapshot?, replay?, snapshot_follow? }
+OutputReaders: PortId → OutputPortReaders {
+    snapshot?, replay?, snapshot_follow?, query?
+}
 ```
 
-The query registers all three providers on `out`.
+The built-in query registers snapshot, replay and snapshot-follow readers on
+`out`. A native query can additionally register a `QueryViewProvider` for its
+query output.
 
 ### Cursor
 
@@ -550,9 +570,12 @@ cursor from another epoch, stream or scope with `EpochChanged`.
 | `Invalid` | The provider violated this contract |
 | `Failed` | Another failure occurred |
 
-The host wraps every provider in a fenced handle. A read that spans a
+The host wraps generic output providers in fenced handles. A read that spans a
 component replacement or graph stop fails with `Retired`. The host also checks
-that each snapshot's schema and cursor belong to the endpoint.
+that each snapshot's schema and cursor belong to the endpoint. Query recovery
+readers follow the separate lifecycle contract in [§17](#17-query-configuration-and-views).
+
+Query-specific reads are described in [§17](#17-query-configuration-and-views).
 
 ---
 
@@ -605,23 +628,31 @@ instead of `handle`.
 
 ## 9. Bootstrap
 
-Defined in `src/bootstrap.rs`. The host side is
+Defined in `src/bootstrap.rs`. The host query side is
 `lib/src/computation/v1/query_bootstrap.rs`, `composite_bootstrap.rs` and
-`output_bootstrap.rs`. The plugin side is
+`output_bootstrap.rs`. Transformer bootstrap uses the same provider family,
+with the component as the initialization owner. The plugin side is
 `components/computation-plugin-sdk/src/bootstrap.rs` and the ABI is
 `components/computation-plugin-abi/src/bootstrap.rs`.
 
-Bootstrap seeds a query's initial state before it consumes live input.
+Bootstrap initializes state before ordinary processing. A host-managed query
+uses a query-scoped provider. A native transformer, including a native query,
+can instead declare one of its input ports for provider-driven initialization.
 
-- A query has **one bootstrap slot**.
+- A host-managed `ContinuousQuery` has **one bootstrap slot**.
 - `CompositeBootstrapProvider` combines several providers in that slot.
 - When combined preparations disagree, `ResetRequired` wins over
   `RefreshVolatile`, which wins over `Ready`.
+- A native transformer declares either a quiescent or durable bootstrap input.
+  It does not use the host-managed query bootstrap slot.
 
 Snapshot data is a stream of ordinary `ChangeEnvelope`s. There is no separate
 bootstrap row format.
 
-### Lifecycle
+### Host-managed query lifecycle
+
+This sequence describes the host-managed `ContinuousQuery` bootstrap path.
+Native transformers use the input-based bootstrap hooks described below.
 
 ```mermaid
 sequenceDiagram
@@ -703,6 +734,23 @@ A plugin implements `BootstrapFactory` and `NativeBootstrapProvider`.
 `NativeBootstrapProvider` mirrors the host trait without host-only details such
 as retirement and `take_input_replay`.
 
+A native transformer can receive provider data on its declared bootstrap input
+before the host enables ordinary processing. Its factory metadata declares
+either `quiescent_bootstrap` or `durable_bootstrap` for that input:
+
+- **Quiescent bootstrap** initializes a non-indexed transformer. Writers must
+  remain quiescent while it loads data. It has no durable handover.
+- **Durable bootstrap** uses the transformer's host-owned indexed processing
+  transaction. Bootstrap rows, progress watermarks and the completion marker
+  commit with the transformer's state. The provider receives the actual
+  processing owner's `BootstrapState`.
+
+The `NativeTransformer` hooks expose the bootstrap input, status, reset,
+per-envelope processing and completion. The provider remains a separate
+`NativeBootstrapProvider`. A native query can use this path to initialize its
+result rows from an existing provider; it can also initialize from upstream
+output snapshots as described below.
+
 The ABI carries bounded MessagePack DTOs:
 
 - `Prepared { preparation, pending }`
@@ -727,6 +775,18 @@ output readers. A typical case is a query downstream of another query.
 - **Changed outputs or missing checkpoint:** return `ResetRequired`.
 - **Handover state:** store the version 1 JSON
   `{ outputs: [{ component, port, producer }] }`.
+
+A native query transformer can also initialize from configured upstream
+snapshots. The plugin reads each configured output snapshot into its evaluator
+before accepting live input. It tracks a separate producer cursor for each
+input, then ignores live envelopes already covered by that input's snapshot.
+This profile is volatile and requires the host to retain each live input before
+capturing its snapshot. It does not provide a globally atomic snapshot across
+inputs. Durable indexed queries use the provider-bound bootstrap path instead.
+
+The native middleware transformer supports optional quiescent bootstrap too.
+Its initial records pass through the same map/relabel pipeline as live records,
+so a downstream query can bootstrap from the middleware's output snapshot.
 
 ---
 
@@ -995,3 +1055,96 @@ Codecs check the contributor and change-set scope. A marker inherited from an
 ancestor branch is ignored or rejected. Always use the owning codec
 (`QueryChangeCodec`, `GraphProducerProgress`, `SourceTransactionCodec`) instead
 of matching keys manually.
+
+---
+
+## 17. Query configuration and views
+
+Defined in `src/query_configuration.rs`, `src/query_joins.rs`,
+`src/query_read.rs` and `src/query_recovery.rs`.
+
+Queries use the transformer execution role. Factory metadata marks query
+semantics and declares which output ports provide query reads. The query
+annotation does not select a different scheduler, evaluator or storage owner.
+
+### Execution settings
+
+`QueryExecutionSettings` carries query-specific configuration shared by the
+built-in and native query implementations:
+
+| Field | Contract |
+|---|---|
+| `joins` | Synthetic relationships built by matching node-label properties |
+| `middleware` | Ordered source middleware settings |
+| `inputs` | Input component, optional port, source label interests and pipeline |
+| `result` | Optional graph-node label for projected result rows |
+| `source_transactions` | Optional limits for complete source transactions |
+
+`QueryInputConfig` accepts a component-name shorthand or an expanded object.
+Input order remains significant for same-timestamp merge behavior. Query joins
+require unique relationship IDs and at least two label/property keys.
+Fingerprint normalization sorts input interests and join keys without removing
+repeated join keys.
+
+### Query output readers
+
+`QueryViewProvider` adds query semantics to the generic output readers in
+[§7](#7-output-reads-snapshot-replay-and-snapshot-follow). It does not own or
+run an evaluator. The provider describes the query and can return:
+
+- `query_head()`: producer cursor and result generation.
+- `query_snapshot()`: output snapshot and result generation.
+- `query_view()`: cursor, canonical result rows, retained envelopes,
+  configuration hash and optional volatile incarnation from one coherent read.
+- `query_replay(after)`: retained output after a cursor and the result
+  generation.
+- `query_observation()`: cursor, generation, configuration hash, live row
+  count, retained envelope count and oldest retained sequence.
+
+After positively completed query cleanup, recovery-capable providers can expose
+a `QueryRecoveryReader`. Its recovery view reads retained canonical state
+without restarting the evaluator or reopening ordinary read services.
+
+Native factory metadata declares query output ports with `output_queries`.
+`query_observations` enables canonical output observations in transform
+responses and requires exactly one registered query output. The optional
+`query_recovery_views` capability requires query observations. Query output
+readers remain separate from source schema discovery ([§10](#10-source-schema-discovery)).
+
+---
+
+## 18. Scheduled work
+
+Defined in `src/scheduling.rs`. Native transformers use the host-owned
+processing APIs in `components/computation-plugin-sdk/src/processing.rs` and
+`scheduling.rs`.
+
+Scheduled work is stored in the component's processing transaction. A request
+is not committed until the operation that created or changed it succeeds. When
+work becomes due, the graph uses the transformer's normal wakeup path. The
+plugin does not need to start a scheduler task.
+
+```text
+ScheduledRequest { key, due_time_ms, payload }
+ScheduledWorkToken { key, request_id }
+ScheduledWork { token, due_time_ms, payload }
+```
+
+- Keys are component-local, non-empty, contain no NUL, and use at most
+  256 UTF-8 bytes.
+- Payloads are opaque and limited to 65,536 bytes.
+- One component can have at most 4,096 outstanding requests.
+- The encoded scheduling checkpoint is limited to 1 MiB.
+- Replacement, cancellation and completion must name the exact request token.
+  Replacing a request creates a new request identity.
+- A component claims due work and commits completion with its business state
+  and retained output. Completing the request does not acknowledge an external
+  effect or prove delivery.
+
+`NativeScheduling` exposes read-only deadline observation and a
+`WakeupSource`. `request_scheduled_work`, `replace_scheduled_work`,
+`cancel_scheduled_work`, `scheduled_work`, `claim_due_scheduled_work` and
+`complete_scheduled_work` use the borrowed `NativeProcessingContext`, so the
+host can commit them with the component's state. Eligibility uses physical
+Unix time, not an input's logical event time. `FutureWakeup` provides the
+shared wakeup policy for native scheduled work and query future events.

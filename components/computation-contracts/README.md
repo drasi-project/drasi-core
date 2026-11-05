@@ -4,13 +4,14 @@ Shared identifiers, envelopes, schemas, message codecs and component interfaces
 belong here rather than in the query runtime. Both the host and native plugins
 use the same definitions and encoding implementations.
 
-See [CONTRACTS.md](CONTRACTS.md) for a reference covering every contract between
-components: envelopes, ports, codecs, output reads, bootstrap, source schema
-discovery, progress, admission and delivery.
+See [CONTRACTS.md](CONTRACTS.md) for the component contract reference. It covers
+envelopes, ports, codecs, output reads, bootstrap, source schema discovery,
+progress, admission, delivery, query views and scheduled work.
 
 There is no graph executor, query evaluator, language parser or storage backend
 in this package. Sources, transformers and query outputs share the graph-change
-contract; query-specific metadata is optional for generic graph consumers.
+contract. Query semantics are separate from the transformer's execution role,
+and generic graph consumers can ignore query-specific metadata.
 Shared graph values come from `drasi-core-types`.
 Owned-worker helpers use the caller's Tokio runtime and do not create an executor.
 `OperationFailures` preserves all typed operation/cleanup causes without requiring
