@@ -1042,9 +1042,11 @@ fenced. `require_native_metrics()` is validated against the actual plugin
 capability before construction. See the [native SDK guide](../components/computation-plugin-sdk/README.md#telemetry-registration-foundations)
 for API and compatibility details.
 
-For a runnable, host-exported HTTP/PostgreSQL source -> query -> handled callback
-trace, see the [source tracing demonstration](examples/observability/README.md).
-It includes a local Jaeger setup and an exact trace-shape verifier.
+For a runnable HTTP/PostgreSQL source -> query -> native inspector -> handled
+callback trace, see the [observability demonstration](examples/observability/README.md).
+It includes a separately built plugin, a live metrics/correlated-log dashboard,
+local Jaeger, and an exact trace-shape verifier. `TRACE_SAMPLING=never` demonstrates
+metrics/logging independently of sampled traces.
 
 Execution context is transient metadata accompanying work, not the envelope's
 persisted `ProcessingContext`/annotations. It holds an optional sending trace ID,

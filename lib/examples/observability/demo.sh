@@ -26,6 +26,12 @@ http_port="${HTTP_PORT:-19090}"
 pg_port="${PGPORT:-15437}"
 jaeger_port="${JAEGER_UI_PORT:-16689}"
 otlp_port="${OTLP_HTTP_PORT:-14318}"
+telemetry_port="${TELEMETRY_PORT:-19091}"
+sampling="${TRACE_SAMPLING:-always}"
+case "$sampling" in
+    always|never) ;;
+    *) printf '%s\n' 'TRACE_SAMPLING must be always or never.' >&2; exit 2 ;;
+esac
 target="${CARGO_TARGET_DIR:-"$root/target"}"
 case "$target" in /*) ;; *) target="$PWD/$target" ;; esac
 
@@ -43,14 +49,27 @@ for name in drasi-otel-demo-postgres drasi-otel-demo-jaeger; do
     fi
 done
 
-printf '%s\n' 'Building the demo (the first build can take a few minutes)...'
+printf '%s\n' 'Building the demo and its separate native plugin (the first build can take a few minutes)...'
+cargo build --manifest-path "$directory/native-plugin/Cargo.toml" --target-dir "$target" --locked --quiet
 cargo build --manifest-path "$directory/Cargo.toml" --target-dir "$target" --locked --quiet
+plugin_name="$(python3 - <<'PY'
+import sys
+print("drasi_observability_demo_plugin.dll" if sys.platform == "win32" else
+      "libdrasi_observability_demo_plugin.dylib" if sys.platform == "darwin" else
+      "libdrasi_observability_demo_plugin.so")
+PY
+)"
+plugin="$target/debug/$plugin_name"
+if [[ ! -f "$plugin" ]]; then
+    printf 'Native demo plugin was not built at %s.\n' "$plugin" >&2
+    exit 1
+fi
 
-python3 - "$http_port" "$pg_port" "$jaeger_port" "$otlp_port" <<'PY'
+python3 - "$http_port" "$pg_port" "$jaeger_port" "$otlp_port" "$telemetry_port" <<'PY'
 import socket
 import sys
 
-names = ["HTTP_PORT", "PGPORT", "JAEGER_UI_PORT", "OTLP_HTTP_PORT"]
+names = ["HTTP_PORT", "PGPORT", "JAEGER_UI_PORT", "OTLP_HTTP_PORT", "TELEMETRY_PORT"]
 ports = []
 for name, raw in zip(names, sys.argv[1:]):
     try:
@@ -169,10 +188,14 @@ CREATE PUBLICATION drasi_trace_demo FOR TABLE trace_items;
 SQL
 
 PGPASSWORD="$password" PGPORT="$pg_port" HTTP_PORT="$http_port" \
+    TELEMETRY_PORT="$telemetry_port" TRACE_SAMPLING="$sampling" \
+    DEMO_PLUGIN_PATH="$plugin" JAEGER_URL="$jaeger_url" \
     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://127.0.0.1:$otlp_port/v1/traces" \
     "$target/debug/drasi-source-traces-example" >"$log" 2>&1 &
 app_pid=$!
 wait_for 'HTTP source' curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:$http_port/health"
+telemetry_url="http://127.0.0.1:$telemetry_port"
+wait_for 'telemetry dashboard' curl --fail --silent --show-error --max-time 2 "$telemetry_url/health"
 replication_active() {
     [[ "$("$engine" exec "$postgres" psql -U postgres -At -c \
         "SELECT active FROM pg_replication_slots WHERE slot_name='drasi_trace_demo';")" == t ]]
@@ -196,11 +219,18 @@ has_trace_id() { [[ -n "$(trace_id "$1")" ]]; }
 for source in http postgres; do
     wait_for "$source callback" has_trace_id "$source"
     trace="$(trace_id "$source")"
-    wait_for "$source trace export" python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url"
-    python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url"
+    if [[ "$sampling" == always ]]; then
+        wait_for "$source trace export" python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url"
+        python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url"
+    else
+        printf 'UNSAMPLED %s: context %s propagated; no Jaeger trace is expected.\n' "$source" "$trace"
+    fi
 done
+wait_for 'native metrics and correlated logs' python3 "$directory/verify_telemetry.py" --url "$telemetry_url" --sampling "$sampling"
+python3 "$directory/verify_telemetry.py" --url "$telemetry_url" --sampling "$sampling"
 
-printf '\nJaeger: %s\nService: drasi-source-traces\n' "$jaeger_url"
+printf '\nDashboard: %s\nMetrics: %s/metrics\nCorrelated logs: %s/logs\nJaeger: %s\nService: drasi-source-traces\n' \
+    "$telemetry_url" "$telemetry_url" "$telemetry_url" "$jaeger_url"
 cat "$log"
 if [[ "$smoke" -eq 1 ]]; then exit 0; fi
 printf '\n%s\n' 'Demo is live. Open either trace URL above. Press Ctrl-C to stop and clean up.'

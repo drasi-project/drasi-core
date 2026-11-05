@@ -569,7 +569,8 @@ impl Subscriber for Capture {
     }
     fn record(&self, id: &Id, values: &Record<'_>) {
         let limits = match self.0.entries.lock() {
-            Ok(entries) => entries.get(&id.into_u64())
+            Ok(entries) => entries
+                .get(&id.into_u64())
                 .filter(|entry| entry.span.context.sampled() || entry.sampling.is_some())
                 .map(|entry| entry.remaining),
             Err(_) => {
@@ -577,23 +578,42 @@ impl Subscriber for Capture {
                 return;
             }
         };
-        let Some(mut remaining) = limits else { return; };
+        let Some(mut remaining) = limits else {
+            return;
+        };
         let mut attributes = Vec::new();
         let mut invalid = false;
         let mut status = TelemetrySpanStatus::Unset;
         // A user Debug implementation may emit tracing itself. Never invoke it
         // while holding the span registry lock.
-        values.record(&mut Fields { attributes: &mut attributes, remaining: &mut remaining,
-            invalid: &mut invalid, status: &mut status, message: None, event: false });
+        values.record(&mut Fields {
+            attributes: &mut attributes,
+            remaining: &mut remaining,
+            invalid: &mut invalid,
+            status: &mut status,
+            message: None,
+            event: false,
+        });
         match self.0.entries.lock() {
-            Ok(mut entries) => if let Some(entry) = entries.get_mut(&id.into_u64()) {
-                entry.invalid |= invalid;
-                let mut fields = Fields { attributes: &mut entry.span.attributes,
-                    remaining: &mut entry.remaining, invalid: &mut entry.invalid,
-                    status: &mut entry.span.status, message: None, event: false };
-                for (key,value) in attributes { fields.value(&key, value); }
-                if status != TelemetrySpanStatus::Unset { entry.span.status = status; }
-            },
+            Ok(mut entries) => {
+                if let Some(entry) = entries.get_mut(&id.into_u64()) {
+                    entry.invalid |= invalid;
+                    let mut fields = Fields {
+                        attributes: &mut entry.span.attributes,
+                        remaining: &mut entry.remaining,
+                        invalid: &mut entry.invalid,
+                        status: &mut entry.span.status,
+                        message: None,
+                        event: false,
+                    };
+                    for (key, value) in attributes {
+                        fields.value(&key, value);
+                    }
+                    if status != TelemetrySpanStatus::Unset {
+                        entry.span.status = status;
+                    }
+                }
+            }
             Err(_) => diagnostics().record(TelemetryLoss::Capture),
         }
     }
@@ -787,114 +807,6 @@ impl log::Log for NativeLogger {
             .is_none_or(|binding| binding.enabled(metadata.target(), level, false))
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use drasi_computation_contracts::{ComponentId, ComponentRole, ComponentSemanticKind};
-        use metrics::Counter;
-
-        #[derive(Debug)]
-        struct Backend {
-            config: PluginTelemetryConfig,
-            diagnostics: TelemetryDiagnostics,
-            spans: Mutex<Vec<CompletedSpan>>,
-            roots: AtomicU64,
-        }
-        impl PluginTelemetryBackend for Backend {
-            fn config(&self) -> &PluginTelemetryConfig { &self.config }
-            fn diagnostics(&self) -> &TelemetryDiagnostics { &self.diagnostics }
-            fn for_plugin(&self, _: &str) -> Result<PluginTelemetry> { Err(TelemetryError::Unsupported("test rebind")) }
-            fn register_metric(&self, _: &PluginMetricRegistration) -> Result<RegisteredMetric> { Ok(RegisteredMetric::Counter(Counter::noop())) }
-            fn register_metric_handle(&self, _: &PluginMetricRegistration) -> Result<Option<PluginMetricHandle>> { Err(TelemetryError::Unsupported("test handles")) }
-            fn update_metric(&self, _: PluginMetricUpdate) -> Result<()> { Err(TelemetryError::Unsupported("test updates")) }
-            fn has_span_collector(&self) -> bool { true }
-            fn submit_encoded_span(&self, _: &[u8]) -> TelemetrySubmission { TelemetrySubmission::Invalid }
-            fn submit_span(&self, span: &CompletedSpan) -> TelemetrySubmission {
-                span.validate().unwrap();
-                self.spans.lock().unwrap().push(span.clone());
-                TelemetrySubmission::Accepted
-            }
-            fn submit_log(&self, _: &TelemetryLogRecord) -> TelemetrySubmission { TelemetrySubmission::Accepted }
-            fn sample_root(&self, request: &RootSpanRequest) -> Result<RootSpanDecision> {
-                request.validate()?;
-                self.roots.fetch_add(1, Ordering::SeqCst);
-                Ok(RootSpanDecision { sampled: true, trace_state: Some("test=state".into()) })
-            }
-        }
-
-        fn setup(open_spans: usize) -> (Arc<Backend>, ExecutionScope) {
-            let backend = Arc::new(Backend {
-                config: PluginTelemetryConfig {
-                    scope: TelemetryScope::graph("capture", "graph").unwrap().component(ComponentId::try_new("probe").unwrap(), ComponentRole::Service, ComponentSemanticKind::Service),
-                    generation: 1, plugin_kind: "test".into(), tracing: true, metrics: false,
-                    native_metrics_required: false, trace_directives: "trace".into(), log_directives: "off".into(),
-                    metric_exclusions: vec![], sampling: PluginRootSampling::Always,
-                    limits: TelemetryLimits { open_spans, ..Default::default() },
-                },
-                diagnostics: Default::default(), spans: Mutex::new(vec![]), roots: AtomicU64::new(0),
-            });
-            let _dispatch = tracing::dispatcher::set_default(dispatch());
-            let scope = ExecutionScope::new(Default::default())
-                .with_component(backend.config.scope.clone(), 1)
-                .with_plugin_telemetry(Some(PluginTelemetry::new(backend.clone())))
-                .with_adapter(Some(Arc::new(NativeContextAdapter)));
-            (backend, scope)
-        }
-
-        #[test]
-        fn root_sampling_waits_for_links_fields_and_runs_once_even_with_reentrant_debug() {
-            let (backend, scope) = setup(8);
-            scope.in_scope(|| {
-                struct Reentrant;
-                impl fmt::Debug for Reentrant {
-                    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                        tracing::info!("recording nested diagnostic");
-                        formatter.write_str("safe")
-                    }
-                }
-                let span = tracing::info_span!("capture.root", value = tracing::field::Empty);
-                span.record("value", tracing::field::debug(Reentrant));
-                let link_context = TraceContextV1::new([7;16], [8;8], 1, None).unwrap();
-                NativeContextAdapter.add_link(&span, &link_context).unwrap();
-                assert_eq!(backend.roots.load(Ordering::SeqCst), 0);
-                let original = NativeContextAdapter.span_context(&span);
-                assert_eq!(NativeContextAdapter.span_context(&span), original);
-                span.in_scope(|| {
-                    assert_eq!(ExecutionContext::current(), original);
-                    tracing::info!(count = 3, "work done");
-                });
-                drop(span);
-                assert_eq!(backend.roots.load(Ordering::SeqCst), 1);
-                let records = backend.spans.lock().unwrap();
-                assert_eq!(records.len(), 1);
-                assert_eq!(records[0].context, original.trace().unwrap().clone());
-                assert_eq!(records[0].links[0].context, link_context);
-                assert_eq!(records[0].context.trace_state(), Some("test=state"));
-                assert_eq!(records[0].attributes, vec![("value".into(), TelemetryAttribute::String("safe".into()))]);
-                assert_eq!(records[0].events.len(), 1);
-                assert_eq!(backend.diagnostics.snapshot().capture, 0);
-            });
-        }
-
-        #[test]
-        fn open_span_and_field_limits_reject_without_unbounded_state_or_fallback_queue() {
-            let (backend, scope) = setup(1);
-            scope.in_scope(|| {
-                let first = tracing::info_span!("bounded.first");
-                let rejected = tracing::info_span!("bounded.second");
-                assert_eq!(rejected.id().unwrap().into_u64(), DISCARDED);
-                drop(rejected);
-                drop(first);
-                let oversized = tracing::info_span!("bounded.fields", value = tracing::field::Empty);
-                oversized.record("value", "x".repeat(MAX_TELEMETRY_TEXT_BYTES + 1));
-                drop(oversized);
-                assert_eq!(backend.spans.lock().unwrap().len(), 1);
-                assert_eq!(backend.diagnostics.snapshot().capture, 2);
-                let remaining = capture().0.counts.lock().unwrap();
-                assert!(!remaining.bindings.contains_key(&scope.in_scope(|| ExecutionScope::current_plugin_telemetry().unwrap().binding_key())));
-            });
-        }
-    }
     fn log(&self, record: &log::Record<'_>) {
         let Some(binding) = ExecutionScope::current_plugin_telemetry() else {
             if record.target() == "drasi::telemetry_loss" {
@@ -931,4 +843,161 @@ impl log::Log for NativeLogger {
         }
     }
     fn flush(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_computation_contracts::{ComponentId, ComponentRole, ComponentSemanticKind};
+    use metrics::Counter;
+
+    #[derive(Debug)]
+    struct Backend {
+        config: PluginTelemetryConfig,
+        diagnostics: TelemetryDiagnostics,
+        spans: Mutex<Vec<CompletedSpan>>,
+        roots: AtomicU64,
+    }
+    impl PluginTelemetryBackend for Backend {
+        fn config(&self) -> &PluginTelemetryConfig {
+            &self.config
+        }
+        fn diagnostics(&self) -> &TelemetryDiagnostics {
+            &self.diagnostics
+        }
+        fn for_plugin(&self, _: &str) -> Result<PluginTelemetry> {
+            Err(TelemetryError::Unsupported("test rebind"))
+        }
+        fn register_metric(&self, _: &PluginMetricRegistration) -> Result<RegisteredMetric> {
+            Ok(RegisteredMetric::Counter(Counter::noop()))
+        }
+        fn register_metric_handle(
+            &self,
+            _: &PluginMetricRegistration,
+        ) -> Result<Option<PluginMetricHandle>> {
+            Err(TelemetryError::Unsupported("test handles"))
+        }
+        fn update_metric(&self, _: PluginMetricUpdate) -> Result<()> {
+            Err(TelemetryError::Unsupported("test updates"))
+        }
+        fn has_span_collector(&self) -> bool {
+            true
+        }
+        fn submit_encoded_span(&self, _: &[u8]) -> TelemetrySubmission {
+            TelemetrySubmission::Invalid
+        }
+        fn submit_span(&self, span: &CompletedSpan) -> TelemetrySubmission {
+            span.validate().unwrap();
+            self.spans.lock().unwrap().push(span.clone());
+            TelemetrySubmission::Accepted
+        }
+        fn submit_log(&self, _: &TelemetryLogRecord) -> TelemetrySubmission {
+            TelemetrySubmission::Accepted
+        }
+        fn sample_root(&self, request: &RootSpanRequest) -> Result<RootSpanDecision> {
+            request.validate()?;
+            self.roots.fetch_add(1, Ordering::SeqCst);
+            Ok(RootSpanDecision {
+                sampled: true,
+                trace_state: Some("test=state".into()),
+            })
+        }
+    }
+
+    fn setup(open_spans: usize) -> (Arc<Backend>, ExecutionScope) {
+        let backend = Arc::new(Backend {
+            config: PluginTelemetryConfig {
+                scope: TelemetryScope::graph("capture", "graph")
+                    .unwrap()
+                    .component(
+                        ComponentId::try_new("probe").unwrap(),
+                        ComponentRole::Service,
+                        ComponentSemanticKind::Service,
+                    ),
+                generation: 1,
+                plugin_kind: "test".into(),
+                tracing: true,
+                metrics: false,
+                native_metrics_required: false,
+                trace_directives: "trace".into(),
+                log_directives: "off".into(),
+                metric_exclusions: vec![],
+                sampling: PluginRootSampling::Always,
+                limits: TelemetryLimits {
+                    open_spans,
+                    ..Default::default()
+                },
+            },
+            diagnostics: Default::default(),
+            spans: Mutex::new(vec![]),
+            roots: AtomicU64::new(0),
+        });
+        let _dispatch = tracing::dispatcher::set_default(dispatch());
+        let scope = ExecutionScope::new(Default::default())
+            .with_component(backend.config.scope.clone(), 1)
+            .with_plugin_telemetry(Some(PluginTelemetry::new(backend.clone())))
+            .with_adapter(Some(Arc::new(NativeContextAdapter)));
+        (backend, scope)
+    }
+
+    #[test]
+    fn root_sampling_waits_for_links_fields_and_runs_once_even_with_reentrant_debug() {
+        let (backend, scope) = setup(8);
+        scope.in_scope(|| {
+            struct Reentrant;
+            impl fmt::Debug for Reentrant {
+                fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    tracing::info!("recording nested diagnostic");
+                    formatter.write_str("safe")
+                }
+            }
+            let span = tracing::info_span!("capture.root", value = tracing::field::Empty);
+            span.record("value", tracing::field::debug(Reentrant));
+            let link_context = TraceContextV1::new([7; 16], [8; 8], 1, None).unwrap();
+            NativeContextAdapter.add_link(&span, &link_context).unwrap();
+            assert_eq!(backend.roots.load(Ordering::SeqCst), 0);
+            let original = NativeContextAdapter.span_context(&span);
+            assert_eq!(NativeContextAdapter.span_context(&span), original);
+            span.in_scope(|| {
+                assert_eq!(ExecutionContext::current(), original);
+                tracing::info!(count = 3, "work done");
+            });
+            drop(span);
+            assert_eq!(backend.roots.load(Ordering::SeqCst), 1);
+            let records = backend.spans.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].context, original.trace().unwrap().clone());
+            assert_eq!(records[0].links[0].context, link_context);
+            assert_eq!(records[0].context.trace_state(), Some("test=state"));
+            assert_eq!(
+                records[0].attributes,
+                vec![("value".into(), TelemetryAttribute::String("safe".into()))]
+            );
+            assert_eq!(records[0].events.len(), 1);
+            assert_eq!(backend.diagnostics.snapshot().capture, 0);
+        });
+    }
+
+    #[test]
+    fn open_span_and_field_limits_reject_without_unbounded_state_or_fallback_queue() {
+        let (backend, scope) = setup(1);
+        scope.in_scope(|| {
+            let first = tracing::info_span!("bounded.first");
+            let rejected = tracing::info_span!("bounded.second");
+            assert_eq!(rejected.id().unwrap().into_u64(), DISCARDED);
+            drop(rejected);
+            drop(first);
+            let oversized = tracing::info_span!("bounded.fields", value = tracing::field::Empty);
+            oversized.record("value", "x".repeat(MAX_TELEMETRY_TEXT_BYTES + 1));
+            drop(oversized);
+            assert_eq!(backend.spans.lock().unwrap().len(), 1);
+            assert_eq!(backend.diagnostics.snapshot().capture, 2);
+            let remaining = capture().0.counts.lock().unwrap();
+            assert!(!remaining.bindings.contains_key(&scope.in_scope(|| {
+                ExecutionScope::current_plugin_telemetry()
+                    .unwrap()
+                    .binding_key()
+            })));
+        });
+    }
 }

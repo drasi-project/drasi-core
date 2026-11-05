@@ -1,31 +1,35 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Real HTTP and PostgreSQL sources, continuous queries and handled callbacks.
-//! See ../README.md for the local PostgreSQL and Jaeger setup.
+//! Real sources, queries, native plugin telemetry, and handled callbacks.
+//! See ../README.md for the one-command dashboard and Jaeger setup.
+
+mod dashboard;
 
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_core::computation::InMemoryComputationProvider;
-use drasi_host_sdk::computation::NativePlugin;
+use drasi_host_sdk::computation::{self, NativePlugin};
 use drasi_lib::{
     computation::v1::*,
     error::OperationFailures,
     observability::{
-        ComponentLogRuntime, ExecutionContext, LogPolicy, OpenTelemetryContextAdapter,
-        TelemetryOptions, TelemetryProfile, TelemetrySampler, TelemetrySettings, TELEMETRY_TARGET,
+        ComponentLogRuntime, ExecutionContext, LogPolicy, MetricRegistrationContext,
+        NativeSpanCollector, OpenTelemetryContextAdapter, OpenTelemetrySpanProcessor, RootSampling,
+        TelemetryOptions, TelemetryProfile, TelemetrySettings, TELEMETRY_TARGET,
     },
     DrasiLib,
 };
 use drasi_reaction_application::NativeApplicationReaction;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
-    trace::{Sampler, SdkTracerProvider},
+    trace::{BatchSpanProcessor, Sampler, SdkTracerProvider},
     Resource,
 };
 use serde_json::{json, Value};
-use std::{env, num::NonZeroUsize, str::FromStr, sync::Arc, time::Duration};
+use std::{env, num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use tracing_subscriber::{filter::filter_fn, prelude::*};
 
 const INSTANCE: &str = "source-trace-demo";
@@ -108,12 +112,18 @@ fn finish(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(OperationFailures::new("source trace demonstration failed", failures).into())
+        Err(OperationFailures::new("observability demonstration failed", failures).into())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let sampling = setting("TRACE_SAMPLING", "always")?;
+    let sampling_policy = match sampling.as_str() {
+        "always" => RootSampling::Always,
+        "never" => RootSampling::Never,
+        _ => anyhow::bail!("TRACE_SAMPLING must be always or never"),
+    };
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_endpoint(setting(
@@ -122,15 +132,27 @@ async fn main() -> Result<()> {
         )?)
         .with_timeout(Duration::from_secs(3))
         .build()?;
+    let processor = OpenTelemetrySpanProcessor::new(
+        BatchSpanProcessor::builder(exporter).build(),
+        Sampler::AlwaysOn,
+    );
     let provider = SdkTracerProvider::builder()
-        .with_sampler(TelemetrySampler(Sampler::AlwaysOn))
-        .with_batch_exporter(exporter)
+        .with_sampler(processor.sampler())
+        .with_span_processor(processor.clone())
         .with_resource(Resource::builder_empty().with_service_name(SERVICE).build())
         .build();
     let logging = ComponentLogRuntime::new(LogPolicy::new("info")?)?;
+    let native_spans = NativeSpanCollector::new(Arc::new(processor), Default::default())?;
+    let recorder = Arc::new(
+        PrometheusBuilder::new()
+            .set_buckets(&[0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0])?
+            .build_recorder(),
+    );
+    let metrics = MetricRegistrationContext::new(recorder.clone(), Default::default())?;
     let settings = TelemetrySettings::new(TelemetryProfile::Debug)
-        .with_metrics(false)
-        .require_distributed_tracing();
+        .with_sampling(sampling_policy)
+        .require_distributed_tracing()
+        .require_native_metrics();
     let policy = settings.resolve()?;
     let result = async {
         tracing_subscriber::registry()
@@ -145,9 +167,21 @@ async fn main() -> Result<()> {
                     })),
             )
             .try_init()?;
-        run(logging.clone(), settings).await
+        run(
+            logging.clone(),
+            native_spans.clone(),
+            metrics,
+            recorder.handle(),
+            sampling,
+            settings,
+        )
+        .await
     }
     .await;
+    let spans = native_spans
+        .shutdown(Duration::from_secs(3))
+        .await
+        .map_err(Into::into);
     let logs = logging
         .shutdown(Duration::from_secs(3))
         .await
@@ -156,10 +190,17 @@ async fn main() -> Result<()> {
         .await
         .context("join trace exporter shutdown")
         .and_then(|result| result.map_err(Into::into));
-    finish([result, logs, traces])
+    finish([result, spans, logs, traces])
 }
 
-async fn run(logging: ComponentLogRuntime, settings: TelemetrySettings) -> Result<()> {
+async fn run(
+    logging: ComponentLogRuntime,
+    native_spans: NativeSpanCollector,
+    metrics: MetricRegistrationContext,
+    metric_handle: metrics_exporter_prometheus::PrometheusHandle,
+    sampling: String,
+    settings: TelemetrySettings,
+) -> Result<()> {
     let http = NativePlugin::from_definition(drasi_computation_source_http::plugin()?)?;
     let postgres = NativePlugin::from_definition(drasi_computation_source_postgres::plugin()?)?;
     let http_factory = http
@@ -176,6 +217,34 @@ async fn run(logging: ComponentLogRuntime, settings: TelemetrySettings) -> Resul
         })
         .context("PostgreSQL row source factory")?
         .clone();
+    let plugin_path = match env::var_os("DEMO_PLUGIN_PATH") {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let target = env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target")
+                });
+            target.join("debug").join(format!(
+                "{}drasi_observability_demo_plugin{}",
+                env::consts::DLL_PREFIX,
+                env::consts::DLL_SUFFIX,
+            ))
+        }
+    }
+    .canonicalize()
+    .context("demo native plugin is missing; use make observability-demo to build it")?;
+    let inspector = computation::load(&plugin_path).context("load demo inspector cdylib")?;
+    let inspector_factory = inspector
+        .factories()
+        .first()
+        .context("inspector factory")?
+        .clone();
+    let capabilities = inspector_factory.telemetry_capabilities();
+    ensure!(
+        capabilities & 15 == 15,
+        "demo inspector lacks shared telemetry capabilities"
+    );
     let progress = Arc::new(QuerySourceProgress::new(
         ComponentBatch::GRAPH_ID,
         id("postgres-query")?,
@@ -236,6 +305,7 @@ async fn run(logging: ComponentLogRuntime, settings: TelemetrySettings) -> Resul
     for source in ["http", "postgres"] {
         let query_id = format!("{source}-query");
         let output_id = format!("{source}-output");
+        let inspection_id = format!("{source}-inspect");
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: ComponentBatch::GRAPH_ID.into(),
@@ -262,9 +332,10 @@ async fn run(logging: ComponentLogRuntime, settings: TelemetrySettings) -> Resul
                     .trace()
                     .context("handled callback has no operation trace context")?;
                 println!(
-                    "RESULT source={source} query={source}-query trace_id={} span_id={} changes={}",
+                    "RESULT source={source} query={source}-query trace_id={} span_id={} sampled={} changes={}",
                     opentelemetry::trace::TraceId::from_bytes(trace.trace_id()),
                     opentelemetry::trace::SpanId::from_bytes(trace.span_id()),
+                    trace.sampled(),
                     input.envelope.changes().operations().len()
                 );
                 Ok(())
@@ -272,37 +343,75 @@ async fn run(logging: ComponentLogRuntime, settings: TelemetrySettings) -> Resul
         )?;
         batch = batch
             .query(Box::new(query))
+            .component(
+                inspector_factory.specification(id(&inspection_id)?, json!({}))?,
+                inspector_factory.clone(),
+            )
             .sink(Box::new(reaction))
             .bind_stream(endpoint(source, "out")?, stream(source)?)
             .bind_stream(endpoint(&query_id, "out")?, stream(&query_id)?)
+            .bind_stream(endpoint(&inspection_id, "out")?, stream(&inspection_id)?)
             .connect(
                 EdgeDefinition::new(endpoint(source, "out")?, endpoint(&query_id, "in")?),
                 Box::new(BoundedPipeConfig { capacity: 32 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint(&query_id, "out")?, endpoint(&output_id, "in")?),
+                EdgeDefinition::new(endpoint(&query_id, "out")?, endpoint(&inspection_id, "in")?),
+                Box::new(BoundedPipeConfig { capacity: 32 }),
+            )
+            .connect(
+                EdgeDefinition::new(
+                    endpoint(&inspection_id, "out")?,
+                    endpoint(&output_id, "in")?,
+                ),
                 Box::new(BoundedPipeConfig { capacity: 32 }),
             );
     }
     let core = DrasiLib::builder()
         .with_id(INSTANCE)
-        .with_component_logging(logging)
+        .with_component_logging(logging.clone())
         .with_telemetry(
             TelemetryOptions::new(settings)
-                .with_context_adapter(Arc::new(OpenTelemetryContextAdapter)),
+                .with_context_adapter(Arc::new(OpenTelemetryContextAdapter))
+                .with_trace_directives("drasi::telemetry=trace,drasi_demo_plugin=info")
+                .with_metric_context(metrics)
+                .with_native_span_collector(native_spans.clone()),
         )
         .with_components(batch.build()?)
         .build()
         .await?;
+    let dashboard_port = port("TELEMETRY_PORT", 19091)?;
+    let mut dashboard = dashboard::Dashboard::start(
+        dashboard_port,
+        dashboard::DashboardState {
+            metrics: metric_handle,
+            logging: logging.clone(),
+            spans: native_spans,
+            plugin: plugin_path,
+            capabilities,
+            sampling: sampling.clone(),
+            jaeger: setting("JAEGER_URL", "http://127.0.0.1:16689")?,
+        },
+    )
+    .await?;
+    let mut dashboard_joined = false;
     let result = async {
         core.start().await?;
         println!("READY HTTP http://127.0.0.1:{http_port}/sources/http/events");
         println!("READY PostgreSQL publication/slot drasi_trace_demo; wait for its slot to be active before inserting");
         println!("TRACES service={SERVICE}; each RESULT prints the trace ID to open in Jaeger");
+        println!("DASHBOARD http://127.0.0.1:{dashboard_port}/ sampling={sampling}");
+        println!("METRICS http://127.0.0.1:{dashboard_port}/metrics");
+        println!("LOGS http://127.0.0.1:{dashboard_port}/logs");
         let control = core.computation_control()?;
         let mut observed = control.subscribe_observed();
         tokio::select! {
             stopped = tokio::signal::ctrl_c() => stopped.context("wait for Ctrl-C")?,
+            server = &mut dashboard.task => {
+                dashboard_joined = true;
+                server.context("join telemetry dashboard")??;
+                anyhow::bail!("telemetry dashboard stopped unexpectedly");
+            }
             failed = observed.wait_for(|graph| graph.components.values().any(|component| component.failure.is_some())) => {
                 let graph = failed.context("component observation closed")?;
                 let failure = graph.components.values().find_map(|component| component.failure.as_ref())
@@ -313,5 +422,6 @@ async fn run(logging: ComponentLogRuntime, settings: TelemetrySettings) -> Resul
         Ok(())
     }.await;
     let shutdown = core.shutdown().await.map_err(Into::into);
-    finish([result, shutdown])
+    let dashboard_shutdown = dashboard.shutdown(dashboard_joined).await;
+    finish([result, shutdown, dashboard_shutdown])
 }

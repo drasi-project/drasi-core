@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drasi native telemetry demo</title>
+<style>
+  :root { color-scheme: light; font-family: system-ui, sans-serif; color: #2C3D45; background: #f5f6f3; }
+  body { max-width: 1150px; margin: 2rem auto; padding: 0 1.25rem 3rem; }
+  h1 { margin-bottom: .35rem; } h2 { font-size: 1.15rem; }
+  a { color: #375f57; } .muted { color: #52646c; } code, pre { font-family: ui-monospace, monospace; }
+  section { background: white; border: 1px solid #dce3df; border-top: 4px solid #658780; border-radius: 6px; margin: 1.4rem 0; padding: 1rem 1.2rem; }
+  pre { background: #f2f4f1; padding: 1rem; overflow: auto; font-size: .82rem; max-height: 28rem; }
+  #error { color: #943d31; border-left: 4px solid #B36A5F; padding-left: 1rem; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; } th, td { padding: .6rem; text-align: left; vertical-align: top; border-bottom: 1px solid #e6ebe7; }
+  td:last-child { overflow-wrap: anywhere; } .pill { display: inline-block; padding: .25rem .6rem; border-radius: 1rem; background: #e4ede8; }
+  #traces { display: flex; flex-wrap: wrap; gap: .75rem; } .warning { background: #f2e8df; color: #624c35; }
+  details { margin-top: 1rem; } label { display: block; margin: .5rem 0; } small { overflow-wrap: anywhere; }
+</style>
+<h1>Drasi native telemetry</h1>
+<p class="muted">Real HTTP and PostgreSQL sources, continuous queries, and a separately loaded native plugin.</p>
+<p id="error" hidden></p>
+<section>
+  <h2>Connected pipeline</h2>
+  <pre>HTTP / PostgreSQL → continuous query → native inspector (.dylib / .so / .dll) → handled callback</pre>
+  <p>The host owns tracing, logging, metrics, and export. The plugin measures record-image inspection, not another copy of framework throughput.</p>
+  <p><span id="sampling" class="pill">Loading…</span> <a id="jaeger" href="#">Open Jaeger</a> · <a href="/metrics">Prometheus metrics</a> · <a href="/logs">JSON logs</a></p>
+  <small id="plugin" class="muted"></small>
+  <p id="health" class="muted"></p>
+</section>
+<section>
+  <h2>Traces</h2>
+  <p>Each sampled trace includes <code>plugin.inspect</code> from the native library with its original span ID and timing. Click a trace after sending an event.</p>
+  <div id="traces"></div>
+  <p id="no-traces" class="muted">Waiting for an inspected result…</p>
+</section>
+<section>
+  <h2>Live metrics</h2>
+  <p>Scoped plugin counters, gauges, and histograms remain enabled when traces are not sampled. Labels are assigned by the host; durations are in seconds.</p>
+  <label><input id="all" type="checkbox"> Include framework query, component, and queue metrics</label>
+  <pre id="metrics">Waiting for metrics…</pre>
+</section>
+<section>
+  <h2>Correlated native logs</h2>
+  <p>Original plugin timestamps, safe fields, and trace/span IDs arrive through the host log runtime. No record payloads or credentials are displayed.</p>
+  <table><thead><tr><th>Time / component</th><th>Native log</th><th>Trace</th></tr></thead><tbody id="logs"></tbody></table>
+</section>
+<script>
+  let latestMetrics = "";
+  const element = id => document.getElementById(id);
+  function showMetrics() {
+    element("metrics").textContent = latestMetrics.split("\n")
+      .filter(line => element("all").checked || line.includes("drasi_plugin_"))
+      .join("\n") || "No plugin metric series yet.";
+  }
+  element("all").addEventListener("change", showMetrics);
+  async function get(path, json = true) {
+    const response = await fetch(path, { cache: "no-store" });
+    if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+    return json ? response.json() : response.text();
+  }
+  async function refresh() {
+    try {
+      const [status, metrics, logs] = await Promise.all([get("/status"), get("/metrics", false), get("/logs")]);
+      element("sampling").textContent = `Trace sampling: ${status.sampling}`;
+      element("sampling").className = status.sampling === "never" ? "pill warning" : "pill";
+      element("jaeger").href = status.jaeger;
+      element("plugin").textContent = `Loaded native library: ${status.plugin_path} · capabilities: ${status.plugin_capabilities}`;
+      const lost = Object.values(status.span_losses).reduce((sum, count) => sum + count, 0);
+      element("health").textContent = status.span_buffer.error
+        ? `Collection error: ${status.span_buffer.error}`
+        : `Native span buffer: ${status.span_buffer.records} records / ${status.span_buffer.bytes} bytes · span losses: ${lost} · log drops: ${status.log_losses.full + status.log_losses.closed}`;
+      latestMetrics = metrics;
+      showMetrics();
+      element("logs").replaceChildren();
+      element("traces").replaceChildren();
+      const traces = new Set();
+      for (const log of [...logs].reverse()) {
+        const row = document.createElement("tr");
+        for (const text of [
+          `${log.timestamp}\n${log.component}`,
+          `${log.level} ${log.message}\n${JSON.stringify(log.attributes || [])}`,
+          log.trace_id ? `${log.sampled ? "sampled" : "unsampled"}\n${log.trace_id}\nspan: ${log.span_id}` : "Lifecycle / no event trace",
+        ]) {
+          const cell = document.createElement("td");
+          cell.textContent = text;
+          cell.style.whiteSpace = "pre-wrap";
+          row.append(cell);
+        }
+        element("logs").append(row);
+        if (log.sampled && log.trace_id && !traces.has(log.trace_id)) {
+          traces.add(log.trace_id);
+          const link = document.createElement("a");
+          link.href = `${status.jaeger}/trace/${log.trace_id}`;
+          link.textContent = `${log.component}: ${log.trace_id.slice(0, 12)}…`;
+          link.target = "_blank";
+          link.rel = "noopener";
+          element("traces").append(link);
+        }
+      }
+      element("no-traces").hidden = traces.size > 0;
+      element("no-traces").textContent = status.sampling === "never"
+        ? "Sampling is disabled. Inspection metrics and native logs still update; unsampled contexts are not exported to Jaeger."
+        : "Waiting for a sampled inspected result…";
+      element("error").hidden = true;
+    } catch (error) {
+      element("error").textContent = `Cannot refresh demo: ${error.message}`;
+      element("error").hidden = false;
+    }
+  }
+  async function poll() { await refresh(); window.setTimeout(poll, 2000); }
+  poll();
+</script>
+</html>

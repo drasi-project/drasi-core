@@ -236,23 +236,31 @@ impl Drop for ComponentObservations {
     fn drop(&mut self) {
         self.revoke();
     }
+}
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        #[test]
-        fn deferred_resource_bindings_follow_resource_owner_not_component_publications() {
-            let graph = GraphTelemetry::default();
-            let (owner, binding) = graph.resource_binding("instance", "graph", "bootstrap", 42, None).unwrap();
-            assert_eq!(binding.config().scope.component_id().unwrap().as_str(), "resource/bootstrap");
-            assert_eq!(binding.config().generation, 42);
-            assert!(binding.is_active().unwrap());
-            let retained = owner.clone();
-            drop(owner);
-            assert!(binding.is_active().unwrap());
-            drop(retained);
-            assert!(!binding.is_active().unwrap());
-            assert!(matches!(binding.for_plugin("test"), Err(TelemetryError::Retired)));
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn deferred_resource_bindings_follow_resource_owner_not_component_publications() {
+        let graph = GraphTelemetry::default();
+        let (owner, binding) = graph
+            .resource_binding("instance", "graph", "bootstrap", 42, None)
+            .unwrap();
+        assert_eq!(
+            binding.config().scope.component_id().unwrap().as_str(),
+            "resource/bootstrap"
+        );
+        assert_eq!(binding.config().generation, 42);
+        assert!(binding.is_active().unwrap());
+        let retained = owner.clone();
+        drop(owner);
+        assert!(binding.is_active().unwrap());
+        drop(retained);
+        assert!(!binding.is_active().unwrap());
+        assert!(matches!(
+            binding.for_plugin("test"),
+            Err(TelemetryError::Retired)
+        ));
     }
 }

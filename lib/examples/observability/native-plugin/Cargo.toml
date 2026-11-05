@@ -1,0 +1,20 @@
+[package]
+name = "drasi-observability-demo-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+drasi-computation-contracts = { path = "../../../../components/computation-contracts" }
+drasi-computation-plugin-sdk = { path = "../../../../components/computation-plugin-sdk" }
+metrics = "0.24"
+serde_json = "1"
+tracing = "0.1"

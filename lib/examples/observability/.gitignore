@@ -1,0 +1,3 @@
+# The runner builds both independent workspaces with --locked.
+!Cargo.lock
+!native-plugin/Cargo.lock
