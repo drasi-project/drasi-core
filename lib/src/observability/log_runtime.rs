@@ -187,22 +187,27 @@ impl RuntimeInner {
     }
 
     pub(super) fn submit(&self, message: LogMessage) -> bool {
+        self.submit_outcome(message) == super::TelemetrySubmission::Accepted
+    }
+
+    fn submit_outcome(&self, message: LogMessage) -> super::TelemetrySubmission {
+        use super::TelemetrySubmission;
         if !self.policy.allows(message.level) {
-            return true;
+            return TelemetrySubmission::Accepted;
         }
         if !self.open.load(Ordering::Acquire) {
             loss(&self.closed, "closed");
-            return false;
+            return TelemetrySubmission::Closed;
         }
         match self.sender.try_send(Command::Log(message)) {
-            Ok(()) => true,
+            Ok(()) => TelemetrySubmission::Accepted,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 loss(&self.full, "full");
-                false
+                TelemetrySubmission::Full
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 loss(&self.closed, "closed");
-                false
+                TelemetrySubmission::Closed
             }
         }
     }
@@ -377,6 +382,17 @@ impl ComponentLogRuntime {
 
     pub fn try_log(&self, message: LogMessage) -> bool {
         self.inner.submit(message)
+    }
+
+    pub(crate) fn try_native_log(
+        &self,
+        target: &str,
+        message: LogMessage,
+    ) -> LoggingResult<super::TelemetrySubmission> {
+        if !self.inner.policy.allows_target(target, message.level)? {
+            return Ok(super::TelemetrySubmission::Accepted);
+        }
+        Ok(self.inner.submit_outcome(message))
     }
 
     pub async fn flush(&self) -> LoggingResult<()> {

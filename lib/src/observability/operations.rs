@@ -179,7 +179,7 @@ struct OperationMetrics {
 #[derive(Debug)]
 pub(crate) struct ComponentObservations {
     pub generation: u64,
-    config: GraphTelemetry,
+    pub(super) config: GraphTelemetry,
     metrics: BTreeMap<ObservedOperation, OperationMetrics>,
     inputs: [Counter; 3],
     outputs: Counter,
@@ -189,11 +189,12 @@ pub(crate) struct ComponentObservations {
     query: std::sync::OnceLock<QueryMetrics>,
     subscriptions: Mutex<ReactionSubscriptions>,
     state: Mutex<BindingState>,
+    pub(super) lifetime: super::TelemetryLifetime,
+    pub(super) plugins: Mutex<BTreeMap<String, super::PluginTelemetry>>,
 }
 
 #[derive(Debug)]
 struct BindingState {
-    active: bool,
     up: Gauge,
 }
 
@@ -346,7 +347,9 @@ impl ComponentObservations {
             worker_owned: std::sync::atomic::AtomicBool::new(false),
             query: std::sync::OnceLock::new(),
             subscriptions: Mutex::new(BTreeMap::new()),
-            state: Mutex::new(BindingState { active: true, up }),
+            state: Mutex::new(BindingState { up }),
+            lifetime: super::TelemetryLifetime::default(),
+            plugins: Mutex::new(BTreeMap::new()),
         }))
     }
 
@@ -374,13 +377,15 @@ impl ComponentObservations {
         {
             return Ok(());
         }
-        let state = self.state.lock().map_err(|_| TelemetryError::Poisoned)?;
-        if state.active && self.query.get().is_none() {
-            self.query
-                .set(QueryMetrics::new(&self.config)?)
-                .expect("query metric binding is serialized");
-        }
-        Ok(())
+        self.lifetime.with_active(|| {
+            let _state = self.state.lock().map_err(|_| TelemetryError::Poisoned)?;
+            if self.query.get().is_none() {
+                self.query
+                    .set(QueryMetrics::new(&self.config)?)
+                    .expect("query metric binding is serialized");
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn query_observer(
@@ -567,37 +572,34 @@ impl ComponentObservations {
     }
 
     pub(crate) fn update_up(&self, up: bool) {
-        let state = self.state.lock().unwrap_or_else(|error| {
-            log::error!("Component telemetry state poisoned: {error}");
-            error.into_inner()
+        self.update(|| match self.state.lock() {
+            Ok(state) => state.up.set(f64::from(up)),
+            Err(error) => log::error!("Component telemetry state poisoned: {error}"),
         });
-        if state.active {
-            state.up.set(f64::from(up));
-        }
     }
 
     pub(crate) fn revoke(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|error| {
-            log::error!("Revoking poisoned component telemetry: {error}");
-            error.into_inner()
-        });
-        if !state.active {
-            return;
-        }
-        state.active = false;
-        state.up.set(0.0);
-        if let Some(query) = self.query.get() {
-            query.retire();
+        if let Err(error) = self.lifetime.revoke(|| {
+            match self.state.lock() {
+                Ok(state) => state.up.set(0.0),
+                Err(error) => log::error!("Revoking poisoned component telemetry: {error}"),
+            }
+            if let Some(query) = self.query.get() {
+                query.retire();
+            }
+        }) {
+            log::error!("Revoking component telemetry: {error}");
         }
     }
 
     pub(super) fn update(&self, work: impl FnOnce()) {
-        let state = self.state.lock().unwrap_or_else(|error| {
-            log::error!("Updating poisoned component telemetry: {error}");
-            error.into_inner()
-        });
-        if state.active {
+        if let Err(error) = self.lifetime.with_active(|| {
             work();
+            Ok(())
+        }) {
+            if error != TelemetryError::Retired {
+                log::error!("Updating component telemetry: {error}");
+            }
         }
     }
 
@@ -718,12 +720,7 @@ impl ComponentObservations {
             && operation
                 .span_name()
                 .is_some_and(|name| self.config.policy().allows_span(name));
-        let eligible = eligible
-            && self
-                .state
-                .lock()
-                .map_err(|_| TelemetryError::Poisoned)?
-                .active;
+        let eligible = eligible && self.lifetime.is_active()?;
         let sampled = !eligible
             || self.config.context_adapter().is_some()
             || self.config.policy().sampling().decide(

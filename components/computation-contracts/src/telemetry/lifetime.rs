@@ -25,6 +25,38 @@ pub(super) trait TelemetryRetirement: std::fmt::Debug + Send + Sync {
     fn retire(&self);
 }
 
+impl Lifetime {
+    fn revoke(&self, retire: impl FnOnce()) -> Result<bool> {
+        let mut active = self.active.write().map_err(|_| TelemetryError::Poisoned)?;
+        if !*active {
+            return Ok(false);
+        }
+        *active = false;
+        let listeners = std::mem::take(
+            &mut *self
+                .retirements
+                .lock()
+                .map_err(|_| TelemetryError::Poisoned)?,
+        );
+        for listener in listeners
+            .into_iter()
+            .filter_map(|listener| listener.upgrade())
+        {
+            listener.retire();
+        }
+        retire();
+        Ok(true)
+    }
+}
+
+impl TelemetryRetirement for Lifetime {
+    fn retire(&self) {
+        if let Err(error) = self.revoke(|| {}) {
+            log::error!("Retiring child telemetry binding: {error}");
+        }
+    }
+}
+
 impl Default for TelemetryLifetime {
     fn default() -> Self {
         Self(Arc::new(Lifetime {
@@ -40,6 +72,30 @@ impl TelemetryLifetime {
         if !*active {
             return Err(TelemetryError::Retired);
         }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            #[test]
+            fn parent_revocation_retires_children_without_retaining_replaced_generations() {
+                let parent = TelemetryLifetime::default();
+                let child = parent.child().unwrap();
+                assert!(child.is_active().unwrap());
+                assert!(parent.revoke(|| {}).unwrap());
+                assert!(!child.is_active().unwrap());
+                assert!(matches!(parent.child(), Err(TelemetryError::Retired)));
+                assert!(matches!(
+                    child.with_active(|| Ok(())),
+                    Err(TelemetryError::Retired)
+                ));
+                let parent = TelemetryLifetime::default();
+                for _ in 0..20_000 {
+                    drop(parent.child().unwrap());
+                }
+                assert!(parent.child().unwrap().is_active().unwrap());
+                assert!(parent.0.retirements.lock().unwrap().len() <= 1);
+            }
+        }
         work()
     }
 
@@ -47,32 +103,16 @@ impl TelemetryLifetime {
         Ok(*self.0.active.read().map_err(|_| TelemetryError::Poisoned)?)
     }
 
+    pub fn child(&self) -> Result<Self> {
+        let child = Self::default();
+        let listener: Arc<dyn TelemetryRetirement> = child.0.clone();
+        self.with_active(|| self.on_retire(Arc::downgrade(&listener)))?;
+        Ok(child)
+    }
+
     /// Run final gauge resets while late writers are excluded.
     pub fn revoke(&self, retire: impl FnOnce()) -> Result<bool> {
-        let mut active = self
-            .0
-            .active
-            .write()
-            .map_err(|_| TelemetryError::Poisoned)?;
-        if !*active {
-            return Ok(false);
-        }
-        *active = false;
-        let listeners = std::mem::take(
-            &mut *self
-                .0
-                .retirements
-                .lock()
-                .map_err(|_| TelemetryError::Poisoned)?,
-        );
-        for listener in listeners
-            .into_iter()
-            .filter_map(|listener| listener.upgrade())
-        {
-            listener.retire();
-        }
-        retire();
-        Ok(true)
+        self.0.revoke(retire)
     }
 
     pub(super) fn on_retire(&self, listener: Weak<dyn TelemetryRetirement>) -> Result<()> {

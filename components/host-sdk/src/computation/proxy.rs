@@ -395,6 +395,7 @@ impl Drop for RemoteComponent {
 /// unsupported interfaces return errors rather than falling back to legacy roles.
 pub struct NativeComponentProxy {
     pub(super) inner: Arc<RemoteComponent>,
+    telemetry_binding: Option<super::telemetry::NativeTelemetryBinding>,
     descriptor: ComponentDescriptor,
     metadata: FactoryMetadata,
     pub(super) codec: Arc<BinaryEnvelopeCodec>,
@@ -669,6 +670,7 @@ impl NativeComponentProxy {
         }
         Ok(Self {
             inner,
+            telemetry_binding: None,
             descriptor: actual.descriptor,
             metadata,
             codec,
@@ -683,6 +685,14 @@ impl NativeComponentProxy {
             stop: tokio::sync::Mutex::new(StopState::default()),
         })
     }
+    pub(super) fn with_telemetry_binding(
+        mut self,
+        binding: Option<super::telemetry::NativeTelemetryBinding>,
+    ) -> Self {
+        self.telemetry_binding = binding;
+        self
+    }
+
     pub(super) fn with_source_schema(
         mut self,
         extension: Option<abi::source_schema::PluginSourceSchemaV1>,

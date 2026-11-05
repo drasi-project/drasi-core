@@ -1015,6 +1015,33 @@ owner.
 
 ## Portable execution context
 
+### Shared native telemetry
+
+Supply a host-owned `NativeSpanCollector` using
+`TelemetryOptions::with_native_span_collector(...)` to collect native internal
+spans. Collection is bounded and nonblocking at submission; metrics do not use
+its queue. Ordinary logs still use `ComponentLogRuntime`, independently of
+tracing and sampling. Native log records preserve original timestamps, target,
+safe fields and optional trace context in `LogMessage::metadata`. Existing
+constructors and old serialized log fields remain available; Rust callers using
+`LogMessage` struct literals must initialize the new optional field.
+
+With `otel-context`, wrap a host processor in `OpenTelemetrySpanProcessor`,
+compose a clone and its `sampler()` into the host tracer provider, and supply
+another clone to `NativeSpanCollector::new`. Both paths share the processor and
+resource; native IDs, parentage and timestamps are not recreated as new spans.
+Use bounded batch processors/exporters for production. After stopping producers,
+await collector shutdown and logging drain before shutting down the provider.
+Stopping an instance does not shut down a collector shared with another instance.
+
+Component factories use `ConstructionContext::plugin_metrics(kind)` to cache a
+`ScopedMetricEmitter`. Native SDK factories use that same emitter API through
+their negotiated binding. Counters accumulate across replacement, including
+generation-local `absolute()` reports; custom gauges reset and old handles are
+fenced. `require_native_metrics()` is validated against the actual plugin
+capability before construction. See the [native SDK guide](../components/computation-plugin-sdk/README.md#telemetry-registration-foundations)
+for API and compatibility details.
+
 For a runnable, host-exported HTTP/PostgreSQL source -> query -> handled callback
 trace, see the [source tracing demonstration](examples/observability/README.md).
 It includes a local Jaeger setup and an exact trace-shape verifier.

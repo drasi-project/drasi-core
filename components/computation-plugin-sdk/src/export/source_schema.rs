@@ -149,7 +149,11 @@ unsafe extern "C" fn begin(raw: *mut c_void, out: *mut abi::OperationHandle) -> 
         let (guard, mut changed) = state.claim()?;
         let runtime = io_runtime()?;
         let damaged = instance.damaged.clone();
-        let operation = transport::export_component_operation(
+        let scope = instance
+            .execution_scope
+            .has_plugin_telemetry()
+            .then(|| instance.execution_scope.clone());
+        let operation = crate::telemetry_transport::export_operation(
             async move {
                 guard.validate()?;
                 let schema = tokio::select! {
@@ -177,6 +181,7 @@ unsafe extern "C" fn begin(raw: *mut c_void, out: *mut abi::OperationHandle) -> 
             Some(runtime),
             damaged,
             false,
+            scope,
         );
         unsafe { transport::write_out(out, operation) }
     })

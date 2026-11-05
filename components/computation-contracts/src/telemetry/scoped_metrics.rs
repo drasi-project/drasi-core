@@ -29,6 +29,16 @@ pub struct ScopedMetricEmitter {
 }
 
 impl ScopedMetricEmitter {
+    pub fn disabled() -> Self {
+        #[derive(Debug)]
+        struct Disabled;
+        impl ScopedMetricBackend for Disabled {
+            fn register(&self, _: &PluginMetricRegistration) -> Result<RegisteredMetric> {
+                Ok(RegisteredMetric::Disabled)
+            }
+        }
+        Self::new(Arc::new(Disabled))
+    }
     pub fn new(backend: Arc<dyn ScopedMetricBackend>) -> Self {
         Self {
             backend,

@@ -34,6 +34,8 @@ pub struct TelemetryOptions {
     trace_directives: Option<String>,
     context_adapter: Option<Arc<dyn TraceContextAdapter>>,
     link_limits: TraceLinkLimits,
+    native_spans: Option<super::NativeSpanCollector>,
+    plugin_limits: TelemetryLimits,
 }
 
 impl From<TelemetrySettings> for TelemetryOptions {
@@ -52,6 +54,16 @@ impl From<TelemetryProfile> for TelemetryOptions {
 }
 
 impl TelemetryOptions {
+    pub fn with_native_span_collector(mut self, collector: super::NativeSpanCollector) -> Self {
+        self.plugin_limits = collector.limits();
+        self.native_spans = Some(collector);
+        self
+    }
+
+    pub fn with_plugin_telemetry_limits(mut self, limits: TelemetryLimits) -> Self {
+        self.plugin_limits = limits;
+        self
+    }
     pub fn new(settings: impl Into<Self>) -> Self {
         settings.into()
     }
@@ -88,6 +100,7 @@ impl TelemetryOptions {
     ) -> Result<GraphTelemetry> {
         let policy = Arc::new(self.settings.resolve()?);
         let link_limits = self.link_limits.validate()?;
+        let plugin_limits = self.plugin_limits.validate()?;
         if policy.distributed_tracing_required() && self.context_adapter.is_none() {
             return Err(TelemetryError::Unsupported(
                 "distributed trace context adapter",
@@ -126,6 +139,8 @@ impl TelemetryOptions {
             filter: Arc::new(filter),
             context_adapter: self.context_adapter.clone(),
             link_limits,
+            native_spans: self.native_spans.clone(),
+            plugin_limits,
             owners: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -139,6 +154,8 @@ pub struct GraphTelemetry {
     filter: Arc<EnvFilter>,
     context_adapter: Option<Arc<dyn TraceContextAdapter>>,
     link_limits: TraceLinkLimits,
+    native_spans: Option<super::NativeSpanCollector>,
+    plugin_limits: TelemetryLimits,
     owners: Arc<
         Mutex<
             BTreeMap<drasi_computation_contracts::ComponentId, Arc<super::ComponentObservations>>,
@@ -155,12 +172,73 @@ impl Default for GraphTelemetry {
             filter: Arc::new(EnvFilter::new("trace")),
             context_adapter: None,
             link_limits: TraceLinkLimits::default(),
+            native_spans: None,
+            plugin_limits: TelemetryLimits::default(),
             owners: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
 
 impl GraphTelemetry {
+    pub(crate) fn resource_binding(
+        &self,
+        instance: &str,
+        graph: &str,
+        resource: &str,
+        generation: u64,
+        logging: Option<super::ComponentLogRuntime>,
+    ) -> Result<(Arc<super::ComponentObservations>, PluginTelemetry)> {
+        let scope = TelemetryScope::graph(instance, graph)?.component(
+            drasi_computation_contracts::ComponentId::try_new(format!("resource/{resource}"))
+                .map_err(|error| TelemetryError::Invalid(error.to_string()))?,
+            drasi_computation_contracts::ComponentRole::Service,
+            drasi_computation_contracts::ComponentSemanticKind::Service,
+        );
+        let mut config = self.clone();
+        config.owners = Arc::new(Mutex::new(BTreeMap::new()));
+        // Resource lifetimes use the shared fence, without registering synthetic
+        // component calls/up/queue measurements or publishing another graph node.
+        let mut owner = super::ComponentObservations::new(GraphTelemetry::default(), generation)?;
+        Arc::get_mut(&mut owner)
+            .ok_or_else(|| {
+                TelemetryError::Invalid("resource telemetry owner is unexpectedly shared".into())
+            })?
+            .config = config;
+        let binding = super::plugin_telemetry::bind(&owner, scope, "resource", logging)?;
+        Ok((owner, binding))
+    }
+
+    pub fn plugin_binding(
+        &self,
+        scope: TelemetryScope,
+        generation: u64,
+        kind: &str,
+        logging: Option<super::ComponentLogRuntime>,
+    ) -> Result<PluginTelemetry> {
+        let owner = self.observations(
+            scope.component_id().cloned().ok_or_else(|| {
+                TelemetryError::Invalid("plugin binding needs a component".into())
+            })?,
+            scope
+                .role()
+                .ok_or_else(|| TelemetryError::Invalid("plugin binding needs a role".into()))?,
+            scope.semantic_kind().ok_or_else(|| {
+                TelemetryError::Invalid("plugin binding needs a semantic kind".into())
+            })?,
+            generation,
+        )?;
+        super::plugin_telemetry::bind(&owner, scope, kind, logging)
+    }
+
+    pub(super) fn native_spans(&self) -> Option<super::NativeSpanCollector> {
+        self.native_spans.clone()
+    }
+    pub(super) fn plugin_limits(&self) -> TelemetryLimits {
+        self.plugin_limits
+    }
+    pub(super) fn trace_directives(&self) -> String {
+        self.filter.to_string()
+    }
     pub(crate) fn link_limits(&self) -> TraceLinkLimits {
         self.link_limits
     }
@@ -270,8 +348,12 @@ impl GraphTelemetry {
         let policy = self.policy.clone();
         filter_fn(move |metadata| {
             metadata.is_span()
-                && metadata.target() == TELEMETRY_TARGET
-                && policy.allows_span(metadata.name())
+                && ((metadata.target() == TELEMETRY_TARGET && policy.allows_span(metadata.name()))
+                    || (metadata.target() != TELEMETRY_TARGET
+                        && metadata.name() != "computation_component"
+                        && policy.tracing_enabled()
+                        && ExecutionScope::current_plugin_telemetry()
+                            .is_some_and(|binding| binding.config().tracing)))
         })
         .and(self.filter.as_ref().clone())
     }

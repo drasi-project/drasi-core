@@ -287,6 +287,7 @@ or arbitrary storage owners. Current native extension contracts include:
 | Output snapshot/replay/follow | Per-output providers over the component's own state, bounded typed answers and leases that end on stop, restart and release | A shared row store, streaming of unbounded data, crash-durable handover or a generic live-follow coordinator |
 | Handled consumers | Existing delivery runner, retries and completion state; borrowed transactional state when selected | An independent plugin commit or atomic remote effects |
 | Telemetry context V1 | Bounded portable operation/input/output context, receiver scope restoration and context-bearing admission/consumer calls | Completed-span/log collection, exporters or native metric callbacks |
+| Shared telemetry V2 | Scoped constructor/worker bindings, completed spans/logs, direct metric registration/updates and host root sampling | Plugin-owned exporters, sampled metrics, Rust layouts across FFI, or changes to V1/base tables |
 
 The current transactional participant has no commit operation. The actual
 transaction owner controls commit/rollback. Managed consumer/bootstrap retirement

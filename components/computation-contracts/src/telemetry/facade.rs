@@ -276,6 +276,7 @@ mod tests {
                 plugin_kind: "probe".into(),
                 tracing: false,
                 metrics,
+                native_metrics_required: false,
                 trace_directives: "off".into(),
                 log_directives: "off".into(),
                 metric_exclusions: vec![],

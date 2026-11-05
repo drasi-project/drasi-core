@@ -7,6 +7,7 @@ RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
        build-native-context-fixtures test-native-context observability-demo observability-demo-smoke \
+       build-native-telemetry-fixtures test-native-telemetry \
        build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
@@ -20,6 +21,7 @@ help:
 	@echo "  build-test-plugins        - Build cdylib plugins needed for host-sdk integration tests"
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
 	@echo "  test-native-context       - Build SDK-only context fixtures and qualify the native context ABI"
+	@echo "  test-native-telemetry     - Build real SDK libraries and qualify shared telemetry"
 	@echo "  observability-demo        - Run HTTP/PostgreSQL tracing demo with Jaeger; Ctrl-C cleans up"
 	@echo "  observability-demo-smoke  - Run, verify both traces, and clean up automatically"
 	@echo "  build-native-plugins      - Build all native plugin libraries (host-loaded, no query engine dependency)"
@@ -84,7 +86,7 @@ TEST_PLUGIN_NAMES := drasi_source_mock drasi_reaction_log drasi_reaction_sse \
                      drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile \
                      $(subst -,_,$(NATIVE_STANDARD_PACKAGES) $(NATIVE_NETWORK_PACKAGES) $(NATIVE_MYSQL_PACKAGES) $(NATIVE_MSSQL_PACKAGES) $(NATIVE_POSTGRES_PACKAGES) $(NATIVE_SQLITE_PACKAGES))
 
-build-test-plugins: build-native-plugins
+build-test-plugins: build-native-plugins build-native-telemetry-fixtures
 	@echo "=== Building cdylib test plugins ==="
 	cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 	cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
@@ -112,10 +114,11 @@ build-test-plugins: build-native-plugins
 	@echo "=== Test plugins built ==="
 
 # Build test plugins, then run host-sdk integration tests.
-test-host-sdk: build-test-plugins build-native-context-fixtures
+test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
 	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test native_sqlite_components -- --test-threads=1
-	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --test native_telemetry --test logging_policy --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --locked -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-mssql-plugins build-native-postgres-plugins build-native-sqlite-plugins
@@ -131,6 +134,13 @@ build-native-context-fixtures:
 
 test-native-context: build-native-context-fixtures
 	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --locked -- --test-threads=1
+
+build-native-telemetry-fixtures: build-native-context-fixtures
+	cargo build -p drasi-computation-plugin-sdk --example telemetry_fixture --no-default-features --locked
+
+test-native-telemetry: build-native-telemetry-fixtures
+	cargo test -p drasi-host-sdk --features otel-context --test native_telemetry --test native_execution_context --test logging_policy --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --locked -- --test-threads=1
 
 observability-demo:
 	bash lib/examples/observability/demo.sh

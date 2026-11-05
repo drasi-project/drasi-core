@@ -1,5 +1,31 @@
 # Drasi Host SDK
 
+## Shared native telemetry
+
+The loader negotiates telemetry V2 separately from frozen base/V1 and ordinary
+plugin interfaces. Native factories bind the actual graph-owned telemetry before
+calling constructors, including service-aware construction. Opaque metric tokens
+are scoped to the binding and generation; updates call the host recorder directly
+and never enter the droppable span queue. Native log records use the selected
+component-log destination once.
+
+Configure collection through the [library telemetry options](../../lib/README.md#shared-native-telemetry).
+Deferred graph resource construction also supplies an owned resource scope.
+Direct constructor/provider callers outside graph construction must enter an
+explicit `ExecutionScope::with_plugin_telemetry` binding. No factory guesses a
+global instance identity. V1/base-only plugins retain supported host observations
+while missing internal telemetry is reported; required native metric support
+fails before construction. A malformed advertised V2 extension is rejected.
+
+`NativeSpanCollector` owns bounded collection, not the graph or exporter.
+Stop producers, retain their callbacks through cleanup, drain the collector,
+then shut down the provider. Cancelling a public wait does not discard the
+owned worker. Recorders and sampling callbacks must perform no network I/O or
+recursive telemetry updates.
+
+Rebuild actual libraries after SDK changes. `make test-native-telemetry` runs
+real native telemetry/context/logging checks and a no-OTel metrics/log profile.
+
 ## Native activation identity
 
 Factories negotiating `activation_credentials_v1` accept an optional `identity`

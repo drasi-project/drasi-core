@@ -152,6 +152,7 @@ pub struct NativeSourceBootstrapResource {
     identity: Option<Arc<super::NativeIdentityResource>>,
     lifecycle: Mutex<Lifecycle>,
     stop: tokio::sync::Mutex<Option<OperationFuture>>,
+    _telemetry: Option<super::telemetry::NativeTelemetryBinding>,
 }
 
 unsafe impl Send for NativeSourceBootstrapResource {}
@@ -215,6 +216,7 @@ impl NativeSourceBootstrapResource {
         factory_state: *mut c_void,
         plugin: Arc<PluginOwner>,
         identity: Option<Arc<super::NativeIdentityResource>>,
+        telemetry: Option<super::telemetry::NativeTelemetryBinding>,
     ) -> anyhow::Result<Arc<Self>> {
         owners.validate(&request)?;
         let bindings = Bindings::new(&owners)?;
@@ -234,13 +236,16 @@ impl NativeSourceBootstrapResource {
             "source bootstrap request exceeds supported size"
         );
         let mut raw = BootstrapCoordinatorHandle::null();
-        bindings.with_table(|table| unsafe {
-            take_status(extension.create.expect("validated")(
-                factory_state,
-                abi::BorrowedBytes::new(&bytes),
-                table,
-                &mut raw,
-            ))
+        super::telemetry::scope(telemetry.as_ref(), || {
+            bindings.with_table(|table| unsafe {
+                take_status(extension.create.expect("validated")(
+                    factory_state,
+                    abi::BorrowedBytes::new(&bytes),
+                    table,
+                    &mut raw,
+                ))
+            })?;
+            Ok(())
         })?;
         // A valid release callback owns even an otherwise incomplete handle.
         // Install it before validating the rest of the producer's table.
@@ -259,6 +264,7 @@ impl NativeSourceBootstrapResource {
                 bindings: Some(bindings),
             }),
             stop: tokio::sync::Mutex::new(None),
+            _telemetry: telemetry,
         });
         let description = unsafe { take_reply(table.describe.expect("validated")(raw.state))? };
         let described: CreateRequest = bootstrap::decode(&description)?;
@@ -400,11 +406,16 @@ impl ResourceCleanup for NativeSourceBootstrapResource {
         }
         if pending.is_none() {
             let mut raw = abi::OperationHandle::null();
+            super::telemetry::scope(self._telemetry.as_ref(), || {
+                unsafe {
+                    take_status((*self.raw.vtable).stop.expect("validated")(
+                        self.raw.state,
+                        &mut raw,
+                    ))?;
+                }
+                Ok(())
+            })?;
             unsafe {
-                take_status((*self.raw.vtable).stop.expect("validated")(
-                    self.raw.state,
-                    &mut raw,
-                ))?;
                 *pending = Some(OperationFuture::new(raw)?);
             }
         }

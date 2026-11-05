@@ -81,21 +81,44 @@ global facade. Disabled or excluded collection returns no-op handles without
 registration. Recorder callbacks run only after shared validation and atomic
 conflict/capacity checks, independent of trace sampling.
 
-Native context transport is available through the optional `telemetry-v1`
-extension. This is not a completed-span/log collection or metrics bridge.
-A cdylib does not share the host's Rust context, pointers or global recorder.
-Native metric callbacks, generation-scoped absolute counter accounting,
-stale-handle revocation and replacement gauge resets remain follow-up work.
-Do not install a recorder/exporter inside a plugin as a substitute.
+Native telemetry V2 adds completed spans, logs, and scoped metric callbacks to
+the context-only V1 family, without changing V1/base tables. A cdylib never shares
+the host's Rust context, pointers or recorder. Use `ScopedMetricEmitter::current()`
+inside a bound native factory; static factories can use
+`ConstructionContext::plugin_metrics(kind)`. Register handles once, then clone
+them into owned workers. Raw `MetricRegistrationContext::plugin` retains its
+older, unfenced recorder semantics and is not the scoped component API.
+
+The host derives a native plugin namespace from the implementation identity
+(ASCII letters lowercased; separators become `-`). For `test/telemetry`, a leaf
+`frames_received` becomes `drasi.plugin.test-telemetry.frames_received`. Use the
+same host-assigned kind for a direct static integration. Additional labels
+cannot override host identity.
+
+Within one binding, `increment(d)` adds to its local total and forwards `d`.
+`absolute(v)` forwards only `max(v - local_total, 0)`. Replacement starts a new
+local total without resetting the stable host counter: A reports 100, B reports
+10, and the host total is 110. Repeated/older totals add nothing. Custom gauges
+start at zero and reset on retirement; re-registration does not reset them.
+Histogram observations are unsampled. Late updates are rejected and diagnosed.
+These rules do not change framework checkpoint gauges or snapshot APIs.
+
+Run `cargo run -p drasi-computation-plugin-sdk --example scoped_metrics --locked`
+for a small internal frame/decode example. Its component helper uses identical
+scoped counter/histogram handles in both build modes; it measures failed decode
+attempts too, returns the original decode error, and records no frame contents.
+It does not duplicate graph publication/processing or end-to-end measurements.
 
 The graph now owns source publication, processing/handling, lifecycle and
 acceptance observations in both build modes. Do not duplicate those wrappers
 inside a native component. A batch callback receives the graph-created batch
 operation context, selected from all callback inputs before sampling; each input
 keeps its separate carried context. Internal plugin spans become children of
-that operation when the local tracing integration is enabled, including
-propagation of unsampled decisions. These host observations do not imply that
-completed native spans or native metric updates are transported to the host.
+that operation when the negotiated capture binding is enabled, including
+propagation of unsampled decisions. The SDK captures ordinary `tracing`
+instrumentation; components must not install a competing native logger,
+subscriber, recorder or exporter. Native library-local raw metric macros are
+explicitly unattributed; use scoped handles rather than guessing an instance.
 
 ### Portable execution context
 
@@ -120,21 +143,50 @@ entered-span or context guard across an await.
 Bootstrap and scheduled/replay framework spans remain host-owned. A wakeup is
 not proof that work exists, and saved output replay is not new evaluation.
 Do not persist trace context with snapshots, future-queue items, output records,
-or producer progress. Context-aware worker adoption does not enable export of
-completed native internal spans.
+or producer progress. Native span export additionally requires a host-owned
+`NativeSpanCollector`; metrics/logs remain independent of it.
 
-With the SDK's `otel-context` feature, the context adapter uses the plugin's
-locally composed `tracing-opentelemetry` layer. Keep its default context
-activation enabled. This does not install that layer or export plugin spans;
-production native span/log collection remains separate work.
+With a V2 binding, the SDK uses a bounded library-local capture subscriber and
+portable context adapter; it needs no OTel feature or exporter. The older V1
+path can still use the SDK's optional `otel-context` adapter with a plugin-local
+test/application tracing layer. No host globals are replaced in static builds.
 
-`export_computation_plugin!` advertises the context-only
-`drasi_computation_plugin_telemetry_v1` extension. The host negotiates it
+`export_computation_plugin!` advertises both the unchanged context-only
+`drasi_computation_plugin_telemetry_v1` and unified
+`drasi_computation_plugin_telemetry_v2` extensions. The host negotiates them
 independently of frozen ABI 1.0/base wire version 1. Contextual creation and
 operation capsules contain unchanged base payload bytes and separate bounded
 context records. Batch operation context is distinct from every input context.
 Admission and handled-consumer callbacks use the same negotiated context family.
-No new metric capability is advertised.
+V2 separately advertises context, span, log and metric capabilities.
+Malformed advertised extensions fail rather than falling back to another ABI.
+
+Factories require an owning runtime scope for internal collection. Raw/direct
+constructor callers outside graph construction must supply an explicit `ExecutionScope::with_plugin_telemetry`
+binding; they cannot infer ownership from a process-global "current instance".
+Deferred graph-owned resource constructors receive a resource-lifetime binding
+before acquisition. These use `component_id=resource/<resource-id>` and semantic
+kind `service`; reserve that telemetry namespace when choosing direct host IDs.
+Their actual resource generation fences replacement, and their handles retain
+the binding through awaited cleanup. No synthetic graph component or framework
+resource-throughput metrics are created.
+Old hosts retain supported base/V1 behavior with scoped metrics disabled.
+Required native metrics fail before construction when their capability is absent.
+
+The host span handoff defaults to 1,024 records and 16 MiB encoded bytes with a
+64 KiB maximum record; queued, reserved and in-flight work all count. SDK capture
+limits open spans to 256 per binding (4,096 per library), with fixed bounds of 64
+attributes, 32 events, 32 links and 4 KiB text values. Unsupported/oversized
+records are diagnosed, not retried. Target/level filters are supported; native
+span/field filter directives fail explicitly. Metrics bypass this droppable
+queue and run against a nonblocking, nonrecursive host recorder.
+
+Submission reports accepted/full/invalid/closed; accepted does not mean exported.
+Host rejection is not counted again by the SDK. Local SDK loss snapshots are
+available through `telemetry_bridge::native_telemetry_losses()`; bound host
+diagnostics and collector losses remain readable without metric export.
+Stop/join producers before collector shutdown, drain accepted records, then shut
+down the host provider. Timed-out/cancelled cleanup retains its owner for retry.
 
 Trace state is limited to 512 bytes/32 members, an encoded context to 1 KiB,
 and a capsule to the existing native message limit. Sparse sidecars include only
@@ -144,7 +196,9 @@ framing space at the native message ceiling. Invalid frames fail explicitly.
 Old/base-only plugins continue to work without requested propagation; supplied
 context or required native propagation must not silently disappear.
 
-Rebuild actual cdylibs after SDK changes. `make test-native-context` builds two
+Rebuild actual cdylibs after SDK changes. `make test-native-telemetry` builds the
+SDK-only full-telemetry, frozen-V1 and base-only fixtures and tests the actual
+boundary, including a no-OTel metric/log run. `make test-native-context` builds two
 SDK-only libraries (context-capable and base-only) and tests real parentage,
 unsampled propagation, operation/input separation, cancellation and compatibility.
 It does not build the network/database plugin families.

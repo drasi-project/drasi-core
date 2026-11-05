@@ -208,6 +208,7 @@ pub struct PluginTelemetryConfig {
     pub plugin_kind: String,
     pub tracing: bool,
     pub metrics: bool,
+    pub native_metrics_required: bool,
     #[serde(deserialize_with = "text")]
     pub trace_directives: String,
     #[serde(deserialize_with = "text")]
@@ -216,6 +217,19 @@ pub struct PluginTelemetryConfig {
     pub metric_exclusions: Vec<String>,
     pub sampling: PluginRootSampling,
     pub limits: TelemetryLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTelemetryScope {
+    pub config: PluginTelemetryConfig,
+    pub context: Option<TraceContextV1>,
+}
+
+impl TelemetryRecord for PluginTelemetryScope {
+    fn validate(&self) -> Result<()> {
+        self.config.validate()
+    }
 }
 
 impl PluginTelemetryConfig {

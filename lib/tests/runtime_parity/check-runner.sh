@@ -67,6 +67,7 @@ cargo() {
         package=drasi-host-sdk
         profile=host-sdk
         sources=(lib components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
+        sources+=(components/host-sdk/tests/native_metrics_telemetry.rs components/host-sdk/tests/native_telemetry.rs components/host-sdk/tests/native_execution_context.rs components/host-sdk/tests/logging_policy.rs)
     elif [[ " $* " == *" -p drasi-computation-bridge-common "* ]]; then
         inventory=/dev/null
         mappings=/dev/null

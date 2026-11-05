@@ -6,8 +6,7 @@
 
 pub use drasi_computation_contracts::{PortFormatAlternative, PortFormatCatalogue, SinkBatching};
 pub use drasi_computation_plugin_abi as abi;
-/// Registration foundations for statically linked use. Native callback
-/// transport and generation-scoped metric handles are not implemented.
+/// Shared scoped telemetry APIs for static and native components.
 pub mod telemetry {
     pub use drasi_computation_contracts::telemetry::facade::*;
     pub use drasi_computation_contracts::telemetry::*;
@@ -29,6 +28,9 @@ pub mod output_reads;
 pub mod output_snapshots;
 mod port_formats;
 pub mod progress;
+#[doc(hidden)]
+pub mod telemetry_bridge;
+mod telemetry_capture;
 pub mod telemetry_transport;
 mod transaction;
 pub mod transport;
@@ -118,6 +120,21 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.telemetry(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_telemetry_v2(
+        ) -> *const $crate::abi::telemetry::PluginTelemetryV2 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Err(error) = $crate::telemetry_bridge::initialize_native_logging() {
+                    eprintln!("native telemetry initialization failed: {error}");
+                    return std::ptr::null();
+                }
+                match __drasi_computation_export() {
+                    Ok(export) => export.telemetry_v2(),
                     Err(_) => std::ptr::null(),
                 }
             }))

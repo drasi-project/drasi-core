@@ -58,6 +58,7 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+metrics = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = { version = "0.32", default-features = false }
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }

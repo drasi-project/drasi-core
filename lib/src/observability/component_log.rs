@@ -263,6 +263,16 @@ impl std::fmt::Display for LogLevel {
 /// Contains the log content along with metadata about when and where
 /// the log was generated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogMetadata {
+    pub graph_id: String,
+    pub plugin_kind: String,
+    pub generation: u64,
+    pub target: String,
+    pub attributes: super::TelemetryAttributes,
+    pub context: Option<super::TraceContextV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogMessage {
     /// Timestamp when the log was emitted
     pub timestamp: DateTime<Utc>,
@@ -276,6 +286,8 @@ pub struct LogMessage {
     pub component_id: String,
     /// The component's log category, including its native processing role.
     pub component_type: ComponentLogType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<LogMetadata>,
 }
 
 impl LogMessage {
@@ -304,6 +316,7 @@ impl LogMessage {
             instance_id: instance_id.into(),
             component_id: component_id.into(),
             component_type: component_type.into(),
+            metadata: None,
         }
     }
 

@@ -25,6 +25,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }
 futures-core = "0.3"
 futures-util = "0.3"
 metrics = { workspace = true }
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = { version = "0.4", features = ["std"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros"] }
@@ -33,6 +38,12 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 tracing-opentelemetry = { version = "0.32", default-features = false }
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "testing"] }
+
+[[example]]
+name = "telemetry_fixture"
+path = "tests/fixtures/telemetry_fixture.rs"
+crate-type = ["cdylib"]
+test = false
 
 [[example]]
 name = "execution_context_fixture"

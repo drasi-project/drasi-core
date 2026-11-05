@@ -56,8 +56,27 @@ pub(crate) fn decode_creation(
         .map(|frame| ExecutionContext::decode(&frame.execution_context))
         .transpose()?
         .unwrap_or_default();
-    let mut scope = ExecutionScope::new(context);
-    if let Some(binding) = &request.scope {
+    let binding = ExecutionScope::current_plugin_telemetry();
+    let mut scope = ExecutionScope::new(context)
+        .with_plugin_telemetry(binding.clone())
+        .with_disabled_plugin_metrics(binding.is_none());
+    if let Some(binding) = &binding {
+        let config = binding.config();
+        anyhow::ensure!(
+            config.scope.component_id() == Some(&request.id)
+                && config.scope.role() == Some(factory.role),
+            "native telemetry binding does not match the constructed component"
+        );
+        if let Some(request_scope) = &request.scope {
+            anyhow::ensure!(
+                request_scope.instance_id == config.scope.instance_id()
+                    && request_scope.graph_id == config.scope.graph_id()
+                    && request_scope.generation == config.generation,
+                "native telemetry binding does not match construction scope"
+            );
+        }
+        scope = scope.with_component(config.scope.clone(), config.generation);
+    } else if let Some(binding) = &request.scope {
         let descriptor = factory.descriptor(request.id.clone())?;
         scope = scope.with_component(
             TelemetryScope::graph(binding.instance_id.as_str(), binding.graph_id.as_str())?
@@ -74,11 +93,17 @@ pub(crate) fn decode_creation(
             binding.generation,
         );
     }
-    #[cfg(feature = "otel-context")]
-    {
+    if binding.is_some() {
         scope = scope.with_adapter(Some(std::sync::Arc::new(
-            crate::telemetry::OpenTelemetryContextAdapter,
+            crate::telemetry_capture::NativeContextAdapter,
         )));
+    } else {
+        #[cfg(feature = "otel-context")]
+        {
+            scope = scope.with_adapter(Some(std::sync::Arc::new(
+                crate::telemetry::OpenTelemetryContextAdapter,
+            )));
+        }
     }
     Ok((request, scope, creation.is_some()))
 }
@@ -277,6 +302,8 @@ pub(crate) fn export_operation(
     cleanup: bool,
     scope: Option<ExecutionScope>,
 ) -> abi::OperationHandle {
+    let scope = scope
+        .or_else(|| ExecutionScope::current_plugin_telemetry().map(|_| ExecutionScope::capture()));
     match scope {
         Some(scope) => crate::transport::export_component_operation(
             scope.scope(future),

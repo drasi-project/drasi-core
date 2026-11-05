@@ -13,6 +13,8 @@ pub mod facade;
 mod lifetime;
 #[cfg(feature = "otel-context")]
 mod otel;
+#[cfg(all(feature = "otel-context", feature = "metrics-facade"))]
+mod otel_completed;
 #[cfg(feature = "metrics-facade")]
 mod plugin;
 mod records;
@@ -27,6 +29,8 @@ pub use execution_scope::*;
 pub use lifetime::*;
 #[cfg(feature = "otel-context")]
 pub use otel::*;
+#[cfg(all(feature = "otel-context", feature = "metrics-facade"))]
+pub use otel_completed::*;
 #[cfg(feature = "metrics-facade")]
 pub use plugin::*;
 pub use records::*;
@@ -168,6 +172,7 @@ impl TelemetryProfile {
             exclusions: Arc::from([]),
             sampling: RootSampling::Always,
             distributed_tracing: false,
+            native_metrics: false,
         }
     }
 }
@@ -271,9 +276,6 @@ impl TelemetrySettings {
     }
 
     pub fn resolve(&self) -> Result<ResolvedTelemetry> {
-        if self.native_metrics {
-            return Err(TelemetryError::Unsupported("native metric callbacks"));
-        }
         if self.exclusions.len() > 64 || self.exclusions.iter().any(|value| value.len() > 256) {
             return Err(TelemetryError::Invalid(
                 "at most 64 metric exclusions of 256 bytes each are supported".into(),
@@ -285,6 +287,12 @@ impl TelemetrySettings {
         policy.exclusions = self.exclusions.clone().into();
         policy.sampling = self.sampling;
         policy.distributed_tracing = self.distributed_tracing;
+        policy.native_metrics = self.native_metrics;
+        if self.native_metrics && !policy.metrics {
+            return Err(TelemetryError::Invalid(
+                "required native metrics need enabled metric collection".into(),
+            ));
+        }
         Ok(policy)
     }
 }
@@ -297,6 +305,7 @@ pub struct ResolvedTelemetry {
     exclusions: Arc<[String]>,
     sampling: RootSampling,
     distributed_tracing: bool,
+    native_metrics: bool,
 }
 
 impl Default for ResolvedTelemetry {
@@ -306,6 +315,12 @@ impl Default for ResolvedTelemetry {
 }
 
 impl ResolvedTelemetry {
+    pub fn native_metrics_required(&self) -> bool {
+        self.native_metrics
+    }
+    pub fn metric_exclusions(&self) -> &[String] {
+        &self.exclusions
+    }
     pub fn distributed_tracing_required(&self) -> bool {
         self.distributed_tracing
     }
@@ -594,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn required_context_is_explicit_and_native_metrics_remain_unsupported() {
+    fn required_context_and_metrics_are_explicit() {
         assert!(TelemetrySettings::default()
             .require_distributed_tracing()
             .resolve()
@@ -604,7 +619,12 @@ mod tests {
             TelemetrySettings::default()
                 .require_native_metrics()
                 .resolve(),
-            Err(TelemetryError::Unsupported(_))
+            Err(TelemetryError::Invalid(_))
         ));
+        assert!(TelemetrySettings::new(TelemetryProfile::Basic)
+            .require_native_metrics()
+            .resolve()
+            .unwrap()
+            .native_metrics_required());
     }
 }

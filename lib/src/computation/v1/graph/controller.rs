@@ -3740,7 +3740,31 @@ impl Operations {
                 .telemetry
                 .policy()
                 .distributed_tracing_required(),
-        );
+        )
+        .with_plugin_telemetry(Some(
+            graph
+                .observability
+                .telemetry
+                .plugin_binding(
+                    crate::observability::TelemetryScope::graph(
+                        graph.execution_scope.clone(),
+                        graph.snapshot.id.clone(),
+                    )
+                    .map_err(|error| component_error(&node, "bind plugin scope", error.into()))?
+                    .component(
+                        node.descriptor.id().clone(),
+                        node.role,
+                        drasi_computation_contracts::ComponentSemanticKind::for_component(
+                            node.role,
+                            &node.descriptor,
+                        ),
+                    ),
+                    generation.0,
+                    "component",
+                    graph.observability.logging.clone(),
+                )
+                .map_err(|error| component_error(&node, "bind plugin telemetry", error.into()))?,
+        ));
         let lifecycle_parent = execution_scope.context().clone();
         let admission_activation = if operation == Operation::Process
             && matches!(&lease.component, Component::Source(_))

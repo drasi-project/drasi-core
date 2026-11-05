@@ -60,6 +60,8 @@ pub struct ExecutionScope {
     transport_required: bool,
     #[cfg(feature = "metrics-facade")]
     plugin_telemetry: Option<super::PluginTelemetry>,
+    #[cfg(feature = "metrics-facade")]
+    disabled_plugin_metrics: bool,
 }
 
 thread_local! {
@@ -76,6 +78,8 @@ impl ExecutionScope {
             transport_required: false,
             #[cfg(feature = "metrics-facade")]
             plugin_telemetry: None,
+            #[cfg(feature = "metrics-facade")]
+            disabled_plugin_metrics: false,
         }
     }
 
@@ -91,6 +95,24 @@ impl ExecutionScope {
     pub fn with_plugin_telemetry(mut self, binding: Option<super::PluginTelemetry>) -> Self {
         self.plugin_telemetry = binding;
         self
+    }
+    #[cfg(feature = "metrics-facade")]
+    pub fn has_plugin_telemetry(&self) -> bool {
+        self.plugin_telemetry.is_some()
+    }
+    #[cfg(feature = "metrics-facade")]
+    pub fn with_disabled_plugin_metrics(mut self, disabled: bool) -> Self {
+        self.disabled_plugin_metrics = disabled;
+        self
+    }
+    #[cfg(feature = "metrics-facade")]
+    pub fn plugin_metrics_disabled() -> bool {
+        CURRENT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .is_some_and(|scope| scope.disabled_plugin_metrics)
+        })
     }
 
     #[cfg(feature = "metrics-facade")]

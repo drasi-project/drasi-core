@@ -399,6 +399,9 @@ impl ExportedPlugin {
     pub fn telemetry(&self) -> *const abi::telemetry::PluginTelemetryV1 {
         &PLUGIN_TELEMETRY
     }
+    pub fn telemetry_v2(&self) -> *const abi::telemetry::PluginTelemetryV2 {
+        &PLUGIN_TELEMETRY_V2
+    }
     pub fn output_snapshots(&self) -> *const abi::output_snapshots::PluginOutputSnapshotsV1 {
         &PLUGIN_OUTPUT_SNAPSHOTS
     }
@@ -490,6 +493,16 @@ static PLUGIN_TELEMETRY: abi::telemetry::PluginTelemetryV1 = abi::telemetry::Plu
     reserved: 0,
     begin: Some(begin_context),
     begin_consumer: Some(begin_consumer_context),
+};
+
+static PLUGIN_TELEMETRY_V2: abi::telemetry::PluginTelemetryV2 = abi::telemetry::PluginTelemetryV2 {
+    header: Header::new::<abi::telemetry::PluginTelemetryV2>(),
+    version: abi::telemetry::VERSION_V2,
+    capabilities: abi::telemetry::ALL,
+    reserved: 0,
+    begin: Some(begin_context),
+    begin_consumer: Some(begin_consumer_context),
+    with_scope: Some(crate::telemetry_bridge::with_scope),
 };
 
 static PLUGIN_BATCHING: abi::batching::PluginBatchingV1 = abi::batching::PluginBatchingV1 {
@@ -701,11 +714,14 @@ unsafe fn begin_consumer_operation(
     transport::status_boundary(|| {
         require_output(out)?;
         let instance = unsafe { state_ref::<Arc<Instance>>(raw)? }.clone();
-        let scope = contexts.as_ref().map(|contexts| {
-            instance
-                .execution_scope
-                .with_context(contexts.operation.clone())
-        });
+        let scope = contexts
+            .as_ref()
+            .map(|contexts| {
+                instance
+                    .execution_scope
+                    .with_context(contexts.operation.clone())
+            })
+            .or_else(|| Some(instance.execution_scope.with_context(Default::default())));
         if let Some(contexts) = &contexts {
             contexts
                 .require_inputs(usize::from(code == abi::consumer::BEGIN_BATCH))
@@ -1762,7 +1778,9 @@ unsafe extern "C" fn configuration(state: *mut c_void) -> Reply {
             )
         })?;
         let configuration = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            component.base().configuration().map_err(Failure::from)
+            instance
+                .execution_scope
+                .in_scope(|| component.base().configuration().map_err(Failure::from))
         })) {
             Ok(result) => {
                 if result
@@ -1902,11 +1920,14 @@ unsafe fn begin_operation(
                 contexts.require_empty_inputs().map_err(Failure::from)?;
             }
         }
-        let scope = contexts.as_ref().map(|contexts| {
-            instance
-                .execution_scope
-                .with_context(contexts.operation.clone())
-        });
+        let scope = contexts
+            .as_ref()
+            .map(|contexts| {
+                instance
+                    .execution_scope
+                    .with_context(contexts.operation.clone())
+            })
+            .or_else(|| Some(instance.execution_scope.with_context(Default::default())));
         if code != STOP && instance.damaged.is_damaged() {
             return Err(Failure::panicked());
         }

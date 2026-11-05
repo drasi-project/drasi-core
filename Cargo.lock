@@ -3119,6 +3119,7 @@ dependencies = [
  "drasi-core-types",
  "futures-core",
  "futures-util",
+ "log",
  "metrics",
  "opentelemetry 0.31.0",
  "opentelemetry_sdk 0.31.0",
@@ -3128,8 +3129,10 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-core",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3596,6 +3599,7 @@ dependencies = [
  "indexmap 2.14.2",
  "libloading",
  "log",
+ "metrics",
  "notify",
  "notify-debouncer-mini",
  "oci-client",

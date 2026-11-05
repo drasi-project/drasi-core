@@ -32,9 +32,18 @@ and handling attempts. Query engine time excludes result hooks and commit;
 bootstrap, scheduled evaluation, and replay retain distinct count semantics.
 Persistence entries describe supported framework observations, not engine
 statistics. Checkpoint lag requires known, compatible query/checkpoint progress;
-unsupported values are absent rather than zero. Ordinary worker implementation
-and generation fencing remain host-local; these definitions do not provide
-native metric transport.
+unsupported values are absent rather than zero. `TelemetryLifetime` supplies
+shared revocation, and `LocalMetricBinding` supplies generation-local counter
+accounting for static emitters and native Host SDK callbacks. Cloned/re-registered
+handles share the same local total; absolute updates become host increments.
+Retirement resets registered custom gauges and rejects stale updates.
+
+Bounded span/log/metric records are transport data, not Rust ABI layouts.
+`PluginTelemetry` is a local integration interface; the native SDK translates it
+to the separately negotiated telemetry ABI. Native span collection and metric
+updates do not require the optional OTel adapter. With `otel-context` and
+`metrics-facade`, `OpenTelemetrySpanProcessor` lets native completed records and
+ordinary host spans share one host processor without replacing IDs/timestamps.
 
 The host owns one `MetricRegistrationContext` per recorder and shares its clones
 across instances. Incompatible same-name definitions fail atomically before

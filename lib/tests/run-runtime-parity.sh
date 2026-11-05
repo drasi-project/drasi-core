@@ -85,6 +85,9 @@ for profile in core-types shared-contracts default no-default-features extra-cap
             mappings=/dev/null
             sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
             targets=(--lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
+            sources+=(components/host-sdk/tests/native_metrics_telemetry.rs components/host-sdk/tests/native_telemetry.rs components/host-sdk/tests/native_execution_context.rs components/host-sdk/tests/logging_policy.rs)
+            targets+=(--test native_metrics_telemetry --test native_telemetry --test native_execution_context --test logging_policy)
+            features+=(--features otel-context)
             test_arguments+=(--test-threads=1)
             ;;
         native-bridge)

@@ -1,9 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Optional execution-context transport. Base tables and wire version stay frozen.
-//! The extension accepts bounded MessagePack operation capsules around unchanged
-//! base payloads. It advertises no span/log collection or metric callbacks.
+//! Versioned telemetry extensions. V1 and all base tables/wire formats are frozen.
 
 use crate::{BorrowedBytes, Header, OperationHandle, Status, Transaction};
 use std::ffi::c_void;
@@ -35,6 +33,52 @@ pub struct PluginTelemetryV1 {
     pub begin_consumer: Option<Begin>,
 }
 
+pub const VERSION_V2: u32 = 2;
+pub const SYMBOL_V2: &[u8] = b"drasi_computation_plugin_telemetry_v2\0";
+pub const SPANS: u32 = 2;
+pub const LOGS: u32 = 4;
+pub const METRICS: u32 = 8;
+pub const ALL: u32 = CONTEXT | SPANS | LOGS | METRICS;
+pub type TelemetryFnV2 = unsafe extern "C" fn() -> *const PluginTelemetryV2;
+pub type ScopedCall = unsafe extern "C" fn(*mut c_void) -> Status;
+pub type WithScope =
+    unsafe extern "C" fn(*const HostTelemetryV2, BorrowedBytes, ScopedCall, *mut c_void) -> Status;
+pub type Submit = unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> u32;
+pub type Request = unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> crate::Reply;
+pub type Update = unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Status;
+
+/// `call` is synchronous and may not be retained. It invokes existing
+/// service-aware constructors while the plugin-local telemetry scope is entered.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PluginTelemetryV2 {
+    pub header: Header,
+    pub version: u32,
+    pub capabilities: u32,
+    pub reserved: u64,
+    pub begin: Option<Begin>,
+    pub begin_consumer: Option<Begin>,
+    pub with_scope: Option<WithScope>,
+}
+
+/// The plugin retains `context` before the borrowing call returns. Only the
+/// host dereferences it; callbacks may run concurrently until the last release.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct HostTelemetryV2 {
+    pub header: Header,
+    pub version: u32,
+    pub capabilities: u32,
+    pub context: *mut c_void,
+    pub retain: Option<unsafe extern "C" fn(*mut c_void)>,
+    pub release: Option<unsafe extern "C" fn(*mut c_void)>,
+    pub submit_span: Option<Submit>,
+    pub submit_log: Option<Submit>,
+    pub register_metric: Option<Request>,
+    pub update_metric: Option<Update>,
+    pub sample_root: Option<Request>,
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -42,6 +86,8 @@ mod tests {
         use std::mem::size_of;
         let pointer = size_of::<usize>();
         assert_eq!(size_of::<super::PluginTelemetryV1>(), 32 + 2 * pointer);
+        assert_eq!(size_of::<super::PluginTelemetryV2>(), 32 + 3 * pointer);
+        assert_eq!(size_of::<super::HostTelemetryV2>(), 24 + 8 * pointer);
         assert_eq!(size_of::<crate::ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<crate::FactoryVTable>(), 16 + 2 * pointer);
         assert_eq!(size_of::<crate::OperationVTable>(), 16 + 3 * pointer);

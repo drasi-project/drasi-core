@@ -272,6 +272,7 @@ pub struct ResourceHandle {
     value: Arc<dyn Any + Send + Sync>,
     cleanup: Option<Arc<dyn ResourceCleanup>>,
     identity: Option<Arc<dyn ResourceIdentity>>,
+    telemetry_owner: Option<Arc<crate::observability::ComponentObservations>>,
 }
 
 trait ResourceIdentity: Send + Sync {
@@ -339,6 +340,7 @@ pub(crate) struct WeakResourceHandle {
     value: std::sync::Weak<dyn Any + Send + Sync>,
     cleanup: Option<std::sync::Weak<dyn ResourceCleanup>>,
     identity: Option<std::sync::Weak<dyn ResourceIdentity>>,
+    telemetry_owner: Option<std::sync::Weak<crate::observability::ComponentObservations>>,
 }
 
 impl WeakResourceHandle {
@@ -352,6 +354,10 @@ impl WeakResourceHandle {
             },
             identity: match &self.identity {
                 Some(identity) => Some(identity.upgrade()?),
+                None => None,
+            },
+            telemetry_owner: match &self.telemetry_owner {
+                Some(owner) => Some(owner.upgrade()?),
                 None => None,
             },
         })
@@ -374,6 +380,7 @@ impl ResourceHandle {
             value: Arc::downgrade(&self.value),
             cleanup: self.cleanup.as_ref().map(Arc::downgrade),
             identity: self.identity.as_ref().map(Arc::downgrade),
+            telemetry_owner: self.telemetry_owner.as_ref().map(Arc::downgrade),
         }
     }
     pub fn new<T: Any + Send + Sync>(role: ResourceRole, value: Arc<T>) -> Self {
@@ -382,6 +389,7 @@ impl ResourceHandle {
             value,
             cleanup: None,
             identity: None,
+            telemetry_owner: None,
         }
     }
 
@@ -402,6 +410,16 @@ impl ResourceHandle {
 
     pub fn with_cleanup(mut self, cleanup: Arc<dyn ResourceCleanup>) -> Self {
         self.cleanup = Some(cleanup);
+        self
+    }
+
+    pub(super) fn with_telemetry_owner(
+        mut self,
+        owner: Arc<crate::observability::ComponentObservations>,
+    ) -> Self {
+        if self.telemetry_owner.is_none() {
+            self.telemetry_owner = Some(owner);
+        }
         self
     }
 
@@ -680,6 +698,26 @@ pub struct ConstructionContext {
 }
 
 impl ConstructionContext {
+    pub fn plugin_metrics(
+        &self,
+        kind: &str,
+    ) -> crate::observability::Result<crate::observability::ScopedMetricEmitter> {
+        use crate::observability::TelemetryScope;
+        let binding = self.telemetry().plugin_binding(
+            TelemetryScope::graph(self.instance_id.clone(), self.graph_id.clone())?.component(
+                self.component_id.clone(),
+                self.specification.role,
+                drasi_computation_contracts::ComponentSemanticKind::for_component(
+                    self.specification.role,
+                    &self.specification.descriptor,
+                ),
+            ),
+            self.generation.0,
+            kind,
+            self.component_logging().cloned(),
+        )?;
+        Ok(binding.metrics())
+    }
     pub fn telemetry(&self) -> &crate::observability::GraphTelemetry {
         &self.observability.telemetry
     }
