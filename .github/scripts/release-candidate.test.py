@@ -261,6 +261,31 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(candidate.IDENTITY, result["certificate_identity"])
         self.assertEqual("nightly-candidate-123-2", result["candidate_artifact"])
 
+    def test_temporary_branch_handoff_preserves_branch_provenance(self):
+        self.data.update(source_ref=candidate.BRANCH_TEST_REF, branch_test=True)
+        self.produce(*self.handoff_fixture())
+        result = json.loads((self.base / "ready.json").read_text())
+        self.assertEqual(8, len(result["artifacts"]))
+        self.assertEqual("locked", result["mode"])
+        self.assertEqual(candidate.BRANCH_TEST_REF, result["source_ref"])
+        self.assertIs(result["branch_test"], True)
+        self.assertEqual(candidate.BRANCH_TEST_IDENTITY, result["certificate_identity"])
+        self.assertEqual(candidate.TEST_REGISTRY, result["registry"])
+
+    def test_temporary_branch_cannot_claim_main_provenance(self):
+        self.data.update(source_ref=candidate.BRANCH_TEST_REF, branch_test=False)
+        with self.assertRaisesRegex(ValueError, "trusted main"):
+            self.produce(*self.handoff_fixture())
+        self.assertFalse((self.base / "ready.json").exists())
+
+    def test_freeze_marks_temporary_branch_candidate(self):
+        destination = self.base / "branch-candidate"
+        with patch.dict(os.environ, {"GITHUB_REF": candidate.BRANCH_TEST_REF}):
+            candidate.freeze(self.root, destination)
+        result = candidate.load(destination, candidate.sha(destination / "candidate.json"))
+        self.assertEqual(candidate.BRANCH_TEST_REF, result["source_ref"])
+        self.assertIs(result["branch_test"], True)
+
     def test_branch_handoff_rejects_legacy_opt_in(self):
         self.data.update(source_ref="refs/heads/test/release", branch_test=True)
         with self.assertRaisesRegex(ValueError, "trusted main"):
@@ -544,6 +569,58 @@ class WorkflowTests(unittest.TestCase):
                     }, capture_output=True, text=True)
                 self.assertEqual(1, result.returncode, result.stderr)
 
+    def test_temporary_branch_publication_requires_full_isolated_nightly(self):
+        inputs = {
+            "candidate_artifact": "nightly-candidate-123-2", "candidate_sha256": "a" * 64,
+            "registry": candidate.TEST_REGISTRY, "tag": "nightly-123-2",
+            "sign": True, "dry_run": False, "skip_visibility": False,
+            "ref": "", "pre_release": "",
+        }
+        env = {
+            "GITHUB_REPOSITORY": "drasi-project/drasi-core",
+            "GITHUB_REF": candidate.BRANCH_TEST_REF,
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_WORKFLOW_REF":
+                f"drasi-project/drasi-core/.github/workflows/nightly.yml@{candidate.BRANCH_TEST_REF}",
+            "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+            "WORKFLOW_INPUTS": json.dumps(inputs),
+        }
+        for event in ("push", "workflow_dispatch"):
+            with self.subTest(event=event):
+                self.assertEqual(candidate.BRANCH_TEST_IDENTITY,
+                                 candidate.publication_context(env | {"GITHUB_EVENT_NAME": event}))
+        for key, value in (
+            ("GITHUB_REPOSITORY", "someone/drasi-core"),
+            ("GITHUB_REF", candidate.BRANCH_TEST_REF + "-other"),
+            ("GITHUB_EVENT_NAME", "pull_request"),
+            ("GITHUB_EVENT_NAME", "pull_request_target"),
+            ("GITHUB_EVENT_NAME", "schedule"),
+            ("GITHUB_WORKFLOW_REF",
+             f"drasi-project/drasi-core/.github/workflows/publish-plugins.yml@{candidate.BRANCH_TEST_REF}"),
+            ("GITHUB_WORKFLOW_REF",
+             f"drasi-project/drasi-core/.github/workflows/release-plz.yml@{candidate.BRANCH_TEST_REF}"),
+            ("GITHUB_RUN_ID", ""), ("GITHUB_RUN_ATTEMPT", "0"),
+        ):
+            with self.subTest(context=key, value=value), self.assertRaises(ValueError):
+                candidate.publication_context(env | {key: value})
+        for key, value in (
+            ("registry", "ghcr.io/drasi-project"),
+            ("tag", "stable"), ("tag", "nightly-123-1"),
+            ("candidate_artifact", ""), ("candidate_artifact", "nightly-candidate-123-1"),
+            ("candidate_sha256", ""), ("candidate_sha256", "not-a-hash"),
+            ("sign", False), ("sign", 1), ("dry_run", True), ("skip_visibility", True),
+            ("ref", "main"), ("pre_release", "dev.1"),
+            ("repair_batch", "none"), ("repair_action", "plan"),
+            ("force_publish", True), ("unknown", True),
+        ):
+            with self.subTest(input=key, value=value), self.assertRaises(ValueError):
+                candidate.publication_context(env | {
+                    "WORKFLOW_INPUTS": json.dumps(inputs | {key: value}),
+                })
+        for malformed in ("{}", "[]", "null", "{"):
+            with self.subTest(inputs=malformed), self.assertRaises(ValueError):
+                candidate.publication_context(env | {"WORKFLOW_INPUTS": malformed})
+
     def test_make_publish_all_does_not_hide_mixed_publication_failures(self):
         with tempfile.TemporaryDirectory() as directory:
             cargo = Path(directory) / "cargo"
@@ -564,6 +641,7 @@ class WorkflowTests(unittest.TestCase):
         dispatch = document["on"]["workflow_dispatch"] or {}
         self.assertEqual({}, dispatch.get("inputs", {}))
         self.assertEqual([{"cron": "0 12 * * *"}], document["on"]["schedule"])
+        self.assertEqual({"branches": ["plugin-build-workflow-fix"]}, document["on"]["push"])
         jobs = document["jobs"]
         prepare_script = "\n".join(s.get("run", "") for s in jobs["prepare"]["steps"])
         self.assertIn("release-plz update", prepare_script)
@@ -576,16 +654,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual({"prepare", "package", "publish-plugins"}, set(jobs["handoff"]["needs"]))
         self.assertNotIn("CARGO_REGISTRY_TOKEN", json.dumps(document))
         self.assertNotIn("allow_branch_test", json.dumps(document))
-        for repository, ref, allowed in (
-            ("drasi-project/drasi-core", "refs/heads/main", True),
-            ("drasi-project/drasi-core", "refs/heads/test/release", False),
-            ("drasi-project/drasi-core", "refs/tags/v1", False),
-            ("someone/drasi-core", "refs/heads/main", False),
+        for repository, ref, event, allowed in (
+            ("drasi-project/drasi-core", "refs/heads/main", "workflow_dispatch", True),
+            ("drasi-project/drasi-core", "refs/heads/main", "schedule", True),
+            ("drasi-project/drasi-core", candidate.BRANCH_TEST_REF, "push", True),
+            ("drasi-project/drasi-core", candidate.BRANCH_TEST_REF, "workflow_dispatch", True),
+            ("drasi-project/drasi-core", candidate.BRANCH_TEST_REF, "schedule", False),
+            ("drasi-project/drasi-core", candidate.BRANCH_TEST_REF, "pull_request", False),
+            ("drasi-project/drasi-core", "refs/heads/test/release", "workflow_dispatch", False),
+            ("drasi-project/drasi-core", "refs/tags/v1", "workflow_dispatch", False),
+            ("someone/drasi-core", "refs/heads/main", "workflow_dispatch", False),
+            ("someone/drasi-core", candidate.BRANCH_TEST_REF, "push", False),
         ):
-            with self.subTest(repository=repository, ref=ref):
+            with self.subTest(repository=repository, ref=ref, event=event):
                 self.assertEqual(allowed, repair_tests.expression(jobs["prepare"]["if"], {
                     "github": {"repository": repository, "ref": ref,
-                               "event_name": "workflow_dispatch"},
+                               "event_name": event},
                     "inputs": {"allow_branch_test": True},
                 }))
 
@@ -601,6 +685,8 @@ class WorkflowTests(unittest.TestCase):
         for filename, event, branch, overrides in (
             ("nightly.yml", "schedule", "main", {}),
             ("nightly.yml", "workflow_dispatch", "main", {}),
+            ("nightly.yml", "push", "plugin-build-workflow-fix", {}),
+            ("nightly.yml", "workflow_dispatch", "plugin-build-workflow-fix", {}),
             ("release-plz.yml", "push", "main", {}),
             ("release-plz.yml", "workflow_dispatch", "main", {}),
             ("release-plz.yml", "workflow_dispatch", "main", {"force_publish": True}),
@@ -653,7 +739,8 @@ class WorkflowTests(unittest.TestCase):
                     })
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                 self.assertEqual({
-                    "certificate_identity": candidate.IDENTITY,
+                    "certificate_identity": (candidate.BRANCH_TEST_IDENTITY
+                                             if ref == candidate.BRANCH_TEST_REF else candidate.IDENTITY),
                     "mode": "publish",
                 }, dict(line.split("=", 1) for line in outputs.read_text().splitlines()))
 

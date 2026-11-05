@@ -14,10 +14,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gcc libc6-dev \
     perl make autoconf automake libtool cmake \
-    protobuf-compiler libprotobuf-dev \
+    unzip \
     libclang-dev \
     libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+COPY ci/scripts/install-protoc.sh /tmp/install-protoc.sh
+RUN bash /tmp/install-protoc.sh && rm /tmp/install-protoc.sh
+ENV PROTOC=/opt/protoc/bin/protoc
+ENV PROTOC_INCLUDE=/opt/protoc/include
+ENV PATH="/opt/protoc/bin:${PATH}"
 
 # librdkafka 2.12.1 has a cmake-build bug: config.h.in uses
 # `#cmakedefine01 WITH_OAUTHBEARER_OIDC` (always emits a #define) but

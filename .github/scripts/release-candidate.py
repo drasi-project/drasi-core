@@ -28,6 +28,10 @@ IDENTITY = ("https://github.com/drasi-project/drasi-core/"
             ".github/workflows/publish-plugins.yml@refs/heads/main")
 ISSUER = "https://token.actions.githubusercontent.com"
 
+# Temporary full nightly rehearsal; remove after validating the Protobuf build fix.
+BRANCH_TEST_REF = "refs/heads/plugin-build-workflow-fix"
+BRANCH_TEST_IDENTITY = IDENTITY.rsplit("@", 1)[0] + "@" + BRANCH_TEST_REF
+
 
 def require(condition, message):
     if not condition:
@@ -57,12 +61,40 @@ def publication_context(env):
     repository = "drasi-project/drasi-core"
     require(env.get("GITHUB_REPOSITORY") == repository,
             "Publication and repair require the official repository")
+    if env.get("GITHUB_REF") == BRANCH_TEST_REF:
+        require(env.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch")
+                and env.get("GITHUB_WORKFLOW_REF") ==
+                f"{repository}/.github/workflows/nightly.yml@{BRANCH_TEST_REF}",
+                "Temporary branch publication requires the exact nightly caller")
+        require(all(re.fullmatch(r"[1-9][0-9]*", env.get(key, ""))
+                    for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+                "Temporary branch publication requires a producer run and attempt")
+        run_id, attempt = env["GITHUB_RUN_ID"], env["GITHUB_RUN_ATTEMPT"]
+        expected = {
+            "candidate_artifact": f"nightly-candidate-{run_id}-{attempt}",
+            "registry": TEST_REGISTRY,
+            "tag": f"nightly-{run_id}-{attempt}",
+            "sign": True, "dry_run": False, "skip_visibility": False,
+            "ref": "", "pre_release": "",
+        }
+        inputs = json.loads(env.get("WORKFLOW_INPUTS", "{}"))
+        require(isinstance(inputs, dict) and set(inputs) == set(expected) | {"candidate_sha256"},
+                "Temporary branch publication only accepts the full nightly inputs")
+        for key, value in expected.items():
+            require(inputs[key] == value and type(inputs[key]) is type(value),
+                    f"Temporary branch publication requires the nightly value for {key}")
+        require(isinstance(inputs["candidate_sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", inputs["candidate_sha256"]),
+                "Temporary branch publication requires the prepared candidate hash")
+        return BRANCH_TEST_IDENTITY
     require(env.get("GITHUB_REF") == "refs/heads/main",
             "Publication and repair must use the trusted main workflow")
     return IDENTITY
 
 
 def candidate_identity(candidate):
+    if candidate["source_ref"] == BRANCH_TEST_REF and candidate["branch_test"] is True:
+        return BRANCH_TEST_IDENTITY
     require(candidate["source_ref"] == "refs/heads/main" and candidate["branch_test"] is False,
             "Candidate must use trusted main without a branch rehearsal")
     return IDENTITY
@@ -175,11 +207,12 @@ def freeze(root, destination):
             bundle.add(path, arcname=name, recursive=False)
     lock_hash = sha(root / "Cargo.lock")
     baseline = subprocess.check_output(["git", "show", "HEAD:Cargo.lock"], cwd=root)
+    source_ref = os.environ.get("GITHUB_REF", "refs/heads/main")
     candidate = {
         "schema_version": 1,
         "source_commit": run("git", "rev-parse", "HEAD", cwd=root),
-        "source_ref": os.environ.get("GITHUB_REF", "refs/heads/main"),
-        "branch_test": False,
+        "source_ref": source_ref,
+        "branch_test": source_ref != "refs/heads/main",
         "source_sha256": sha(archive),
         "lock_sha256": lock_hash,
         "baseline_lock_sha256": hashlib.sha256(baseline).hexdigest(),

@@ -226,7 +226,8 @@ strict validation or silently ignoring arbitrary fields.
 
 The [candidate tests](../scripts/release-candidate.test.py) parse the workflow
 YAML and exercise scheduled/manual nightly, automatic release, manual release,
-and force-publish recovery selection, and reject non-main publication. They also check
+and force-publish recovery selection, and reject non-main publication except the
+temporary, isolated branch rehearsal described below. They also check
 shared candidate/tooling/publication safeguards and intentional preparation and
 dry-run differences. The [repair tests](../scripts/repair-plugin-signatures.test.py)
 cover strict input validation and repair isolation. Both suites already run in
@@ -337,6 +338,16 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
 - **Candidate inputs**: Internal callers provide the same-run prepared artifact and manifest hash; standalone dispatch prepares one locked candidate before the matrix.
 - **Nightly behavior**: Uses the same eight targets, native setup, GNU glibc 2.28 checks, and required cosign signing/verification as production, but writes only to the dedicated test namespace described below.
 
+Linux build containers use [install-protoc.sh](../../ci/scripts/install-protoc.sh)
+to install checksum-pinned `protoc` 29.3 and its matching standard includes.
+The compiler is selected for the **container host architecture**, even when Rust
+cross-compiles for another target. The manylinux build script and all cross
+Dockerfiles set `PROTOC` and `PROTOC_INCLUDE` explicitly so Temporal's proto3
+`optional` fields and `ruby_package` options do not use old distribution compilers
+or headers. This does not change the GNU plugin glibc 2.28 baseline. When updating
+Protobuf, update both architecture checksums in the installer and its tests.
+Run `python3 ci/scripts/install-protoc.test.py` for the offline installer checks.
+
 ### [nightly.yml](nightly.yml)
 
 Runs daily at **12:00 UTC (05:00 PDT / 04:00 PST)** on `main`. GitHub's UTC
@@ -359,16 +370,50 @@ gh workflow run nightly.yml --repo drasi-project/drasi-core \
   --ref main
 ```
 
-Manual dispatch has no inputs. Only the official repository's `main` can run the
-rehearsal; forks, other branches, and tags cannot publish. This is a real, full
+Manual dispatch has no inputs. Normal rehearsals run only on the official
+repository's `main`, with the temporary branch exception below; forks, other
+branches, and tags cannot publish. This is a real, full
 eight-platform signed publication to the isolated nightly namespace, not a dry
 run. The package provisioning requirements below still apply.
 
-Signatures use the exact `publish-plugins.yml@refs/heads/main` identity. The
+Main signatures use the exact `publish-plugins.yml@refs/heads/main` identity. The
 schema-version-1 candidate and handoff retain `source_ref: refs/heads/main` and
-`branch_test: false`; the latter is no longer configurable. Earlier branch-test
-artifacts remain diagnostic outputs, and the handoff rejects them rather than
-treating them as trusted-main candidates.
+`branch_test: false`; the latter is derived from the source ref, not configurable.
+Other branch-test artifacts remain rejected by the handoff rather than being
+treated as trusted-main candidates.
+
+#### Temporary full branch rehearsal
+
+Until the Protobuf container fix is validated, pushes to
+`plugin-build-workflow-fix` in the official repository run the **entire** nightly:
+release preparation, verified crate packaging, all eight plugin targets, real
+GHCR pushes, signing, signature verification, visibility checks, and handoff.
+Commit the changes and push that branch to start the run. Manual retries also work:
+
+```bash
+gh workflow run nightly.yml --repo drasi-project/drasi-core \
+  --ref plugin-build-workflow-fix
+```
+
+The exception accepts only this nightly caller and its unchanged publication
+inputs: the existing nightly namespace, unique run/attempt tags, a same-run
+candidate, signing enabled, and no skipped checks. It does not enable production
+publication, standalone branch publication, signature repair, crates.io writes,
+or official releases.
+
+Candidate and handoff artifacts retain
+`source_ref: refs/heads/plugin-build-workflow-fix` and `branch_test: true`.
+Signatures use the exact
+`publish-plugins.yml@refs/heads/plugin-build-workflow-fix` identity. The same
+complete handoff is produced, but it is a branch diagnostic, **not trusted-main
+readiness** for downstream consumers.
+
+Remove the temporary push trigger, prepare-job exception, and matching branch
+exceptions/tests in [release-candidate.py](../scripts/release-candidate.py) and
+[release-candidate.test.py](../scripts/release-candidate.test.py) after validation,
+before merging.
+
+#### Rehearsal sequence and publication
 
 The sequence is preparation, verified local packaging, eight-target signed plugin
 publication plus public visibility checks, then complete-inventory validation.

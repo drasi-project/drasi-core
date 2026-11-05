@@ -4,6 +4,10 @@ name: Nightly Build
 # No crates.io writes, official tags/releases, or production OCI repositories.
 
 on:
+  # Temporary full rehearsal; remove after validating the Protobuf build fix.
+  push:
+    branches:
+      - plugin-build-workflow-fix
   schedule:
     # 12:00 UTC daily = 05:00 PDT / 04:00 PST. GitHub cron does not observe DST.
     # Runs against main.
@@ -17,7 +21,11 @@ permissions:
 jobs:
   prepare:
     name: Prepare locked release candidate
-    if: ${{ github.repository == 'drasi-project/drasi-core' && github.ref == 'refs/heads/main' }}
+    if: >-
+      ${{ github.repository == 'drasi-project/drasi-core' &&
+          (github.ref == 'refs/heads/main' ||
+           (github.ref == 'refs/heads/plugin-build-workflow-fix' &&
+            (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))) }}
     runs-on: ubuntu-latest
     outputs:
       candidate_sha256: ${{ steps.freeze.outputs.candidate_sha256 }}
@@ -148,7 +156,11 @@ jobs:
         run: |
           {
             echo "Prepared candidate: $CANDIDATE_SHA256"
+            echo "Source ref: $GITHUB_REF"
             echo "All eight publication targets passed. This is producer readiness, not runtime E2E success."
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "Temporary branch rehearsal: branch_test=true; not trusted-main readiness."
+            fi
             echo "Consumer must select run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT and verify completed success."
           } >> "$GITHUB_STEP_SUMMARY"
 

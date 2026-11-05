@@ -15,9 +15,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gcc g++ libc6-dev pkg-config \
     perl make autoconf automake libtool cmake \
-    protobuf-compiler libprotobuf-dev \
+    unzip \
     libclang-dev libssl-dev libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+COPY ci/scripts/install-protoc.sh /tmp/install-protoc.sh
+RUN bash /tmp/install-protoc.sh && rm /tmp/install-protoc.sh
+ENV PROTOC=/opt/protoc/bin/protoc
+ENV PROTOC_INCLUDE=/opt/protoc/include
+ENV PATH="/opt/protoc/bin:${PATH}"
 
 # Build libjq from source (with bundled oniguruma) for static linking
 ENV JQ_VERSION=1.7.1
