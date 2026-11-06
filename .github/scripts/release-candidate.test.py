@@ -319,6 +319,12 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(candidate.IDENTITY, result["certificate_identity"])
         self.assertEqual("nightly-candidate-123-2", result["candidate_artifact"])
 
+    def test_handoff_rejects_former_branch_rehearsal(self):
+        self.data.update(source_ref="refs/heads/plugin-build-workflow-fix", branch_test=True)
+        with self.assertRaisesRegex(ValueError, "trusted main"):
+            self.produce(*self.handoff_fixture())
+        self.assertFalse((self.base / "ready.json").exists())
+
     def test_branch_handoff_rejects_legacy_opt_in(self):
         self.data.update(source_ref="refs/heads/test/release", branch_test=True)
         with self.assertRaisesRegex(ValueError, "trusted main"):
@@ -646,6 +652,27 @@ class WorkflowTests(unittest.TestCase):
                     }, capture_output=True, text=True)
                 self.assertEqual(1, result.returncode, result.stderr)
 
+    def test_branch_publication_rejects_former_nightly_exception(self):
+        inputs = {
+            "candidate_artifact": "nightly-candidate-123-2", "candidate_sha256": "a" * 64,
+            "registry": candidate.TEST_REGISTRY, "tag": "nightly-123-2",
+            "sign": True, "dry_run": False, "skip_visibility": False,
+            "ref": "", "pre_release": "",
+        }
+        ref = "refs/heads/plugin-build-workflow-fix"
+        env = {
+            "GITHUB_REPOSITORY": "drasi-project/drasi-core",
+            "GITHUB_REF": ref,
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_WORKFLOW_REF":
+                f"drasi-project/drasi-core/.github/workflows/nightly.yml@{ref}",
+            "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+            "WORKFLOW_INPUTS": json.dumps(inputs),
+        }
+        for event in ("push", "workflow_dispatch"):
+            with self.subTest(event=event), self.assertRaisesRegex(ValueError, "trusted main"):
+                candidate.publication_context(env | {"GITHUB_EVENT_NAME": event})
+
     def test_make_publish_all_does_not_hide_mixed_publication_failures(self):
         with tempfile.TemporaryDirectory() as directory:
             cargo = Path(directory) / "cargo"
@@ -666,6 +693,7 @@ class WorkflowTests(unittest.TestCase):
         dispatch = document["on"]["workflow_dispatch"] or {}
         self.assertEqual({}, dispatch.get("inputs", {}))
         self.assertEqual([{"cron": "0 12 * * *"}], document["on"]["schedule"])
+        self.assertEqual({"schedule", "workflow_dispatch"}, set(document["on"]))
         jobs = document["jobs"]
         prepare_script = "\n".join(s.get("run", "") for s in jobs["prepare"]["steps"])
         self.assertIn("release-plz update", prepare_script)
@@ -678,16 +706,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual({"prepare", "package", "publish-plugins"}, set(jobs["handoff"]["needs"]))
         self.assertNotIn("CARGO_REGISTRY_TOKEN", json.dumps(document))
         self.assertNotIn("allow_branch_test", json.dumps(document))
-        for repository, ref, allowed in (
-            ("drasi-project/drasi-core", "refs/heads/main", True),
-            ("drasi-project/drasi-core", "refs/heads/test/release", False),
-            ("drasi-project/drasi-core", "refs/tags/v1", False),
-            ("someone/drasi-core", "refs/heads/main", False),
+        rehearsal_ref = "refs/heads/plugin-build-workflow-fix"
+        for repository, ref, event, allowed in (
+            ("drasi-project/drasi-core", "refs/heads/main", "workflow_dispatch", True),
+            ("drasi-project/drasi-core", "refs/heads/main", "schedule", True),
+            ("drasi-project/drasi-core", rehearsal_ref, "push", False),
+            ("drasi-project/drasi-core", rehearsal_ref, "workflow_dispatch", False),
+            ("drasi-project/drasi-core", rehearsal_ref, "schedule", False),
+            ("drasi-project/drasi-core", rehearsal_ref, "pull_request", False),
+            ("drasi-project/drasi-core", "refs/heads/test/release", "workflow_dispatch", False),
+            ("drasi-project/drasi-core", "refs/tags/v1", "workflow_dispatch", False),
+            ("someone/drasi-core", "refs/heads/main", "workflow_dispatch", False),
+            ("someone/drasi-core", rehearsal_ref, "push", False),
         ):
-            with self.subTest(repository=repository, ref=ref):
+            with self.subTest(repository=repository, ref=ref, event=event):
                 self.assertEqual(allowed, repair_tests.expression(jobs["prepare"]["if"], {
                     "github": {"repository": repository, "ref": ref,
-                               "event_name": "workflow_dispatch"},
+                               "event_name": event},
                     "inputs": {"allow_branch_test": True},
                 }))
 

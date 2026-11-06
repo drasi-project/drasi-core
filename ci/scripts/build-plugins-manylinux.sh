@@ -27,8 +27,12 @@ dnf install -y \
   make \
   perl \
   pkgconf-pkg-config \
-  protobuf-compiler \
-  protobuf-devel
+  unzip
+
+bash ci/scripts/install-protoc.sh
+export PROTOC=/opt/protoc/bin/protoc
+export PROTOC_INCLUDE=/opt/protoc/include
+export PATH="/opt/protoc/bin:${PATH}"
 
 rustup_version="1.27.1"
 case "${target}" in

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Weak;
 
@@ -25,9 +24,10 @@ use crate::evaluation::ExpressionEvaluator;
 use crate::evaluation::{FunctionError, FunctionEvaluationError};
 use crate::interface::ResultIndex;
 use crate::interface::ResultOwner;
-use crate::models::ElementValue;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
+
+use super::state_codec::{self, StateCodecError};
 
 pub struct PreviousValue {
     result_index: Arc<dyn ResultIndex>,
@@ -61,22 +61,19 @@ impl ScalarFunction for PreviousValue {
             });
         }
 
+        let codec_error = |error: StateCodecError| FunctionError {
+            function_name: expression.name.to_string(),
+            error: error.into(),
+        };
+
         let result_owner = ResultOwner::Function(expression.position_in_query);
         let value = &args[0];
-        let default_value: ElementValue = {
-            if args.len() > 1 {
-                &args[1]
-            } else {
-                &VariableValue::Null
-            }
-        }
-        .try_into()
-        .map_err(|_e| FunctionError {
-            function_name: expression.name.to_string(),
-            error: FunctionEvaluationError::InvalidType {
-                expected: "ElementValue".to_string(),
-            },
-        })?;
+        let default_value = state_codec::encode(if args.len() > 1 {
+            &args[1]
+        } else {
+            &VariableValue::Null
+        })
+        .map_err(codec_error)?;
 
         let expression_evaluator = match self.expression_evaluator.upgrade() {
             Some(evaluator) => evaluator,
@@ -101,20 +98,12 @@ impl ScalarFunction for PreviousValue {
             }
         };
 
-        let current_value: ElementValue = value.try_into().map_err(|_e| FunctionError {
-            function_name: expression.name.to_string(),
-            error: FunctionEvaluationError::InvalidType {
-                expected: "ElementValue".to_string(),
-            },
-        })?;
+        let current_value = state_codec::encode(value).map_err(codec_error)?;
 
         let prev_values = match self.result_index.get(&result_key, &result_owner).await {
             Ok(v) => match v {
                 Some(v) => match v {
-                    ValueAccumulator::Map(m) => (
-                        m.get("0").cloned().unwrap_or_default(),
-                        m.get("1").cloned().unwrap_or_default(),
-                    ),
+                    ValueAccumulator::Map(m) => state_codec::read_state(&m).map_err(codec_error)?,
                     _ => {
                         return Err(FunctionError {
                             function_name: expression.name.to_string(),
@@ -124,7 +113,7 @@ impl ScalarFunction for PreviousValue {
                         })
                     }
                 },
-                None => (default_value.clone(), default_value.clone()),
+                None => [default_value.clone(), default_value],
             },
             Err(e) => {
                 return Err(FunctionError {
@@ -133,21 +122,17 @@ impl ScalarFunction for PreviousValue {
                 })
             }
         };
+        let [last_value, value_before_last] = prev_values;
 
         match context.get_side_effects() {
             SideEffects::Apply => {
+                let result = state_codec::decode(&last_value).map_err(codec_error)?;
                 match self
                     .result_index
                     .set(
                         result_key.clone(),
                         result_owner,
-                        Some(ValueAccumulator::Map(
-                            BTreeMap::from([
-                                ("0".to_string(), current_value),
-                                ("1".to_string(), prev_values.0.clone()),
-                            ])
-                            .into(),
-                        )),
+                        Some(state_codec::write_state(current_value, last_value)),
                     )
                     .await
                 {
@@ -159,11 +144,11 @@ impl ScalarFunction for PreviousValue {
                         })
                     }
                 };
-                Ok((&prev_values.0).into())
+                Ok(result)
             }
-            SideEffects::Snapshot => Ok((&prev_values.1).into()),
-            SideEffects::RevertForUpdate => Ok((&prev_values.1).into()),
-            SideEffects::RevertForDelete => Ok((&prev_values.1).into()),
+            SideEffects::Snapshot | SideEffects::RevertForUpdate | SideEffects::RevertForDelete => {
+                state_codec::decode(&value_before_last).map_err(codec_error)
+            }
         }
     }
 }
