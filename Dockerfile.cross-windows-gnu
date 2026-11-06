@@ -14,11 +14,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gcc g++ libc6-dev pkg-config \
     perl make autoconf automake libtool cmake \
-    protobuf-compiler libprotobuf-dev \
+    unzip \
     gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 libclang-dev \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix \
     && update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+
+COPY ci/scripts/install-protoc.sh /tmp/install-protoc.sh
+RUN bash /tmp/install-protoc.sh && rm /tmp/install-protoc.sh
+ENV PROTOC=/opt/protoc/bin/protoc
+ENV PROTOC_INCLUDE=/opt/protoc/include
+ENV PATH="/opt/protoc/bin:${PATH}"
 
 # Create a linker wrapper that replaces dynamic MinGW runtime references
 # with their static equivalents, producing a standalone .exe with no DLL deps.

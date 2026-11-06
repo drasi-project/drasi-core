@@ -337,6 +337,16 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
 - **Candidate inputs**: Internal callers provide the same-run prepared artifact and manifest hash; standalone dispatch prepares one locked candidate before the matrix.
 - **Nightly behavior**: Uses the same eight targets, native setup, GNU glibc 2.28 checks, and required cosign signing/verification as production, but writes only to the dedicated test namespace described below.
 
+Linux build containers use [install-protoc.sh](../../ci/scripts/install-protoc.sh)
+to install checksum-pinned `protoc` 29.3 and its matching standard includes.
+The compiler is selected for the **container host architecture**, even when Rust
+cross-compiles for another target. The manylinux build script and all cross
+Dockerfiles set `PROTOC` and `PROTOC_INCLUDE` explicitly so Temporal's proto3
+`optional` fields and `ruby_package` options do not use old distribution compilers
+or headers. This does not change the GNU plugin glibc 2.28 baseline. When updating
+Protobuf, update both architecture checksums in the installer and its tests.
+Run `python3 ci/scripts/install-protoc.test.py` for the offline installer checks.
+
 ### [nightly.yml](nightly.yml)
 
 Runs daily at **12:00 UTC (05:00 PDT / 04:00 PST)** on `main`. GitHub's UTC
